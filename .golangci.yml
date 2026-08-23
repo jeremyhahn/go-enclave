@@ -1,0 +1,82 @@
+# golangci-lint configuration for go-enclave (Google Go style + security).
+# Mirrors the portfolio baseline (devops.md §8): staticcheck, errcheck, unused,
+# ineffassign, misspell, gocritic and the security linters enabled.
+version: "2"
+
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - goconst
+    - misspell
+    - unparam
+    - unconvert
+    - nolintlint
+    - revive
+    - gosec
+    - bodyclose
+    - noctx
+    - whitespace
+    - gocritic
+  disable:
+    - prealloc
+
+  settings:
+    govet:
+      enable-all: true
+      disable:
+        - fieldalignment
+        - shadow
+    staticcheck:
+      checks:
+        - "all"
+    goconst:
+      min-len: 3
+      min-occurrences: 3
+    misspell:
+      locale: US
+    revive:
+      rules:
+        - name: exported
+          arguments:
+            - "checkPrivateReceivers"
+
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - std-error-handling
+    rules:
+      - path: _test\.go
+        linters:
+          - gosec
+          - unparam
+          - errcheck
+          - goconst
+          - gocritic
+          - ineffassign
+          - revive
+          - staticcheck
+          # Subprocess spawning (exec.Command with os.Args[0]) is how the
+          # fault-injection tests re-enter themselves; CommandContext adds
+          # nothing to a self-spawned test child.
+          - noctx
+
+formatters:
+  enable:
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/jeremyhahn/go-enclave
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0

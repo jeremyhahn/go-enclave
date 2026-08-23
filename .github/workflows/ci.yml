@@ -1,0 +1,408 @@
+# ci-template: v1.9 — canonical CI for all first-party Go repos.
+#
+# v1.9 (2026-08-20, owner ruling — FAIL-FAST STAGED PIPELINE): iterate fast.
+# Gitea cannot cancel in-flight jobs (no cancel route — task #90), so
+# fail-fast comes from ORDERING: a fast tier (lint + build, ~minutes) gates
+# the expensive tier (security, test, integration where present). A broken
+# push reports in minutes and burns nothing downstream; a green push pays
+# one fast-tier of extra latency. trivy and fips move to nightly.yml
+# (schedule + workflow_dispatch): both were known-red on every push (fips:
+# tracked per-repo fips140=only issues; trivy: undiagnosed install failure),
+# and a known-red job burning 60-90 runner-minutes per push verifies
+# nothing. The gate now distinguishes SKIP (upstream stage failed) from
+# FAIL, both failing closed — this supersedes v1.8.1's lint-decoupling,
+# whose silent-skip hazard is closed at the source (pinned linter) and in
+# the gate (named skips).
+#
+# v1.8 (2026-08-19): gosec and govulncheck triage their own exit codes. A shell
+# reports a signal death as 128+N, so an OOM kill leaves 137 — indistinguishable
+# from a real finding in the job summary, which is all the Gitea API exposes
+# (task #97). Found on go-quicbaas: gosec reported `Issues : 0`, govulncheck was
+# SIGKILLed while four sibling repos ran heavy jobs on the same host, and the
+# Makefile reported it as "reachable vulnerabilities" — a phantom CVE hunt
+# waiting to happen. Both steps still exit non-zero; they only say WHICH it was.
+# The same conflation exists in every repo's Makefile vuln target — fix it there
+# too when adopting this version.
+#
+# v1.7 (2026-08-18): gosec -concurrency 4. The v1.6 GOMEMLIMIT/GOMAXPROCS
+# bound was PROVEN INSUFFICIENT: gosec sizes its pool from runtime.NumCPU()
+# (the host's 24 cores, GOMAXPROCS notwithstanding), so live SSA for ~24
+# packages exceeded the 16 GB container cap with all three observed scans
+# carrying GOMEMLIMIT=10GiB while pinned at 16/16 GiB. Live heap cannot be
+# GC'd away; only lower analysis concurrency shrinks it.
+#
+# v1.6 (2026-08-18): GOMEMLIMIT + GOMAXPROCS on the security job. The Go
+# toolchain does not see cgroup limits — inside a 16 GB container it read the
+# HOST's 24 cores and 94 GB, ran 24 gosec workers, and grew the heap until the
+# cgroup had to swap 10.9 GB of anonymous memory. It never OOMed (swap absorbed
+# it), so instead of failing it thrashed: memory PSI 98, 43% of the host's CPU
+# in iowait, every other job on the box starved. Full evidence in the job's
+# comment block below. This is a TUNING fix, not a capacity one: the host had
+# 56 GB free throughout.
+#
+# v1.5 (2026-08-18): triggers narrowed to `[main]`. The template shipped
+# `[master, main, develop]` with a "CUSTOMIZE" note, so 15 of 20 repos still
+# name branches that DO NOT EXIST — the template contradicted the ratified
+# trunk-based standard (company CLAUDE.md: "no branches, and the trunk is
+# main"), and a template that disagrees with the standard loses every time it
+# is copied. Inert today, because no event can fire for a branch that is
+# absent; the cost is latent, not current. Recreate `develop` in any of those
+# repos and its every commit runs CI twice — one push run and one
+# pull_request run for the same sha — with nothing to cancel the second
+# (concurrency: is UNUSABLE here, see below and task #88).
+# Do NOT re-add a branch list "for safety": a repo that needs a second trunk
+# is a decision for the owner, not a default.
+#
+# v1.4 (2026-08-17): `fips` job added (owner mandate, security-review.md §6)
+# — build + unit tests under GOFIPS140=latest with GODEBUG=fips140=only, wired
+# into ci-gate. Rolls out per repo through each project agent's own issue
+# (NOT a blind template sweep): FIPS mode surfaces real incompatibilities
+# (non-approved primitives) that each agent must resolve or escalate as an
+# owner decision before its repo adopts v1.4.
+#
+# v1.3 (2026-08-14): `workflow_dispatch:` trigger added, so a phantom failure
+# (runner crash, host overload; see infra lessons.md) can be retried without
+# pushing an empty commit.
+#
+#   CORRECTION (2026-08-19): this entry originally claimed "Gitea's build
+#   exposes no rerun API, so without it the only way to retry a phantom
+#   failure is an empty commit." That premise is FALSE and it propagated to
+#   five repos. `swagger.v1.json` on 1.27.1 publishes three re-run routes:
+#     /repos/{owner}/{repo}/actions/runs/{run}/rerun
+#     /repos/{owner}/{repo}/actions/runs/{run}/rerun-failed-jobs
+#     /repos/{owner}/{repo}/actions/runs/{run}/jobs/{job_id}/rerun
+#   `rerun-failed-jobs` re-runs only a run's failed jobs. Note the job-level
+#   route is NESTED under the run — the flat `jobs/{id}/rerun` shape does not
+#   exist, and probing that shape is how two of us concluded the API was
+#   missing. A 404 does not distinguish a missing route from a missing
+#   resource; swagger is the authority.
+#
+#   Stated precisely, because the mistake is easy to make in reverse: these
+#   routes are PUBLISHED IN THE SPEC — verified. They have NOT yet been
+#   executed here, so do not upgrade this to "rerun works" until someone has
+#   actually run one. What IS measured: there is no `cancel` route at any
+#   path, and DELETE returns 400 "this workflow run is not done" on anything
+#   unfinished, so no REST call can shed a queued run (task #90).
+#
+#   `workflow_dispatch` KEEPS its place regardless, on an independent
+#   justification: re-run acts on an existing run, so it cannot help when a
+#   run was never created — the lazy-creation case where a fresh head shows
+#   no jobs for minutes. Removing the trigger because re-run exists would be
+#   an overcorrection.
+#
+# v1.2 (2026-08-14): actions/checkout and actions/setup-go moved to @v6 —
+# §9 already named checkout@v6 the standard and repos were shipping green on
+# v6/v6 while this file still said v4/v5 (same defect class as promising a
+# gate the template doesn't implement: the standard and the template must
+# never disagree).
+#
+# v1.1 (2026-08-14): gosec findings now also print to the job log (the SARIF
+# upload only exists on github.com, so on Gitea the findings were invisible).
+# Also NEVER add `GOPROXY: direct` / `GOSUMDB: off` to a repo's env block:
+# GOPRIVATE (injected by the runners, dependency-resolution.md §6) already
+# exempts first-party modules from proxy and sumdb; the blanket override
+# disables checksum-database verification for every third-party dependency
+# and breaks the build when an upstream re-points a tag (go-tpm-tools v0.4.8,
+# 2026-08-14). `ghcr.io` likewise does not exist on Gitea — use the Gitea
+# registry (lessons.md).
+# Source of truth: software/templates/github-actions/ci.yml in the
+# automatethethings repo. Copied into each repo (never workflow_call: the
+# template lives inside the security boundary and cannot be referenced from
+# github.com). Blocks marked CUSTOMIZE are the only expected divergence;
+# everything else drifting from the template is a defect (devops.md §8).
+#
+# Runs identically on Gitea Actions (dev) and GitHub Actions (public mirror);
+# host-specific steps are guarded on github.server_url (devops.md §1).
+
+name: CI
+
+on:
+  push:
+    branches: [main]                    # trunk-based: main is the ONLY trunk
+  pull_request:
+    branches: [main]
+  workflow_dispatch:                    # re-fire a whole workflow; also the
+                                        # only retry when a run was never
+                                        # created (see v1.3 correction above)
+
+permissions:
+  contents: read
+  security-events: write
+
+env:
+  GO_VERSION: "1.26.7"        # latest 1.26 patch (owner ruling 2026-08-20): 1.27.0 is BLOCKED — cockroachdb/swiss fails to compile under it (undefined fastrand64; task #121). Bump within 1.26 as patches ship; move to 1.27 only in the #121 wave after the swiss/pebble chain is bumped
+  COVERAGE_THRESHOLD: 90      # CUSTOMIZE: per testing-guidelines.md
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Check formatting
+        run: |
+          UNFORMATTED=$(gofmt -l .)
+          if [ -n "${UNFORMATTED}" ]; then
+            echo "Files not formatted:"; echo "${UNFORMATTED}"; exit 1
+          fi
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Install golangci-lint
+        # PINNED (devops.md §9 documented-pin clause; go-qrdb#42, 2026-08-19):
+        # @latest moved to v2.13.0, which panics under Go 1.26 ("nilness:
+        # internal error: unhandled builtin recover" in honnef.co/go/tools
+        # v0.8.0-rc.1) and took the whole gate down — and with it every job
+        # that needed lint. Unpin when an upstream release passes on the
+        # portfolio (tracked on go-qrdb#42).
+        # RETRIED (2026-08-20): sum.golang.org tile fetches during this
+        # install flake with HTTP/2 INTERNAL_ERROR (2/2 runs observed on
+        # go-qrdb), and under staged fail-fast a linter-INSTALL flake blocks
+        # the whole pipeline. Bounded retry, full sumdb verification kept —
+        # do NOT "fix" this with GOSUMDB=off, which trades a flake for a
+        # supply-chain hole. Durable fix: bake the pinned linter into the
+        # runner image (infra).
+        run: |
+          for i in 1 2 3; do
+            go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 && exit 0
+            echo "install attempt $i failed; retrying"; sleep 10
+          done
+          echo "golangci-lint install failed after 3 attempts"; exit 1
+
+      # .golangci.yml must enable staticcheck, errcheck, unused, ineffassign,
+      # misspell, gocritic (devops.md §8) — the umbrella with the security
+      # linters off does not satisfy the gate.
+      - name: golangci-lint
+        run: golangci-lint run --timeout=5m ./...
+
+  security:
+    name: Security
+    runs-on: ubuntu-latest
+    # STAGED FAIL-FAST (v1.9): gated on the fast tier like test — a push that
+    # cannot lint or build should not spend a heavy gosec/govulncheck pass.
+    needs: [lint, build]
+    # THE GO TOOLCHAIN IS CGROUP-UNAWARE. Inside a job container capped at
+    # --memory=16g on gpu-host, `nproc` still reports 24 and /proc/meminfo still
+    # reports 94 GB, because both come from the HOST. Consequences, measured on
+    # 2026-08-18 against a live gosec run (cgroup memory.stat):
+    #   - gosec defaults its worker count to NumCPU, so it ran 24 concurrent
+    #     analyzers, each holding package ASTs/SSA.
+    #   - Go's GC, with GOGC=100 and no GOMEMLIMIT, lets the heap roughly double
+    #     before collecting and has no reason to stop short of what it believes
+    #     is a 94 GB machine.
+    # The heap blew past the 16 GB cgroup cap: memory.current 15.78 GB pinned at
+    # the limit, memory.swap.current 10.93 GB, memory.events "max" 19440, and
+    # anon 14.90 GB. Because the memory is ANONYMOUS, the kernel's only reclaim
+    # path is swap — and because swap absorbed it, oom_kill stayed 0, so it
+    # never failed fast. It just thrashed: host memory PSI 98, io PSI 98, 43% of
+    # all CPU in iowait, dragging every other job on the box down with it. The
+    # host had 56 GB FREE the whole time; the cap is per-cgroup, so more RAM
+    # would have changed nothing.
+    #
+    # GOMEMLIMIT makes the GC treat the container's budget as real and collect
+    # instead of growing. GOMAXPROCS cuts gosec's worker count, which is the
+    # other multiplier. Keep GOMEMLIMIT comfortably BELOW the container cap —
+    # it is a soft limit and non-heap memory lives outside it.
+    env:
+      GOMEMLIMIT: 10GiB
+      GOMAXPROCS: 8
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Install gosec
+        # RETRIED (2026-08-20): same sum.golang.org flake class as the lint
+        # install — a tool-install network failure must not fail a job that
+        # never ran its analysis. Full sumdb verification kept.
+        run: |
+          for i in 1 2 3; do
+            go install github.com/securego/gosec/v2/cmd/gosec@latest && exit 0
+            echo "install attempt $i failed; retrying"; sleep 10
+          done
+          echo "tool install failed after 3 attempts"; exit 1
+
+      # CUSTOMIZE (with justification): every -exclude rule must carry a
+      # written reason HERE, checked against the code, and the list must stay
+      # identical to GOSEC_EXCLUDE in the Makefile. go-quicraft's ci.yml is
+      # the worked example of what those justifications look like.
+      - name: Run gosec
+        # -stdout keeps the findings readable in the job log: the SARIF upload
+        # below only runs on github.com, so without it a Gitea failure exits 1
+        # with the findings buried in an artifact nobody can see.
+        # -concurrency 4 is the part of the memory bound that actually works
+        # (v1.7, 2026-08-18). GOMAXPROCS does NOT shrink gosec's footprint:
+        # gosec sizes its worker pool from runtime.NumCPU(), which reports the
+        # HOST's physical cores (24) regardless of GOMAXPROCS, so it analyzed
+        # 24 packages' SSA simultaneously and the LIVE heap alone exceeded the
+        # 16 GB container cap — GOMEMLIMIT cannot collect live memory, verified
+        # on three concurrent scans all carrying GOMEMLIMIT=10GiB at 16/16 GiB.
+        # Memory scales with concurrent package analysis; 4 bounds it.
+        #
+        # Exit code triaged as in the govulncheck step below (v1.8): -concurrency
+        # bounds gosec's footprint but does not make a kill impossible when
+        # siblings crowd the host, and a bare 137 reads as "findings" when the
+        # log holds none. Fail-closed either way.
+        run: |
+          set +e
+          gosec -concurrency 4 -fmt=sarif -out=gosec.sarif -stdout -verbose=text -exclude-dir=test -exclude-dir=examples -severity=medium -confidence=medium ./...
+          rc=$?
+          set -e
+          if [ "$rc" -gt 128 ]; then
+            echo "::error::gosec was KILLED by signal $((rc - 128)) — this is NOT a security finding."
+            echo "Memory pressure in the job container. Re-run when the host is quieter."
+          fi
+          exit "$rc"
+
+      - name: Upload gosec SARIF
+        # Gitea has no code-scanning API; the upload 404s and fails the job.
+        if: always() && github.server_url == 'https://github.com'
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: gosec.sarif
+          category: gosec
+
+      - name: Install govulncheck
+        # RETRIED (2026-08-20): same sum.golang.org flake class as the lint
+        # install — a tool-install network failure must not fail a job that
+        # never ran its analysis. Full sumdb verification kept.
+        run: |
+          for i in 1 2 3; do
+            go install golang.org/x/vuln/cmd/govulncheck@latest && exit 0
+            echo "install attempt $i failed; retrying"; sleep 10
+          done
+          echo "tool install failed after 3 attempts"; exit 1
+
+      # Also the toolchain-currency forcing function: fails on stdlib vulns
+      # in an outdated Go (devops.md §9).
+      #
+      # The exit code is triaged rather than propagated bare (v1.8). A shell
+      # reports a signal death as 128+N, so an OOM kill leaves 137 — and a bare
+      # `govulncheck ./...` renders that as an ordinary red with no findings in
+      # the log, which reads exactly like "vulnerabilities found" and sends
+      # someone hunting a CVE that does not exist. Observed on go-quicbaas:
+      # gosec reported `Issues : 0`, govulncheck was SIGKILLed in the 16 GB
+      # container while four sibling repos ran heavy jobs on the same host, and
+      # the Makefile called it "reachable vulnerabilities". govulncheck holds
+      # the whole package graph and its SSA live, so the v1.6 GOMEMLIMIT remedy
+      # cannot help — GOMEMLIMIT does not collect LIVE memory.
+      # Fail-closed either way: this still exits non-zero. It only says which.
+      - name: Run govulncheck
+        run: |
+          set +e
+          govulncheck ./...
+          rc=$?
+          set -e
+          if [ "$rc" -gt 128 ]; then
+            echo "::error::govulncheck was KILLED by signal $((rc - 128)) — this is NOT a vulnerability finding."
+            echo "Memory pressure in the job container, not a CVE. Re-run when the host is quieter."
+            echo "Confirm locally with an uncapped 'govulncheck ./...' before treating it as a finding."
+          fi
+          exit "$rc"
+
+      - name: Verify module integrity
+        run: go mod verify
+
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Build all packages
+        run: go build ./...
+
+      # CUSTOMIZE: repos with nested modules (sdk/go, xkey) build each.
+
+  # FIPS gate (owner mandate 2026-08-17, security-review.md §6): every
+  # project must build and pass unit tests with Go's native FIPS 140-3
+  # mode enabled. GOFIPS140=latest selects the newest validated Go Crypto
+  # Module snapshot at build time; the fips140=only GODEBUG rejects non-approved
+  # algorithms at runtime, so non-approved primitives on exercised paths
+  # fail HERE instead of in a customer's regulated environment. A primitive
+  # that cannot pass is an owner-visible decision issue, never a silent
+  # substitution.
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    # STAGED FAIL-FAST (owner ruling 2026-08-20, v1.9): the expensive tier
+    # starts only when the fast tier (lint+build, ~minutes) is green, so a
+    # broken push reports in minutes and burns nothing downstream — Gitea has
+    # no cancel API (task #90), so fail-fast can only come from ordering.
+    # This deliberately supersedes the v1.8.1 lint-decoupling (go-qrdb#42):
+    # that fix targeted a SILENT skip masquerading as test failure; the
+    # outage class is now closed at the source (linter pinned) and the gate
+    # below reports skipped-because-upstream-failed distinctly, so a blocked
+    # test run is loud, attributed, and fail-closed — not silent.
+    needs: [lint, build]
+    timeout-minutes: 30       # CUSTOMIZE: give the suite honest headroom
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      # CUSTOMIZE: repo-specific environment tuning goes here (e.g. QUIC UDP
+      # buffer sysctls). Note job containers may have a read-only /proc/sys —
+      # tune the runner HOST for settings that matter; with host networking
+      # the host's values apply.
+
+      - name: Run tests with coverage
+        run: |
+          go test -race -count=1 -timeout=900s -coverprofile=coverage.out ./...
+          COVERAGE=$(go tool cover -func=coverage.out | grep total | awk '{print $3}' | sed 's/%//')
+          echo "Total coverage: ${COVERAGE}%"
+          if [ $(echo "${COVERAGE} < ${{ env.COVERAGE_THRESHOLD }}" | bc -l) -eq 1 ]; then
+            echo "FAIL: coverage ${COVERAGE}% is below minimum ${{ env.COVERAGE_THRESHOLD }}%"
+            exit 1
+          fi
+
+  # CUSTOMIZE: repos that build container images add an `image` job here that
+  # builds each image and gates it with `trivy image --severity CRITICAL,HIGH
+  # --exit-code 1` BEFORE any push to either registry (devops.md §8). Never
+  # image-scan the devcontainer into code scanning.
+
+  # The single required check (devops.md §1). Every job above must appear in
+  # BOTH the needs list and the results check — a gate that can pass vacuously
+  # is worse than no gate. Do not use join(needs.*.result); it evaluates empty
+  # on Gitea and reports success while jobs fail.
+  ci-gate:
+    name: CI Gate
+    runs-on: ubuntu-latest
+    if: always()
+    # v1.9: trivy and fips moved to nightly.yml (known-red/long-horizon jobs
+    # off the push path — owner ruling 2026-08-20); they gate nothing here.
+    needs: [lint, security, build, test]
+    steps:
+      - name: Fail closed on any non-success
+        run: |
+          # skipped ≠ failed, but BOTH fail the gate: a skipped job means an
+          # upstream gate failed (staged fail-fast), and naming it prevents
+          # the go-qrdb#42 class — a red that looks like a test failure while
+          # tests never ran.
+          check() { case "$2" in
+            success) echo "OK   $1";;
+            skipped) echo "SKIP $1 (upstream stage failed — see its job)"; BAD=1;;
+            *)       echo "FAIL $1 ($2)"; BAD=1;;
+          esac; }
+          BAD=0
+          check lint     "${{ needs.lint.result }}"
+          check security "${{ needs.security.result }}"
+          check build    "${{ needs.build.result }}"
+          check test     "${{ needs.test.result }}"
+          exit $BAD

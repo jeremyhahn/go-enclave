@@ -1,0 +1,407 @@
+// Copyright (c) 2025 Jeremy Hahn
+// Copyright (c) 2025 Automate The Things, LLC
+//
+// This file is part of go-enclave.
+//
+// go-enclave is dual-licensed:
+//
+// 1. GNU Affero General Public License v3.0 (AGPL-3.0)
+//    See LICENSE file or visit https://www.gnu.org/licenses/agpl-3.0.html
+//
+// 2. Commercial License
+//    Contact licensing@automatethethings.com for commercial licensing options.
+
+package enclave
+
+import (
+	"bytes"
+	"errors"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+)
+
+func TestNewMemoryEnclave_HoldsMaterial(t *testing.T) {
+	e, err := NewMemoryEnclave([]byte("private-key-material"))
+	if err != nil {
+		t.Fatalf("NewMemoryEnclave: %v", err)
+	}
+	defer e.Destroy()
+
+	got, err := e.Open()
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if string(got) != "private-key-material" {
+		t.Errorf("Open = %q, want %q", got, "private-key-material")
+	}
+	if e.Size() != len("private-key-material") {
+		t.Errorf("Size = %d, want %d", e.Size(), len("private-key-material"))
+	}
+	if !e.IsAlive() {
+		t.Error("IsAlive = false, want true")
+	}
+}
+
+func TestNewMemoryEnclave_WipesSource(t *testing.T) {
+	src := []byte("wipe-me-completely")
+	want := make([]byte, len(src))
+
+	e, err := NewMemoryEnclave(src)
+	if err != nil {
+		t.Fatalf("NewMemoryEnclave: %v", err)
+	}
+	defer e.Destroy()
+
+	if !bytes.Equal(src, want) {
+		t.Errorf("source not wiped: got %q, want all zeroes", src)
+	}
+}
+
+func TestNewMemoryEnclave_Empty(t *testing.T) {
+	for name, in := range map[string][]byte{"nil": nil, "empty": {}} {
+		t.Run(name, func(t *testing.T) {
+			e, err := NewMemoryEnclave(in)
+			if !errors.Is(err, ErrEmptyEnclave) {
+				t.Errorf("err = %v, want ErrEmptyEnclave", err)
+			}
+			if e != nil {
+				t.Error("enclave should be nil on error")
+			}
+		})
+	}
+}
+
+func TestNewMemoryEnclaveFromString(t *testing.T) {
+	e, err := NewMemoryEnclaveFromString("AKIAIOSFODNN7EXAMPLE")
+	if err != nil {
+		t.Fatalf("NewMemoryEnclaveFromString: %v", err)
+	}
+	defer e.Destroy()
+
+	got, err := e.OpenString()
+	if err != nil {
+		t.Fatalf("OpenString: %v", err)
+	}
+	if got != "AKIAIOSFODNN7EXAMPLE" {
+		t.Errorf("OpenString = %q, want %q", got, "AKIAIOSFODNN7EXAMPLE")
+	}
+
+	if _, err := NewMemoryEnclaveFromString(""); !errors.Is(err, ErrEmptyEnclave) {
+		t.Errorf("empty string err = %v, want ErrEmptyEnclave", err)
+	}
+}
+
+func TestMemoryEnclave_Destroy(t *testing.T) {
+	e, err := NewMemoryEnclave([]byte("transient"))
+	if err != nil {
+		t.Fatalf("NewMemoryEnclave: %v", err)
+	}
+
+	e.Destroy()
+	e.Destroy() // idempotent
+
+	if e.IsAlive() {
+		t.Error("IsAlive = true after Destroy")
+	}
+	if e.Size() != 0 {
+		t.Errorf("Size = %d after Destroy, want 0", e.Size())
+	}
+	if _, err := e.Open(); !errors.Is(err, ErrEnclaveDestroyed) {
+		t.Errorf("Open err = %v, want ErrEnclaveDestroyed", err)
+	}
+	if _, err := e.OpenString(); !errors.Is(err, ErrEnclaveDestroyed) {
+		t.Errorf("OpenString err = %v, want ErrEnclaveDestroyed", err)
+	}
+	if err := e.WithBytes(func([]byte) error { return nil }); !errors.Is(err, ErrEnclaveDestroyed) {
+		t.Errorf("WithBytes err = %v, want ErrEnclaveDestroyed", err)
+	}
+	if e.EqualTo([]byte("transient")) {
+		t.Error("EqualTo = true on destroyed enclave")
+	}
+}
+
+func TestMemoryEnclave_NilReceiver(t *testing.T) {
+	var e *MemoryEnclave
+
+	e.Destroy() // must not panic
+
+	if e.IsAlive() {
+		t.Error("IsAlive = true on nil enclave")
+	}
+	if e.Size() != 0 {
+		t.Errorf("Size = %d on nil enclave, want 0", e.Size())
+	}
+	if _, err := e.Open(); !errors.Is(err, ErrEnclaveDestroyed) {
+		t.Errorf("Open err = %v, want ErrEnclaveDestroyed", err)
+	}
+	if e.EqualTo(nil) {
+		t.Error("EqualTo = true on nil enclave")
+	}
+	if got := e.String(); got != "MemoryEnclave(destroyed)" {
+		t.Errorf("String = %q", got)
+	}
+}
+
+func TestMemoryEnclave_WithBytes(t *testing.T) {
+	e, err := NewMemoryEnclave([]byte("borrowed"))
+	if err != nil {
+		t.Fatalf("NewMemoryEnclave: %v", err)
+	}
+	defer e.Destroy()
+
+	var seen string
+	if err := e.WithBytes(func(b []byte) error {
+		seen = string(b)
+		return nil
+	}); err != nil {
+		t.Fatalf("WithBytes: %v", err)
+	}
+	if seen != "borrowed" {
+		t.Errorf("fn saw %q, want %q", seen, "borrowed")
+	}
+
+	sentinel := errors.New("from fn")
+	if err := e.WithBytes(func([]byte) error { return sentinel }); !errors.Is(err, sentinel) {
+		t.Errorf("WithBytes err = %v, want the fn's error", err)
+	}
+}
+
+func TestMemoryEnclave_EqualTo(t *testing.T) {
+	e, err := NewMemoryEnclave([]byte("compare-me"))
+	if err != nil {
+		t.Fatalf("NewMemoryEnclave: %v", err)
+	}
+	defer e.Destroy()
+
+	if !e.EqualTo([]byte("compare-me")) {
+		t.Error("EqualTo = false for equal material")
+	}
+	if e.EqualTo([]byte("compare-mE")) {
+		t.Error("EqualTo = true for different material")
+	}
+	if e.EqualTo([]byte("compare")) {
+		t.Error("EqualTo = true for a prefix")
+	}
+}
+
+func TestMemoryEnclave_StringRedacts(t *testing.T) {
+	e, err := NewMemoryEnclave([]byte("do-not-print-me"))
+	if err != nil {
+		t.Fatalf("NewMemoryEnclave: %v", err)
+	}
+	defer e.Destroy()
+
+	got := e.String()
+	if strings.Contains(got, "do-not-print-me") {
+		t.Errorf("String leaked the material: %q", got)
+	}
+	if got != "MemoryEnclave(redacted)" {
+		t.Errorf("String = %q, want MemoryEnclave(redacted)", got)
+	}
+}
+
+func TestWipe(t *testing.T) {
+	b := []byte("scrub")
+	Wipe(b)
+	for i, c := range b {
+		if c != 0 {
+			t.Errorf("byte %d = %d, want 0", i, c)
+		}
+	}
+}
+
+func TestMemoryEnclave_ConcurrentAccess(t *testing.T) {
+	e, err := NewMemoryEnclave([]byte("concurrent"))
+	if err != nil {
+		t.Fatalf("NewMemoryEnclave: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			// Read through the scoped accessor, NOT Open: Open hands back a
+			// slice that outlives the lock, so dereferencing it here would
+			// race the Destroy below against unmapped pages — the very fault
+			// this test is supposed to rule out. Either the material or
+			// ErrEnclaveDestroyed is correct; a race or a fault is not.
+			if s, err := e.OpenString(); err == nil && s != "concurrent" {
+				t.Errorf("OpenString = %q", s)
+			}
+			_ = e.Size()
+			_ = e.IsAlive()
+			_ = e.String()
+		}()
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		e.Destroy()
+	}()
+	wg.Wait()
+
+	if e.IsAlive() {
+		t.Error("IsAlive = true after concurrent Destroy")
+	}
+}
+
+// TestMemoryEnclave_DestroyWaitsForInFlightReader asserts the lifetime
+// discipline the concurrency contract promises: Destroy blocks until an
+// in-flight scoped borrow has returned, instead of wiping and unmapping the
+// pages the borrower is still reading. An atomic swap of the buffer handle
+// would satisfy IsAlive and still leave the reader on freed memory, so the
+// property under test is the ordering, not the flag.
+func TestMemoryEnclave_DestroyWaitsForInFlightReader(t *testing.T) {
+	e, err := NewMemoryEnclave([]byte("private-key-material"))
+	if err != nil {
+		t.Fatalf("NewMemoryEnclave: %v", err)
+	}
+
+	var order, readerExit, destroyExit atomic.Int32
+
+	borrowed := make(chan struct{})
+	release := make(chan struct{})
+	destroyed := make(chan struct{})
+
+	go func() {
+		_ = e.WithBytes(func(b []byte) error {
+			close(borrowed)
+			<-release
+			// Ordered from INSIDE the borrow, while the read lock is still
+			// held. Placed after WithBytes returns — where it used to be — it
+			// is ordered against nothing: the lock drops on return, so Destroy
+			// is free to take the write lock, finish, and increment first,
+			// leaving this store unexecuted when the assertion below reads it
+			// (#27; seen as "reader exited at 0 and Destroy at 1"). Here, the
+			// increment happens-before the lock is released, which
+			// happens-before Destroy can acquire it — so the ordering the
+			// assertion checks is the lock discipline itself rather than
+			// goroutine scheduling.
+			readerExit.Store(order.Add(1))
+			return nil
+		})
+	}()
+
+	<-borrowed
+
+	go func() {
+		e.Destroy()
+		destroyExit.Store(order.Add(1))
+		close(destroyed)
+	}()
+
+	// Destroy must not complete while the borrow is outstanding. The reader is
+	// parked on release, so a Destroy that returns here returned while another
+	// goroutine held a live view of the locked pages.
+	select {
+	case <-destroyed:
+		t.Fatal("Destroy completed while a borrow was still in flight")
+	case <-time.After(250 * time.Millisecond):
+	}
+
+	close(release)
+
+	select {
+	case <-destroyed:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Destroy did not complete after the borrow was released")
+	}
+
+	if readerExit.Load() != 1 || destroyExit.Load() != 2 {
+		t.Fatalf("reader exited at %d and Destroy at %d, want 1 then 2", readerExit.Load(), destroyExit.Load())
+	}
+	if e.IsAlive() {
+		t.Error("enclave still alive after Destroy")
+	}
+}
+
+// TestMemoryEnclave_ConcurrentReadersAndDestroy runs every scoped-borrow path
+// against a concurrent Destroy. Under -race this catches an access that
+// escapes the enclave's lock; without it, it still catches a read that
+// dereferences a destroyed buffer.
+func TestMemoryEnclave_ConcurrentReadersAndDestroy(t *testing.T) {
+	for i := 0; i < 50; i++ {
+		e, err := NewMemoryEnclave([]byte("private-key-material"))
+		if err != nil {
+			t.Fatalf("NewMemoryEnclave: %v", err)
+		}
+
+		var wg sync.WaitGroup
+		for r := 0; r < 8; r++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				_ = e.WithBytes(func(b []byte) error { return nil })
+				_, _ = e.OpenString()
+				_ = e.EqualTo([]byte("private-key-material"))
+				_ = e.Size()
+				_ = e.String()
+			}()
+		}
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			e.Destroy()
+		}()
+
+		wg.Wait()
+
+		if e.IsAlive() {
+			t.Fatal("enclave alive after Destroy")
+		}
+	}
+}
+
+// TestLockedMemoryError covers the typed error's contract: callers match the
+// ErrLockedMemoryUnavailable sentinel and never the struct, the memguard
+// diagnostic survives for an operator, and errors.As reaches a cause that
+// happens to be an error.
+func TestLockedMemoryError(t *testing.T) {
+	t.Run("matches the sentinel with no cause", func(t *testing.T) {
+		err := error(&LockedMemoryError{})
+		if !errors.Is(err, ErrLockedMemoryUnavailable) {
+			t.Error("errors.Is did not match ErrLockedMemoryUnavailable")
+		}
+		if err.Error() != ErrLockedMemoryUnavailable.Error() {
+			t.Errorf("Error() = %q, want the bare sentinel text", err.Error())
+		}
+	})
+
+	t.Run("matches the sentinel and keeps the cause", func(t *testing.T) {
+		err := error(&LockedMemoryError{Cause: "could not acquire lock, limit reached?"})
+		if !errors.Is(err, ErrLockedMemoryUnavailable) {
+			t.Error("errors.Is did not match ErrLockedMemoryUnavailable")
+		}
+		if !strings.Contains(err.Error(), "limit reached?") {
+			t.Errorf("Error() = %q, want the memguard diagnostic retained", err.Error())
+		}
+	})
+
+	t.Run("does not match unrelated sentinels", func(t *testing.T) {
+		if errors.Is(&LockedMemoryError{}, ErrEnclaveDestroyed) {
+			t.Error("matched ErrEnclaveDestroyed")
+		}
+	})
+
+	t.Run("unwraps an error cause", func(t *testing.T) {
+		cause := errors.New("mmap: cannot allocate memory")
+		err := error(&LockedMemoryError{Cause: cause})
+		if !errors.Is(err, cause) {
+			t.Error("errors.Is did not reach the wrapped cause")
+		}
+		if got := errors.Unwrap(err); got != cause {
+			t.Errorf("Unwrap() = %v, want the cause", got)
+		}
+	})
+
+	t.Run("unwraps to nil for a non-error cause", func(t *testing.T) {
+		if got := errors.Unwrap(error(&LockedMemoryError{Cause: "a string panic"})); got != nil {
+			t.Errorf("Unwrap() = %v, want nil", got)
+		}
+	})
+}

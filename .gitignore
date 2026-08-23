@@ -1,0 +1,43 @@
+# Credentials and Secrets — never commit
+*.env
+*.env.*
+.env
+.env.*
+*.key
+*.pem
+*.crt
+credentials.json
+secrets.yaml
+secrets.yml
+
+# Build / test artifacts
+bin/
+dist/
+*.so
+*.dylib
+*.dll
+*.exe
+*.test
+*.out
+coverage/
+coverage.txt
+coverage.out
+*.prof
+
+# Go workspace (dependency-resolution.md: no go.work in first-party repos)
+go.work
+go.work.sum
+gosec.sarif
+gosec-results.json
+
+# OS / editor
+.DS_Store
+*~
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# AI assistant / local tooling — never commit
+.serena/
+.claude/
