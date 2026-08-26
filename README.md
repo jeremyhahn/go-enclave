@@ -68,7 +68,10 @@ go-enclave addresses both halves:
    valid view even if an unrelated allocation elsewhere exhausts locked memory
    and purges the process.
 3. **Admission control.** `Allocator` is a lock-free bounded allocator with a
-   typed `ErrBudgetExhausted`. Sizing its budget below `RLIMIT_MEMLOCK` and
+   typed `ErrBudgetExhausted`, accounted in **locked bytes** — the unit
+   `RLIMIT_MEMLOCK` uses, so the budget and the ceiling are directly comparable.
+   Every enclave costs at least one page (`LockedSize` computes it), which is
+   what a budget must be sized in. Sizing its budget below `RLIMIT_MEMLOCK` and
    admitting untrusted allocations through it turns a remote memlock-drain
    (measured: a Noise responder allocating key buffers before authentication)
    into a local, typed refusal — the ceiling, and therefore the purge, is never
@@ -85,7 +88,8 @@ go-enclave addresses both halves:
 | `(*MemoryEnclave) OpenString / EqualTo / Size / IsAlive / String` | Locked, concurrency-safe accessors. |
 | `(*MemoryEnclave) Open()` | **Unsafe.** Returns a slice not covered by the lock; see its doc. |
 | `(*MemoryEnclave) Destroy()` | Zeroize and release; idempotent, nil-safe, deferrable. |
-| `NewAllocator(maxBytes)` / `(*Allocator) New(data)` / `(*Allocator) NewSized(n)` | Bounded allocation with `ErrBudgetExhausted`; admission is decided before memguard is entered, and reservations are released on `Destroy`. |
+| `NewAllocator(maxBytes)` / `(*Allocator) New(data)` / `(*Allocator) NewSized(n)` | Bounded allocation with `ErrBudgetExhausted`; admission is decided before memguard is entered, and reservations are released on `Destroy`. The budget is in **locked bytes**, the unit `RLIMIT_MEMLOCK` uses. |
+| `LockedSize(n int) int64` | What an enclave of `n` bytes actually costs — `n` rounded up to a whole page. Size budgets with this: every enclave occupies at least one page, so a budget for a hundred small credentials is a hundred **pages**. Returns `int64`, matching the budget, because on a 32-bit platform the cost can exceed `int`. |
 | `Wipe(b []byte)` | Zero a transient plain slice. |
 
 Errors: `ErrEmptyEnclave`, `ErrInvalidSize`, `ErrEnclaveDestroyed`, `ErrLockedMemoryUnavailable`

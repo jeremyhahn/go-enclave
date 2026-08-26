@@ -21,6 +21,7 @@ import (
 	"io"
 	"math"
 	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -242,7 +243,8 @@ func TestNewMemoryEnclaveSized_ConcurrentBorrowsAndDestroy(t *testing.T) {
 }
 
 func TestAllocator_NewSized_Admits(t *testing.T) {
-	a, err := NewAllocator(1024)
+	limit := 4 * pageSize
+	a, err := NewAllocator(limit)
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
@@ -254,11 +256,12 @@ func TestAllocator_NewSized_Admits(t *testing.T) {
 	}
 	defer e.Destroy()
 
-	if a.InUse() != n {
-		t.Errorf("InUse = %d, want %d", a.InUse(), n)
+	// Charged the page it actually locks, not the 48 bytes requested.
+	if a.InUse() != pageSize {
+		t.Errorf("InUse = %d, want one page (%d)", a.InUse(), pageSize)
 	}
-	if a.Available() != 1024-n {
-		t.Errorf("Available = %d, want %d", a.Available(), 1024-n)
+	if a.Available() != limit-pageSize {
+		t.Errorf("Available = %d, want %d", a.Available(), limit-pageSize)
 	}
 	if e.Size() != n {
 		t.Errorf("Size = %d, want %d", e.Size(), n)
@@ -288,7 +291,8 @@ func TestAllocator_NewSized_Admits(t *testing.T) {
 // (Linux) — a typed error alone cannot show it, since ErrLockedMemoryUnavailable
 // is typed too and would mean the purge already ran.
 func TestAllocator_NewSized_RefusesOverBudget(t *testing.T) {
-	a, err := NewAllocator(32)
+	// One page of budget holds exactly one enclave, however small.
+	a, err := NewAllocator(pageSize)
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
@@ -300,7 +304,7 @@ func TestAllocator_NewSized_RefusesOverBudget(t *testing.T) {
 	defer first.Destroy()
 
 	before := a.InUse()
-	e, err := a.NewSized(16) // 24 + 16 = 40 > 32
+	e, err := a.NewSized(16)
 	if !errors.Is(err, ErrBudgetExhausted) {
 		t.Fatalf("over-budget NewSized err = %v, want ErrBudgetExhausted", err)
 	}
@@ -315,8 +319,10 @@ func TestAllocator_NewSized_RefusesOverBudget(t *testing.T) {
 	if !errors.As(err, &be) {
 		t.Fatalf("err is not a *BudgetError: %v", err)
 	}
-	if be.Requested != 16 || be.Limit != 32 || be.InUse != 24 {
-		t.Errorf("BudgetError = %+v, want Requested=16 InUse=24 Limit=32", be)
+	// Locked bytes throughout: 16 bytes of material costs a page, and the page
+	// already taken is what leaves no room.
+	if be.Requested != pageSize || be.Limit != pageSize || be.InUse != pageSize {
+		t.Errorf("BudgetError = %+v, want Requested=InUse=Limit=%d", be, pageSize)
 	}
 }
 
@@ -324,7 +330,7 @@ func TestAllocator_NewSized_RefusesOverBudget(t *testing.T) {
 // admission as well as ahead of memguard: an impossible size is neither charged
 // to the budget nor reported as a budget refusal.
 func TestAllocator_NewSized_RejectsNonPositive(t *testing.T) {
-	a, err := NewAllocator(1024)
+	a, err := NewAllocator(4 * pageSize)
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
@@ -359,109 +365,285 @@ func TestAllocator_NewSized_RejectsNonPositive(t *testing.T) {
 // admitted during that window overshoots. Asserting on reserve is the only place
 // that window is observable, so the check lives here and is tested here.
 func TestAllocator_reserve_RefusesNonPositive(t *testing.T) {
-	a, err := NewAllocator(1024)
+	limit := 16 * pageSize
+	a, err := NewAllocator(limit)
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
 
 	for _, n := range []int64{0, -1, -4096} {
 		t.Run(fmt.Sprintf("%d", n), func(t *testing.T) {
-			if err := a.reserve(n); !errors.Is(err, ErrInvalidSize) {
+			if _, err := a.reserve(n); !errors.Is(err, ErrInvalidSize) {
 				t.Errorf("reserve(%d) = %v, want ErrInvalidSize", n, err)
 			}
 			if got := a.InUse(); got != 0 {
 				t.Errorf("InUse = %d after reserve(%d), want 0 (the counter was touched)", got, n)
 			}
-			if got := a.Available(); got != 1024 {
-				t.Errorf("Available = %d after reserve(%d), want the full 1024", got, n)
+			if got := a.Available(); got != limit {
+				t.Errorf("Available = %d after reserve(%d), want the full %d", got, n, limit)
 			}
 		})
 	}
 
-	// The gate still admits a legitimate reservation afterwards.
-	if err := a.reserve(64); err != nil {
+	// The gate still admits a legitimate reservation afterwards, and charges it
+	// the page it will actually cost rather than the 64 bytes asked for.
+	charge, err := a.reserve(64)
+	if err != nil {
 		t.Fatalf("reserve(64) after the refusals: %v", err)
 	}
-	if a.InUse() != 64 {
-		t.Errorf("InUse = %d, want 64", a.InUse())
+	if charge != pageSize {
+		t.Errorf("reserve(64) charged %d, want one page (%d)", charge, pageSize)
+	}
+	if a.InUse() != pageSize {
+		t.Errorf("InUse = %d, want %d", a.InUse(), pageSize)
 	}
 }
 
-// TestAllocator_reserve_DoesNotOverflow covers the fail-open Codex found on PR
-// #3: `used+n > limit` performs signed addition, and for a large enough n that
-// addition wraps NEGATIVE, passes the budget test, and admits an allocation the
-// budget cannot cover.
+// TestLockedSize pins the accounting unit itself: an enclave costs its size
+// rounded UP to a whole page, so everything under a page costs a page.
 //
-// It is reachable through the public surface because NewSized takes its size
-// from the caller as a plain int, with nothing upstream bounding it — unlike
-// New, whose size is the length of a slice that had to be allocated first. And
-// the consequence is the exact one admission exists to prevent: the request
-// reaches memguard, memguard cannot map it, and core.Panic purges every live
-// locked buffer in the process.
+// The exported helper exists because a caller cannot size a budget without it
+// — the change this test guards is what makes Limit comparable to
+// RLIMIT_MEMLOCK, and a hundred 32-byte credentials need a hundred pages of
+// budget, not 3200 bytes.
+func TestLockedSize(t *testing.T) {
+	p := int(pageSize)
+	for _, tc := range []struct {
+		in   int
+		want int64
+	}{
+		{1, pageSize},
+		{32, pageSize},
+		{p - 1, pageSize},
+		{p, pageSize},
+		{p + 1, 2 * pageSize},
+		{2 * p, 2 * pageSize},
+		{2*p + 1, 3 * pageSize},
+	} {
+		if got := LockedSize(tc.in); got != tc.want {
+			t.Errorf("LockedSize(%d) = %d, want %d", tc.in, got, tc.want)
+		}
+	}
+
+	// Not a size any enclave can have: no rounding is defined, so no cost is
+	// reported.
+	for _, n := range []int{0, -1, -4096} {
+		if got := LockedSize(n); got != 0 {
+			t.Errorf("LockedSize(%d) = %d, want 0", n, got)
+		}
+	}
+
+	// The platform maximum is refused on every platform, and after Codex round
+	// 2 on PR #8 it is refused for a second reason as well: even where the data
+	// region rounds representably, memguard's mapping is that region PLUS two
+	// guard pages, laid out in int arithmetic. So the largest constructible
+	// enclave stops short of the platform maximum by those guard pages, and
+	// anything past it reports 0 — "not a size any enclave can have".
+	//
+	// Round 1 of that review argued the return type had to be int64 because a
+	// 32-bit platform could produce a locked size above MaxInt32. That reason is
+	// now GONE: the guard-page ceiling keeps every valid answer inside int on
+	// both word sizes. int64 stays because it matches NewAllocator's budget, and
+	// this comment records that the original justification did not survive.
+	maxIntV := int(^uint(0) >> 1)
+	if got := LockedSize(maxIntV); got != 0 {
+		t.Errorf("LockedSize(maxInt) = %d, want 0", got)
+	}
+	if got := LockedSize(maxIntV - int(pageSize)); got != 0 {
+		t.Errorf("LockedSize(maxInt-page) = %d, want 0 (the mapping needs two guard pages too)", got)
+	}
+
+	// The boundary itself: the largest size whose data region plus two guard
+	// pages still fits, and the first one past it.
+	largest := int((maxInt - 2*pageSize) / pageSize * pageSize)
+	if got := LockedSize(largest); got != int64(largest) {
+		t.Errorf("LockedSize(largest constructible) = %d, want %d", got, largest)
+	}
+	if got := LockedSize(largest + 1); got != 0 {
+		t.Errorf("LockedSize(largest+1) = %d, want 0", got)
+	}
+}
+
+// TestSizedConstructors_RefuseUnmappableSizes is the regression test for the
+// fail-open Codex found in round 2 of PR #8, and it covers BOTH construction
+// paths because both reach memguard.
 //
-// The public-surface half of this test is therefore also the arm check. With
-// the fix it never enters memguard; with `used+n > a.limit` restored it does,
-// and comes back with ErrLockedMemoryUnavailable — a different sentinel, from
-// the other side of the line.
+// memguard maps roundToPageSize(size) + 2*pageSize in int arithmetic. A size
+// whose data region rounds representably can still overflow once the guard pages
+// are added; mmap then refuses the nonsense length and core.Panic purges every
+// live locked buffer in the process. Measured against v0.2.0-alpha with
+// n = MaxInt64-pageSize: admission passed, the request reached memguard, and an
+// unrelated canary enclave came back DEAD.
+//
+// The assertion that matters is the sentinel. ErrInvalidSize means the size was
+// refused on this side of the line; ErrLockedMemoryUnavailable would mean the
+// request reached memguard and the purge already ran — the failure this exists
+// to prevent, wearing a typed error.
+//
+// The budget is deliberately large enough to admit the rounded charge on both
+// word sizes and nothing is pre-reserved, so a refusal here cannot be the budget
+// doing the work by accident.
+func TestSizedConstructors_RefuseUnmappableSizes(t *testing.T) {
+	maxIntV := int(^uint(0) >> 1)
+
+	// A canary that must survive: if the request reaches memguard, the purge
+	// destroys it. That is the observable, not just the error value.
+	canary, err := NewMemoryEnclave([]byte("canary-key-material"))
+	if err != nil {
+		t.Skipf("could not allocate the canary enclave: %v", err)
+	}
+	defer canary.Destroy()
+
+	for _, tc := range []struct {
+		name string
+		n    int
+	}{
+		{"platform maximum", maxIntV},
+		{"data region rounds, mapping does not", maxIntV - int(pageSize)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Unadmitted path first: no Allocator stands in front of it at all,
+			// so its own size check is the only thing between the caller and a
+			// process-wide purge.
+			e, err := NewMemoryEnclaveSized(tc.n)
+			if !errors.Is(err, ErrInvalidSize) {
+				t.Errorf("NewMemoryEnclaveSized(%d) = %v, want ErrInvalidSize", tc.n, err)
+			}
+			if errors.Is(err, ErrLockedMemoryUnavailable) {
+				t.Error("the request reached memguard; the size check did not run first")
+			}
+			if e != nil {
+				t.Error("a non-nil enclave was returned")
+				e.Destroy()
+			}
+
+			// Admitted path, with a budget big enough that admission cannot be
+			// what refuses it.
+			a, err := NewAllocator(maxInt)
+			if err != nil {
+				t.Fatalf("NewAllocator: %v", err)
+			}
+			e, err = a.NewSized(tc.n)
+			if !errors.Is(err, ErrInvalidSize) {
+				t.Errorf("NewSized(%d) = %v, want ErrInvalidSize", tc.n, err)
+			}
+			if errors.Is(err, ErrLockedMemoryUnavailable) {
+				t.Error("the request reached memguard; admission failed open")
+			}
+			if e != nil {
+				t.Error("a non-nil enclave was returned")
+				e.Destroy()
+			}
+			if got := a.InUse(); got != 0 {
+				t.Errorf("InUse = %d after the refusal, want 0", got)
+			}
+
+			if !canary.IsAlive() {
+				t.Fatal("an unrelated enclave died: memguard was entered and purged the process")
+			}
+		})
+	}
+
+	if !canary.EqualTo([]byte("canary-key-material")) {
+		t.Error("the canary's material did not survive")
+	}
+}
+
+// TestAllocator_reserve_DoesNotOverflow covers the two arithmetic guards on the
+// admission path. Each is a fail-open into memguard's process-wide purge if it
+// wraps, and they are asserted separately because a single request cannot
+// exercise both — one is caught before the other is ever consulted.
+//
+// The SIZE guard is the page rounding. The obvious form, `n+pageSize-1` masked
+// down, wraps for a large enough n; it also has to leave room for the two guard
+// pages memguard maps alongside the data region (see lockedSize).
+//
+// The BUDGET guard is the predicate itself, the fail-open Codex found on PR #3:
+// `used+charge > limit` performs signed addition, and for a large enough charge
+// that addition wraps NEGATIVE, passes the comparison, and admits an allocation
+// the budget cannot cover.
+//
+// One asymmetry, stated rather than hidden: the budget wrap is reachable only
+// where int is 64 bits. On a 32-bit platform the largest constructible charge is
+// bounded by int, far below the point where adding it to the counter could
+// overflow an int64. The assertions below hold on both — as a wrap on 64-bit and
+// as an ordinary over-budget refusal on 32-bit — but the mutant that restores
+// `used+charge > limit` is only caught on 64-bit, and claiming otherwise would
+// be false.
 func TestAllocator_reserve_DoesNotOverflow(t *testing.T) {
+	// Guard 1 — the size. MaxInt64 has no representable page-rounded cost and
+	// no mapping that fits, so it is refused as an impossible SIZE before any
+	// budget comparison happens. A larger limit would not help, which is why
+	// this is ErrInvalidSize and not ErrBudgetExhausted.
 	a, err := NewAllocator(math.MaxInt64)
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
-
-	// One byte in, so limit-used is MaxInt64-1 and the wrap is reachable:
-	// used+n = 1 + MaxInt64 overflows to MinInt64, which is <= limit.
-	if err := a.reserve(1); err != nil {
+	if _, err := a.reserve(1); err != nil {
 		t.Fatalf("reserve(1): %v", err)
 	}
-	if a.InUse() != 1 {
-		t.Fatalf("InUse = %d, want 1", a.InUse())
+	if a.InUse() != pageSize {
+		t.Fatalf("InUse = %d, want one page (%d)", a.InUse(), pageSize)
+	}
+	if _, err := a.reserve(math.MaxInt64); !errors.Is(err, ErrInvalidSize) {
+		t.Errorf("reserve(MaxInt64) = %v, want ErrInvalidSize", err)
+	}
+	if got := a.InUse(); got != pageSize {
+		t.Errorf("InUse = %d after the refusal, want the unchanged %d", got, pageSize)
 	}
 
-	if err := a.reserve(math.MaxInt64); !errors.Is(err, ErrBudgetExhausted) {
-		t.Errorf("reserve(MaxInt64) = %v, want ErrBudgetExhausted", err)
-	}
-	if got := a.InUse(); got != 1 {
-		t.Errorf("InUse = %d after the refusal, want the unchanged 1 (the counter wrapped)", got)
+	// Guard 2 — the budget predicate. widest is the largest size that clears
+	// every size guard, so it reaches the comparison. The budget is exactly its
+	// charge and several pages are already spoken for, which makes it over
+	// budget on any platform; on 64-bit it is also past the point where
+	// used+charge overflows, which is what the restored-predicate mutant needs.
+	widest := (maxInt - 2*pageSize) / pageSize * pageSize
+	if _, ok := lockedSize(widest); !ok {
+		t.Fatalf("lockedSize(%d) refused; the test would never reach the budget predicate", widest)
 	}
 
-	// The public half asks for the largest int the PLATFORM has, computed at
-	// runtime. Passing math.MaxInt64 to a parameter of type int is a compile
-	// error wherever int is 32 bits, which would cost the package its 32-bit
-	// buildability (Codex round 2; reproduced with GOARCH=386, and confirmed
-	// absent on dev/main before this branch).
-	//
-	// The budget is that same maximum, so the request is over budget on every
-	// platform: n == limit and one byte is already reserved. On a 64-bit build
-	// that is also exactly the wrapping case — used+n is 1+MaxInt64 — so this
-	// doubles as the arm check there. On a 32-bit build the wrap is out of
-	// reach through this constructor (int caps the request at MaxInt32, and
-	// the counter is int64 either way), so what remains here is an ordinary
-	// over-budget refusal. The gate-level assertion above is where the wrap is
-	// covered on every platform: reserve takes an int64.
-	maxInt := int(^uint(0) >> 1)
-
-	wide, err := NewAllocator(int64(maxInt))
+	w, err := NewAllocator(widest)
 	if err != nil {
-		t.Fatalf("NewAllocator(maxInt): %v", err)
+		t.Fatalf("NewAllocator(widest): %v", err)
 	}
-	if err := wide.reserve(1); err != nil {
-		t.Fatalf("reserve(1): %v", err)
+	const spokenFor = 4
+	for i := 0; i < spokenFor; i++ {
+		if _, err := w.reserve(1); err != nil {
+			t.Fatalf("reserve(1) #%d: %v", i, err)
+		}
+	}
+	before := w.InUse()
+	if before != spokenFor*pageSize {
+		t.Fatalf("InUse = %d, want %d", before, spokenFor*pageSize)
+	}
+	if _, err := w.reserve(widest); !errors.Is(err, ErrBudgetExhausted) {
+		t.Errorf("reserve(widest) = %v, want ErrBudgetExhausted", err)
+	}
+	if got := w.InUse(); got != before {
+		t.Errorf("InUse = %d after the refusal, want the unchanged %d (the counter wrapped)", got, before)
 	}
 
-	e, err := wide.NewSized(maxInt)
+	// The public half, through NewSized. Its job is the memguard arm check:
+	// with admission intact the request never enters memguard, and with either
+	// guard removed it does and comes back with ErrLockedMemoryUnavailable — a
+	// different sentinel, from the far side of the purge.
+	small, err := NewAllocator(2 * pageSize)
+	if err != nil {
+		t.Fatalf("NewAllocator: %v", err)
+	}
+	e, err := small.NewSized(int(widest))
 	if !errors.Is(err, ErrBudgetExhausted) {
-		t.Errorf("NewSized(maxInt) = %v, want ErrBudgetExhausted", err)
+		t.Errorf("NewSized(widest) against a two-page budget = %v, want ErrBudgetExhausted", err)
 	}
 	if errors.Is(err, ErrLockedMemoryUnavailable) {
 		t.Error("the request reached memguard; admission failed open")
 	}
 	if e != nil {
-		t.Error("NewSized(maxInt) returned a non-nil enclave")
+		t.Error("NewSized(widest) returned a non-nil enclave")
 		e.Destroy()
 	}
-	if got := wide.InUse(); got != 1 {
-		t.Errorf("InUse = %d after the refusal, want the unchanged 1", got)
+	if got := small.InUse(); got != 0 {
+		t.Errorf("InUse = %d after the refusal, want 0", got)
 	}
 }
 
@@ -472,7 +654,7 @@ func TestAllocator_reserve_DoesNotOverflow(t *testing.T) {
 // confirm an identical allocation now succeeds. Dropping `e.release = …` from
 // NewSized leaves the budget consumed forever and fails the final call.
 func TestAllocator_NewSized_DestroyReleasesReservation(t *testing.T) {
-	a, err := NewAllocator(16)
+	a, err := NewAllocator(pageSize)
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
@@ -481,8 +663,8 @@ func TestAllocator_NewSized_DestroyReleasesReservation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSized (full): %v", err)
 	}
-	if a.InUse() != 16 {
-		t.Fatalf("InUse = %d, want 16", a.InUse())
+	if a.InUse() != pageSize {
+		t.Fatalf("InUse = %d, want one page (%d)", a.InUse(), pageSize)
 	}
 	if _, err := a.NewSized(1); !errors.Is(err, ErrBudgetExhausted) {
 		t.Fatalf("NewSized while full err = %v, want ErrBudgetExhausted", err)
@@ -493,8 +675,8 @@ func TestAllocator_NewSized_DestroyReleasesReservation(t *testing.T) {
 		t.Fatalf("InUse = %d after Destroy, want 0 (reservation not released)", a.InUse())
 	}
 	e.Destroy() // idempotent; must not release twice and underflow
-	if a.InUse() != 0 || a.Available() != 16 {
-		t.Fatalf("InUse = %d Available = %d after a double Destroy, want 0 and 16", a.InUse(), a.Available())
+	if a.InUse() != 0 || a.Available() != pageSize {
+		t.Fatalf("InUse = %d Available = %d after a double Destroy, want 0 and %d", a.InUse(), a.Available(), pageSize)
 	}
 
 	e2, err := a.NewSized(16)
@@ -510,15 +692,21 @@ func TestAllocator_NewSized_DestroyReleasesReservation(t *testing.T) {
 // own goroutine generated into it (so no two fills share storage), and the
 // counter returns to exactly zero once everything is destroyed.
 func TestAllocator_NewSized_Concurrent(t *testing.T) {
+	// Budget in PAGES: each enclave costs one whatever its size, so a budget
+	// expressed in the requested bytes would refuse every allocation and leave
+	// this test asserting nothing while still reporting green. The admitted
+	// counter makes that failure mode loud instead of silent.
 	const (
-		limit = 200
-		size  = 40
+		capacity = 5
+		size     = 40
 	)
+	limit := capacity * pageSize
 	a, err := NewAllocator(limit)
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
 
+	var admitted atomic.Int64
 	var wg sync.WaitGroup
 	for g := 0; g < 32; g++ {
 		wg.Add(1)
@@ -533,6 +721,7 @@ func TestAllocator_NewSized_Concurrent(t *testing.T) {
 					}
 					continue
 				}
+				admitted.Add(1)
 				if u := a.InUse(); u > limit {
 					t.Errorf("InUse = %d exceeded limit %d", u, limit)
 				}
@@ -551,6 +740,9 @@ func TestAllocator_NewSized_Concurrent(t *testing.T) {
 	}
 	wg.Wait()
 
+	if admitted.Load() == 0 {
+		t.Fatal("every allocation was refused; the budget admits nothing and this test asserted nothing")
+	}
 	if a.InUse() != 0 {
 		t.Errorf("InUse = %d after all destroys, want 0", a.InUse())
 	}

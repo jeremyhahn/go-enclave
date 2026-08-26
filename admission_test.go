@@ -18,6 +18,7 @@ import (
 	"errors"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -44,12 +45,12 @@ func TestNewAllocator_InvalidBudget(t *testing.T) {
 }
 
 func TestAllocator_New_Admits(t *testing.T) {
-	a, err := NewAllocator(1024)
+	limit := 4 * pageSize
+	a, err := NewAllocator(limit)
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
 	material := []byte("admitted-key-material")
-	want := len(material)
 
 	e, err := a.New(material)
 	if err != nil {
@@ -57,11 +58,13 @@ func TestAllocator_New_Admits(t *testing.T) {
 	}
 	defer e.Destroy()
 
-	if a.InUse() != int64(want) {
-		t.Errorf("InUse = %d, want %d", a.InUse(), want)
+	// Charged a whole page, not the 21 bytes of material: that is what the
+	// kernel locks, and the budget is denominated in what the kernel charges.
+	if a.InUse() != pageSize {
+		t.Errorf("InUse = %d, want one page (%d)", a.InUse(), pageSize)
 	}
-	if a.Available() != 1024-int64(want) {
-		t.Errorf("Available = %d, want %d", a.Available(), 1024-int64(want))
+	if a.Available() != limit-pageSize {
+		t.Errorf("Available = %d, want %d", a.Available(), limit-pageSize)
 	}
 	if got, err := e.OpenString(); err != nil || got != "admitted-key-material" {
 		t.Errorf("OpenString = %q, %v; want the material", got, err)
@@ -74,7 +77,8 @@ func TestAllocator_New_Admits(t *testing.T) {
 // the over-budget refusal (or weakening the `>` comparison) lets the second
 // New through and fails this test.
 func TestAllocator_New_RefusesOverBudget(t *testing.T) {
-	a, err := NewAllocator(32)
+	// One page of budget holds exactly one enclave, however small its material.
+	a, err := NewAllocator(pageSize)
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
@@ -86,7 +90,7 @@ func TestAllocator_New_RefusesOverBudget(t *testing.T) {
 	defer first.Destroy()
 
 	before := a.InUse()
-	e, err := a.New(bytes.Repeat([]byte("y"), 16)) // 24 + 16 = 40 > 32
+	e, err := a.New(bytes.Repeat([]byte("y"), 16))
 	if !errors.Is(err, ErrBudgetExhausted) {
 		t.Fatalf("over-budget New err = %v, want ErrBudgetExhausted", err)
 	}
@@ -101,8 +105,10 @@ func TestAllocator_New_RefusesOverBudget(t *testing.T) {
 	if !errors.As(err, &be) {
 		t.Fatalf("err is not a *BudgetError: %v", err)
 	}
-	if be.Requested != 16 || be.Limit != 32 || be.InUse != 24 {
-		t.Errorf("BudgetError = %+v, want Requested=16 InUse=24 Limit=32", be)
+	// The figures are in locked bytes throughout — 16 bytes of material costs
+	// a page, and the page already taken is what leaves no room.
+	if be.Requested != pageSize || be.Limit != pageSize || be.InUse != pageSize {
+		t.Errorf("BudgetError = %+v, want Requested=InUse=Limit=%d", be, pageSize)
 	}
 }
 
@@ -135,7 +141,7 @@ func TestAllocator_New_WipesSourceOnRefusal(t *testing.T) {
 // Allocator.New, or the releaseOnce.Do(e.release) in Destroy, leaves the
 // budget consumed forever and fails the final New.
 func TestAllocator_Destroy_ReleasesReservation(t *testing.T) {
-	a, err := NewAllocator(16)
+	a, err := NewAllocator(pageSize)
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
@@ -144,8 +150,8 @@ func TestAllocator_Destroy_ReleasesReservation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New (full): %v", err)
 	}
-	if a.InUse() != 16 {
-		t.Fatalf("InUse = %d, want 16", a.InUse())
+	if a.InUse() != pageSize {
+		t.Fatalf("InUse = %d, want one page (%d)", a.InUse(), pageSize)
 	}
 
 	// Budget is full: another allocation must be refused.
@@ -171,7 +177,8 @@ func TestAllocator_Destroy_ReleasesReservation(t *testing.T) {
 // reservation twice and drive InUse negative, which would let the allocator
 // admit more than its budget.
 func TestAllocator_Destroy_ReleasesExactlyOnce(t *testing.T) {
-	a, err := NewAllocator(64)
+	limit := 2 * pageSize
+	a, err := NewAllocator(limit)
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
@@ -184,13 +191,13 @@ func TestAllocator_Destroy_ReleasesExactlyOnce(t *testing.T) {
 	if a.InUse() != 0 {
 		t.Fatalf("InUse = %d after double Destroy, want exactly 0", a.InUse())
 	}
-	if a.Available() != 64 {
-		t.Fatalf("Available = %d after double Destroy, want the full 64", a.Available())
+	if a.Available() != limit {
+		t.Fatalf("Available = %d after double Destroy, want the full %d", a.Available(), limit)
 	}
 }
 
 func TestAllocator_New_Empty(t *testing.T) {
-	a, err := NewAllocator(1024)
+	a, err := NewAllocator(4 * pageSize)
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
@@ -239,12 +246,19 @@ func TestBudgetError(t *testing.T) {
 // any observed point (the CAS refuses rather than overshooting), and the
 // counter returns to exactly zero once every enclave is destroyed.
 func TestAllocator_Concurrent(t *testing.T) {
-	const limit = 200
+	// Budget in PAGES: each enclave costs one whatever its material's size, so
+	// a budget expressed in the material's bytes would refuse every single
+	// allocation and leave this test asserting nothing. That is exactly what it
+	// did when the accounting changed, silently and while still green — hence
+	// the admitted counter below.
+	const capacity = 5
+	limit := capacity * pageSize
 	a, err := NewAllocator(limit)
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
 
+	var admitted atomic.Int64
 	var wg sync.WaitGroup
 	for g := 0; g < 32; g++ {
 		wg.Add(1)
@@ -258,6 +272,7 @@ func TestAllocator_Concurrent(t *testing.T) {
 					}
 					continue
 				}
+				admitted.Add(1)
 				if u := a.InUse(); u > limit {
 					t.Errorf("InUse = %d exceeded limit %d", u, limit)
 				}
@@ -267,6 +282,9 @@ func TestAllocator_Concurrent(t *testing.T) {
 	}
 	wg.Wait()
 
+	if admitted.Load() == 0 {
+		t.Fatal("every allocation was refused; the budget admits nothing and this test asserted nothing")
+	}
 	if a.InUse() != 0 {
 		t.Errorf("InUse = %d after all destroys, want 0", a.InUse())
 	}

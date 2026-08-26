@@ -4,6 +4,50 @@ All notable changes to go-enclave are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- **`Allocator` admitted against the wrong unit.** The budget counted requested
+  BYTES while the kernel charges locked PAGES, so a budget sized below
+  `RLIMIT_MEMLOCK` was not actually bounded by it — the comparison the type
+  exists to make could not be made. Measured against `/proc/self/status` VmLck
+  on a 4 KiB-page host: a 32-byte enclave locks 4096 bytes, a **128x**
+  undercount, and 200 of them charged 6400 bytes against a budget while locking
+  819200. Reservations are now charged, reported and released in locked bytes,
+  page-rounded as the kernel charges them (go-enclave #7).
+
+- **A size too large to MAP reached memguard and purged the process.** memguard
+  lays out the data region plus two guard pages using `int` arithmetic
+  (`core.NewBuffer` asks `memcall.Alloc` for `2*pageSize + roundToPageSize(size)`),
+  so past a certain size that arithmetic overflows, `mmap` refuses the nonsense
+  length, and `core.Panic` destroys every live locked buffer in the process.
+  Measured on v0.2.0-alpha with `n = MaxInt64-pageSize`: admission passed, the
+  request reached memguard, and an unrelated canary enclave came back dead. Both
+  construction paths are now gated — `Allocator.NewSized` through admission and
+  `NewMemoryEnclaveSized`, which has no allocator in front of it at all.
+
+### Added
+
+- `LockedSize(n int) int64` — the locked memory an enclave of n bytes actually
+  consumes, so a caller can size a budget instead of guessing. Returns int64 to
+  match the budget type and because on a 32-bit platform the cost of a large
+  enclave exceeds what an int can hold. Guard pages are
+  not part of it: they are mapped PROT_NONE and never mlock'd, verified against
+  the kernel's accounting rather than inferred from the mapping code.
+
+### Changed
+
+- `ErrInvalidSize` now reports two conditions rather than one: a non-positive
+  size, and a size too large for memguard to map. Its message changed to match.
+  A larger `Allocator` budget helps with neither, which is why they are not
+  `ErrBudgetExhausted`.
+- `Limit`, `InUse`, `Available` and `BudgetError.Requested` are documented as
+  **locked bytes**, comparable to `RLIMIT_MEMLOCK`. Existing budgets therefore
+  admit far fewer enclaves — which is the fix, not a regression: they admitted
+  more before only by mismeasuring. A budget below one page constructs and then
+  admits nothing, refusing with figures that show why.
+
 ## [v0.2.0-alpha] - 2026-08-26
 
 ### Added

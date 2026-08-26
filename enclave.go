@@ -33,16 +33,23 @@ var (
 	ErrEnclaveDestroyed = errors.New("enclave: enclave has been destroyed")
 
 	// ErrInvalidSize is returned by [NewMemoryEnclaveSized] and
-	// [Allocator.NewSized] for a non-positive size, and mirrors
-	// [ErrInvalidBudget]: asking for zero or fewer bytes of locked memory is a
-	// configuration or programming mistake rather than a runtime condition.
+	// [Allocator.NewSized] for a size no enclave can have, and mirrors
+	// [ErrInvalidBudget]: it reports a programming mistake rather than a
+	// runtime condition.
+	//
+	// Two conditions produce it. A non-positive size, which memguard answers
+	// with a dead buffer. And a size too large to MAP: memguard lays out the
+	// data region plus two guard pages using int arithmetic, so past a certain
+	// size that arithmetic overflows, mmap refuses the nonsense length, and
+	// memguard purges the process — see [LockedSize], which reports 0 for
+	// exactly these sizes. A bigger [Allocator] budget does not help with
+	// either, which is why this is not ErrBudgetExhausted.
 	//
 	// It is deliberately distinct from [ErrEmptyEnclave]. That one reports a
 	// caller that lost the material it meant to protect; this one reports a
 	// caller that asked for an impossible allocation. Both are refused before
-	// memguard is entered, because memguard's own answer to a size below one is
-	// a dead buffer rather than an error.
-	ErrInvalidSize = errors.New("enclave: enclave size must be positive")
+	// memguard is entered.
+	ErrInvalidSize = errors.New("enclave: enclave size must be positive and small enough to map")
 
 	// ErrLockedMemoryUnavailable is the sentinel for a refusal by the operating
 	// system to allocate or lock the pages backing an enclave, which usually
@@ -215,11 +222,13 @@ func NewMemoryEnclave(data []byte) (*MemoryEnclave, error) {
 // enclave, where the same mistake against a NewMemoryEnclave enclave would
 // fault. Never retain what a borrow hands you.
 //
-// It returns ErrInvalidSize when n is not positive, decided before memguard is
-// entered, and ErrLockedMemoryUnavailable when the kernel refuses to lock the
-// pages.
+// It returns ErrInvalidSize for a size no enclave can have — non-positive, or
+// too large for memguard to map — and ErrLockedMemoryUnavailable when the
+// kernel refuses to lock the pages. Both size refusals are decided before
+// memguard is entered. This constructor takes no [Allocator], so the check here
+// is the ONLY thing between a caller's arithmetic and a process-wide purge.
 func NewMemoryEnclaveSized(n int) (*MemoryEnclave, error) {
-	if n <= 0 {
+	if _, ok := lockedSize(int64(n)); !ok {
 		return nil, ErrInvalidSize
 	}
 

@@ -16,8 +16,92 @@ package enclave
 import (
 	"errors"
 	"fmt"
+	"math"
+	"os"
 	"sync/atomic"
 )
+
+// pageSize is the locked-memory accounting unit. The kernel charges
+// RLIMIT_MEMLOCK in whole pages, so this is the granularity every reservation
+// is rounded to. It is read once: the value cannot change for a running
+// process.
+var pageSize = int64(os.Getpagesize())
+
+// LockedSize reports how much locked memory an enclave of n bytes actually
+// consumes, which is n rounded UP to a whole page.
+//
+// Callers need this to size an [Allocator] budget, because the kernel's unit
+// and the caller's are not the same one. An enclave of 32 bytes occupies a
+// full page — measured against /proc/self/status VmLck, 4096 bytes on a
+// 4 KiB-page host — so a budget meant to hold a hundred small credentials must
+// be a hundred PAGES, not a hundred times thirty-two bytes. Without this the
+// correct budget is folklore.
+//
+// Only the data region is charged. memguard fences each enclave with two guard
+// pages, but those are mapped PROT_NONE and never mlock'd, so they cost address
+// space and VMAs rather than locked memory — verified against the kernel's own
+// accounting, not inferred from the mapping code.
+//
+// It returns int64 to match [NewAllocator]'s budget, so sizing a budget from it
+// needs no conversion: NewAllocator(100 * LockedSize(32)) type-checks as
+// written, and the conversion it removes sits exactly where a truncation would
+// bite.
+//
+// It returns 0 when n is not a size any enclave can have — see [ErrInvalidSize]
+// for what that covers.
+func LockedSize(n int) int64 {
+	locked, ok := lockedSize(int64(n))
+	if !ok {
+		return 0
+	}
+	return locked
+}
+
+// maxInt is the largest value of type int on this platform. memguard sizes its
+// mapping in int, so this is the ceiling every enclave has to fit under.
+const maxInt = int64(^uint(0) >> 1)
+
+// lockedSize reports the locked memory an enclave of n bytes consumes — n
+// rounded up to a whole page — and whether such an enclave can be built here at
+// all. Both refusals happen before memguard is entered, which is the point: it
+// aborts the process rather than returning an error, so every impossible size
+// must be caught on this side of the line.
+//
+// Three conditions, and each one is a fail-open into the purge if it is missed.
+//
+// n must be positive. memguard's answer to a size below one is a dead buffer.
+//
+// The rounding must not overflow. The obvious form, n+pageSize-1 masked down,
+// overflows for a large enough n and wraps NEGATIVE — the same shape as the
+// admission fail-open fixed in PR #3, landing in the same place. Dividing first
+// cannot overflow for n >= 1, and the multiplication back is guarded.
+//
+// And the whole MAPPING must be representable, not just the locked part.
+// memguard maps the data region plus two guard pages — core.NewBuffer asks
+// memcall.Alloc for (2 * pageSize) + roundToPageSize(size) — and does that
+// arithmetic in int. A size whose data region rounds representably can still
+// overflow once the guard pages are added, and memguard's own roundToPageSize
+// can overflow before that. Either way memcall.Alloc is handed a nonsense
+// length, mmap refuses it, and core.Panic purges every live locked buffer in
+// the process. Measured on v0.2.0-alpha with n = MaxInt64-pageSize: admission
+// passed, the request reached memguard, and an unrelated canary enclave came
+// back dead. The guard pages cost no LOCKED memory — they are PROT_NONE and
+// never mlock'd, so they stay out of the charge — but they are part of the
+// mapping, and it is the mapping that has to fit.
+func lockedSize(n int64) (int64, bool) {
+	if n <= 0 {
+		return 0, false
+	}
+	pages := (n-1)/pageSize + 1
+	if pages > math.MaxInt64/pageSize {
+		return 0, false
+	}
+	locked := pages * pageSize
+	if locked > maxInt-2*pageSize {
+		return 0, false
+	}
+	return locked, true
+}
 
 var (
 	// ErrBudgetExhausted is the sentinel returned by [Allocator.New] and
@@ -41,13 +125,16 @@ var (
 // was when the refusal happened; that detail is diagnostic, not contract.
 // Match on [ErrBudgetExhausted]; errors.Is reports it for every BudgetError.
 type BudgetError struct {
-	// Requested is the number of bytes the refused allocation asked for.
+	// Requested is the LOCKED bytes the refused allocation would have consumed
+	// — the caller's size rounded up to a whole page, since that is what the
+	// kernel charges. A 32-byte credential reports 4096 here on a 4 KiB-page
+	// host; see [LockedSize].
 	Requested int64
 	// InUse is the number of bytes already reserved when the refusal happened.
 	// It is a snapshot: under concurrency the true figure may have moved by
 	// the time this error is read.
 	InUse int64
-	// Limit is the allocator's total budget in bytes.
+	// Limit is the allocator's total budget in locked bytes.
 	Limit int64
 }
 
@@ -112,12 +199,24 @@ type Allocator struct {
 	used atomic.Int64
 }
 
-// NewAllocator returns an Allocator with the given total budget in bytes.
+// NewAllocator returns an Allocator with the given total budget in LOCKED
+// bytes — the same unit RLIMIT_MEMLOCK is expressed in, so the two can be
+// compared directly.
 //
-// It returns ErrInvalidBudget when maxBytes is not positive. Size the budget
-// comfortably below the process's RLIMIT_MEMLOCK ceiling: the ceiling is what
-// triggers memguard's purge, and locked memory is also consumed by guard and
-// canary pages and by any locked allocation outside this Allocator.
+// Size the budget in PAGES, not in the sizes of the things being protected.
+// Every enclave occupies at least one whole page, so a budget meant to hold a
+// hundred small credentials is a hundred pages; [LockedSize] computes the cost
+// of one. A budget below a single page constructs successfully and then admits
+// nothing, refusing each allocation with a [BudgetError] whose figures show
+// why.
+//
+// Leave headroom below the process's RLIMIT_MEMLOCK ceiling: the ceiling is
+// what triggers memguard's purge, and locked memory is also consumed by any
+// locked allocation outside this Allocator. Guard and canary pages are not
+// part of that — they are mapped PROT_NONE and never mlock'd, so they cost
+// address space and VMAs rather than locked memory.
+//
+// It returns ErrInvalidBudget when maxBytes is not positive.
 func NewAllocator(maxBytes int64) (*Allocator, error) {
 	if maxBytes <= 0 {
 		return nil, ErrInvalidBudget
@@ -134,16 +233,16 @@ func NewAllocator(maxBytes int64) (*Allocator, error) {
 //
 // Returns, all leaving the budget as it was found:
 //   - ErrEmptyEnclave when data is empty (no reservation is taken);
-//   - ErrBudgetExhausted (as a [BudgetError]) when admitting len(data) would
-//     exceed the budget — decided before any locked memory is requested, so no
-//     purge can result;
+//   - ErrBudgetExhausted (as a [BudgetError]) when the page-rounded cost of
+//     len(data) would exceed the budget — decided before any locked memory is
+//     requested, so no purge can result;
 //   - ErrLockedMemoryUnavailable if the kernel refuses the lock despite
 //     admission (the reservation is released before returning).
 //
-// On success the returned enclave holds a reservation of len(data) bytes until
-// its Destroy runs. Callers must Destroy every enclave New returns, exactly as
-// for NewMemoryEnclave; the reservation leaks for the process lifetime
-// otherwise.
+// On success the returned enclave holds a reservation of [LockedSize](len(data))
+// bytes — len(data) rounded up to a whole page — until its Destroy runs.
+// Callers must Destroy every enclave New returns, exactly as for
+// NewMemoryEnclave; the reservation leaks for the process lifetime otherwise.
 func (a *Allocator) New(data []byte) (*MemoryEnclave, error) {
 	if len(data) == 0 {
 		// Match NewMemoryEnclave's contract: wipe the (empty) slice, take no
@@ -157,23 +256,24 @@ func (a *Allocator) New(data []byte) (*MemoryEnclave, error) {
 	// n is at least 1 here, so the only refusal reserve can produce is a
 	// BudgetError — which is why ErrInvalidSize is absent from this
 	// constructor's documented returns.
-	if err := a.reserve(n); err != nil {
+	charge, err := a.reserve(n)
+	if err != nil {
 		// Wipe here too: admission failure is a terminal path for data, and the
 		// ownership contract says nothing survives it.
 		Wipe(data)
 		return nil, err
 	}
 
-	e, err := NewMemoryEnclave(data)
-	if err != nil {
+	e, cerr := NewMemoryEnclave(data)
+	if cerr != nil {
 		// Admission succeeded but the OS still refused (or the input was
 		// rejected): release the reservation so the failure does not shrink
 		// the budget permanently. data was already wiped by NewMemoryEnclave.
-		a.used.Add(-n)
-		return nil, err
+		a.used.Add(-charge)
+		return nil, cerr
 	}
 
-	e.release = func() { a.used.Add(-n) }
+	e.release = func() { a.used.Add(-charge) }
 	return e, nil
 }
 
@@ -193,39 +293,47 @@ func (a *Allocator) New(data []byte) (*MemoryEnclave, error) {
 // the things admission refuses, which is why no separate size check precedes it.
 //
 // Returns, all leaving the budget as it was found:
-//   - ErrInvalidSize when n is not positive (no reservation is taken);
-//   - ErrBudgetExhausted (as a [BudgetError]) when admitting n bytes would
-//     exceed the budget;
+//   - ErrInvalidSize when n is a size no enclave can have — non-positive, or
+//     too large for memguard to map (no reservation is taken);
+//   - ErrBudgetExhausted (as a [BudgetError]) when the page-rounded cost of n
+//     would exceed the budget;
 //   - ErrLockedMemoryUnavailable if the kernel refuses the lock despite
 //     admission (the reservation is released before returning).
 //
-// On success the returned enclave holds a reservation of n bytes until its
-// Destroy runs, which callers must always call; the reservation leaks for the
-// process lifetime otherwise.
+// On success the returned enclave holds a reservation of [LockedSize](n) bytes
+// — n rounded up to a whole page — until its Destroy runs, which callers must
+// always call; the reservation leaks for the process lifetime otherwise.
 func (a *Allocator) NewSized(n int) (*MemoryEnclave, error) {
-	size := int64(n)
-
 	// Admission first, and it is admission that refuses a non-positive size:
 	// see reserve. Nothing below this line can be reached by a size memguard
 	// would choke on.
-	if err := a.reserve(size); err != nil {
+	charge, err := a.reserve(int64(n))
+	if err != nil {
 		return nil, err
 	}
 
-	e, err := NewMemoryEnclaveSized(n)
-	if err != nil {
+	e, cerr := NewMemoryEnclaveSized(n)
+	if cerr != nil {
 		// Admission succeeded but the OS still refused: release the reservation
 		// so the failure does not shrink the budget permanently.
-		a.used.Add(-size)
-		return nil, err
+		a.used.Add(-charge)
+		return nil, cerr
 	}
 
-	e.release = func() { a.used.Add(-size) }
+	e.release = func() { a.used.Add(-charge) }
 	return e, nil
 }
 
 // reserve claims n bytes of the budget, lock-free, and is the sole admission
 // gate every constructor on this type goes through.
+//
+// It charges what the KERNEL will charge, not what the caller asked for: n is
+// rounded up to a whole page by [lockedSize], and the rounded figure is what is
+// reserved, reported and released. The two units are not interchangeable — a
+// 32-byte enclave locks a full page — so a budget accounted in requested bytes
+// cannot be compared to RLIMIT_MEMLOCK at all, which is the comparison the whole
+// type exists to make. It returns the amount charged, which callers must hold on
+// to: the release has to return exactly that, not n.
 //
 // It owns the counter's two invariants, and together they keep used within
 // [0, limit] — which the admission predicate below then depends on.
@@ -241,45 +349,58 @@ func (a *Allocator) NewSized(n int) (*MemoryEnclave, error) {
 // It returns ErrInvalidSize or a [BudgetError] on refusal and leaves the counter
 // exactly as it found it; callers own whatever else a refusal implies for their
 // arguments.
-func (a *Allocator) reserve(n int64) error {
+func (a *Allocator) reserve(n int64) (int64, error) {
 	if n <= 0 {
-		return ErrInvalidSize
+		return 0, ErrInvalidSize
+	}
+
+	charge, ok := lockedSize(n)
+	if !ok {
+		// Not a size any enclave can have on this platform. That is a property
+		// of the size, not of the budget — a larger limit would not help — so
+		// it reports as ErrInvalidSize rather than as a refusal to admit.
+		return 0, ErrInvalidSize
 	}
 
 	for {
 		used := a.used.Load()
 
-		// Compare n against the REMAINING budget rather than testing used+n
-		// against the limit. That addition overflows for a large enough n and
-		// wraps negative, which passes a `used+n > limit` test and admits an
-		// allocation the budget cannot possibly cover — a fail-open straight
-		// into memguard, on the one path whose entire purpose is to keep an
-		// impossible request away from it. [Allocator.NewSized] takes the size
-		// from the caller as a plain int, so nothing upstream bounds it.
+		// Compare the charge against the REMAINING budget rather than testing
+		// used+charge against the limit. That addition overflows for a large
+		// enough request and wraps negative, which passes a `used+n > limit`
+		// test and admits an allocation the budget cannot possibly cover — a
+		// fail-open straight into memguard, on the one path whose entire
+		// purpose is to keep an impossible request away from it.
+		// [Allocator.NewSized] takes the size from the caller as a plain int,
+		// so nothing upstream bounds it.
 		//
 		// This form cannot overflow: used is in [0, limit] by the invariants
-		// above, so limit-used is in [0, limit], and n is already positive.
-		// The CAS below is safe for the same reason — admitting n means
-		// n <= limit-used, hence used+n <= limit.
-		if n > a.limit-used {
-			return &BudgetError{Requested: n, InUse: used, Limit: a.limit}
+		// above, so limit-used is in [0, limit], and charge is already
+		// positive. The CAS below is safe for the same reason — admitting
+		// charge means charge <= limit-used, hence used+charge <= limit.
+		if charge > a.limit-used {
+			return 0, &BudgetError{Requested: charge, InUse: used, Limit: a.limit}
 		}
-		if a.used.CompareAndSwap(used, used+n) {
-			return nil
+		if a.used.CompareAndSwap(used, used+charge) {
+			return charge, nil
 		}
 	}
 }
 
-// InUse reports the bytes currently reserved through this Allocator. It is a
+// InUse reports the locked bytes currently reserved through this Allocator,
+// page-rounded as the kernel charges them rather than summed from the sizes
+// callers asked for. It is a
 // snapshot, useful for observability; do not build admission logic on it, as
 // it can change between the read and any decision. The reservation the
 // constructors take is atomic and is the only correct admission gate.
 func (a *Allocator) InUse() int64 { return a.used.Load() }
 
-// Limit reports the Allocator's total budget in bytes.
+// Limit reports the Allocator's total budget in locked bytes.
 func (a *Allocator) Limit() int64 { return a.limit }
 
-// Available reports limit minus in-use bytes, clamped at zero. Like InUse it is
+// Available reports limit minus in-use locked bytes, clamped at zero. It is an
+// upper bound on what can still be admitted, not a count: a remainder smaller
+// than one page admits nothing. Like InUse it is
 // a snapshot for observability, not an admission gate.
 func (a *Allocator) Available() int64 {
 	free := a.limit - a.used.Load()
