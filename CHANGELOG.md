@@ -4,7 +4,7 @@ All notable changes to go-enclave are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [v0.2.0-alpha] - 2026-08-26
 
 ### Added
 
@@ -67,4 +67,5 @@ All notable changes to go-enclave are documented here. The format follows
   locked-memory allocation below the RLIMIT_MEMLOCK ceiling that triggers a
   purge. Reservations are released on `Destroy`.
 
+[v0.2.0-alpha]: http://198.51.100.91:3001/jeremyhahn/go-enclave/releases/tag/v0.2.0-alpha
 [v0.1.0-alpha]: http://198.51.100.91:3001/jeremyhahn/go-enclave/releases/tag/v0.1.0-alpha
