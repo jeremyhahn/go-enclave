@@ -49,6 +49,35 @@ All notable changes to go-enclave are documented here. The format follows
 
 ### Changed
 
+- **`WipeAll` waits briefly between retry passes, so the promise it makes about
+  momentary readers is actually true.** Without it the retry loop was
+  temporally degenerate: all eight passes completed in about 966 **nanoseconds**,
+  so "still held after every pass" meant "held for more than roughly a
+  microsecond," and a realistic reader — a health probe calling `IsAlive`, a
+  `Size`, an `EqualTo` — lost its enclave 20/20 times at every duration from
+  20µs to 2ms.
+
+  This is a backoff, not synchronization, and the distinction is the test:
+  remove the wait and the sweep is still **correct** — the enclave simply is not
+  reclaimed on that call, the count stays honest, and the documented remedy
+  still works. A sleep standing in for an ordering guarantee becomes *wrong*
+  when removed; that is the pattern this project bans, and this is not it. There
+  is also nothing to wait on: the party being waited for is another goroutine's
+  read lock, and `sync.RWMutex` exposes no "notify when free."
+
+  Cost is milliseconds at shutdown, and only when something is genuinely still
+  held. Stated as measured rather than as arithmetic: nominally 1.4ms, measured
+  at **7.5ms** against a held enclave, because short sleeps overshoot.
+
+- **`WipeAll`'s documentation no longer attributes a non-zero count solely to
+  caller ordering.** A read that simply outlasts the retry budget produces the
+  same number, so the count now reads as "these were still in use" rather than
+  as a diagnosis — and it says plainly that `WipeAll` belongs to the **program
+  that owns the process**, never to a library, since it destroys enclaves
+  belonging to subsystems a library knows nothing about. Two independent
+  consumers reached that conclusion on their own and declined to call it; an API
+  two callers separately avoid is inviting the mistake.
+
 - **An enclave is published to the shutdown ledger as the LAST step of its
   construction**, after every field a sweep reads has been set. `Allocator.New`
   and `Allocator.NewSized` install the reservation callback and then register;

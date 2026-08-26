@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 )
 
 // This file is the one thing v0.3.0-alpha removed and a consumer still needed.
@@ -79,6 +80,46 @@ import (
 // caller's cue that their ordering is wrong.
 const maxSweepPasses = 8
 
+// sweepBackoff is how long [WipeAll] waits between passes when something is
+// still held.
+//
+// WHY THIS EXISTS. Without it the retry loop is temporally degenerate: all
+// eight passes complete in about 966 NANOSECONDS, so "still held after every
+// pass" means "held for more than roughly a microsecond." A reader doing
+// anything realistic — a health probe calling IsAlive, a Size, an EqualTo —
+// loses its enclave every time, measured 20/20 at 20µs, 100µs, 500µs and 2ms.
+// The documented promise that a momentary reader "costs the sweep a pass, not
+// the enclave" was false for every reader that actually exists.
+//
+// WHY THIS IS A BACKOFF AND NOT SYNCHRONIZATION, which matters because this
+// package otherwise forbids sleeping: the test is whether CORRECTNESS depends
+// on the duration. Delete this wait and the sweep is still correct — an enclave
+// simply is not reclaimed on THIS call, the count stays honest, and the
+// documented remedy still works. Nothing is racing; the sweep is only less
+// likely to win. A sleep standing in for an ordering guarantee would instead
+// become WRONG when removed, and flakiness would be its symptom. That is the
+// pattern the convention bans, and this is not it.
+//
+// There is also nothing to wait ON. The party being waited for is another
+// goroutine's read lock, and sync.RWMutex exposes no "notify when free" — so
+// there is no channel to select on, and runtime.Gosched() grants scheduling
+// opportunities rather than wall-clock time. Making readers observable would
+// mean registering every borrow on the hot path to serve a shutdown-only
+// sweep, which is the wrong trade and is deliberately not done.
+//
+// COST, stated as measured rather than as arithmetic: the nominal figure is
+// (maxSweepPasses-1) * sweepBackoff = 1.4ms, but that is a LOWER BOUND. Timer
+// granularity means each short sleep overshoots, and a real sweep against a
+// held enclave was measured at 7.5ms — about 5.4x nominal. Either way it is
+// milliseconds at shutdown, and only when something is genuinely still held: a
+// sweep that finds everything on the first pass breaks out before ever reaching
+// the wait and pays nothing.
+//
+// Anything comparing itself against this budget must use the MEASURED cost, not
+// the nominal one. A test that assumed 1.4ms picked a "well over budget" hold
+// of 5.6ms, which is under the real 7.5ms, and failed for that reason alone.
+const sweepBackoff = 200 * time.Microsecond
+
 var (
 	registryMu sync.Mutex
 	// live holds every enclave that has been constructed and not yet released.
@@ -135,6 +176,19 @@ func deregister(e *MemoryEnclave) {
 // should not outlive it. It is not a fault handler and not a garbage collector:
 // nothing calls it for you.
 //
+// # It belongs to the program, never to a library
+//
+// Call it only from the code that OWNS THE PROCESS. A library must not call it,
+// because it destroys every enclave in the process — including those belonging
+// to subsystems the library knows nothing about, whose owners are still using
+// them. There is no way for a library to know it is safe, and no way for the
+// owner of another enclave to defend against it.
+//
+// This is stated because two independent consumers reached it on their own and
+// declined to call WipeAll for exactly this reason. An API that two callers
+// separately decide to avoid is inviting the mistake, which makes it a
+// documentation defect rather than a coincidence.
+//
 // # What it does not do
 //
 // It never panics, including on an enclave whose canary fails. A sweep that
@@ -145,14 +199,23 @@ func deregister(e *MemoryEnclave) {
 // act on state that is by definition wrong — but a sweep is not one enclave, and
 // non-fatal must not mean invisible.
 //
-// It never waits for a reader. An enclave being read when the sweep reaches it
-// is SKIPPED, not blocked on — a shutdown that hangs behind a goroutine still
-// reading a key is worse than one that reports what it could not reach. It is
-// RETRIED on the next pass rather than written off, so a momentary reader (a
-// health probe calling IsAlive, a Size, an EqualTo) costs the sweep a pass, not
-// the enclave. Only a borrow that outlives every pass is skipped and counted,
-// and that is a consumer ordering bug this reports rather than deadlocking on or
-// silently ignoring.
+// It never waits indefinitely for a reader. An enclave being read when the
+// sweep reaches it is SKIPPED, not blocked on — a shutdown that hangs behind a
+// goroutine still reading a key is worse than one that reports what it could
+// not reach. It is RETRIED on later passes rather than written off, with a
+// short wait between them ([sweepBackoff]), so a reader that finishes inside
+// the retry budget costs the sweep a pass rather than the enclave.
+//
+// That budget is BOUNDED and worth knowing: (maxSweepPasses-1) * sweepBackoff,
+// about 1.4ms. A read that finishes well inside it is reclaimed on a later
+// pass; one still in flight after the whole budget is skipped and counted. So
+// "momentary" here means milliseconds, not any duration — a long-running
+// operation holding an enclave across a shutdown will be counted, correctly.
+//
+// A non-zero count therefore means SOMETHING WAS STILL BEING READ. That is
+// often a shutdown-ordering problem in the caller, and it is not necessarily
+// one: a read that simply took longer than the budget produces the same
+// number. Treat it as "these were still in use," not as a diagnosis.
 //
 // It never unmaps underneath a reader, which is the other half of the same
 // decision: [MemoryEnclave.Open] hands back a slice that outlives the enclave's
@@ -246,6 +309,13 @@ func WipeAll() (int, error) {
 
 		if len(batch) == 0 {
 			break
+		}
+
+		// After the break, so a sweep that finds nothing left pays nothing.
+		// See sweepBackoff for why a wait is the right primitive here and why
+		// it is a backoff rather than synchronization.
+		if pass > 0 {
+			time.Sleep(sweepBackoff)
 		}
 
 		for _, e := range batch {

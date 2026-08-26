@@ -636,6 +636,15 @@ func TestWipeAll_ConcurrentWithAllocatorConstructionKeepsTheBudgetExact(t *testi
 // dropped. That makes the handover synchronous instead of hoping a goroutine is
 // scheduled inside a window of a few microseconds.
 //
+// THIS TEST IS HALF OF A PAIR — do not delete the other half. Its partner is
+// TestWipeAll_AppliesTheRetryBackoff. This one proves every pass reconsiders
+// every still-registered enclave; that one proves the sweep waits long enough
+// between passes for a reader to finish. The promise that a momentary reader
+// keeps its enclave needs BOTH, and neither test implies the other: this test
+// passes with the backoff deleted (it releases its reader from inside the
+// sweep, so it never needs wall-clock time), and its partner passes with a
+// seen-set reintroduced. See that test's comment for the full decomposition.
+//
 // The scenario is repeated because ledger iteration is map-ordered: the defect
 // only manifests when the sweep reaches the held enclave BEFORE the gate that
 // frees it, which is a coin flip per trial. Over 16 trials the old behavior
@@ -988,5 +997,118 @@ func TestWipeAll_AFailedReleaseKeepsBothTheChargeAndTheLedgerEntry(t *testing.T)
 	}
 	if got := a.InUse(); got != 0 {
 		t.Errorf("InUse = %d after the successful retry, want 0", got)
+	}
+}
+
+// TestWipeAll_AppliesTheRetryBackoff pins that the sweep actually waits between
+// passes, and it does so WITHOUT depending on when a goroutine wakes up.
+//
+// # Why not "hold briefly, then assert it was reclaimed"
+//
+// That was the obvious test and it is unsound, which Codex caught on this PR.
+// Receiving from a timer makes the reader goroutine RUNNABLE after d; it does
+// not make it RUN. Under contention the reader can stay descheduled while the
+// sweep spends its whole budget, so the enclave is CORRECTLY skipped and the
+// assertion fails against correct code. An earlier revision of this test
+// claimed the hold was "bounded from above" — a timer bounds when a goroutine
+// becomes runnable, never when it releases a lock, so the comment asserted
+// something the code could not enforce.
+//
+// # What is deterministic instead
+//
+// Hold the read lock for the ENTIRE sweep and measure how long the sweep takes.
+// The reader never releases, so there is no wake-up to race: every pass must
+// fail its TryLock, and the sweep must therefore pay every backoff. Elapsed
+// time is then a direct observation of the mechanism under test, and the
+// assertion is a LOWER bound — which contention can only push further in the
+// direction it already expects.
+//
+// # THIS TEST IS HALF OF A PAIR — do not delete the other half
+//
+// Its partner is TestWipeAll_RetriesAReaderRatherThanAbandoningIt. The
+// user-facing promise — a momentary reader keeps its enclave — decomposes into
+// two properties, and NEITHER test covers both:
+//
+//	(1) the sweep waits between passes, and the waits total long enough
+//	    — this test, by elapsed time
+//	(2) every pass reconsiders every still-registered enclave
+//	    — the partner, plus the visited-at-snapshot mutant
+//
+// Given both, a reader releasing at 300µs is reclaimed deductively: a later
+// pass arrives AND its TryLock succeeds. Given only (1), THIS TEST STILL PASSES
+// WHILE THE PROMISE IS BROKEN — reintroduce a seen-set and the sweep still
+// spends its backoffs while abandoning enclaves, and the elapsed-time assertion
+// goes green. On its own this is a mechanism test, which is exactly the
+// critique that was made of its partner.
+//
+// So neither is redundant, and a future round trimming tests must not delete
+// one on the grounds that the other covers it.
+//
+// # Why this SHAPE, not just why this assertion
+//
+// The rule worth carrying: ask which way the environment's noise pushes an
+// assertion. Here every perturbing force — contention, a loaded runner, a slow
+// scheduler — pushes elapsed time FURTHER INTO the regime being asserted, so
+// the assertion is monotone under load and cannot fail from a hostile
+// environment, only from the mechanism being absent. When the answer instead is
+// "the noise pushes it AWAY from what I am asserting," redesign the test rather
+// than tuning its constants.
+func TestWipeAll_AppliesTheRetryBackoff(t *testing.T) {
+	if remaining, err := WipeAll(); remaining != 0 || err != nil {
+		t.Skipf("this test needs a clean ledger; WipeAll = %d, %v", remaining, err)
+	}
+
+	e, err := NewMemoryEnclaveSized(64)
+	if err != nil {
+		t.Skipf("could not allocate: %v", err)
+	}
+
+	inBorrow := make(chan struct{})
+	release := make(chan struct{})
+	borrowDone := make(chan struct{})
+	go func() {
+		defer close(borrowDone)
+		_ = e.WithBytes(func([]byte) error {
+			close(inBorrow)
+			<-release // held for the whole sweep; nothing to race
+			return nil
+		})
+	}()
+	<-inBorrow
+
+	start := time.Now()
+	remaining, serr := WipeAll()
+	elapsed := time.Since(start)
+
+	// Every pass loses its TryLock, so every backoff is paid. This is the
+	// nominal figure and a LOWER bound: short sleeps overshoot, so the real
+	// elapsed time is larger (measured ~7.5ms against a nominal 1.4ms). A
+	// slower machine only increases it.
+	wantAtLeast := time.Duration(maxSweepPasses-1) * sweepBackoff
+	if elapsed < wantAtLeast {
+		t.Errorf("sweep took %v against a permanently held enclave, want at least %v "+
+			"((maxSweepPasses-1) * sweepBackoff): the retry loop is not waiting between passes, so a "+
+			"reader has no time to finish and the momentary-reader promise is false", elapsed, wantAtLeast)
+	}
+
+	// And it still skips and counts rather than waiting the reader out.
+	if serr != nil {
+		t.Errorf("WipeAll err = %v, want nil", serr)
+	}
+	if remaining != 1 || !e.IsAlive() {
+		t.Errorf("WipeAll = %d, alive = %v: a reader held across the whole sweep must be skipped and "+
+			"COUNTED, never waited out", remaining, e.IsAlive())
+	}
+
+	close(release)
+	select {
+	case <-borrowDone:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the reader goroutine did not finish within 30s")
+	}
+
+	// Once it lets go, the retry the count was asking for settles it.
+	if remaining, err := WipeAll(); remaining != 0 || err != nil {
+		t.Errorf("WipeAll after the reader finished = %d, %v; want 0, nil", remaining, err)
 	}
 }

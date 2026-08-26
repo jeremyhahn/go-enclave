@@ -125,7 +125,10 @@
 //
 // It returns two independent things. The COUNT is how many enclaves are still
 // holding locked memory, so a non-zero value means workers outlived the
-// shutdown — an ordering bug in the caller. The ERROR reports detected canary
+// shutdown. That is often an ordering problem in the caller and is not
+// necessarily one, since a read outlasting the bounded retry budget (about
+// 1.4ms) produces the same number — read it as "these were still in use,"
+// not as a diagnosis. The ERROR reports detected canary
 // corruption, matching ErrEnclaveCorrupted exactly as Destroy's panic value
 // does. They are orthogonal: a corrupt enclave's pages ARE reclaimed, so it
 // never appears in the count, and without a second return value the fact that
@@ -137,6 +140,11 @@
 // One more thing follows for callers: WipeAll is a global destroyer. An enclave
 // another component still holds is destroyed too, and a retained Open slice
 // faults if it is read afterwards.
+//
+// So it belongs to the PROGRAM and never to a library. Call it from the code
+// that owns the process — a signal handler, a defer in main. A library calling
+// it destroys enclaves belonging to subsystems it knows nothing about, whose
+// owners are still using them, and it has no way to know that is safe.
 //
 // # FIPS
 //
