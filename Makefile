@@ -1,6 +1,11 @@
 # go-enclave — foundational locked-memory primitive.
 # Pure library, single package: no binaries, no container image.
 
+# Release tooling. agent-git.sh supplies the acting agent's identity and SSH
+# signing for every git write; REPO_NAME is what it maps to agent-<repo>.
+AGENT_GIT ?= /home/jhahn/sources/automatethethings/software/scripts/agent-git.sh
+REPO_NAME ?= $(notdir $(CURDIR))
+
 GOCMD    ?= go
 GOTEST   := $(GOCMD) test
 GOVET    := $(GOCMD) vet
@@ -119,14 +124,27 @@ deps-latest:
 	  if [ -n "$$V" ] && [ "$$V" != "$$m" ]; then go get "$$m@$$V" || exit 1; fi; \
 	done; go mod tidy'
 
-## release-alpha: bump VERSION, tag, push to dev
+## release-alpha: cut a signed release — make release-alpha VERSION=vX.Y.Z-alpha
+# Company template v2 (software/templates/make/release-alpha.mk), adopted
+# verbatim per go-enclave #10. The v1 recipe this replaces auto-incremented
+# PATCH only — it would have named the additive v0.2.0-alpha as v0.1.1-alpha —
+# and created LIGHTWEIGHT UNSIGNED tags under the OWNER's local identity, pushed
+# every local tag, and let `|| true` swallow a failed VERSION commit so a tag
+# could disagree with its own VERSION file. Both releases cut from this repo so
+# far were done by hand for exactly those reasons.
 .PHONY: release-alpha
 release-alpha:
-	@V=$$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || echo v0.0.0-alpha); \
-	NEXT=$$(echo $$V | awk -F'[.-]' '{printf "v%s.%s.%d-alpha", substr($$1,2), $$2, $$3+1}'); \
-	echo $$NEXT > VERSION && git add VERSION && git commit -q -m "chore(release): $$NEXT" || true; \
-	git tag $$NEXT; \
-	git push dev HEAD --tags && echo "Tagged $$NEXT"
+	@test -n "$(VERSION)" || { echo "ERROR: state the version explicitly: make release-alpha VERSION=vX.Y.Z-alpha (release-versioning.md decides patch/minor/major — the recipe refuses to guess)"; exit 1; }
+	@echo "$(VERSION)" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+-alpha$$' || { echo "ERROR: '$(VERSION)' is not vX.Y.Z-alpha"; exit 1; }
+	@! git rev-parse -q --verify "refs/tags/$(VERSION)" >/dev/null || { echo "ERROR: tag $(VERSION) already exists"; exit 1; }
+	@test -z "$$(git status --porcelain)" || { echo "ERROR: working tree not clean"; exit 1; }
+	@grep -q "$(VERSION)" CHANGELOG.md || { echo "ERROR: CHANGELOG.md has no $(VERSION) entry"; exit 1; }
+	@echo "$(VERSION)" > VERSION
+	$(AGENT_GIT) $(REPO_NAME) add VERSION
+	$(AGENT_GIT) $(REPO_NAME) commit -m "chore(release): $(VERSION)"
+	$(AGENT_GIT) $(REPO_NAME) tag -a "$(VERSION)" -m "$(VERSION)"
+	$(AGENT_GIT) $(REPO_NAME) push dev HEAD "refs/tags/$(VERSION)"
+	@echo "Released $(VERSION) (signed, annotated, single tag pushed)"
 
 ## clean: remove build/test artifacts
 .PHONY: clean
