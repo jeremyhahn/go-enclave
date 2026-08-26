@@ -9,5 +9,5 @@ require (
 
 require (
 	github.com/awnumar/memcall v0.5.0 // indirect
-	golang.org/x/crypto v0.41.0 // indirect
+	golang.org/x/crypto v0.52.0 // indirect
 )

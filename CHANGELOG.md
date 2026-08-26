@@ -36,6 +36,19 @@ All notable changes to go-enclave are documented here. The format follows
   material, while a sized enclave's pages stay writable for its lifetime. `Open`
   and the package documentation previously said a write always faults.
 
+### Security
+
+- Bumped the indirect `golang.org/x/crypto` from v0.41.0 to v0.52.0, clearing ten
+  HIGH CVEs (CVE-2025-47913, CVE-2026-39828/-39829/-39830/-39831/-39832/-39835,
+  CVE-2026-42508, CVE-2026-46595, CVE-2026-46597). No go-enclave code imports the
+  module — it arrives via memguard — so `govulncheck` reported them only as
+  present-but-uncalled; `trivy` is module-level and does flag them.
+- Added a tracked, intentionally empty `.trivyignore`, and pointed the `Makefile`'s
+  `trivy` target at it. The nightly Trivy job passes `--ignorefile .trivyignore`,
+  and trivy treats a missing ignore file as a FATAL flag error rather than as an
+  empty list — so that job had never scanned this repository, and the CVEs above
+  were behind the error it died on (go-enclave #4).
+
 ## [v0.1.0-alpha] - 2026-08-23
 
 ### Added

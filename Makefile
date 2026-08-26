@@ -68,9 +68,12 @@ modverify:
 	$(GOMOD) verify
 
 ## trivy: filesystem vulnerability + secret scan
+# --ignorefile matches the nightly job, so a suppression recorded in
+# .trivyignore applies in both places. Without it the two scans disagree, which
+# is how a red nightly hid behind a green `make security`.
 .PHONY: trivy
 trivy:
-	@trivy fs --scanners vuln,secret --severity CRITICAL,HIGH --exit-code 1 .
+	@trivy fs --scanners vuln,secret --severity CRITICAL,HIGH --exit-code 1 --ignorefile .trivyignore .
 
 ## security: full local security suite (devops.md §8; no container image to scan)
 .PHONY: security
