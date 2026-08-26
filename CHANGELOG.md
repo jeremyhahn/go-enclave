@@ -4,6 +4,90 @@ All notable changes to go-enclave are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+
+- **go-enclave maps its own memory.** The backing store is no longer a memguard
+  `LockedBuffer`; the package allocates, locks, guards, wipes and releases pages
+  through `memcall` directly — the layer memguard itself uses. Owner ruling on
+  issue #2, 2026-08-26.
+
+  The layout is deliberately unchanged: an mlock'd inner region with the data
+  flush against an inaccessible postguard, a random canary in the slack ahead of
+  it, a second guard page in front, wipe-and-verify on release. What changed is
+  the FAILURE POLICY, which could not be changed from outside memguard. memguard
+  registers every buffer in a process-global list and answers any mapping failure
+  with `core.Panic`: `Purge()` — destroying and UNMAPPING every live buffer in
+  the process — and then a panic. go-enclave converted that panic into a typed
+  error from v0.1.0-alpha, but a `recover` cannot undo a purge that already ran,
+  so it also needed `purgeMu`, a process-wide lock serializing every allocation
+  against every borrow.
+
+- **`purgeMu` is gone, and with it the nested-allocation deadlock.** Allocating,
+  borrowing or destroying an enclave from inside another enclave's live borrow
+  now works. It previously deadlocked: allocation took the lock exclusively,
+  borrows took it shared, and Go's `RWMutex` blocks new readers once a writer
+  queues. That blocked go-qrdb #74/#145 outright — the three ways of writing the
+  code were deadlock, an unprotected heap copy, or an unsynchronized read.
+
+- **An allocation failure no longer damages unrelated enclaves.** Exhausting
+  `RLIMIT_MEMLOCK` fails exactly the allocation that reached the ceiling. An
+  enclave is destroyed when its owner destroys it and at no other time, so
+  `ErrEnclaveDestroyed` can no longer appear spontaneously on an enclave the
+  caller still holds.
+
+- **A failed mapping releases everything it took.** Where memguard aborts and
+  never unwinds, this returns an error — so the cleanup is real code, verified
+  against `VmLck` and the process's VMA count over 256 induced failures.
+
+- **The material is destroyed before any syscall that could be refused.**
+  `mprotect` can be denied — a seccomp filter is the realistic case — and the
+  release path used to make the region writable first and wipe afterwards, so a
+  refusal returned an error having wiped nothing and left the secret resident on
+  locked pages. While the inner region is writable, which it is unless a freeze
+  succeeded, the material needs no syscall to destroy; it is now destroyed
+  first, so the worst a refusal can cost is an empty mapping that could not be
+  handed back.
+
+- **A release that could not unmap keeps its handle.** If the region cannot be
+  made writable — so it was never wiped — or cannot be unlocked or unmapped, the
+  mapping is left intact and the `Allocator` reservation is NOT returned.
+  Clearing the fields regardless would strand memory that is still resident,
+  possibly still locked and possibly still holding material, with no reference
+  left to retry through, while the budget reported those bytes as available. A
+  caller that recovers from the panic can call `Destroy` again to retry.
+
+- The `Allocator` is unchanged in shape but its rationale is narrower and
+  honest: it bounds one path's consumption so an untrusted source cannot starve
+  the rest of the process. It never protected against collateral purges, and
+  there are no longer any to protect against.
+
+### Added
+
+- `CoreDumpsDisabled()` reports whether lowering `RLIMIT_CORE` at import
+  succeeded. The package documented core dumps as disabled while discarding the
+  result, which is a guarantee the code did not enforce and a control callers had
+  no API to assert. It is best effort by nature, so it is now reported rather
+  than promised — and every enclave's pages are separately marked
+  `MADV_DONTDUMP` as they are locked, which **is** verified and fails the
+  allocation if refused. memcall attempts the same madvise and discards its
+  result, so this is the first core-dump control here that is actually checked.
+
+- `ErrEnclaveCorrupted`, reported when the canary does not verify on release.
+  `Destroy` wipes and releases everything it holds, returns the `Allocator`
+  reservation, and then panics with it — see its documentation for why detected
+  memory corruption is the one condition this package does not hand back as an
+  error.
+
+### Removed
+
+- The `github.com/awnumar/memguard` dependency, and with it `golang.org/x/crypto`
+  — go-enclave never called memguard's `Enclave`/`Seal` paths, but their NaCl
+  secretbox sat in the build graph of every consumer, and x/crypto is where the
+  ten HIGH CVEs cleared in v0.2.0-alpha came from. The module now requires
+  `memcall` and `golang.org/x/sys` and nothing else.
+
 ## [v0.2.1-alpha] - 2026-08-26
 
 ### Fixed

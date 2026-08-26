@@ -15,10 +15,44 @@
 // for holding sensitive material — private keys, credentials, passphrases and
 // tokens — for the whole of its lifetime in the process.
 //
-// A MemoryEnclave wraps a memguard LockedBuffer. The bytes live on guarded
-// pages that are mlock'd (so they are never paged to swap), fenced by
-// inaccessible guard pages, checked by a canary, and wiped on release. Core
-// dumps are disabled process-wide by memguard on import.
+// The bytes live on pages this package maps itself: mlock'd, so they are never
+// paged to swap; fenced on both sides by inaccessible guard pages, so an
+// overflow faults instead of corrupting a neighbor; preceded by a random
+// canary, so an underflow is detected on release; and wiped before the pages go
+// back to the kernel.
+//
+// A core file would write those pages to disk in plaintext, so they are kept out
+// of one at two levels: RLIMIT_CORE is lowered process-wide on import, which is
+// best effort and reported by [CoreDumpsDisabled] rather than assumed, and every
+// enclave's pages are additionally marked MADV_DONTDUMP as they are locked. The
+// second one is checked rather than attempted-and-forgotten: its error fails the
+// allocation. That the refusal is REPORTED at all is covered by a test; that the
+// report is acted on at the call site is guaranteed by construction, being one
+// branch in [newMapping] that no test can reach — the region it passes is always
+// page-aligned, and an aligned madvise does not fail.
+//
+// Every failure is a returned error. The mapping, the lock and the guard
+// protections can all be refused by the kernel — most often at the process's
+// RLIMIT_MEMLOCK ceiling — and each one yields [ErrLockedMemoryUnavailable]
+// having released whatever it had already taken. No failure anywhere in the
+// process can touch an enclave it does not own. Until v0.3.0-alpha that second
+// guarantee did not hold: the pages came
+// from memguard, whose failure path unmaps every live locked buffer in the
+// process before panicking, so an unrelated allocation failure destroyed live
+// enclaves and holding a borrow across any call that allocated deadlocked
+// against the lock that made the first hazard survivable (issue #2).
+//
+// # The one thing that is not an error
+//
+// [MemoryEnclave.Destroy] PANICS when the canary guarding an enclave did not
+// verify, after wiping the material, releasing the pages and returning any
+// [Allocator] reservation. Everything else in this package hands failures back;
+// this one does not, and the distinction is deliberate rather than an oversight.
+// A failed canary means memory the enclave did not own was written — the state a
+// caller would use to handle the error is the state that is already wrong — and
+// it is the class Go reserves panic for. It is also what this method always did:
+// before v0.3.0-alpha the same check lived in memguard and called core.Panic,
+// which additionally destroyed every other enclave in the process on its way out.
 //
 // The vocabulary is deliberate and portfolio-wide: the type describes its
 // mechanism — a region of locked memory — and is never called a "secret",
@@ -70,14 +104,18 @@
 // locked pages and is NOT covered by the lock once Open returns: a concurrent
 // Destroy unmaps it and a read through it then faults the process rather than
 // returning an error. Nor is it a write path — a write faults on an enclave
-// built from existing material, whose pages memguard freezes, and silently
+// built from existing material, whose pages are frozen read-only, and silently
 // corrupts a sized enclave, whose pages stay writable. Use Open only where no
 // concurrent Destroy is possible, and never retain what it returns.
 //
 // # FIPS
 //
-// A MemoryEnclave performs no cryptography. It uses only the memguard
-// LockedBuffer path — never Enclave/Seal, whose sealing uses NaCl secretbox,
-// an algorithm that is not FIPS 140-approved. Locked buffers are safe under
-// GODEBUG=fips140=only, which this repository's CI enforces.
+// A MemoryEnclave performs no cryptography. It maps, locks and wipes memory,
+// and the only cryptographic primitive anywhere near it is crypto/rand filling
+// the canary — a FIPS-approved DRBG. It is safe under GODEBUG=fips140=only,
+// which this repository's CI enforces.
+//
+// This is also why the package no longer depends on memguard, whose Enclave and
+// Seal paths use NaCl secretbox: go-enclave never called them, but the
+// dependency put a non-approved algorithm in the build graph of every consumer.
 package enclave

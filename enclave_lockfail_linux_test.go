@@ -21,9 +21,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"sync/atomic"
 	"testing"
-	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -127,65 +125,76 @@ func lockedMemoryExhaustionChild(t *testing.T) {
 }
 
 const (
-	// borrowMarker selects the child half of the purge-during-borrow test.
-	borrowMarker = "GO_ENCLAVE_BORROW_PURGE"
+	// foreignMarker selects the child half of the foreign-failure test.
+	foreignMarker = "GO_ENCLAVE_FOREIGN_FAILURE"
 
-	// borrowSurvived is logged by the child once it has read intact material
-	// out of a borrow that was held across another goroutine's failed
-	// allocation — the allocation whose failure purges and unmaps every live
-	// buffer in the process.
-	borrowSurvived = "borrow survived a process-wide purge triggered elsewhere"
+	// foreignFailed is logged by the child once an unrelated allocation has
+	// actually failed under the injected ceiling. Without it the test would pass
+	// vacuously on any run where the fault never bit.
+	foreignFailed = "an unrelated allocation failed under the injected ceiling"
 
-	// purgeConfirmed is logged by the child once it has confirmed the purge
-	// actually happened. Without it the test would pass vacuously on any run
-	// where the foreign allocation happened to succeed.
-	purgeConfirmed = "the foreign allocation failed and purged the process"
+	// allocationRanDuringBorrow is logged once the child has seen that failing
+	// allocation COMPLETE while a borrow was still in flight. Before
+	// v0.3.0-alpha it could not: allocation took purgeMu exclusively and parked
+	// until every borrow had returned.
+	allocationRanDuringBorrow = "the failing allocation completed while a borrow was live"
+
+	// enclaveSurvived is logged once the child has confirmed the unrelated
+	// enclave is still alive and still holds its material. Before v0.3.0-alpha
+	// it was destroyed: memguard purged every live buffer in the process before
+	// panicking, and the most this package could do was hold the borrow safe
+	// across it.
+	enclaveSurvived = "the unrelated enclave survived intact"
 )
 
-// TestMemoryEnclave_BorrowSurvivesForeignAllocationFailure covers the one
-// lifetime hazard a per-enclave lock cannot reach.
+// TestMemoryEnclave_UnaffectedByForeignAllocationFailure is the headline
+// behavioral change of v0.3.0-alpha, and it replaces the test that used to
+// live here.
 //
-// memguard's allocation failure path calls core.Purge before it panics, and
-// Purge destroys EVERY live buffer in the process — memcall.Free, so the pages
-// are unmapped, not merely wiped. It holds only memguard's own locks. So a
-// goroutine parked inside WithBytes on enclave A, holding a slice into A's
-// locked pages, can have those pages unmapped by an unrelated goroutine that
-// exhausts locked memory constructing enclave B. Reading the slice afterwards
-// faults the process; there is no error to return.
+// That test — BorrowSurvivesForeignAllocationFailure — asserted the best thing
+// achievable while memguard owned the memory: an allocation failure ANYWHERE in
+// the process purged and unmapped every live buffer, so the most go-enclave
+// could promise was that an in-flight borrow was held safe across the purge by
+// a process-wide lock. The enclave itself still died, and the lock is what made
+// allocating inside a borrow deadlock.
 //
-// The fix is package-wide: allocation takes purgeMu exclusively, every borrow
-// takes it shared. This test parks a borrow, lets a foreign allocation fail
-// underneath it, and then reads through the borrowed slice. It runs in a
-// subprocess because the fault is injected process-wide and because the
-// unfixed behavior is a SIGSEGV rather than a test failure.
-func TestMemoryEnclave_BorrowSurvivesForeignAllocationFailure(t *testing.T) {
-	if os.Getenv(borrowMarker) == "1" {
-		borrowPurgeChild(t)
+// go-enclave now maps its own memory (issue #2, owner-ruled). There is no
+// registry to purge, so a foreign failure is simply a failure: it returns a
+// typed error to its own caller and touches nothing else. This test asserts the
+// stronger property directly — the unrelated enclave is ALIVE and INTACT
+// afterwards — and, because there is no lock any more, that the failing
+// allocation ran to completion while a borrow was still in flight.
+//
+// It stays in a subprocess because the fault is injected process-wide.
+func TestMemoryEnclave_UnaffectedByForeignAllocationFailure(t *testing.T) {
+	if os.Getenv(foreignMarker) == "1" {
+		foreignFailureChild(t)
 		return
 	}
 
-	cmd := exec.Command(os.Args[0], "-test.run=^TestMemoryEnclave_BorrowSurvivesForeignAllocationFailure$", "-test.v")
-	cmd.Env = append(os.Environ(), borrowMarker+"=1")
+	cmd := exec.Command(os.Args[0], "-test.run=^TestMemoryEnclave_UnaffectedByForeignAllocationFailure$", "-test.v")
+	cmd.Env = append(os.Environ(), foreignMarker+"=1")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("subprocess failed (a fault here is the unfixed use-after-unmap): %v\n%s", err, out)
+		t.Fatalf("subprocess failed: %v\n%s", err, out)
 	}
 	if strings.Contains(string(out), "--- SKIP") {
 		t.Skipf("subprocess could not inject the fault:\n%s", out)
 	}
-	for _, want := range []string{purgeConfirmed, borrowSurvived} {
+	for _, want := range []string{foreignFailed, allocationRanDuringBorrow, enclaveSurvived} {
 		if !strings.Contains(string(out), want) {
 			t.Fatalf("subprocess did not confirm %q:\n%s", want, out)
 		}
 	}
 }
 
-func borrowPurgeChild(t *testing.T) {
+func foreignFailureChild(t *testing.T) {
 	t.Helper()
 
 	const material = "server-private-key-material"
 
-	// Allocate A while locked memory is still available.
+	// Allocated while locked memory is still available. Nothing below ever
+	// touches it; its survival is the whole point.
 	a, err := NewMemoryEnclave([]byte(material))
 	if err != nil {
 		t.Skipf("could not allocate the enclave under test: %v", err)
@@ -195,120 +204,74 @@ func borrowPurgeChild(t *testing.T) {
 	if err := unix.Getrlimit(unix.RLIMIT_MEMLOCK, &original); err != nil {
 		t.Skipf("cannot read RLIMIT_MEMLOCK: %v", err)
 	}
-	// Lowering the soft limit does not unlock pages already locked, so A stays
+	// Lowering the soft limit does not unlock pages already locked, so a stays
 	// intact; only subsequent allocations fail.
 	limit := unix.Rlimit{Cur: uint64(os.Getpagesize()), Max: original.Max}
 	if err := unix.Setrlimit(unix.RLIMIT_MEMLOCK, &limit); err != nil {
 		t.Skipf("cannot lower RLIMIT_MEMLOCK: %v", err)
 	}
 
-	// order records which finished first. The borrow MUST complete before the
-	// allocation does; if the allocation completes first it has already purged
-	// and unmapped the pages the borrow is about to read.
-	var order, borrowExit, allocExit atomic.Int32
-
+	// Park a borrow. On the old design this is what made the foreign allocation
+	// wait; here it must not interact with it at all.
 	borrowed := make(chan struct{})
 	release := make(chan struct{})
 	borrowErr := make(chan error, 1)
-
 	go func() {
 		borrowErr <- a.WithBytes(func(b []byte) error {
 			close(borrowed)
 			<-release
-			// Read AFTER the foreign allocation has had its chance to run. On
-			// the unfixed code these pages are already unmapped and this
-			// faults the process.
+			// Read AFTER the foreign failure has happened. On the old design
+			// these pages were unmapped by then and this faulted the process.
 			if string(b) != material {
 				return errors.New("borrowed material changed underneath the borrow")
 			}
-			// Record completion HERE, while the read lock is still held.
-			// Recording it after WithBytes returns would race the woken
-			// allocator, which by then may already have recorded its own
-			// completion — a flake against correct code.
-			borrowExit.Store(order.Add(1))
 			return nil
 		})
 	}()
-
 	<-borrowed
 
-	attempting := make(chan struct{})
-	allocErr := make(chan error, 1)
-	go func() {
-		// Announce entry BEFORE the call, so the release below cannot happen
-		// until this goroutine is genuinely inside the allocation path. Without
-		// this the test could pass vacuously by releasing the borrow before the
-		// allocation was ever attempted.
-		close(attempting)
-		var e *MemoryEnclave
-		var err error
-		// Exhaust the one-page ceiling. Deliberately not destroyed.
-		for i := 0; i < 64; i++ {
-			e, err = NewMemoryEnclave([]byte(fmt.Sprintf("foreign-material-%d", i)))
-			if err != nil {
-				break
-			}
-			_ = e
-		}
-		allocExit.Store(order.Add(1))
-		allocErr <- err
-	}()
-
-	<-attempting
-
-	// Closing `attempting` only proves the goroutine was scheduled, not that it
-	// reached the coordination point — it can be descheduled immediately after.
-	// So observe the queued writer DIRECTLY. This test is in-package, so it can
-	// interrogate purgeMu itself rather than infer from a timeout: TryRLock
-	// fails exactly when a writer holds or is waiting for the lock, and the
-	// borrow above already holds it shared, so a failed TryRLock can only mean
-	// the allocator has reached purgeMu.Lock while this borrow is live.
-	//
-	// No probe goroutine and no timeout-as-evidence: a scheduler that never ran
-	// the probe used to be indistinguishable from a genuinely blocked one.
-	observed := false
-	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); {
-		if !purgeMu.TryRLock() {
-			observed = true
+	// The borrow is live and parked. A failing allocation now has to complete
+	// on its own — nothing waits for anything.
+	var lastErr error
+	for i := 0; i < 64; i++ {
+		e, ferr := NewMemoryEnclave([]byte(fmt.Sprintf("foreign-material-%d", i)))
+		if ferr != nil {
+			lastErr = ferr
 			break
 		}
-		purgeMu.RUnlock()
-		time.Sleep(time.Millisecond)
+		// Deliberately not destroyed: the point is to reach the ceiling.
+		_ = e
 	}
-	if !observed {
-		t.Fatal("no writer ever queued on purgeMu while the borrow was live; the allocator " +
-			"either completed early (and purged) or never reached the lock — the test would be vacuous")
+	if lastErr == nil {
+		t.Skip("the foreign allocations unexpectedly succeeded; no fault was injected")
 	}
+	if !errors.Is(lastErr, ErrLockedMemoryUnavailable) {
+		t.Fatalf("foreign allocation err = %v, want ErrLockedMemoryUnavailable", lastErr)
+	}
+	t.Log(foreignFailed)
 
-	// It is parked on purgeMu, so it cannot have purged.
-	if len(allocErr) != 0 {
-		t.Fatal("the foreign allocation completed while a borrow was still in flight")
-	}
+	// Reaching here at all is the second assertion: the allocation returned
+	// while the borrow was still parked. Under the old process-wide lock this
+	// line was unreachable — the allocation would be blocked on purgeMu until
+	// the borrow released, and the borrow is waiting on a channel this
+	// goroutine has not closed yet.
+	t.Log(allocationRanDuringBorrow)
 
 	close(release)
-
 	if err := <-borrowErr; err != nil {
 		t.Fatalf("borrow: %v", err)
 	}
 
-	aErr := <-allocErr
-	if aErr == nil {
-		t.Skip("the foreign allocation unexpectedly succeeded; no purge was injected")
+	if !a.IsAlive() {
+		t.Fatal("the unrelated enclave was destroyed by a foreign allocation failure")
 	}
-	if !errors.Is(aErr, ErrLockedMemoryUnavailable) {
-		t.Fatalf("foreign allocation err = %v, want ErrLockedMemoryUnavailable", aErr)
+	if !a.EqualTo([]byte(material)) {
+		t.Fatal("the unrelated enclave's material did not survive a foreign allocation failure")
 	}
-	if borrowExit.Load() != 1 || allocExit.Load() != 2 {
-		t.Fatalf("borrow finished at %d and the allocation at %d, want the borrow first",
-			borrowExit.Load(), allocExit.Load())
+	if a.Size() != len(material) {
+		t.Fatalf("Size = %d after the foreign failure, want %d", a.Size(), len(material))
 	}
-	// The purge really ran, so A is gone now — the documented cost of
-	// locked-memory exhaustion, and proof this test was not vacuous.
-	if a.IsAlive() {
-		t.Fatal("expected the process-wide purge to have destroyed the enclave")
-	}
-	t.Log(purgeConfirmed)
-	t.Log(borrowSurvived)
+	t.Log(enclaveSurvived)
 }
 
 const (

@@ -18,8 +18,6 @@ import (
 	"errors"
 	"fmt"
 	"sync"
-
-	"github.com/awnumar/memguard"
 )
 
 var (
@@ -37,18 +35,17 @@ var (
 	// [ErrInvalidBudget]: it reports a programming mistake rather than a
 	// runtime condition.
 	//
-	// Two conditions produce it. A non-positive size, which memguard answers
-	// with a dead buffer. And a size too large to MAP: memguard lays out the
-	// data region plus two guard pages using int arithmetic, so past a certain
-	// size that arithmetic overflows, mmap refuses the nonsense length, and
-	// memguard purges the process — see [LockedSize], which reports 0 for
-	// exactly these sizes. A bigger [Allocator] budget does not help with
-	// either, which is why this is not ErrBudgetExhausted.
+	// Two conditions produce it. A non-positive size, which has no mapping to
+	// make. And a size too large to MAP: an enclave is the data region plus two
+	// guard pages, sized as an int, so past a certain size that arithmetic
+	// overflows and mmap would be handed a nonsense length — see [LockedSize],
+	// which reports 0 for exactly these sizes. A bigger [Allocator] budget does
+	// not help with either, which is why this is not ErrBudgetExhausted.
 	//
 	// It is deliberately distinct from [ErrEmptyEnclave]. That one reports a
 	// caller that lost the material it meant to protect; this one reports a
 	// caller that asked for an impossible allocation. Both are refused before
-	// memguard is entered.
+	// anything is mapped.
 	ErrInvalidSize = errors.New("enclave: enclave size must be positive and small enough to map")
 
 	// ErrLockedMemoryUnavailable is the sentinel for a refusal by the operating
@@ -61,15 +58,16 @@ var (
 // LockedMemoryError reports that the pages backing an enclave could not be
 // allocated or locked.
 //
-// It carries the cause memguard reported before it would have aborted the
-// process. That detail names the failing address and the kernel's errno, which
-// is what separates an RLIMIT_MEMLOCK ceiling from any other allocation
-// failure — worth keeping for an operator, but diagnostic rather than
-// contract. Match on [ErrLockedMemoryUnavailable]; errors.Is reports it for
-// every LockedMemoryError.
+// It carries the failure the kernel reported, which names the failing address
+// and the errno — what separates an RLIMIT_MEMLOCK ceiling from any other
+// mapping failure. That detail is worth keeping for an operator, but it is
+// diagnostic rather than contract. Match on [ErrLockedMemoryUnavailable];
+// errors.Is reports it for every LockedMemoryError.
 type LockedMemoryError struct {
-	// Cause is the value memguard panicked with. It is an any because that is
-	// what recover yields, and nil when the allocation failed without panicking.
+	// Cause is the underlying mmap, mlock or mprotect failure, and nil when
+	// none was reported. It is an any for compatibility with releases before
+	// v0.3.0-alpha, where it carried whatever memguard panicked with; every
+	// value this package produces now is an error, so errors.As reaches it.
 	Cause any
 }
 
@@ -87,36 +85,14 @@ func (e *LockedMemoryError) Is(target error) bool {
 	return target == ErrLockedMemoryUnavailable
 }
 
-// Unwrap returns the cause when memguard panicked with an error value, so
-// errors.As can reach it, and nil otherwise.
+// Unwrap returns the cause when it is an error, so errors.As can reach the
+// underlying mmap/mlock/mprotect failure, and nil otherwise.
 func (e *LockedMemoryError) Unwrap() error {
 	if err, ok := e.Cause.(error); ok {
 		return err
 	}
 	return nil
 }
-
-// purgeMu serializes memguard ALLOCATION against every borrow in this process.
-//
-// It exists because memguard's failure path is process-wide. When it cannot
-// allocate or lock pages it calls core.Panic, which calls core.Purge first
-// (memguard v0.23.0 core/exit.go:84-87); Purge takes a snapshot of every live
-// buffer and destroys each one, and destroy() ends in memcall.Free — the pages
-// are UNMAPPED, not merely wiped (core/buffer.go:225). Purge holds only
-// memguard's own key and registry locks, so it cannot see, and does not wait
-// for, any MemoryEnclave's mutex.
-//
-// A per-enclave lock therefore cannot make a borrow safe: goroutine A can be
-// inside WithBytes on one enclave, holding a slice into its locked pages,
-// while goroutine B exhausts locked memory constructing an unrelated enclave
-// and unmaps A's pages underneath it. That is a fault, not an error return.
-//
-// Allocation takes this lock exclusively and every borrow takes it shared, so
-// no purge can begin while any borrow is live, and no borrow can begin while
-// an allocation that might purge is in flight. Borrows still run concurrently
-// with each other; only allocation is exclusive, and allocation is a setup-time
-// operation.
-var purgeMu sync.RWMutex
 
 // MemoryEnclave is a region of locked, zeroized memory holding sensitive
 // material for its whole lifetime.
@@ -135,8 +111,8 @@ var purgeMu sync.RWMutex
 // unmapping pages underneath them. Open is the one exception — it hands back a
 // slice that outlives the lock, and its documentation says so.
 type MemoryEnclave struct {
-	mu     sync.RWMutex
-	buffer *memguard.LockedBuffer
+	mu sync.RWMutex
+	m  *mapping
 
 	// release, when non-nil, returns this enclave's reservation to the
 	// [Allocator] that created it. Destroy invokes it exactly once, via
@@ -163,17 +139,40 @@ func NewMemoryEnclave(data []byte) (*MemoryEnclave, error) {
 	}
 
 	// The caller's slice is wiped on EVERY return path, which is what the
-	// ownership contract above promises. memguard.NewBufferFromBytes moves and
-	// wipes its source only after it has successfully allocated a locked
-	// buffer, so on the allocation-failure and recovered-panic paths the
-	// secret would otherwise survive in the caller's memory — on exactly the
-	// resource-exhaustion path this constructor exists to handle. Wiping again
-	// after a successful move is a no-op over already-zeroed bytes.
-	defer memguard.WipeBytes(data)
+	// ownership contract above promises — including the mapping-failure path,
+	// where nothing was copied out and the material would otherwise survive in
+	// the caller's memory on exactly the resource-exhaustion case this
+	// constructor exists to handle. Wiping again after a successful move is a
+	// no-op over already-zeroed bytes.
+	defer wipe(data)
 
-	return lockedEnclave(func() *memguard.LockedBuffer {
-		return memguard.NewBufferFromBytes(data)
-	})
+	m, err := newMapping(len(data))
+	if err != nil {
+		return nil, err
+	}
+
+	copy(m.data, data)
+
+	// Freeze once the material is in: from here a write through a retained
+	// slice faults rather than corrupting the enclave. A sized enclave cannot
+	// do this, which is the one behavioral difference between the two
+	// constructors — see [NewMemoryEnclaveSized].
+	//
+	// A freeze failure means an mprotect was refused, and the same refusal is
+	// likely to meet the cleanup below. That is survivable in the way that
+	// matters: freeze failing leaves the region WRITABLE, so release wipes the
+	// material with no syscall before it attempts anything that can be denied.
+	// What can still fail is handing the pages back, and that is reported
+	// rather than dropped — an unreleasable mapping the caller is told about is
+	// a resource leak, one it is not told about is an invisible one.
+	if ferr := m.freeze(); ferr != nil {
+		if rerr := m.release(); rerr != nil {
+			return nil, errors.Join(ferr, rerr)
+		}
+		return nil, ferr
+	}
+
+	return &MemoryEnclave{m: m}, nil
 }
 
 // NewMemoryEnclaveSized returns an enclave over n bytes of locked, ZEROED
@@ -210,9 +209,9 @@ func NewMemoryEnclave(data []byte) (*MemoryEnclave, error) {
 //
 // # Mutability
 //
-// memguard freezes the pages of an enclave built by NewMemoryEnclave once the
-// material has moved in; the pages behind a sized enclave stay WRITABLE for its
-// whole lifetime, because that is what makes filling them possible. Two
+// The pages of an enclave built by NewMemoryEnclave are frozen read-only once
+// the material has moved in; the pages behind a sized enclave stay WRITABLE for
+// its whole lifetime, because that is what makes filling them possible. Two
 // obligations follow.
 //
 // The fill must complete before the enclave is shared with other goroutines:
@@ -223,57 +222,26 @@ func NewMemoryEnclave(data []byte) (*MemoryEnclave, error) {
 // fault. Never retain what a borrow hands you.
 //
 // It returns ErrInvalidSize for a size no enclave can have — non-positive, or
-// too large for memguard to map — and ErrLockedMemoryUnavailable when the
-// kernel refuses to lock the pages. Both size refusals are decided before
-// memguard is entered. This constructor takes no [Allocator], so the check here
-// is the ONLY thing between a caller's arithmetic and a process-wide purge.
+// too large to map — and ErrLockedMemoryUnavailable when the kernel refuses to
+// map or lock the pages. Both size refusals are decided before anything is
+// mapped, so an impossible size never reaches the kernel.
+//
+// This constructor takes no [Allocator], so that size check is the only thing
+// standing between a caller's arithmetic and mmap. What it is NOT, since
+// v0.3.0-alpha, is the only thing standing between a caller and a process-wide
+// purge: go-enclave maps its own memory and nothing can purge it, so a failure
+// here fails this call and touches no other enclave.
 func NewMemoryEnclaveSized(n int) (*MemoryEnclave, error) {
 	if _, ok := lockedSize(int64(n)); !ok {
 		return nil, ErrInvalidSize
 	}
 
-	return lockedEnclave(func() *memguard.LockedBuffer {
-		return memguard.NewBuffer(n)
-	})
-}
-
-// lockedEnclave allocates through alloc and wraps the result. It is the single
-// point at which this package enters memguard's allocator, so every constructor
-// inherits the same three guarantees.
-//
-// The allocation is serialized against every live borrow: memguard purges and
-// UNMAPS every live buffer in the process before it panics, so an attempt that
-// might fail must not overlap a borrow in another goroutine (see purgeMu).
-//
-// memguard's abort is converted into a typed error. It aborts the process when
-// it cannot allocate, lock or protect the pages it needs, and a foundational
-// library must not kill its host over an RLIMIT_MEMLOCK ceiling it does not
-// control. memguard purges every live locked buffer before panicking and
-// documents recovery from that panic as safe; the cost is that other enclaves
-// in the process are destroyed and will report ErrEnclaveDestroyed from that
-// point on.
-//
-// A buffer that comes back dead without a panic — memguard's answer to an
-// invalid size — is reported as ErrLockedMemoryUnavailable rather than handed
-// out. Constructors reject such sizes before calling here, so in practice this
-// is the belt to the callers' braces.
-func lockedEnclave(alloc func() *memguard.LockedBuffer) (e *MemoryEnclave, err error) {
-	purgeMu.Lock()
-	defer purgeMu.Unlock()
-
-	defer func() {
-		if r := recover(); r != nil {
-			e = nil
-			err = &LockedMemoryError{Cause: r}
-		}
-	}()
-
-	buffer := alloc()
-	if !buffer.IsAlive() {
-		return nil, &LockedMemoryError{}
+	m, err := newMapping(n)
+	if err != nil {
+		return nil, err
 	}
 
-	return &MemoryEnclave{buffer: buffer}, nil
+	return &MemoryEnclave{m: m}, nil
 }
 
 // NewMemoryEnclaveFromString copies s into a new locked region.
@@ -296,45 +264,42 @@ func NewMemoryEnclaveFromString(s string) (*MemoryEnclave, error) {
 // the duration of the call, so a nested Destroy deadlocks, and a nested read
 // deadlocks whenever a Destroy is already waiting for the write lock.
 //
-// fn must not construct, destroy, or borrow ANY enclave, not merely this one.
-// Allocation and Destroy take purgeMu exclusively while a borrow holds it
-// shared, and Go's RWMutex blocks new readers once a writer is queued — so a
-// nested borrow of a second enclave deadlocks against an allocation that
-// started after the outer borrow. Materialize what you need first, then
-// borrow.
+// fn MAY construct, destroy and borrow OTHER enclaves. Until v0.3.0-alpha it
+// could not: a process-wide lock serialized every allocation against every
+// borrow, so allocating inside a live borrow deadlocked, and consumers holding
+// a key across a call that allocates had no way to write the code (issue #2,
+// go-qrdb #74/#145). That lock existed to keep memguard's process-wide purge
+// from unmapping these pages mid-read; go-enclave now owns its own mapping and
+// nothing can purge it, so the lock is gone and so is the restriction.
 func (e *MemoryEnclave) withLocked(fn func([]byte) error) error {
 	if e == nil {
 		return ErrEnclaveDestroyed
 	}
 
-	// purgeMu first, then the enclave's own lock — always this order, so the
-	// two can never deadlock against each other. purgeMu keeps a
-	// process-wide memguard purge from unmapping these pages mid-read; e.mu
-	// keeps this enclave's own Destroy from doing the same.
-	purgeMu.RLock()
-	defer purgeMu.RUnlock()
-
+	// This enclave's own lock is now the whole story: only its Destroy can
+	// release these pages, and Destroy takes the write lock, so it waits out
+	// every in-flight reader.
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
-	if e.buffer == nil || !e.buffer.IsAlive() {
+	if e.m == nil {
 		return ErrEnclaveDestroyed
 	}
 
-	return fn(e.buffer.Bytes())
+	return fn(e.m.data)
 }
 
 // Open returns a read-only view of the material inside the locked region.
 //
 // UNSAFE. The returned slice aliases the locked pages and is covered by NO
-// lock once this returns. Two separate things can unmap it underneath the
-// caller: a concurrent Destroy on this enclave, and — with no Destroy involved
-// at all — a process-wide memguard purge triggered by any failed allocation
-// anywhere in the process (see purgeMu). Either way a read through the slice
-// faults the process rather than returning an error.
+// lock once this returns. A concurrent Destroy on this enclave unmaps it, and a
+// read through it then faults the process rather than returning an error. That
+// is now the ONLY way it can be unmapped underneath the caller: before
+// v0.3.0-alpha any failed allocation anywhere in the process could do it too,
+// through memguard's process-wide purge.
 //
 // It is not a write path either, and how it fails depends on the constructor:
-// memguard freezes the pages of an enclave built by NewMemoryEnclave, so a
+// the pages of an enclave built by NewMemoryEnclave are frozen read-only, so a
 // write there faults, while a sized enclave's pages stay writable and a stray
 // write silently CORRUPTS the material instead of announcing itself. See
 // [NewMemoryEnclaveSized].
@@ -352,11 +317,11 @@ func (e *MemoryEnclave) Open() ([]byte, error) {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
-	if e.buffer == nil || !e.buffer.IsAlive() {
+	if e.m == nil {
 		return nil, ErrEnclaveDestroyed
 	}
 
-	return e.buffer.Bytes(), nil
+	return e.m.data, nil
 }
 
 // OpenString returns the material as a string.
@@ -389,7 +354,7 @@ func (e *MemoryEnclave) OpenString() (string, error) {
 // It is also how an enclave from [NewMemoryEnclaveSized] is FILLED: the view
 // aliases the locked pages themselves, so material generated into it is never
 // anywhere else. The view is read-only in practice for every enclave built
-// from existing material, whose pages memguard has frozen; a sized enclave's
+// from existing material, whose pages are frozen read-only; a sized enclave's
 // stay writable, with the obligations documented on that constructor.
 func (e *MemoryEnclave) WithBytes(fn func([]byte) error) error {
 	return e.withLocked(fn)
@@ -401,19 +366,14 @@ func (e *MemoryEnclave) Size() int {
 		return 0
 	}
 
-	// Size is len(buffer.Bytes()) inside memguard, so it reads a slice header
-	// a concurrent purge rewrites. Coordinate it like any other read.
-	purgeMu.RLock()
-	defer purgeMu.RUnlock()
-
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
-	if e.buffer == nil || !e.buffer.IsAlive() {
+	if e.m == nil {
 		return 0
 	}
 
-	return e.buffer.Size()
+	return len(e.m.data)
 }
 
 // IsAlive reports whether the locked region still holds material.
@@ -422,13 +382,10 @@ func (e *MemoryEnclave) IsAlive() bool {
 		return false
 	}
 
-	purgeMu.RLock()
-	defer purgeMu.RUnlock()
-
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
-	return e.buffer != nil && e.buffer.IsAlive()
+	return e.m != nil
 }
 
 // EqualTo reports whether the enclave holds exactly other, comparing in
@@ -452,45 +409,70 @@ func (e *MemoryEnclave) EqualTo(other []byte) bool {
 // OpenString or EqualTo has returned. Nothing is wiped or unmapped while a
 // reader still holds a view obtained through those methods. A slice taken
 // from Open is outside that guarantee — see Open.
+//
+// # When the canary fails
+//
+// Releasing the pages verifies the canary sitting ahead of the data. If it
+// does not match, something wrote into memory it did not own — a buffer
+// underflow through a retained slice, or corruption from elsewhere in the
+// process — and Destroy PANICS with [ErrEnclaveCorrupted] after wiping and
+// releasing everything it holds.
+//
+// A panic from a foundational library is close to never right, and this is the
+// exception the rest of the package is built to avoid: detected memory
+// corruption is not a condition a caller can handle, because the state the
+// caller would act on is the state that is wrong. The material is wiped and the
+// pages are returned before the panic, so nothing leaks either way. It is also
+// what this method already did before v0.3.0-alpha — memguard's canary check
+// called core.Panic — except that it no longer destroys every other enclave in
+// the process on its way out.
 func (e *MemoryEnclave) Destroy() {
 	if e == nil {
 		return
 	}
 
-	// Destroy is an ALLOCATION-CLASS operation, not a read: memguard's
-	// Buffer.Destroy calls core.Panic when releasing the pages fails
-	// (core/buffer.go:180-183), and Panic purges the whole process. So it takes
-	// purgeMu exclusively, like NewMemoryEnclave, and in the same order —
-	// purgeMu then e.mu — so the two can never deadlock.
-	e.destroyBuffer()
+	err := e.releaseMapping()
 
-	// Return the Allocator reservation, if any, exactly once — after the pages
-	// are released, and on EVERY call so a caller that defers Destroy always
-	// frees its budget: on a second Destroy, and after a collateral memguard
-	// purge that wiped the buffer without passing through this method (see
-	// purgeMu). releaseOnce makes the accounting exact under either.
-	if e.release != nil {
+	// The reservation goes back only once the PAGES have. A corrupted canary
+	// still counts as released — the region was wiped and unmapped, and the
+	// error is a report about what already happened — but a failed unlock or
+	// unmap does not: the kernel still holds those pages, and telling the
+	// allocator they are available would let it admit allocations the process
+	// cannot satisfy. releaseOnce keeps the accounting exact across the retry.
+	if e.release != nil && (err == nil || errors.Is(err, ErrEnclaveCorrupted)) {
 		e.releaseOnce.Do(e.release)
+	}
+
+	if err != nil {
+		panic(err)
 	}
 }
 
-// destroyBuffer zeroizes and unmaps the locked pages under the allocation-class
-// lock ordering (purgeMu then e.mu), and is idempotent. It is the buffer half
-// of Destroy, split out so Destroy can always run the reservation release even
-// when the buffer is already gone.
-func (e *MemoryEnclave) destroyBuffer() {
-	purgeMu.Lock()
-	defer purgeMu.Unlock()
-
+// releaseMapping wipes, verifies and unmaps the pages under the write lock, and
+// is idempotent. It is the memory half of Destroy, split out so Destroy can run
+// the reservation release and the panic in the right order around it.
+//
+// The handle is dropped only when the pages are actually gone. If the region
+// could not be unmapped — or could not be made writable, so it was never wiped —
+// the enclave KEEPS its mapping: the memory is still resident, and discarding
+// the only reference to it would strand it for the process lifetime with no way
+// to retry. The enclave still reports itself alive in that case, which is the
+// truth, and a caller that recovers from the panic can call Destroy again to
+// retry the release.
+func (e *MemoryEnclave) releaseMapping() error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	if e.buffer == nil {
-		return
+	if e.m == nil {
+		return nil
 	}
 
-	e.buffer.Destroy()
-	e.buffer = nil
+	err := e.m.release()
+	if err != nil && !errors.Is(err, ErrEnclaveCorrupted) {
+		return err
+	}
+	e.m = nil
+	return err
 }
 
 // String masks the contents. It exists so that an enclave reached by an
@@ -506,6 +488,12 @@ func (e *MemoryEnclave) String() string {
 // Wipe overwrites b with zeroes. It is for callers that must hand plain bytes
 // to an API outside this package and want the transient copy cleared as soon
 // as that API returns.
+//
+// It is a best-effort measure on ordinary heap memory and nothing more: the
+// bytes were swappable and core-dumpable for as long as they existed, and the
+// compiler or the garbage collector may already have copied them somewhere this
+// cannot reach. Prefer never materializing them — see [NewMemoryEnclaveSized]
+// for generating material directly into locked memory instead.
 func Wipe(b []byte) {
-	memguard.WipeBytes(b)
+	wipe(b)
 }

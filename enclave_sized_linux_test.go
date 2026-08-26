@@ -164,41 +164,52 @@ const (
 	sizedAdmissionMarker = "GO_ENCLAVE_SIZED_ADMISSION"
 
 	// sizedRefusalConfirmed is logged by the child once an over-budget NewSized
-	// has been refused with the process's locked-memory ceiling already
-	// exhausted, leaving an unrelated enclave alive — which memguard's own
-	// failure path would not have done.
-	sizedRefusalConfirmed = "over-budget NewSized was refused without entering memguard"
+	// has been refused as a BUDGET refusal with the process's locked-memory
+	// ceiling already exhausted — the answer the mapping layer could not have
+	// given, since under that ceiling it can only fail to lock.
+	sizedRefusalConfirmed = "over-budget NewSized was refused by admission, not by the kernel"
 
-	// sizedFaultArmed is logged by the child once it has shown the lock fault was
-	// live during that refusal, by taking an unadmitted sized allocation and
-	// watching it purge the process. Without this the test would pass vacuously
+	// sizedFaultArmed is logged by the child once it has shown the lock fault
+	// was live during that refusal, by taking the same allocation unadmitted and
+	// watching the kernel refuse it. Without this the test would pass vacuously
 	// on any run where the injected ceiling never bit.
-	sizedFaultArmed = "the injected ceiling was live: an unadmitted sized allocation purged the process"
+	sizedFaultArmed = "the injected ceiling was live: the same allocation, unadmitted, was refused by the kernel"
+
+	// sizedNoCollateral is logged once the child has confirmed an unrelated
+	// enclave survived BOTH refusals. Before v0.3.0-alpha the unadmitted one
+	// destroyed it: memguard purged every live buffer in the process on its way
+	// to reporting the failure.
+	sizedNoCollateral = "an unrelated enclave survived both refusals intact"
 
 	// sizedReservationReleased is logged by the child once it has observed that a
 	// lock failure UNDER admission returned the reservation to the allocator.
 	sizedReservationReleased = "NewSized released its reservation on a lock failure"
 )
 
-// TestAllocator_NewSized_RefusalNeverEntersMemguard proves the ordering
-// [Allocator.NewSized] promises: admission decides BEFORE memguard is entered,
-// so a refusal cannot trigger the process-wide purge.
+// TestAllocator_NewSized_RefusalNeverAttemptsMapping proves the ordering
+// [Allocator.NewSized] promises: admission decides BEFORE any memory is mapped
+// or locked.
 //
-// A typed error is not evidence on its own — ErrLockedMemoryUnavailable is typed
-// too, and getting it would mean the purge already happened. The observable is
-// an unrelated enclave: it is alive after the refusal, and dead after the same
-// allocation is taken unadmitted under the same injected ceiling. Move the
-// admission check below the construction in NewSized and both halves fail.
+// The discriminator is the sentinel, and under this design that is sound in a
+// way it was not before v0.3.0-alpha. Back then a typed error proved nothing on
+// its own — ErrLockedMemoryUnavailable came back from the far side of a
+// process-wide purge, so the damage was already done and the test had to watch
+// an unrelated canary enclave die to tell the two paths apart. There is no purge
+// now: ErrBudgetExhausted can only come from admission and
+// ErrLockedMemoryUnavailable only from the kernel refusing the lock, so which
+// one arrives says which layer refused.
 //
-// It runs in a subprocess because the fault is injected process-wide and because
-// recovering from memguard's panic destroys every live locked buffer.
-func TestAllocator_NewSized_RefusalNeverEntersMemguard(t *testing.T) {
+// The canary is still here, asserting the property that replaced it: it must
+// survive BOTH refusals, including the unadmitted one that used to destroy it.
+//
+// It runs in a subprocess because the fault is injected process-wide.
+func TestAllocator_NewSized_RefusalNeverAttemptsMapping(t *testing.T) {
 	if os.Getenv(sizedAdmissionMarker) == "1" {
 		sizedAdmissionChild(t)
 		return
 	}
 
-	cmd := exec.Command(os.Args[0], "-test.run=^TestAllocator_NewSized_RefusalNeverEntersMemguard$", "-test.v")
+	cmd := exec.Command(os.Args[0], "-test.run=^TestAllocator_NewSized_RefusalNeverAttemptsMapping$", "-test.v")
 	cmd.Env = append(os.Environ(), sizedAdmissionMarker+"=1")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -207,7 +218,7 @@ func TestAllocator_NewSized_RefusalNeverEntersMemguard(t *testing.T) {
 	if strings.Contains(string(out), "--- SKIP") {
 		t.Skipf("subprocess could not inject the fault:\n%s", out)
 	}
-	for _, want := range []string{sizedRefusalConfirmed, sizedFaultArmed, sizedReservationReleased} {
+	for _, want := range []string{sizedRefusalConfirmed, sizedFaultArmed, sizedNoCollateral, sizedReservationReleased} {
 		if !strings.Contains(string(out), want) {
 			t.Fatalf("subprocess did not confirm %q:\n%s", want, out)
 		}
@@ -219,9 +230,8 @@ func sizedAdmissionChild(t *testing.T) {
 
 	const material = "canary-key-material"
 
-	// The canary is allocated while locked memory is still available, and is
-	// never touched by the allocator under test. Its liveness is the whole
-	// observable.
+	// Allocated while locked memory is still available, and never touched by
+	// the allocator under test.
 	canary, err := NewMemoryEnclave([]byte(material))
 	if err != nil {
 		t.Skipf("could not allocate the canary enclave: %v", err)
@@ -254,43 +264,45 @@ func sizedAdmissionChild(t *testing.T) {
 	if !errors.Is(err, ErrBudgetExhausted) {
 		t.Fatalf("err = %v, want ErrBudgetExhausted", err)
 	}
+	if errors.Is(err, ErrLockedMemoryUnavailable) {
+		t.Fatal("the request reached the mapping layer; admission did not decide first")
+	}
 	if a.InUse() != 0 {
 		t.Fatalf("InUse = %d after the refusal, want 0", a.InUse())
 	}
-	if !canary.IsAlive() {
-		t.Fatal("an unrelated enclave died during the refusal: memguard was entered and purged the process")
-	}
-	if !canary.EqualTo([]byte(material)) {
-		t.Fatal("the canary's material did not survive the refusal")
-	}
 	t.Log(sizedRefusalConfirmed)
 
-	// Non-vacuity. An unadmitted sized allocation must fail under the ceiling
-	// that was already in force above — and its purge must destroy the canary,
-	// which is precisely what the refusal avoided. The request needs more locked
-	// pages than the whole limit allows, so it fails on the first attempt
-	// whatever else the process has locked at the time.
-	lockFail := 8 * os.Getpagesize()
-
-	if _, err := NewMemoryEnclaveSized(lockFail); !errors.Is(err, ErrLockedMemoryUnavailable) {
+	// Non-vacuity. The same allocation, taken without admission, must be
+	// refused by the KERNEL under the ceiling that was already in force above —
+	// which is what shows the ceiling was live and the different answer above
+	// came from admission rather than from luck.
+	if _, err := NewMemoryEnclaveSized(request); !errors.Is(err, ErrLockedMemoryUnavailable) {
 		t.Fatalf("unadmitted NewMemoryEnclaveSized err = %v, want ErrLockedMemoryUnavailable; "+
 			"the ceiling was not live and the refusal above proves nothing", err)
 	}
-	if canary.IsAlive() {
-		t.Fatal("expected the process-wide purge to have destroyed the canary")
-	}
 	t.Log(sizedFaultArmed)
+
+	// Neither refusal may touch anything else. The unadmitted one is the
+	// interesting half: before v0.3.0-alpha it purged the process here and this
+	// enclave came back dead.
+	if !canary.IsAlive() {
+		t.Fatal("an unrelated enclave died during a refusal")
+	}
+	if !canary.EqualTo([]byte(material)) {
+		t.Fatal("the canary's material did not survive the refusals")
+	}
+	t.Log(sizedNoCollateral)
 
 	// With the ceiling still in force, an ADMITTED sized allocation that the OS
 	// then refuses must give its reservation back, so a transient exhaustion
 	// does not shrink the budget permanently. There is no enclave to inspect —
 	// only the counter records whether the release path ran, which makes this
-	// the mutation killer for `a.used.Add(-size)` in NewSized.
+	// the mutation killer for `a.used.Add(-charge)` in NewSized.
 	big, err := NewAllocator(1 << 24)
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
-	if _, err := big.NewSized(lockFail); !errors.Is(err, ErrLockedMemoryUnavailable) {
+	if _, err := big.NewSized(request); !errors.Is(err, ErrLockedMemoryUnavailable) {
 		t.Fatalf("admitted NewSized err = %v, want ErrLockedMemoryUnavailable", err)
 	}
 	if got := big.InUse(); got != 0 {
