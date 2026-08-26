@@ -6,6 +6,8 @@ All notable changes to go-enclave are documented here. The format follows
 
 ## [Unreleased]
 
+## [v0.4.0-alpha] - 2026-08-26
+
 ### Added
 
 - **`WipeAll() (int, error)` — a cooperative shutdown sweep that destroys every
