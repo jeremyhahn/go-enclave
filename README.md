@@ -97,6 +97,7 @@ pages:
 | `(*MemoryEnclave) OpenString / EqualTo / Size / IsAlive / String` | Locked, concurrency-safe accessors. |
 | `(*MemoryEnclave) Open()` | **Unsafe.** Returns a slice not covered by the lock; see its doc. |
 | `(*MemoryEnclave) Destroy()` | Zeroize and release; idempotent, nil-safe, deferrable. |
+| `WipeAll() (int, error)` | **Orderly shutdown only.** Destroys every live enclave in the process. The **count** is how many are still held — a non-zero value means your workers outlived your shutdown. The **error** reports detected canary corruption (matching `ErrEnclaveCorrupted`) and nothing else; a corrupt enclave's pages *are* reclaimed, so it never appears in the count, which is exactly why it needs its own return value. Never panics, and never waits on a reader — an enclave being read is retried on later passes, and only one still held after every pass is counted. Nothing calls it for you. |
 | `NewAllocator(maxBytes)` / `(*Allocator) New(data)` / `(*Allocator) NewSized(n)` | Bounded allocation with `ErrBudgetExhausted`; admission is decided before anything is mapped, and reservations are released on `Destroy`. The budget is in **locked bytes**, the unit `RLIMIT_MEMLOCK` uses. |
 | `LockedSize(n int) int64` | What an enclave of `n` bytes actually costs — `n` rounded up to a whole page. Size budgets with this: every enclave occupies at least one page, so a budget for a hundred small credentials is a hundred **pages**. Returns `int64` to match the budget, so `NewAllocator(100 * LockedSize(32))` needs no conversion. |
 | `Wipe(b []byte)` | Zero a transient plain slice. |
@@ -115,8 +116,14 @@ room: **admitted is not the same as allocated**, and callers must handle both
 errors.
 
 What you no longer have to tolerate, since v0.3.0-alpha, is an enclave you hold
-reporting `ErrEnclaveDestroyed` because something unrelated failed. Enclaves are
-destroyed when their owner destroys them and at no other time.
+reporting `ErrEnclaveDestroyed` because something *failed* elsewhere. Nothing in
+this package destroys an enclave as a reaction to a fault.
+
+Enclaves are destroyed by their owner's `Destroy` — or by an explicit `WipeAll`,
+which is a deliberate call and never a fault handler. If your process calls
+`WipeAll` at shutdown, every enclave in it is destroyed, including ones other
+components still hold. That is the point of a shutdown sweep, and it is the one
+way an enclave you hold can be destroyed by something other than you.
 
 ## Vocabulary
 

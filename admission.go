@@ -184,17 +184,27 @@ func (a *Allocator) New(data []byte) (*MemoryEnclave, error) {
 		return nil, err
 	}
 
-	e, cerr := NewMemoryEnclave(data)
+	// Unpublished: an enclave this constructor is still initializing must not be
+	// reachable by WipeAll — see the publication note below.
+	e, cerr := newMemoryEnclave(data)
 	if cerr != nil {
 		// Admission succeeded but the OS still refused (or the input was
 		// rejected): release the reservation so the failure does not shrink
-		// the budget permanently. data was already wiped by NewMemoryEnclave.
+		// the budget permanently. data was already wiped by newMemoryEnclave.
 		a.used.Add(-charge)
 		return nil, cerr
 	}
 
 	e.release = func() { a.used.Add(-charge) }
-	return e, nil
+
+	// PUBLICATION IS THE LAST STATEMENT, and the reservation callback is
+	// installed before it. Registering inside the constructor instead — where it
+	// was until Codex caught it on PR #20 — published a half-initialized enclave:
+	// a concurrent WipeAll could destroy it while release was still nil, which
+	// races the assignment above AND hands the pages back to the kernel while the
+	// budget keeps the charge, permanently. register's lock is also what
+	// publishes the write above to a sweeping goroutine.
+	return register(e), nil
 }
 
 // NewSized admits n bytes against the budget and, if admitted, returns an
@@ -231,7 +241,7 @@ func (a *Allocator) NewSized(n int) (*MemoryEnclave, error) {
 		return nil, err
 	}
 
-	e, cerr := NewMemoryEnclaveSized(n)
+	e, cerr := newMemoryEnclaveSized(n)
 	if cerr != nil {
 		// Admission succeeded but the OS still refused: release the reservation
 		// so the failure does not shrink the budget permanently.
@@ -240,7 +250,9 @@ func (a *Allocator) NewSized(n int) (*MemoryEnclave, error) {
 	}
 
 	e.release = func() { a.used.Add(-charge) }
-	return e, nil
+
+	// Publication last, for the reason spelled out in New.
+	return register(e), nil
 }
 
 // reserve claims n bytes of the budget, lock-free, and is the sole admission

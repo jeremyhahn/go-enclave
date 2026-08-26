@@ -108,6 +108,36 @@
 // corrupts a sized enclave, whose pages stay writable. Use Open only where no
 // concurrent Destroy is possible, and never retain what it returns.
 //
+// # Shutdown
+//
+// WipeAll destroys every enclave the package has handed out and not yet
+// reclaimed. It is for an ORDERLY EXIT — a signal handler, a defer in main —
+// where locked memory still held is material that should not outlive the
+// process. Nothing calls it for you.
+//
+// It is deliberately not a fault handler, which is what distinguishes it from
+// the memguard purge this package removed in v0.3.0-alpha: that ran in response
+// to any failed allocation, unmapped every live buffer in the process and then
+// panicked. WipeAll is called on purpose, never panics, and never unmaps memory
+// underneath a reader. An enclave being read when the sweep reaches it is
+// retried on later passes, so a momentary reader costs a pass rather than the
+// enclave; only one still held after every pass is counted.
+//
+// It returns two independent things. The COUNT is how many enclaves are still
+// holding locked memory, so a non-zero value means workers outlived the
+// shutdown — an ordering bug in the caller. The ERROR reports detected canary
+// corruption, matching ErrEnclaveCorrupted exactly as Destroy's panic value
+// does. They are orthogonal: a corrupt enclave's pages ARE reclaimed, so it
+// never appears in the count, and without a second return value the fact that
+// something wrote into memory it did not own would vanish at exit behind a zero
+// that looks like success. Destroy panics on that same condition because a
+// single enclave's caller cannot act on state that is by definition wrong; a
+// sweep must not abort, but non-fatal must not mean invisible either.
+//
+// One more thing follows for callers: WipeAll is a global destroyer. An enclave
+// another component still holds is destroyed too, and a retained Open slice
+// faults if it is read afterwards.
+//
 // # FIPS
 //
 // A MemoryEnclave performs no cryptography. It maps, locks and wipes memory,

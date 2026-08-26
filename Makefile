@@ -93,6 +93,11 @@ security: gosec govulncheck modverify trivy
 
 ## test: unit tests with the race detector
 .PHONY: test
+# -race IS NOT OPTIONAL HERE. It is the sole detector for the
+# publication-ordering defect class in the shutdown registry: measured 10/10
+# against the restored defect with the detector on, 0/10 with it off. Dropping
+# the flag to speed the suite up would retire that guarantee silently — every
+# test would still pass.
 test:
 	$(GOTEST) -race -count=1 -timeout=300s $(PKG)
 

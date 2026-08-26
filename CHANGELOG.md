@@ -4,6 +4,154 @@ All notable changes to go-enclave are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **`WipeAll() (int, error)` — a cooperative shutdown sweep that destroys every
+  live enclave, reports how many it could not, and reports whether any of them
+  were corrupt.** For an orderly exit: a signal handler, a defer in main. It is
+  not a fault handler and nothing calls it for you (go-enclave #18, for go-qrdb
+  #114's `Buffer`).
+
+  The two return values are **orthogonal, and neither implies the other**. The
+  count is how many enclaves are still holding locked memory; a non-zero value
+  is a shutdown-ordering bug in the caller. The error reports detected canary
+  corruption and nothing else, matching `ErrEnclaveCorrupted` through
+  `errors.Is` exactly as `Destroy`'s panic value does, and naming how many
+  enclaves failed.
+
+  A corrupt enclave's pages **are** reclaimed, so it is not "still held" and
+  never appears in the count — which is precisely why the corruption needs a
+  return value of its own. An earlier revision of this branch returned only the
+  count, so a sweep that detected memory corruption reported `0` and looked like
+  a clean exit: `Destroy` panics on that same condition because it matters, and
+  a sweep must not abort, but non-fatal must not mean invisible either.
+
+  This is the one thing v0.3.0-alpha's removal of memguard left a consumer
+  needing. Option B deleted memguard's process-global registry because of what
+  memguard did WITH it — purge the whole thing on any mapping failure, then panic
+  — and go-qrdb's `qrdbd` had been relying on that same registry for a
+  *cooperative* exit wipe. After the conversion its exit path silently stopped
+  covering the cluster DEK: nothing failed, nothing announced it.
+
+  A cooperative sweep is a different mechanism wearing a similar shape.
+  `WipeAll` is called explicitly rather than triggered by a fault, **never
+  panics** — a sweep that aborted partway would leave every enclave after the
+  failure untouched — and **never waits on a reader**: an enclave being read
+  when the sweep reaches it is retried on a later pass, and only one still held
+  after every pass is counted, because a shutdown that hangs behind a goroutine
+  still reading a key is worse than one that reports what it could not reach.
+
+  The registry is touched on construction, on destruction, and by `WipeAll` — and
+  by **nothing on the borrow path**, which is what keeps `purgeMu` from coming
+  back. Allocating inside a live borrow still works.
+
+### Changed
+
+- **An enclave is published to the shutdown ledger as the LAST step of its
+  construction**, after every field a sweep reads has been set. `Allocator.New`
+  and `Allocator.NewSized` install the reservation callback and then register;
+  the constructors no longer register on their behalf.
+
+  Registering inside the constructor put an allocator-backed enclave on the
+  ledger while `Allocator.New` had not yet assigned its `release` callback. A
+  `WipeAll` landing in that window read the field while it was being written — a
+  data race — and destroyed the enclave with `release` still nil, handing the
+  pages back to the kernel while the budget kept the charge. In the
+  `WipeAll`-at-exit pattern, where the sweep is the destroyer, nothing ever
+  returns that charge: an `Allocator` that sweeps and keeps running loses
+  admission capacity permanently. Measured on the defective shape, 34–52 MiB of
+  a 256 MiB budget was stranded per run.
+
+  No API change; `WipeAll` and both allocator constructors behave as documented.
+
+- **A momentary reader no longer costs an enclave its sweep.** `WipeAll` retries
+  an enclave it could not lock on its next pass, instead of writing it off after
+  one lost race.
+
+  `tryReleaseMapping` takes the WRITE lock without waiting, so it loses to any
+  concurrent reader — `IsAlive`, `Size`, `EqualTo`, a health probe polling an
+  enclave during shutdown — not merely to a long `WithBytes` borrow. The sweep
+  marked every enclave as seen when it built a pass's batch, *before* trying to
+  release it, so one lost microsecond took that enclave out of the sweep
+  permanently: no later pass reconsidered it, the process exited with the
+  material still mapped and locked, and the returned count blamed the caller's
+  shutdown ordering. That is the outcome `WipeAll` exists to prevent, reached
+  through the most ordinary concurrent operation there is.
+
+  Termination never depended on the seen-set — `maxSweepPasses` is the bound —
+  so it is gone. A genuinely long borrow still outlives every pass and is
+  skipped and counted, which remains correct: memory being actively read must
+  not be unmapped underneath the reader.
+
+- `tryReleaseMapping` now returns `(released bool, err error)` rather than
+  `(error, bool)`, putting the error last as the conventions require.
+
+### Documentation
+
+- **`WipeAll` is documented in the API surface**, in both the README table and
+  the package doc, where it was missing entirely.
+- **The README's "enclaves are destroyed when their owner destroys them and at
+  no other time" is corrected.** It became false the moment a global sweep
+  existed. What remains true — and is what the sentence was protecting — is that
+  nothing destroys an enclave in reaction to a *fault*.
+- **`Open` names `WipeAll` as a second concurrent destroyer.** A retained `Open`
+  slice segfaults if a shutdown sweep runs while the caller still holds it, and
+  only this enclave's own `Destroy` was mentioned before.
+- **The constructors document that a successful return can hand back an
+  already-destroyed enclave** when `WipeAll` ran between publication and return.
+- **The registry design note states its two costs plainly:** `registryMu`
+  serializes construction and destruction process-wide (it is not `purgeMu` — it
+  never touches the borrow path and is never held across a syscall or an enclave
+  lock), and an enclave whose release keeps failing is retained for the process
+  lifetime by design, so a later sweep can retry it.
+
+### Tests
+
+- **The never-panics guarantee is now pinned rather than merely documented.**
+  `WipeAll`'s most prominent promise — that it does not panic, including on an
+  enclave whose canary fails — had no test. A corrupt canary is now seeded into
+  a batch and the whole batch is checked: no panic, every enclave wiped, the
+  sweep not aborted at the failure, the corrupt enclave's reservation returned
+  (a detected corruption still counts as released), and the corruption
+  **reported** through the error rather than swallowed.
+- **The concurrent-construction test was rebuilt to be affordable in CI.** Its
+  first two versions needed a large payload (1 MiB, then 512 KiB) to widen the
+  window they race for, and a sweeper that spun without yielding to sample it
+  often. Both worked locally — including pinned to a single CPU — and both blew
+  the test's own drain bound on the build runner, twice.
+
+  The payload was the expensive half: under `-race`, hundreds of megabytes of
+  mlock churn in a memory-capped container is a different order of problem from
+  slow CPU. The width also turned out to be unnecessary — race detection needs
+  the window ENTERED, not held open, and a one-page payload hits it just as
+  reliably (8/8 against the defective shape) for 1/128th of the memory. The test
+  now costs hundredths of a second on every machine measured.
+
+  The strength that bought moved to the race detector, which is the reliable
+  oracle for this defect and is what CI runs; the budget assertion is kept as a
+  weaker second signal that needs no detector, and the doc comment says so
+  rather than claiming two equal oracles. The "a live successful return is
+  usable" check moved to a quiescent phase, because it is a property of
+  construction rather than of the race — asserted against a live sweeper it
+  failed whenever the sweeper won everything, which on one CPU was 99 times in
+  100.
+- **The failed-release path is pinned.** An enclave whose release fails for a
+  reason that is not corruption keeps BOTH its Allocator charge and its ledger
+  entry. Neither was held by any test. Refunding unconditionally would hand the
+  budget back while the kernel still holds the pages, so the allocator
+  over-admits against a real `RLIMIT_MEMLOCK`; deregistering would make
+  `WipeAll` return **zero while the material is still mapped and locked**, and
+  no later sweep could ever find it — the same class as the tallied-count
+  fail-open. The shipped code was correct on both; nothing held it correct.
+- **The corruption contract is pinned in both directions.** One test requires
+  the error to name how many enclaves were corrupt; a control requires a clean
+  sweep to report `nil`, without which both would pass against an
+  implementation that reported corruption unconditionally. Every other test in
+  the package now routes its sweep through a helper that fails on an unexpected
+  corruption report, so the whole suite doubles as that control.
+
 ## [v0.3.0-alpha] - 2026-08-26
 
 ### Changed

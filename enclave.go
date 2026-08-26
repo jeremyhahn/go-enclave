@@ -133,7 +133,27 @@ type MemoryEnclave struct {
 //
 // It returns ErrEmptyEnclave when data is empty, and
 // ErrLockedMemoryUnavailable when the kernel refuses to lock the pages.
+//
+// A successful return can hand back an ALREADY-DESTROYED enclave, in exactly one
+// situation: [WipeAll] ran between this enclave's publication and this return,
+// and destroyed it. The enclave is valid and every method behaves as documented
+// for a destroyed one — it reports itself not alive and opens with
+// ErrEnclaveDestroyed — so nothing is unsafe, but a caller that constructs
+// concurrently with a shutdown sweep must check rather than assume. Constructing
+// during a sweep is a consumer ordering problem; see WipeAll.
 func NewMemoryEnclave(data []byte) (*MemoryEnclave, error) {
+	e, err := newMemoryEnclave(data)
+	if err != nil {
+		return nil, err
+	}
+	return register(e), nil
+}
+
+// newMemoryEnclave builds the enclave WITHOUT publishing it to the shutdown
+// ledger, so a caller with further initialization to do — [Allocator.New],
+// installing the reservation callback — can finish before [WipeAll] can reach
+// it. Publication is that caller's last statement; see [register].
+func newMemoryEnclave(data []byte) (*MemoryEnclave, error) {
 	if len(data) == 0 {
 		return nil, ErrEmptyEnclave
 	}
@@ -231,7 +251,20 @@ func NewMemoryEnclave(data []byte) (*MemoryEnclave, error) {
 // v0.3.0-alpha, is the only thing standing between a caller and a process-wide
 // purge: go-enclave maps its own memory and nothing can purge it, so a failure
 // here fails this call and touches no other enclave.
+//
+// Like [NewMemoryEnclave], a successful return can hand back an already-destroyed
+// enclave if [WipeAll] ran between publication and return. See that constructor.
 func NewMemoryEnclaveSized(n int) (*MemoryEnclave, error) {
+	e, err := newMemoryEnclaveSized(n)
+	if err != nil {
+		return nil, err
+	}
+	return register(e), nil
+}
+
+// newMemoryEnclaveSized is [NewMemoryEnclaveSized] without the publication step,
+// for the same reason [newMemoryEnclave] exists.
+func newMemoryEnclaveSized(n int) (*MemoryEnclave, error) {
 	if _, ok := lockedSize(int64(n)); !ok {
 		return nil, ErrInvalidSize
 	}
@@ -293,10 +326,18 @@ func (e *MemoryEnclave) withLocked(fn func([]byte) error) error {
 //
 // UNSAFE. The returned slice aliases the locked pages and is covered by NO
 // lock once this returns. A concurrent Destroy on this enclave unmaps it, and a
-// read through it then faults the process rather than returning an error. That
-// is now the ONLY way it can be unmapped underneath the caller: before
-// v0.3.0-alpha any failed allocation anywhere in the process could do it too,
-// through memguard's process-wide purge.
+// read through it then faults the process rather than returning an error.
+//
+// There are TWO such destroyers, and the second one is not obvious: this
+// enclave's own Destroy, and [WipeAll], which destroys every live enclave in the
+// process. A retained Open slice will SIGSEGV if a shutdown sweep runs while the
+// caller still holds it — no lock is held to prevent that. Callers that use Open
+// must therefore establish that neither can run concurrently, which for WipeAll
+// means the slice does not outlive the caller's own shutdown ordering.
+//
+// What can no longer unmap it: before v0.3.0-alpha any failed allocation
+// anywhere in the process could, through memguard's process-wide purge. That is
+// gone — WipeAll is called deliberately, never triggered by a fault.
 //
 // It is not a write path either, and how it fails depends on the constructor:
 // the pages of an enclave built by NewMemoryEnclave are frozen read-only, so a
@@ -443,6 +484,12 @@ func (e *MemoryEnclave) Destroy() {
 		e.releaseOnce.Do(e.release)
 	}
 
+	// Off the registry once the pages are actually gone. A release that failed
+	// leaves it registered so a later WipeAll still tries.
+	if err == nil || errors.Is(err, ErrEnclaveCorrupted) {
+		deregister(e)
+	}
+
 	if err != nil {
 		panic(err)
 	}
@@ -462,7 +509,31 @@ func (e *MemoryEnclave) Destroy() {
 func (e *MemoryEnclave) releaseMapping() error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	return e.releaseLocked()
+}
 
+// tryReleaseMapping is releaseMapping without the wait: released is false and
+// nothing is done if the lock is unavailable, instead of blocking until it is.
+//
+// The lock it tries for is the WRITE lock, so it loses to any concurrent
+// READER, not merely to a long WithBytes borrow — an IsAlive, a Size and an
+// EqualTo all take the read lock, and each is enough to make this report false.
+// Callers must therefore treat false as "not right now", never as "cannot be
+// released": [WipeAll] retries on its next pass for exactly this reason.
+//
+// It exists for WipeAll, which must not hang a shutdown behind a goroutine that
+// is still reading. Nothing else should use it — an ordinary Destroy is supposed
+// to wait its turn.
+func (e *MemoryEnclave) tryReleaseMapping() (released bool, err error) {
+	if !e.mu.TryLock() {
+		return false, nil
+	}
+	defer e.mu.Unlock()
+	return true, e.releaseLocked()
+}
+
+// releaseLocked is the body both paths share. The caller holds e.mu.
+func (e *MemoryEnclave) releaseLocked() error {
 	if e.m == nil {
 		return nil
 	}

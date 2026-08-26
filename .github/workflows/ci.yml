@@ -362,6 +362,11 @@ jobs:
       # tune the runner HOST for settings that matter; with host networking
       # the host's values apply.
 
+      # -race IS NOT OPTIONAL. It is the sole detector for the
+      # publication-ordering defect class in the shutdown registry: measured
+      # 10/10 against the restored defect with the detector on, 0/10 with it
+      # off. Removing the flag to speed this job up would retire that
+      # guarantee silently — every test would still pass.
       - name: Run tests with coverage
         run: |
           go test -race -count=1 -timeout=900s -coverprofile=coverage.out ./...
