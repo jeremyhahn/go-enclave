@@ -28,6 +28,27 @@ err = e.WithBytes(func(key []byte) error {
 })
 ```
 
+Material that is about to be **generated** never needs to reach the heap at all.
+`NewMemoryEnclaveSized` hands back locked, zeroed pages, and the same borrow
+window is where they are filled:
+
+```go
+e, err := enclave.NewMemoryEnclaveSized(32)
+if err != nil {
+    return err
+}
+defer e.Destroy()
+
+err = e.WithBytes(func(key []byte) error {
+    _, err := io.ReadFull(rand.Reader, key) // straight into locked memory
+    return err
+})
+```
+
+Use it wherever the alternative would be `make` + generate + `NewMemoryEnclave`:
+that shape puts the key on swappable, core-dumpable memory first, and the wipe
+that follows cannot reach copies the compiler or the collector already made.
+
 ## Why this exists
 
 memguard's `NewBuffer` calls `Purge()` — which destroys **every** live protected
@@ -58,15 +79,16 @@ go-enclave addresses both halves:
 | Symbol | Purpose |
 |---|---|
 | `NewMemoryEnclave(data []byte)` | Move `data` into a locked enclave; wipes `data`. |
+| `NewMemoryEnclaveSized(n int)` | `n` bytes of locked, **zeroed** memory the caller fills in place through the borrow — generate-in-place, so the material never touches the heap. |
 | `NewMemoryEnclaveFromString(s)` | Boundary helper for string-only APIs (the string cannot be wiped). |
 | `(*MemoryEnclave) WithBytes(fn)` | **Preferred access.** Borrow the bytes for the duration of `fn` under the read lock. |
 | `(*MemoryEnclave) OpenString / EqualTo / Size / IsAlive / String` | Locked, concurrency-safe accessors. |
 | `(*MemoryEnclave) Open()` | **Unsafe.** Returns a slice not covered by the lock; see its doc. |
 | `(*MemoryEnclave) Destroy()` | Zeroize and release; idempotent, nil-safe, deferrable. |
-| `NewAllocator(maxBytes)` / `(*Allocator) New(data)` | Bounded allocation with `ErrBudgetExhausted`; reservations released on `Destroy`. |
+| `NewAllocator(maxBytes)` / `(*Allocator) New(data)` / `(*Allocator) NewSized(n)` | Bounded allocation with `ErrBudgetExhausted`; admission is decided before memguard is entered, and reservations are released on `Destroy`. |
 | `Wipe(b []byte)` | Zero a transient plain slice. |
 
-Errors: `ErrEmptyEnclave`, `ErrEnclaveDestroyed`, `ErrLockedMemoryUnavailable`
+Errors: `ErrEmptyEnclave`, `ErrInvalidSize`, `ErrEnclaveDestroyed`, `ErrLockedMemoryUnavailable`
 (+ `LockedMemoryError`), `ErrBudgetExhausted` (+ `BudgetError`), `ErrInvalidBudget`.
 
 ### The obligation admission control does not remove

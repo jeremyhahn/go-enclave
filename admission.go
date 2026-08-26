@@ -20,12 +20,12 @@ import (
 )
 
 var (
-	// ErrBudgetExhausted is the sentinel returned by [Allocator.New] when
-	// admitting an allocation would push the total locked bytes held through
-	// the allocator past its budget. Every [BudgetError] matches it, so this
-	// is what callers test for. It is returned BEFORE any locked memory is
-	// requested, so a refusal never reaches memguard and can never trigger the
-	// process-wide purge described on [purgeMu].
+	// ErrBudgetExhausted is the sentinel returned by [Allocator.New] and
+	// [Allocator.NewSized] when admitting an allocation would push the total
+	// locked bytes held through the allocator past its budget. Every
+	// [BudgetError] matches it, so this is what callers test for. It is returned
+	// BEFORE any locked memory is requested, so a refusal never reaches memguard
+	// and can never trigger the process-wide purge described on [purgeMu].
 	ErrBudgetExhausted = errors.New("enclave: locked-memory budget exhausted")
 
 	// ErrInvalidBudget is returned by [NewAllocator] for a non-positive
@@ -154,20 +154,14 @@ func (a *Allocator) New(data []byte) (*MemoryEnclave, error) {
 
 	n := int64(len(data))
 
-	// Reserve first, lock-free. CAS refuses rather than overshooting the
-	// budget, so the counter never exceeds the limit even transiently and two
-	// concurrent New calls can never both squeeze past the last free bytes.
-	for {
-		used := a.used.Load()
-		if used+n > a.limit {
-			// Wipe here too: admission failure is a terminal path for data,
-			// and the ownership contract says nothing survives it.
-			Wipe(data)
-			return nil, &BudgetError{Requested: n, InUse: used, Limit: a.limit}
-		}
-		if a.used.CompareAndSwap(used, used+n) {
-			break
-		}
+	// n is at least 1 here, so the only refusal reserve can produce is a
+	// BudgetError — which is why ErrInvalidSize is absent from this
+	// constructor's documented returns.
+	if err := a.reserve(n); err != nil {
+		// Wipe here too: admission failure is a terminal path for data, and the
+		// ownership contract says nothing survives it.
+		Wipe(data)
+		return nil, err
 	}
 
 	e, err := NewMemoryEnclave(data)
@@ -183,10 +177,103 @@ func (a *Allocator) New(data []byte) (*MemoryEnclave, error) {
 	return e, nil
 }
 
+// NewSized admits n bytes against the budget and, if admitted, returns an
+// enclave over n bytes of locked, ZEROED memory whose Destroy returns the
+// reservation.
+//
+// It is the admitted form of [NewMemoryEnclaveSized]: the caller fills the
+// enclave in place through the borrow, so generated material never touches the
+// ordinary heap. That constructor documents the fill pattern, the make-then-move
+// shape it replaces, and the obligations that come with pages which stay
+// writable — read it before using this.
+//
+// Admission is decided BEFORE any locked memory is requested, exactly as in
+// [Allocator.New], so a refusal never reaches memguard and can never trigger
+// the process-wide purge described on [purgeMu]. A non-positive size is one of
+// the things admission refuses, which is why no separate size check precedes it.
+//
+// Returns, all leaving the budget as it was found:
+//   - ErrInvalidSize when n is not positive (no reservation is taken);
+//   - ErrBudgetExhausted (as a [BudgetError]) when admitting n bytes would
+//     exceed the budget;
+//   - ErrLockedMemoryUnavailable if the kernel refuses the lock despite
+//     admission (the reservation is released before returning).
+//
+// On success the returned enclave holds a reservation of n bytes until its
+// Destroy runs, which callers must always call; the reservation leaks for the
+// process lifetime otherwise.
+func (a *Allocator) NewSized(n int) (*MemoryEnclave, error) {
+	size := int64(n)
+
+	// Admission first, and it is admission that refuses a non-positive size:
+	// see reserve. Nothing below this line can be reached by a size memguard
+	// would choke on.
+	if err := a.reserve(size); err != nil {
+		return nil, err
+	}
+
+	e, err := NewMemoryEnclaveSized(n)
+	if err != nil {
+		// Admission succeeded but the OS still refused: release the reservation
+		// so the failure does not shrink the budget permanently.
+		a.used.Add(-size)
+		return nil, err
+	}
+
+	e.release = func() { a.used.Add(-size) }
+	return e, nil
+}
+
+// reserve claims n bytes of the budget, lock-free, and is the sole admission
+// gate every constructor on this type goes through.
+//
+// It owns the counter's two invariants, and together they keep used within
+// [0, limit] — which the admission predicate below then depends on.
+//
+// A reservation is a POSITIVE number of bytes: a non-positive n is refused with
+// ErrInvalidSize before the counter is touched, so it can never be driven below
+// zero, which would otherwise let a concurrent caller admit against an inflated
+// budget for as long as the bad reservation was outstanding. And the
+// compare-and-swap refuses rather than overshooting, so the counter never
+// exceeds the limit even transiently and two concurrent reservations can never
+// both squeeze past the last free bytes.
+//
+// It returns ErrInvalidSize or a [BudgetError] on refusal and leaves the counter
+// exactly as it found it; callers own whatever else a refusal implies for their
+// arguments.
+func (a *Allocator) reserve(n int64) error {
+	if n <= 0 {
+		return ErrInvalidSize
+	}
+
+	for {
+		used := a.used.Load()
+
+		// Compare n against the REMAINING budget rather than testing used+n
+		// against the limit. That addition overflows for a large enough n and
+		// wraps negative, which passes a `used+n > limit` test and admits an
+		// allocation the budget cannot possibly cover — a fail-open straight
+		// into memguard, on the one path whose entire purpose is to keep an
+		// impossible request away from it. [Allocator.NewSized] takes the size
+		// from the caller as a plain int, so nothing upstream bounds it.
+		//
+		// This form cannot overflow: used is in [0, limit] by the invariants
+		// above, so limit-used is in [0, limit], and n is already positive.
+		// The CAS below is safe for the same reason — admitting n means
+		// n <= limit-used, hence used+n <= limit.
+		if n > a.limit-used {
+			return &BudgetError{Requested: n, InUse: used, Limit: a.limit}
+		}
+		if a.used.CompareAndSwap(used, used+n) {
+			return nil
+		}
+	}
+}
+
 // InUse reports the bytes currently reserved through this Allocator. It is a
 // snapshot, useful for observability; do not build admission logic on it, as
-// it can change between the read and any decision. New's own reservation is
-// atomic and is the only correct admission gate.
+// it can change between the read and any decision. The reservation the
+// constructors take is atomic and is the only correct admission gate.
 func (a *Allocator) InUse() int64 { return a.used.Load() }
 
 // Limit reports the Allocator's total budget in bytes.
