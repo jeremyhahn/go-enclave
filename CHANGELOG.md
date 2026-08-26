@@ -31,8 +31,7 @@ All notable changes to go-enclave are documented here. The format follows
 
 - `LockedSize(n int) int64` — the locked memory an enclave of n bytes actually
   consumes, so a caller can size a budget instead of guessing. Returns int64 to
-  match the budget type and because on a 32-bit platform the cost of a large
-  enclave exceeds what an int can hold. Guard pages are
+  match `NewAllocator`'s budget, so sizing one needs no conversion. Guard pages are
   not part of it: they are mapped PROT_NONE and never mlock'd, verified against
   the kernel's accounting rather than inferred from the mapping code.
 
