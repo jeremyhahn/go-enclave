@@ -157,5 +157,4 @@ Requires Go 1.26.7. Some tests (`_linux` fault-injection) lower
 
 ## License
 
-Dual-licensed under AGPL-3.0 or a commercial license. See [LICENSE](LICENSE);
-contact licensing@automatethethings.com for commercial terms.
+MIT. See [LICENSE](LICENSE).
