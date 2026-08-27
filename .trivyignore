@@ -1,11 +1,11 @@
 # Trivy suppression list for go-enclave.
 #
 # INTENTIONALLY EMPTY. Nothing is suppressed and nothing should be without a
-# reason recorded in place (devops.md §9): one CVE id per line, each with a
+# reason recorded in place: one CVE id per line, each with a
 # comment naming why it does not apply here and what would make it apply again.
 #
 # The file itself is required. Both the nightly Trivy job (nightly.yml, whose
-# CUSTOMIZE note says each repo supplies its own) and `make trivy` pass
+# note says each repo supplies its own) and `make trivy` pass
 # `--ignorefile .trivyignore`, and trivy treats a missing ignore file as a FATAL
 # flag error rather than as an empty list — which is what reddened the nightly
 # on main while `make security` stayed green locally.

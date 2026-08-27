@@ -16,7 +16,7 @@ import (
 	"testing"
 )
 
-// TestWipeAll_LeavesNoResidentMaterial is the end-to-end property go-qrdb's exit
+// TestWipeAll_LeavesNoResidentMaterial is the end-to-end property a shutdown
 // path depends on: after the sweep, no material this package was holding is
 // anywhere in the process's memory.
 //

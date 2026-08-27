@@ -42,7 +42,7 @@ func liveCount() int {
 	return len(live)
 }
 
-// TestWipeAll_DestroysEveryLiveEnclave is the property go-qrdb's exit path needs:
+// TestWipeAll_DestroysEveryLiveEnclave is the property a shutdown path needs:
 // after the sweep, nothing this package allocated is still holding material.
 //
 // It counts the ledger rather than trusting the return value alone, because a

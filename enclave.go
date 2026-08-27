@@ -294,11 +294,11 @@ func NewMemoryEnclaveFromString(s string) (*MemoryEnclave, error) {
 //
 // fn MAY construct, destroy and borrow OTHER enclaves. Until v0.3.0-alpha it
 // could not: a process-wide lock serialized every allocation against every
-// borrow, so allocating inside a live borrow deadlocked, and consumers holding
-// a key across a call that allocates had no way to write the code (issue #2,
-// go-qrdb #74/#145). That lock existed to keep memguard's process-wide purge
-// from unmapping these pages mid-read; go-enclave now owns its own mapping and
-// nothing can purge it, so the lock is gone and so is the restriction.
+// borrow, so allocating inside a live borrow deadlocked, and a caller holding a
+// key across a call that allocates had no way to write the code. That lock
+// existed to keep memguard's process-wide purge from unmapping these pages
+// mid-read; go-enclave now owns its own mapping and nothing can purge it, so the
+// lock is gone and so is the restriction.
 func (e *MemoryEnclave) withLocked(fn func([]byte) error) error {
 	if e == nil {
 		return ErrEnclaveDestroyed

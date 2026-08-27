@@ -38,14 +38,14 @@ import (
 // error from v0.1.0-alpha, but a recover cannot undo a purge that already ran —
 // so it also needed purgeMu, a process-wide lock serializing every allocation
 // against every borrow, whose cost was that allocating inside a live borrow
-// deadlocked (issue #2, and go-qrdb #74/#145 could not work around it).
+// deadlocked — a shape real consumers had no way to write around.
 //
 // Owning the mapping removes the mechanism instead of guarding it. There is no
 // registry, so nothing can purge these pages; every failure is a returned
 // error; and purgeMu is gone because there is no longer anything for it to
-// serialize. The owner ruled this direction on 2026-08-26 (issue #2): mapping
-// memory is not cryptography, and owning the discipline is this library's
-// charter as the portfolio's locked-memory primitive.
+// serialize. The reasoning: mapping memory is not cryptography, and a library
+// whose whole purpose is locked memory should own that discipline rather than
+// inherit someone else's failure policy for it.
 
 // coreDumpErr records whether the process-wide core-dump hardening took. It is
 // written once, from init, before any goroutine can observe it.

@@ -24,7 +24,8 @@ coverage.txt
 coverage.out
 *.prof
 
-# Go workspace (dependency-resolution.md: no go.work in first-party repos)
+# Go workspace — dependencies resolve from published module versions, not a
+# local workspace, so go.work never belongs in the repository
 go.work
 go.work.sum
 gosec.sarif
@@ -41,3 +42,4 @@ gosec-results.json
 # AI assistant / local tooling — never commit
 .serena/
 .claude/
+local.mk

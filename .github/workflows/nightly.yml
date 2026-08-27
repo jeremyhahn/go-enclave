@@ -1,6 +1,6 @@
-# nightly-template: v1.0 — the known-red and long-horizon jobs, off the push path.
+# Nightly jobs: the known-red and long-horizon checks, kept off the push path.
 #
-# Owner ruling 2026-08-20 (fail-fast pipeline for iteration speed): jobs that
+# Jobs that
 # are known-red with tracked issues, or that verify a slow-moving property,
 # do NOT run per push — a known-red job burning 60-90 runner-minutes per push
 # produces information we already have. They run here nightly, plus on demand
@@ -9,9 +9,9 @@
 # diagnosis), a job may move back to ci.yml — that move is deliberate, not
 # automatic.
 #
-# CUSTOMIZE per repo: the fips job needs the repo's build deps; trivy needs
+# the fips job needs this repo's build deps; trivy needs
 # the repo's .trivyignore and skip-dirs. Both jobs are copied verbatim from
-# ci-template v1.8 (they are unchanged by the move).
+# ci.yml (they are unchanged by the move).
 
 name: Nightly
 
@@ -31,7 +31,7 @@ jobs:
     timeout-minutes: 30
     env:
       GOFIPS140: latest
-      # STRICT mode, not `on` (ratified 2026-08-17).
+      # STRICT mode, not `on`.
       #
       # `fips140=on` loads the Go Cryptographic Module but still PERMITS
       # non-approved algorithms: code or a test exercising MD5 or SHA-1
@@ -42,10 +42,10 @@ jobs:
       # `fips140=only` makes non-approved operations error or panic, which is
       # what a compliance gate for FedRAMP / PCI DSS / HIPAA has to do.
       #
-      # Measured before adopting, not assumed: go-frost (ristretto255,
-      # secp256k1, edwards25519) and go-netmon both pass under `only`, and
-      # go-recountly's build is unaffected — GODEBUG is a RUNTIME setting and
-      # cannot cause compile errors.
+      # Measured before adopting, not assumed: libraries using ristretto255,
+      # secp256k1 and edwards25519 pass under `only`, and a build is unaffected
+      # either way — GODEBUG is a RUNTIME setting and cannot cause compile
+      # errors.
       #
       # If this job now fails in a repo, that failure IS the finding: something
       # on a tested path is using non-approved cryptography. Do not weaken this
@@ -62,13 +62,13 @@ jobs:
       - name: Build all packages (FIPS mode)
         run: go build ./...
 
-      # CUSTOMIZE (v1.4.1): this MUST mirror the repo's own unit-test
+      # this MUST mirror the repo's own unit-test
       # invocation — same build tags, same package scope, same dark-suite
       # exclusions — with ONLY the FIPS env changed. A bare `go test ./...`
       # drags in tag-gated helpers, environment-dependent integration
       # suites, and deliberately-dark timing tests that the Test job
       # excludes, and fails for reasons that have nothing to do with FIPS
-      # (seen 2026-08-17 on go-frost/go-objstore/go-signal).
+      # and fails for reasons that have nothing to do with FIPS.
       - name: Unit tests (FIPS mode)
         run: go test -count=1 -timeout=900s ./...
 
@@ -79,7 +79,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      # CUSTOMIZE: skip-dirs — benchmark harnesses, examples, vendored
+      # skip-dirs — benchmark harnesses, examples, vendored
       # adapters; nothing that ships in a release may be skipped.
       - name: Trivy scan (SARIF for code scanning)
         # trivy-action's setup checks out aquasecurity/trivy from github.com
@@ -126,10 +126,9 @@ jobs:
         if: github.server_url != 'https://github.com'
         run: trivy fs --scanners vuln,secret --severity CRITICAL,HIGH --exit-code 1 --format table --skip-dirs test,examples --ignorefile .trivyignore .
 
-      # Misconfiguration scanning (owner ruling 2026-08-20, task #27): devops.md
-      # §8 promises it portfolio-wide. It runs HERE in nightly — advisory exit
-      # code — so findings surface daily without a new finding class blocking
-      # merges. Promote to the PR gate per-repo once its baseline is clean.
+      # Misconfiguration scanning, advisory exit code, so findings surface
+      # daily without a new finding class blocking merges. Promote it to the
+      # pull-request gate once its baseline is clean.
       - name: Trivy misconfiguration scan (advisory)
         if: github.server_url != 'https://github.com'
         run: trivy fs --scanners misconfig --exit-code 0 --format table --skip-dirs test,examples --ignorefile .trivyignore .

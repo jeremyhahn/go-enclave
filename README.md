@@ -1,16 +1,16 @@
 # go-enclave
 
-Foundational locked-memory primitive for the Automate The Things trusted-computing
-stack. `MemoryEnclave` is a region of locked, zeroized memory for holding
-sensitive material — private keys, credentials, passphrases and tokens — for the
-whole of its lifetime in the process.
+A locked-memory primitive for Go. `MemoryEnclave` is a region of locked,
+zeroized memory for holding sensitive material — private keys, credentials,
+passphrases and tokens — for the whole of its lifetime in the process.
 
-It is the portfolio's single locked-memory primitive: **Layer 0**, importable by
-every Layer 0–3 library. It maps its own memory — mlock'd pages, inaccessible
-guard pages either side, a random canary, wiped on release, and kept out of core
-dumps — reports every mapping failure as a typed error rather than aborting, and
-adds admission control so an untrusted caller cannot exhaust the process's
-locked-memory ceiling and starve everything else.
+It is built to sit at the bottom of a dependency graph, so that libraries which
+handle key material can share one implementation rather than each rolling their
+own. It maps its own memory — mlock'd pages, inaccessible guard pages either
+side, a random canary, wiped on release, and kept out of core dumps — reports
+every mapping failure as a typed error rather than aborting, and adds admission
+control so an untrusted caller cannot exhaust the process's locked-memory
+ceiling and starve everything else.
 
 ```go
 import "github.com/jeremyhahn/go-enclave"
@@ -127,10 +127,12 @@ way an enclave you hold can be destroyed by something other than you.
 
 ## Vocabulary
 
-The type describes its mechanism — a region of locked memory. It is **never**
-called a "secret" (already a config value / secret reference / ACME account
-secret / Shamir share in this codebase). Do not introduce `Secret`,
-`SecureString`, `SecureBytes` or `ProtectedBuffer` synonyms.
+The type describes its mechanism — a region of locked memory — rather than what
+a caller keeps in it. "Secret" is deliberately avoided: in most systems that
+word is already taken by a config value, a secret reference, an account secret
+or a key share, and a name that collides with three existing meanings makes
+every call site ambiguous. Avoid introducing `Secret`, `SecureString`,
+`SecureBytes` or `ProtectedBuffer` synonyms alongside it.
 
 ## FIPS
 
@@ -139,9 +141,10 @@ only cryptographic primitive anywhere near it is `crypto/rand` filling the
 canary, a FIPS-approved DRBG. The package builds and its tests pass under
 `GOFIPS140=latest GODEBUG=fips140=only` (`make test-fips`).
 
-Dropping memguard removed a non-approved algorithm from every consumer's build
-graph: go-enclave never called its `Enclave`/`Seal` paths, but NaCl secretbox
-was in the dependency regardless.
+Dropping memguard removed a non-approved algorithm from the build graph of
+everything that imports this package: go-enclave never called its
+`Enclave`/`Seal` paths, but NaCl secretbox was in the dependency regardless.
+That matters to anyone who has to certify what their binary contains.
 
 ## Development
 

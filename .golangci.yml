@@ -1,5 +1,5 @@
 # golangci-lint configuration for go-enclave (Google Go style + security).
-# Mirrors the portfolio baseline (devops.md §8): staticcheck, errcheck, unused,
+# staticcheck, errcheck, unused, ineffassign, misspell, gocritic and the
 # ineffassign, misspell, gocritic and the security linters enabled.
 version: "2"
 

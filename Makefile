@@ -1,15 +1,22 @@
 # go-enclave — foundational locked-memory primitive.
 # Pure library, single package: no binaries, no container image.
 
-# Release tooling. agent-git.sh supplies the acting agent's identity and SSH
-# signing for every git write; REPO_NAME is what it maps to agent-<repo>.
+# Release tooling. MAINTAINER-ONLY: nothing in the build or test targets needs
+# any of this, and a contributor never invokes it.
 #
-# REPO_NAME is the LITERAL repo name and must never be $(notdir $(CURDIR)):
-# that derives the SIGNING IDENTITY from the checkout directory, so a worktree,
-# a CI workspace or a clone named anything else signs and attributes the release
-# as a different agent (reviewer-enclave-9 measured a directory named `mk`
-# producing agent-mk). Template v2.2.
-AGENT_GIT ?= /home/jhahn/sources/automatethethings/software/scripts/agent-git.sh
+# AGENT_GIT points at a wrapper that supplies the committing identity and SSH
+# signing for release writes. It has NO DEFAULT ON PURPOSE — a hardcoded path
+# would publish one machine's directory layout to everyone who reads this file,
+# and the release target fails closed with an explanatory message rather than
+# silently doing the wrong thing. Set it in the environment, or in a gitignored
+# local.mk.
+#
+# REPO_NAME must be the LITERAL repo name and never $(notdir $(CURDIR)): that
+# derives the SIGNING IDENTITY from the checkout directory, so a worktree, a CI
+# workspace or a clone named anything else signs and attributes the release
+# under the wrong name (measured: a directory named `mk` signed as `mk`).
+-include local.mk
+AGENT_GIT ?=
 REPO_NAME ?= go-enclave
 
 GOCMD    ?= go
@@ -49,7 +56,7 @@ vet:
 tidy:
 	$(GOMOD) tidy
 
-## lint: golangci-lint (pinned; devops.md §9)
+## lint: golangci-lint (pinned)
 .PHONY: lint
 lint:
 	@go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_VERSION)
@@ -86,7 +93,7 @@ modverify:
 trivy:
 	@trivy fs --scanners vuln,secret --severity CRITICAL,HIGH --exit-code 1 --ignorefile .trivyignore .
 
-## security: full local security suite (devops.md §8; no container image to scan)
+## security: full local security suite (no container image to scan)
 .PHONY: security
 security: gosec govulncheck modverify trivy
 	@echo "Security suite passed"
@@ -101,7 +108,7 @@ security: gosec govulncheck modverify trivy
 test:
 	$(GOTEST) -race -count=1 -timeout=300s $(PKG)
 
-## coverage: coverage report + threshold (testing-guidelines.md)
+## coverage: coverage report + threshold
 .PHONY: coverage
 coverage:
 	$(GOTEST) -race -covermode=atomic -coverprofile=$(COVERAGE_PROFILE) $(PKG)
@@ -125,7 +132,7 @@ build:
 ci: tidy fmt-check vet lint staticcheck security test build
 	@echo "CI pipeline completed successfully"
 
-## deps-latest: bump first-party deps to their latest Gitea tags (none today)
+## deps-latest: bump internal dependencies to their latest tags (none today)
 .PHONY: deps-latest
 deps-latest:
 	@GOWORK=off sh -c ' \
@@ -136,12 +143,12 @@ deps-latest:
 	done; go mod tidy'
 
 ## release-alpha: cut a signed release — make release-alpha VERSION=vX.Y.Z-alpha
-# Company template v2.2 (software/templates/make/release-alpha.mk), adopted per
-# go-enclave #10. v1 auto-incremented PATCH only — it would have named the
-# additive v0.2.0-alpha as v0.1.1-alpha — and created LIGHTWEIGHT UNSIGNED tags
-# under the OWNER's local identity, pushed every local tag, and let `|| true`
+# The version is stated EXPLICITLY rather than derived. An earlier recipe
+# auto-incremented the PATCH component, which would have named an additive
+# v0.2.0-alpha release as v0.1.1-alpha; it also created LIGHTWEIGHT UNSIGNED
+# tags, pushed every local tag rather than the named one, and let `|| true`
 # swallow a failed VERSION commit so a tag could disagree with its own VERSION
-# file. Both releases cut from this repo so far were done by hand for exactly
+# file. Releases cut from this repo so far were done by hand for exactly
 # those reasons.
 #
 # One deviation from the template as published, and it is a fix not a fork: v2.2
@@ -153,6 +160,7 @@ deps-latest:
 # before the other fifteen repos adopt it.
 .PHONY: release-alpha
 release-alpha:
+	@test -n '$(AGENT_GIT)' || { echo 'ERROR: AGENT_GIT is unset - point it at your commit-signing/release wrapper (maintainer tooling; not needed to build or test)'; exit 1; }
 	@test -n "$(VERSION)" || { echo "ERROR: state the version explicitly: make release-alpha VERSION=vX.Y.Z-alpha (release-versioning.md decides patch/minor/major — the recipe refuses to guess)"; exit 1; }
 	@test "$$(git rev-parse --abbrev-ref HEAD)" = main || { echo "ERROR: releases are cut from main; you are on $$(git rev-parse --abbrev-ref HEAD). 'push dev HEAD' would publish this branch to dev."; exit 1; }
 	@echo "$(VERSION)" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+-alpha$$' || { echo "ERROR: '$(VERSION)' is not vX.Y.Z-alpha"; exit 1; }

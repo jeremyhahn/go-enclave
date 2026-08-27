@@ -24,17 +24,19 @@ import (
 	"github.com/awnumar/memcall"
 )
 
-// TestMemoryEnclave_AllocateInsideBorrow is the test go-qrdb #74/#145 have been
-// waiting on, and the reason issue #2 existed.
+// TestMemoryEnclave_AllocateInsideBorrow covers the deadlock that owning the
+// mapping was meant to remove.
 //
 // Until v0.3.0-alpha a process-wide lock serialized every allocation against
 // every borrow: allocation took it exclusively, borrows took it shared, and Go's
 // RWMutex blocks new readers once a writer queues. So a goroutine holding a
-// borrow that called anything which allocated protected memory DEADLOCKED — and
-// go-qrdb's pkg/dek has exactly that shape, handing a locked DEK to an injected
-// barrier whose conforming implementations allocate. All three ways of writing
-// it were blocked: hold the borrow (deadlock), copy to the heap (the regression
-// this package exists to prevent), or pass the bytes unborrowed (the race).
+// borrow that called anything which allocated protected memory DEADLOCKED.
+//
+// That shape is ordinary, not exotic: handing borrowed key material to an
+// injected interface whose implementations allocate protected memory of their
+// own. All three ways of writing it were blocked — hold the borrow (deadlock),
+// copy to the heap (the regression this package exists to prevent), or pass the
+// bytes unborrowed (the race).
 //
 // go-enclave owns its mapping now, nothing can purge it, and the lock is gone.
 // This holds a borrow and allocates, borrows, fills and destroys a second

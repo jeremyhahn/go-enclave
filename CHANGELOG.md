@@ -13,8 +13,7 @@ All notable changes to go-enclave are documented here. The format follows
 - **`WipeAll() (int, error)` — a cooperative shutdown sweep that destroys every
   live enclave, reports how many it could not, and reports whether any of them
   were corrupt.** For an orderly exit: a signal handler, a defer in main. It is
-  not a fault handler and nothing calls it for you (go-enclave #18, for go-qrdb
-  #114's `Buffer`).
+  not a fault handler and nothing calls it for you.
 
   The two return values are **orthogonal, and neither implies the other**. The
   count is how many enclaves are still holding locked memory; a non-zero value
@@ -33,9 +32,9 @@ All notable changes to go-enclave are documented here. The format follows
   This is the one thing v0.3.0-alpha's removal of memguard left a consumer
   needing. Option B deleted memguard's process-global registry because of what
   memguard did WITH it — purge the whole thing on any mapping failure, then panic
-  — and go-qrdb's `qrdbd` had been relying on that same registry for a
-  *cooperative* exit wipe. After the conversion its exit path silently stopped
-  covering the cluster DEK: nothing failed, nothing announced it.
+  — while a consumer had been relying on that same registry for a *cooperative*
+  exit wipe. After the conversion its exit path silently stopped covering the
+  key it was meant to destroy: nothing failed, nothing announced it.
 
   A cooperative sweep is a different mechanism wearing a similar shape.
   `WipeAll` is called explicitly rather than triggered by a fault, **never
@@ -189,8 +188,7 @@ All notable changes to go-enclave are documented here. The format follows
 
 - **go-enclave maps its own memory.** The backing store is no longer a memguard
   `LockedBuffer`; the package allocates, locks, guards, wipes and releases pages
-  through `memcall` directly — the layer memguard itself uses. Owner ruling on
-  issue #2, 2026-08-26.
+  through `memcall` directly — the layer memguard itself uses.
 
   The layout is deliberately unchanged: an mlock'd inner region with the data
   flush against an inaccessible postguard, a random canary in the slack ahead of
@@ -207,8 +205,10 @@ All notable changes to go-enclave are documented here. The format follows
   borrowing or destroying an enclave from inside another enclave's live borrow
   now works. It previously deadlocked: allocation took the lock exclusively,
   borrows took it shared, and Go's `RWMutex` blocks new readers once a writer
-  queues. That blocked go-qrdb #74/#145 outright — the three ways of writing the
-  code were deadlock, an unprotected heap copy, or an unsynchronized read.
+  queues. That blocked an ordinary shape outright — handing borrowed key
+  material to an injected interface whose implementations allocate protected
+  memory of their own — because the three ways of writing the code were
+  deadlock, an unprotected heap copy, or an unsynchronized read.
 
 - **An allocation failure no longer damages unrelated enclaves.** Exhausting
   `RLIMIT_MEMLOCK` fails exactly the allocation that reached the ceiling. An
@@ -278,7 +278,7 @@ All notable changes to go-enclave are documented here. The format follows
   on a 4 KiB-page host: a 32-byte enclave locks 4096 bytes, a **128x**
   undercount, and 200 of them charged 6400 bytes against a budget while locking
   819200. Reservations are now charged, reported and released in locked bytes,
-  page-rounded as the kernel charges them (go-enclave #7).
+  page-rounded as the kernel charges them.
 
 - **A size too large to MAP reached memguard and purged the process.** memguard
   lays out the data region plus two guard pages using `int` arithmetic
@@ -319,8 +319,7 @@ All notable changes to go-enclave are documented here. The format follows
   `WithBytes` borrow, so generated material — a drawn key, a derived wrapping
   key, a Shamir share — never exists on the ordinary heap, not even transiently.
   Until now the whole construction surface took existing bytes, which forced
-  consumers into the `make` + generate + move shape the wipe cannot fully undo
-  (go-enclave #1, filed for go-qrdb #114).
+  callers into the `make` + generate + move shape the wipe cannot fully undo.
 - `ErrInvalidSize` for a non-positive size, mirroring `ErrInvalidBudget`.
   `Allocator.NewSized` refuses it at the admission gate, before memguard is
   entered.
@@ -353,16 +352,17 @@ All notable changes to go-enclave are documented here. The format follows
   `trivy` target at it. The nightly Trivy job passes `--ignorefile .trivyignore`,
   and trivy treats a missing ignore file as a FATAL flag error rather than as an
   empty list — so that job had never scanned this repository, and the CVEs above
-  were behind the error it died on (go-enclave #4).
+  were behind the error it died on.
 
 ## [v0.1.0-alpha] - 2026-08-23
 
 ### Added
 
 - Initial release. `MemoryEnclave`, a region of locked, zeroized memory for
-  holding sensitive material for its whole lifetime in the process, extracted
-  from `go-objstore/pkg/enclave` (owner ruling 2026-08-23; go-objstore #29) so
-  that every Layer 0–3 library in the portfolio can import it.
+  holding sensitive material for its whole lifetime in the process. Extracted
+  from an object-storage library that had grown its own copy, so that libraries
+  handling key material can share one implementation instead of each rolling
+  their own.
 - Error-returning locked-memory handling: an mlock failure yields a typed
   `LockedMemoryError` / `ErrLockedMemoryUnavailable` instead of memguard's
   process-wide `Purge` + panic.

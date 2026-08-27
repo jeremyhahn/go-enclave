@@ -49,11 +49,12 @@
 // before v0.3.0-alpha the same check lived in memguard and called core.Panic,
 // which additionally destroyed every other enclave in the process on its way out.
 //
-// The vocabulary is deliberate and portfolio-wide: the type describes its
-// mechanism — a region of locked memory — and is never called a "secret",
-// which in this codebase already means a config value, a secret reference, an
-// ACME account secret or a Shamir share. Do not introduce Secret,
-// SecureString, SecureBytes or ProtectedBuffer synonyms.
+// The vocabulary is deliberate: the type describes its mechanism — a region of
+// locked memory — rather than what a caller keeps in it. It is never called a
+// "secret", because in most systems that word is already taken by a config
+// value, a secret reference, an account secret or a key share, and a name that
+// collides with three existing meanings makes every call site ambiguous. Avoid
+// introducing Secret, SecureString, SecureBytes or ProtectedBuffer synonyms.
 //
 // Usage:
 //

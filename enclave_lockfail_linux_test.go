@@ -153,9 +153,9 @@ const (
 // a process-wide lock. The enclave itself still died, and the lock is what made
 // allocating inside a borrow deadlock.
 //
-// go-enclave now maps its own memory (issue #2, owner-ruled). There is no
-// registry to purge, so a foreign failure is simply a failure: it returns a
-// typed error to its own caller and touches nothing else. This test asserts the
+// go-enclave now maps its own memory. There is no registry to purge, so a
+// foreign failure is simply a failure: it returns a typed error to its own
+// caller and touches nothing else. This test asserts the
 // stronger property directly — the unrelated enclave is ALIVE and INTACT
 // afterwards — and, because there is no lock any more, that the failing
 // allocation ran to completion while a borrow was still in flight.
