@@ -400,3 +400,84 @@ func TestLockedMemoryError(t *testing.T) {
 		}
 	})
 }
+
+// TestEqualToErrSeparatesMismatchFromDestroyed is the regression for #30.
+//
+// EqualTo answers false for both "the material differs" and "there is no
+// material", so a caller cannot tell them apart. That is safe in the shape it is
+// nearly always written in — `if e.EqualTo(secret) { grant() }` fails closed —
+// and unsafe the moment the test is inverted, because a destroyed enclave then
+// reads as a definite mismatch.
+func TestEqualToErrSeparatesMismatchFromDestroyed(t *testing.T) {
+	const material = "the real material"
+
+	t.Run("match", func(t *testing.T) {
+		e, err := NewMemoryEnclaveFromString(material)
+		if err != nil {
+			t.Fatalf("NewMemoryEnclaveFromString: %v", err)
+		}
+		defer e.Destroy()
+
+		equal, err := e.EqualToErr([]byte(material))
+		if err != nil {
+			t.Fatalf("EqualToErr on a live enclave = %v, want no error", err)
+		}
+		if !equal {
+			t.Error("EqualToErr reported a mismatch for identical material")
+		}
+	})
+
+	t.Run("genuine mismatch is (false, nil)", func(t *testing.T) {
+		e, err := NewMemoryEnclaveFromString(material)
+		if err != nil {
+			t.Fatalf("NewMemoryEnclaveFromString: %v", err)
+		}
+		defer e.Destroy()
+
+		equal, err := e.EqualToErr([]byte("something else"))
+		if err != nil {
+			t.Fatalf("EqualToErr = %v, want no error: the comparison RAN, it "+
+				"simply did not match", err)
+		}
+		if equal {
+			t.Error("EqualToErr reported equal for different material")
+		}
+	})
+
+	t.Run("destroyed is (false, ErrEnclaveDestroyed)", func(t *testing.T) {
+		e, err := NewMemoryEnclaveFromString(material)
+		if err != nil {
+			t.Fatalf("NewMemoryEnclaveFromString: %v", err)
+		}
+		e.Destroy()
+
+		equal, err := e.EqualToErr([]byte(material))
+		if !errors.Is(err, ErrEnclaveDestroyed) {
+			t.Fatalf("EqualToErr on a destroyed enclave = (%v, %v), want "+
+				"ErrEnclaveDestroyed: a caller that cannot distinguish this "+
+				"from a mismatch is acting on a fact it does not have", equal, err)
+		}
+		if equal {
+			t.Error("EqualToErr reported equal for a destroyed enclave")
+		}
+
+		// The boolean spelling stays fail-closed, which is why it may keep the
+		// collapse: it is the inverted use that is unsafe, and that use now has
+		// EqualToErr.
+		if e.EqualTo([]byte(material)) {
+			t.Error("EqualTo on a destroyed enclave reported true; it must " +
+				"fail closed whatever else changes")
+		}
+	})
+
+	t.Run("nil receiver", func(t *testing.T) {
+		var e *MemoryEnclave
+		equal, err := e.EqualToErr([]byte(material))
+		if !errors.Is(err, ErrEnclaveDestroyed) || equal {
+			t.Fatalf("nil EqualToErr = (%v, %v), want (false, ErrEnclaveDestroyed)", equal, err)
+		}
+		if e.EqualTo([]byte(material)) {
+			t.Error("nil EqualTo reported true")
+		}
+	})
+}

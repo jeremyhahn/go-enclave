@@ -425,17 +425,41 @@ func (e *MemoryEnclave) IsAlive() bool {
 }
 
 // EqualTo reports whether the enclave holds exactly other, comparing in
-// constant time under the read lock. A destroyed or nil enclave equals
-// nothing.
+// constant time under the read lock.
+//
+// A destroyed or nil enclave reports false. That is deliberate and it is
+// FAIL-CLOSED for the shape this is nearly always used in —
+// `if e.EqualTo(secret) { grant() }` — but it means false carries two different
+// facts: the material did not match, and there was no material to compare.
+// Callers that need to tell those apart, or that invert the test, must use
+// [MemoryEnclave.EqualToErr]; inverting this one treats a destroyed enclave as
+// a mismatch, which is the opposite of fail-closed.
 func (e *MemoryEnclave) EqualTo(other []byte) bool {
+	equal, err := e.EqualToErr(other)
+	return err == nil && equal
+}
+
+// EqualToErr reports whether the enclave holds exactly other, distinguishing a
+// comparison that ran and said no from one that could not run at all.
+//
+// It returns [ErrEnclaveDestroyed] for a destroyed or nil enclave, where
+// [MemoryEnclave.EqualTo] returns a bare false. "I compared them and they
+// differ" and "there was nothing to compare" are different answers, and a
+// caller that acts on the first when it was handed the second is acting on a
+// fact it does not have. That collapse is invisible at the call site precisely
+// because the safe-looking spelling is the common one.
+//
+// The comparison itself is constant time and runs under the read lock, so a
+// concurrent Destroy waits rather than unmapping the pages mid-compare.
+func (e *MemoryEnclave) EqualToErr(other []byte) (bool, error) {
 	equal := false
 	if err := e.withLocked(func(b []byte) error {
 		equal = subtle.ConstantTimeCompare(b, other) == 1
 		return nil
 	}); err != nil {
-		return false
+		return false, err
 	}
-	return equal
+	return equal, nil
 }
 
 // Destroy zeroizes the material and releases the locked region. It is
