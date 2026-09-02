@@ -53,7 +53,11 @@ permissions:
   security-events: write
 
 env:
-  GO_VERSION: "1.26.7"        # pinned to a 1.26 patch release; bump within 1.26 as patches ship
+  GO_VERSION: "1.27.0"        # portfolio standard (owner ruling 2026-09-01). The
+                              # ci-runner image seeds this into the toolcache and
+                              # the review image runs it with GOTOOLCHAIN=local, so
+                              # both halves of the bump are in place -- raising the
+                              # go directive alone would break the hosted review.
   COVERAGE_THRESHOLD: 90      # minimum total statement coverage
 
 jobs:
@@ -77,26 +81,48 @@ jobs:
       - name: Vet
         run: go vet ./...
 
-      - name: Install golangci-lint
-        # PINNED:
-        # @latest moved to v2.13.0, which panics under Go 1.26 ("nilness:
-        # internal error: unhandled builtin recover" in honnef.co/go/tools
-        # v0.8.0-rc.1) and took the whole gate down — and with it every job
-        # that needed lint. Unpin when an upstream release passes on the
-        # release passes cleanly.
-        # RETRIED (2026-08-20): sum.golang.org tile fetches during this
-        # install flake with HTTP/2 INTERNAL_ERROR, and under staged fail-fast a
-        # linter-INSTALL flake blocks
-        # the whole pipeline. Bounded retry, full sumdb verification kept —
-        # do NOT "fix" this with GOSUMDB=off, which trades a flake for a
-        # supply-chain hole. Durable fix: bake the pinned linter into the
-        # runner image (infra).
+      # USE THE BAKED TOOL; DO NOT INSTALL OVER THE NETWORK.
+      #
+      # This step used to `go install golangci-lint@v2.12.2` unconditionally,
+      # which OVERWROTE the v2.13.2 the runner image bakes -- and v2.12.2 cannot
+      # lint Go 1.27, so the workflow actively undid the fix that was already
+      # sitting in the image. A sample of 12 repos found 9 in that state.
+      #
+      # It fails CLOSED on absence or a version mismatch rather than falling
+      # back to a network install. A fallback reintroduces the substitution at
+      # exactly the moment the image is wrong, which is the moment the guard
+      # exists for -- and a linter silently downgraded is a gate that reports
+      # green while checking less.
+      - name: Require the pinned golangci-lint
+        env:
+          WANT: v2.13.2
         run: |
-          for i in 1 2 3; do
-            go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 && exit 0
-            echo "install attempt $i failed; retrying"; sleep 10
-          done
-          echo "golangci-lint install failed after 3 attempts"; exit 1
+          set -eu
+          if ! command -v golangci-lint >/dev/null 2>&1; then
+            echo "::error::golangci-lint is not present in the image. It is baked" \
+                 "at $WANT; this job does not install it over the network." >&2
+            exit 1
+          fi
+          # Parse by this tool's OWN marker, not "the first version on the
+          # line". The real output is
+          #   golangci-lint has version 2.13.2 built with go1.26.7 from ...
+          # which carries TWO versions, and the Go one is a different fact. A
+          # positional parse happens to work today and breaks silently the day
+          # the wording changes -- which is how the first draft of this step
+          # shipped a check that read the Go version instead of the scanner's.
+          got=$(golangci-lint --version 2>&1 | sed -n 's/.*has version \([0-9][^ ]*\).*/\1/p' | head -1)
+          case "$got" in
+            v*) ;;
+            "") ;;
+            *) got="v$got" ;;
+          esac
+          echo "golangci-lint present: $got (pinned $WANT)"
+          if [ "$got" != "$WANT" ]; then
+            echo "::error::golangci-lint $got does not match the pin $WANT." \
+                 "Raise the pin here and in the runner image together, or the" \
+                 "linter and the toolchain drift apart." >&2
+            exit 1
+          fi
 
       # .golangci.yml must enable staticcheck, errcheck, unused, ineffassign,
       # misspell, gocritic — the umbrella with the security
@@ -142,20 +168,34 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
 
-      - name: Install gosec
-        # RETRIED (2026-08-20): same sum.golang.org flake class as the lint
-        # install — a tool-install network failure must not fail a job that
-        # never ran its analysis. Full sumdb verification kept.
+      # USE THE BAKED TOOL; DO NOT INSTALL OVER THE NETWORK. This was
+      # `go install ...@latest`, which is worse than a wrong pin: it is
+      # unreproducible, it changes underneath the repo without a commit, and it
+      # once made scans report "Version: dev" (go-luks2 #21). The image bakes a
+      # pinned build and verifies it at build time.
+      - name: Require the pinned gosec
+        env:
+          WANT: v2.29.0
         run: |
-          for i in 1 2 3; do
-            go install github.com/securego/gosec/v2/cmd/gosec@latest && exit 0
-            echo "install attempt $i failed; retrying"; sleep 10
-          done
-          echo "tool install failed after 3 attempts"; exit 1
+          set -eu
+          if ! command -v gosec >/dev/null 2>&1; then
+            echo "::error::gosec is not present in the image. It is baked at $WANT;" \
+                 "this job does not install it over the network." >&2
+            exit 1
+          fi
+          # "Version: v2.29.0" in the image. A gosec built by `go install`
+          # reports "Version: dev" instead, because the version is injected with
+          # -ldflags at image build time -- and "dev" is precisely what this pin
+          # must reject, since an unversioned scanner is an unreproducible one.
+          got=$(gosec --version 2>&1 | sed -n 's/^Version: //p' | head -1)
+          case "$got" in v*) ;; "") ;; *) got="v$got" ;; esac
+          echo "gosec present: $got (pinned $WANT)"
+          if [ "$got" != "$WANT" ]; then
+            echo "::error::gosec $got does not match the pin $WANT. Raise the pin" \
+                 "here and in the runner image together." >&2
+            exit 1
+          fi
 
-      # every -exclude rule must carry a
-      # written reason HERE, checked against the code, and the list must stay
-      # identical to GOSEC_EXCLUDE in the Makefile.
       - name: Run gosec
         # -stdout keeps the findings readable in the job log: the SARIF upload
         # below only runs on github.com, so without it a Gitea failure exits 1
@@ -192,22 +232,35 @@ jobs:
           sarif_file: gosec.sarif
           category: gosec
 
-      - name: Install govulncheck
-        # RETRIED (2026-08-20): same sum.golang.org flake class as the lint
-        # install — a tool-install network failure must not fail a job that
-        # never ran its analysis. Full sumdb verification kept.
+      # USE THE BAKED TOOL; DO NOT INSTALL OVER THE NETWORK. This was
+      # `go install ...@latest`, which is worse than a wrong pin: it is
+      # unreproducible, it changes underneath the repo without a commit, and it
+      # once made scans report "Version: dev" (go-luks2 #21). The image bakes a
+      # pinned build and verifies it at build time.
+      - name: Require the pinned govulncheck
+        env:
+          WANT: v1.7.0
         run: |
-          for i in 1 2 3; do
-            go install golang.org/x/vuln/cmd/govulncheck@latest && exit 0
-            echo "install attempt $i failed; retrying"; sleep 10
-          done
-          echo "tool install failed after 3 attempts"; exit 1
+          set -eu
+          if ! command -v govulncheck >/dev/null 2>&1; then
+            echo "::error::govulncheck is not present in the image. It is baked at $WANT;" \
+                 "this job does not install it over the network." >&2
+            exit 1
+          fi
+          # `govulncheck -version` prints a "Go: go1.27.0" line as well as
+          # "Scanner: govulncheck@v1.7.0", and WHICH COMES FIRST depends on how
+          # the binary was built -- Scanner first in the runner image, Go first
+          # from a `go run`. Taking the first version on the output read the Go
+          # toolchain and compared it to the scanner pin.
+          got=$(govulncheck -version 2>&1 | sed -n 's/^Scanner: govulncheck@//p' | head -1)
+          case "$got" in v*) ;; "") ;; *) got="v$got" ;; esac
+          echo "govulncheck present: $got (pinned $WANT)"
+          if [ "$got" != "$WANT" ]; then
+            echo "::error::govulncheck $got does not match the pin $WANT. Raise the pin" \
+                 "here and in the runner image together." >&2
+            exit 1
+          fi
 
-      # Also the toolchain-currency forcing function: fails on stdlib vulns
-      # in an outdated Go.
-      #
-      # The exit code is triaged rather than propagated bare. A shell
-      # reports a signal death as 128+N, so an OOM kill leaves 137 — and a bare
       # `govulncheck ./...` renders that as an ordinary red with no findings in
       # the log, which reads exactly like "vulnerabilities found" and sends
       # someone hunting a CVE that does not exist. Observed in practice: gosec
