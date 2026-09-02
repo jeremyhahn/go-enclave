@@ -320,6 +320,51 @@ All notable changes to go-enclave are documented here. The format follows
   quietly, and admission fails safe regardless — the kernel refuses the lock and
   the allocation returns `ErrLockedMemoryUnavailable`.
 
+### Tests
+
+- **The retune/admission race test no longer inherits the scheduler's luck
+  (#51).** `TestAllocator_Retune_RacesAdmission` ran a storm — goroutines
+  allocating and destroying in a loop against goroutines raising a page and
+  taking it back — and read the outcome off the counters afterwards. Which half
+  of the race got to run was entirely the scheduler's to decide. Measured on one
+  8-core host with no change to the code under test: `lowered=43` of 2400 idle,
+  `lowered=2400` of 2400 under CPU load, and a flat
+  `admitted=600 refusedAdmit=1800 lowered=2400` under `GOMAXPROCS=1` and
+  `taskset -c 0`, which is not a race at all but sixteen goroutines run to
+  completion in turn. On a saturated CI runner the shrinking half starved
+  outright (`raised=2400 lowered=0`) and the test's own vacuity control fired on
+  an unrelated pull request. **The control was right** — without it that run
+  would have been a green report on a retune path that performed no lowerings —
+  so the setup was fixed and the control kept, word for word.
+
+  The contest is now ARRANGED. Each round releases a fixed cast from one line:
+  actors that each attempt exactly one page-sized admission, actors that each
+  destroy exactly one pre-held enclave, and one retuner that withdraws exactly
+  one page. Every claim is one page and nothing loops, so supply and demand are
+  known before the round opens and `min(supply, demand)` claims must be granted
+  whatever order they land in — too many is the over-commit, too few is a
+  starved round saying so instead of quietly proving less. Three shapes: one
+  where supply covers demand (so a successful lowering is guaranteed on every
+  host, which is what makes the control stop being load-sensitive), one two
+  pages short (the conservation check), and one where destroys land inside the
+  window. Measured 0 failures in 25 runs in each of multi-core, `GOMAXPROCS=1`,
+  `taskset -c 0`, and under 16 busy loops, with `lowered` never below 546 of 600
+  — against a structural floor of 400 that no scheduling can take away.
+
+- **The linearization defect is now caught deterministically rather than a
+  third of the time.** Arranging the contest fixed the vacuity, but neither form
+  reliably catches the regression the test exists for: against a
+  `withdrawLocked` reduced from compare-and-swap to read-then-subtract, the
+  storm form went red on 3 runs in 10 and the arranged form on 0 in 10 — the
+  window a racing admission must land in is two instructions wide, so entering
+  it is a coin flip. `TestAllocator_Retune_LoweringLosesTheContestedPage` parks
+  the withdrawal in that window through a seam on `Allocator` (`stalled`, nil in
+  every build, called only from `withdrawLocked` under the retune mutex — never
+  on the lock-free admission path), lands the conflicting admission by hand, and
+  only then releases it. Red 25 out of 25 against that regression, multi-core
+  and `GOMAXPROCS=1` alike, reporting `free = -4096` — the over-commit itself,
+  by name.
+
 
 ## [v0.4.0-alpha] - 2026-08-26
 

@@ -12,6 +12,7 @@ import (
 	"bytes"
 	"errors"
 	"math"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -697,156 +698,630 @@ func TestLimitError(t *testing.T) {
 	})
 }
 
-// TestAllocator_Retune_RacesAdmission is the test this change exists to pass. A
-// two-page budget with eight goroutines each taking a page, against eight
-// goroutines withdrawing a page and giving it back, keeps the free counter
-// hovering around zero: every admission and every lowering competes for the same
-// last page, so the two decisions cannot both be right unless they are
-// linearized against each other.
+// retuneActors is the number of goroutines that contend for pages in each round
+// of [TestAllocator_Retune_RacesAdmission], besides the one retuner. Each of
+// them either takes exactly one page or gives exactly one back, and every
+// round's arithmetic is written in terms of this count.
+const retuneActors = 8
+
+// retuneShape describes one kind of arranged round: the budget it opens on, how
+// many actors reach for a page, and how many hand one back while the retuner is
+// deciding.
 //
-// The shape of the contest was chosen against two measurements, both of which
-// left it asserting far less than it appears to.
+// Sizes are in PAGES because every claim in a round is exactly one page: an
+// admission of 32 bytes charges lockedSize(32), which is one page, and the
+// retuner withdraws one page. That is what makes a round's outcome arithmetic
+// rather than a prediction — see [TestAllocator_Retune_RacesAdmission].
+type retuneShape struct {
+	name string
+	// limit is the budget the round's allocator is constructed with. The
+	// retuner raises it by one page at the head of the round, before the
+	// contest opens, and that page is the one being contested.
+	limit int64
+	// admit is how many actors attempt exactly one admission each.
+	admit int
+	// drain is how many actors destroy one pre-held enclave each, returning a
+	// page to the budget while the lowering is deciding.
+	drain int
+}
+
+// supply is the page claims available to the round: the budget, plus the page
+// the retuner's raise puts into circulation, less the pages the pre-held
+// enclaves are sitting on when the round opens.
 //
-// A ONE-page budget starves the allocators: a run measured twelve admissions
-// against twenty-four hundred refusals, and a race test where one side almost
-// never commits cannot catch the interleaving it exists for. Retuners that
-// withdraw a page from a two-page budget starve in the other direction on a
-// single core — measured under GOMAXPROCS=1, every one of 2400 lowerings was
-// refused, because two of the eight allocator goroutines were always mid-borrow
-// when a retuner ran, and the run reported green on a retune path it never once
-// executed.
+// Pages returned by the draining actors are deliberately NOT counted. A claim
+// that is only affordable because a concurrent Destroy has already landed is a
+// claim that depends on the scheduler, which is the property this test was
+// rewritten to stop depending on; the shapes are chosen so no claim does.
+func (sh retuneShape) supply() int64 { return sh.limit + 1 - int64(sh.drain) }
+
+// demand is the page claims attempted: one per admitting actor, plus the
+// retuner's withdrawal.
+func (sh retuneShape) demand() int64 { return int64(sh.admit) + 1 }
+
+// granted is how many of those claims MUST succeed, on every host and every
+// interleaving. It is the smaller of supply and demand, and both halves of that
+// are load-bearing:
 //
-// So the retuners RAISE by a page and lower back. The raise always succeeds; the
-// lowering back is refused only when usage is at the raised ceiling exactly,
-// which is a minority of the time on any core count. Usage still cannot exceed
-// three pages against eight allocator goroutines, so the free counter still
-// hovers at zero and the contest is still over the last page.
+//   - No more, because a page cannot be granted twice. Two claims sharing one
+//     page is the over-commit this whole type exists to prevent, and it is what
+//     an over-subscribed round is arranged to detect.
+//   - No fewer, because no contender gives up while a page is free: an
+//     admission is refused only when it reads the counter at exactly zero (the
+//     charge is one page and the counter moves in whole pages), and the same
+//     holds for the withdrawal. Nothing puts a page back afterwards either —
+//     the raise is done before the line, and a shape that is short of supply
+//     is not allowed to drain, which runRetuneShape enforces.
+func (sh retuneShape) granted() int64 {
+	if sh.supply() < sh.demand() {
+		return sh.supply()
+	}
+	return sh.demand()
+}
+
+// retuneRound is the state of one arranged round. Every field is written by a
+// single goroutine and read by the coordinator after the join, except the
+// counters, which are atomic because the actors share them.
+type retuneRound struct {
+	shape retuneShape
+	a     *Allocator
+	held  []*MemoryEnclave // one per draining actor; destroyed inside the window
+	got   []*MemoryEnclave // one per admitting actor; nil where it was refused
+
+	wg      sync.WaitGroup
+	arrived atomic.Int32
+
+	admitted atomic.Int64
+	refused  atomic.Int64
+	lowered  atomic.Bool
+}
+
+// line parks the caller until every participant in the round has reached it, so
+// the claims that follow are made against each other rather than in whatever
+// order the goroutines happened to start.
 //
-// The invariant asserted is that the free counter never goes negative. That is
-// the over-commit in its most direct form — free < 0 means the allocator handed
-// out locked bytes the budget does not cover, and it is exactly equivalent to
-// InUse() exceeding Limit(), but it is a single atomic word so a concurrent
-// observer can read it without the two-word skew that InUse and Limit would
-// have. Nothing in this test calls ForceLimit, which is the only legitimate way
-// to drive it negative.
+// It is bounded and it FAILS on the bound rather than returning quietly. A
+// harness whose synchronization has broken does not produce a weaker test, it
+// produces a test measuring something else entirely — so a participant that
+// never arrives has to say so in those words, not leave the round looking like
+// a legitimate result.
+func (rd *retuneRound) line(t *testing.T) bool {
+	t.Helper()
+	const participants = retuneActors + 1
+	rd.arrived.Add(1)
+	deadline := time.Now().Add(30 * time.Second)
+	for rd.arrived.Load() < participants {
+		if time.Now().After(deadline) {
+			t.Errorf("%s round: %d of %d participants reached the line; the contest was never synchronized and this round proves nothing",
+				rd.shape.name, rd.arrived.Load(), participants)
+			return false
+		}
+		runtime.Gosched()
+	}
+	return true
+}
+
+// retuneTally is the run-wide count of what the arranged rounds actually did.
+// The controls at the end of [TestAllocator_Retune_RacesAdmission] read it, and
+// it is what the test logs: the counts are the evidence that the path ran.
+type retuneTally struct {
+	admitted     atomic.Int64
+	refusedAdmit atomic.Int64
+	raised       atomic.Int64
+	lowered      atomic.Int64
+	refusedLower atomic.Int64
+	overCommit   atomic.Int64
+}
+
+// TestAllocator_Retune_RacesAdmission is the test the retune design exists to
+// pass: a budget lowering and an admission decide against the same free bytes,
+// and the compare-and-swap they share must linearize them so that exactly one
+// of them gets a contested page. Both getting it means the process has promised
+// locked memory the kernel will not hand over, and the failure surfaces later,
+// somewhere else, as ErrLockedMemoryUnavailable.
 //
-// Meaningful only with more than one core, and that is measured rather than
-// assumed: replacing the compare-and-swap in withdrawLocked with a check
-// followed by an unconditional add fails this test on every multi-core run and
-// passes it on every GOMAXPROCS=1 run, because the window between the check and
-// the add is almost never preempted on a single core. The counters at the end
-// are what prove the run actually contended rather than executing each goroutine
-// to completion in turn.
+// # The contest is ARRANGED, and the two earlier versions are why
+//
+// Both earlier versions ran a storm — goroutines allocating and destroying in a
+// tight loop against goroutines raising a page and taking it back — and read
+// the outcome off the counters afterwards. Both were measured executing
+// nothing:
+//
+//   - A ONE-page budget starved the allocators: twelve admissions against
+//     twenty-four hundred refusals, in a test about what happens when an
+//     admission commits.
+//   - Retuners withdrawing a page from a two-page budget starved the other way.
+//     Under GOMAXPROCS=1 every one of 2400 lowerings was refused, and the run
+//     reported green on a retune path it had never once executed.
+//
+// The second measurement is what the vacuity controls at the bottom of this
+// test were added for, and they did their job: they fired on a saturated CI
+// runner with `raised=2400 lowered=0`, failing an unrelated pull request
+// (issue #51). Raising a page and lowering it back had made that starvation
+// rarer, not impossible.
+//
+// The mechanism is not subtle. Goroutines allocating in a loop hold the free
+// counter at zero, so the page a retuner puts into circulation is taken by an
+// admission before that same retuner reaches its own withdrawal a few
+// instructions later — and a couple of allocator goroutines descheduled while
+// each holds a page keep the counter at zero for as long as they stay off the
+// CPU. Whether the shrinking path runs at all is therefore decided by the
+// scheduler. Measured on the storm version at f718f10, one 8-core host, no
+// change to the code under test: idle `lowered=43` of 2400; the same binary
+// under CPU load `lowered=2400` of 2400; GOMAXPROCS=1 and `taskset -c 0` a flat
+// `admitted=600 refusedAdmit=1800 lowered=2400` on every run, which is not a
+// race at all but sixteen goroutines run to completion in turn. A fifty-fold
+// swing in how much of the path ran, none of it under the test's control.
+//
+// So this version arranges the contest instead of hoping for it. A round
+// releases a fixed cast from one line: actors that each attempt EXACTLY ONE
+// page-sized admission, actors that each destroy exactly one pre-held enclave,
+// and one retuner that raises the budget by a page and immediately withdraws
+// one. Every claim in the round is one page, the cast is fixed, and nothing
+// loops — so supply and demand are known before the round opens, and
+// min(supply, demand) of the claims must be granted whatever order they land
+// in. The shrinking half of the retune path is exercised BY CONSTRUCTION in the
+// shapes where supply covers demand, which is what makes the controls stop
+// being load-sensitive: they now fail when the code is broken and at no other
+// time.
+//
+// Three shapes, each proving something the others cannot:
+//
+//   - slack: supply exactly covers demand, so all eight admissions and the
+//     lowering succeed on every host. This is the shape that guarantees the
+//     shrinking path runs — a lowering landing while eight admissions are live
+//     — and it holds under GOMAXPROCS=1 as firmly as on eight cores.
+//   - contested: two pages short, so exactly two claims are refused and the
+//     rest are granted. This is the linearization test: if a lowering and an
+//     admission share a page, one more claim is granted than the budget can pay
+//     for and the count says so. That detection still needs the two to actually
+//     overlap, which needs more than one core — see the mutation note below.
+//   - draining: destroys land inside the window, so a lowering decides while
+//     reservations are being returned to it, and the accounting has to come out
+//     exact anyway.
+//
+// # What each round asserts
+//
+//   - The free counter is never negative. That is over-commit in its most
+//     direct form, sampled by every goroutine at every point where a racing
+//     pair could have double-spent, and checked again after the join.
+//   - Exactly granted() claims succeeded — not fewer (a starved round would say
+//     so instead of quietly proving less) and not more (the over-commit).
+//   - Every admitting actor recorded an outcome, so a goroutine that returned
+//     early cannot be mistaken for a refusal.
+//   - InUse is exactly the pages the admitted enclaves hold, and Limit is the
+//     lowered budget or the raised one according to whether the withdrawal won.
+//   - After the round's enclaves are destroyed the allocator is whole again:
+//     nothing leaked a reservation, and Available is back at Limit.
+//
+// # Mutation notes
+//
+// Replacing the compare-and-swap in withdrawLocked with a check followed by an
+// unconditional add is caught by the contested rounds, which report one more
+// granted claim than the budget could pay for, and by the free-counter witness.
+// It is caught on multi-core runs; on a single core the window between the
+// check and the add is almost never preempted, so a GOMAXPROCS=1 run of this
+// test proves the arrangement holds, not that the race is detectable there.
+// Breaking the lowering path — a withdrawLocked that refuses, a SetLimit that
+// forgets to store the lowered shadow — fails the slack and draining rounds
+// directly and by name, before the vacuity control at the bottom is reached.
 func TestAllocator_Retune_RacesAdmission(t *testing.T) {
-	base := 2 * pageSize
-	a, err := NewAllocator(base)
+	var tally retuneTally
+
+	shapes := []retuneShape{
+		// Supply exactly covers demand: 8 pages plus the raised one against 8
+		// admissions plus the withdrawal.
+		{name: "slack", limit: retuneActors, admit: retuneActors},
+		// Two pages short: 6 plus the raised one against 8 admissions plus the
+		// withdrawal, so exactly two claims must be refused.
+		{name: "contested", limit: retuneActors - 2, admit: retuneActors},
+		// Half the actors return a page while the other half take one: 8 pages
+		// plus the raised one, less the 4 the pre-held enclaves hold, against 4
+		// admissions plus the withdrawal.
+		{name: "draining", limit: retuneActors, admit: retuneActors / 2, drain: retuneActors / 2},
+	}
+
+	for _, sh := range shapes {
+		t.Run(sh.name, func(t *testing.T) {
+			runRetuneShape(t, sh, &tally)
+		})
+	}
+
+	if n := tally.overCommit.Load(); n != 0 {
+		t.Errorf("the allocator over-committed %d times: a lowering and an admission both took the same page", n)
+	}
+	// Controls. Without these the rounds above could have admitted nothing, or
+	// never contended, and still reported green. They are now backed by the
+	// shapes rather than by the scheduler: the slack and draining rounds cannot
+	// finish without a successful lowering, and the contested rounds cannot
+	// finish without a refused admission.
+	if tally.admitted.Load() == 0 {
+		t.Error("no allocation was ever admitted; this test asserted nothing")
+	}
+	if tally.lowered.Load() == 0 {
+		t.Error("no lowering ever succeeded; the shrinking half of the retune path was never exercised")
+	}
+	if tally.raised.Load() == 0 {
+		t.Error("no raise ever ran; the retuners did nothing")
+	}
+	if tally.refusedAdmit.Load() == 0 {
+		t.Error("nothing was ever refused admission; the goroutines never contended and the race was not exercised")
+	}
+	t.Logf("admitted=%d refusedAdmit=%d raised=%d lowered=%d refusedLower=%d",
+		tally.admitted.Load(), tally.refusedAdmit.Load(), tally.raised.Load(),
+		tally.lowered.Load(), tally.refusedLower.Load())
+}
+
+// runRetuneShape runs one shape's rounds against a fixed cast of goroutines,
+// checking each round as it completes and adding what it did to the run-wide
+// tally.
+//
+// The cast is created once and reused for every round, released round by round
+// from a channel closed by the coordinator. Long-lived participants are not an
+// optimization: goroutines that are already running and already hot are the
+// ones most likely to reach the line together, and a cast recreated per round
+// spends the window being scheduled for the first time.
+func runRetuneShape(t *testing.T, sh retuneShape, tally *retuneTally) {
+	// Harness self-checks. Both of these are properties of the SHAPE, so a
+	// future edit that breaks the arithmetic fails here with the reason rather
+	// than in a round assertion that looks like a product defect.
+	if sh.admit+sh.drain != retuneActors {
+		t.Fatalf("shape %s: %d admitting + %d draining actors, want exactly %d",
+			sh.name, sh.admit, sh.drain, retuneActors)
+	}
+	if sh.supply() < sh.demand() && sh.drain != 0 {
+		t.Fatalf("shape %s: an over-subscribed shape must not drain; a page returned mid-round makes the granted count depend on when the Destroy landed", sh.name)
+	}
+
+	const rounds = 200
+
+	release := make([]chan struct{}, rounds)
+	for i := range release {
+		release[i] = make(chan struct{})
+	}
+	// rds[r] is published before release[r] is closed, and read only after the
+	// receive, so the close is the happens-before edge. A nil entry means the
+	// shape gave up after a failing round and the cast should leave.
+	rds := make([]*retuneRound, rounds)
+
+	// witness samples the admission counter, called at every point where a
+	// racing pair could have double-spent a page.
+	witness := func(a *Allocator) {
+		if a.free.Load() < 0 {
+			tally.overCommit.Add(1)
+		}
+	}
+
+	var lifetime sync.WaitGroup
+	// participate is one member of the cast: idx in [0, retuneActors) is an
+	// actor, which admits or drains according to the shape, and idx ==
+	// retuneActors is the retuner.
+	participate := func(idx int) {
+		defer lifetime.Done()
+		for r := 0; r < rounds; r++ {
+			<-release[r]
+			rd := rds[r]
+			if rd == nil {
+				return
+			}
+			func() {
+				defer rd.wg.Done()
+				retuner := idx == retuneActors
+				if retuner {
+					// The raise puts the contested page into circulation, and it
+					// happens BEFORE the line on purpose. A raise only adds
+					// headroom, so it has nothing to race and nothing to
+					// double-spend. Leaving it inside the window spends the
+					// opening of the contest taking a mutex and writing two
+					// words while the admitting actors are already past their
+					// compare-and-swap — a head start for one side, measured as
+					// refusedLower=0 across 200 contested rounds, meaning the
+					// withdrawal never once had to fight for the page the round
+					// was arranged to make it fight for. Out here the retuner
+					// waits at the line with everyone else, and the withdrawal
+					// reaches the counter with the admissions.
+					if err := rd.a.SetLimit((rd.shape.limit + 1) * pageSize); err != nil {
+						t.Errorf("%s round %d: SetLimit(raise): %v", rd.shape.name, r, err)
+						// Arrive at the line anyway. The rest of the cast is
+						// waiting for a full house, and a retuner that walked
+						// off would trade this named error for two hundred
+						// thirty-second stalls and a suite timeout.
+						_ = rd.line(t)
+						return
+					}
+					tally.raised.Add(1)
+				}
+				if !rd.line(t) {
+					return
+				}
+				switch {
+				case retuner:
+					switch err := rd.a.SetLimit(rd.shape.limit * pageSize); {
+					case err == nil:
+						rd.lowered.Store(true)
+						tally.lowered.Add(1)
+					case errors.Is(err, ErrBudgetInUse):
+						tally.refusedLower.Add(1)
+					default:
+						t.Errorf("%s round %d: unexpected SetLimit(lower) err: %v", rd.shape.name, r, err)
+					}
+					witness(rd.a)
+				case idx < rd.shape.admit:
+					e, err := rd.a.NewSized(32)
+					witness(rd.a)
+					switch {
+					case err == nil:
+						rd.got[idx] = e
+						rd.admitted.Add(1)
+						tally.admitted.Add(1)
+					case errors.Is(err, ErrBudgetExhausted):
+						rd.refused.Add(1)
+						tally.refusedAdmit.Add(1)
+					default:
+						t.Errorf("%s round %d: unexpected NewSized err: %v", rd.shape.name, r, err)
+					}
+					witness(rd.a)
+				default:
+					rd.held[idx-rd.shape.admit].Destroy()
+					witness(rd.a)
+				}
+			}()
+		}
+	}
+	lifetime.Add(retuneActors + 1)
+	for i := 0; i <= retuneActors; i++ {
+		go participate(i)
+	}
+
+	var shAdmitted, shRefusedAdmit, shLowered int64
+	// closeFrom is the first round the cast must be let out of rather than run.
+	// It stays at rounds for a clean run.
+	closeFrom := rounds
+	for r := 0; r < rounds; r++ {
+		a, err := NewAllocator(sh.limit * pageSize)
+		if err != nil {
+			t.Errorf("%s round %d: NewAllocator: %v", sh.name, r, err)
+			closeFrom = r
+			break
+		}
+		rd := &retuneRound{
+			shape: sh,
+			a:     a,
+			held:  make([]*MemoryEnclave, sh.drain),
+			got:   make([]*MemoryEnclave, sh.admit),
+		}
+		bad := false
+		for i := range rd.held {
+			e, err := a.NewSized(32)
+			if err != nil {
+				t.Errorf("%s round %d: pre-held enclave %d: %v", sh.name, r, i, err)
+				bad = true
+				break
+			}
+			rd.held[i] = e
+		}
+		// The arranged starting state, checked before anyone is released: a
+		// round that opens on the wrong headroom proves something other than
+		// what its arithmetic says it does.
+		if !bad {
+			if got, want := a.Available(), (sh.limit-int64(sh.drain))*pageSize; got != want {
+				t.Errorf("%s round %d: opened with %d bytes admissible, want %d", sh.name, r, got, want)
+				bad = true
+			}
+		}
+		if bad {
+			for _, e := range rd.held {
+				if e != nil {
+					e.Destroy()
+				}
+			}
+			closeFrom = r
+			break
+		}
+
+		rd.wg.Add(retuneActors + 1)
+		rds[r] = rd
+		close(release[r])
+		waitBounded(t, &rd.wg, 60*time.Second, sh.name+" round")
+
+		checkRetuneRound(t, r, rd)
+		shAdmitted += rd.admitted.Load()
+		shRefusedAdmit += rd.refused.Load()
+		if rd.lowered.Load() {
+			shLowered++
+		}
+
+		for _, e := range rd.got {
+			if e != nil {
+				e.Destroy()
+			}
+		}
+		if got := a.InUse(); got != 0 {
+			t.Errorf("%s round %d: InUse = %d once every enclave was destroyed, want 0 (a reservation leaked)", sh.name, r, got)
+		}
+		if a.Available() != a.Limit() {
+			t.Errorf("%s round %d: Available = %d against Limit %d, want them equal", sh.name, r, a.Available(), a.Limit())
+		}
+
+		if t.Failed() {
+			// One diagnosed round is the diagnosis; two hundred copies of it
+			// are noise on top of it.
+			closeFrom = r + 1
+			break
+		}
+	}
+	for k := closeFrom; k < rounds; k++ {
+		close(release[k])
+	}
+	waitBounded(t, &lifetime, 60*time.Second, sh.name+" cast")
+
+	t.Logf("%s: rounds=%d supply=%d demand=%d granted=%d/round admitted=%d refusedAdmit=%d lowered=%d",
+		sh.name, closeFrom, sh.supply(), sh.demand(), sh.granted(), shAdmitted, shRefusedAdmit, shLowered)
+}
+
+// checkRetuneRound asserts everything one completed round has to be true of.
+// The claims are stated as arithmetic on the shape, so they hold on every host
+// and under every interleaving; a round that does not satisfy them is a defect
+// in the allocator or in the harness, never a slow machine.
+func checkRetuneRound(t *testing.T, r int, rd *retuneRound) {
+	sh := rd.shape
+	admitted := rd.admitted.Load()
+	refused := rd.refused.Load()
+	lowered := rd.lowered.Load()
+
+	if free := rd.a.free.Load(); free < 0 {
+		t.Errorf("%s round %d: free = %d after the round: a lowering and an admission both took the same page",
+			sh.name, r, free)
+	}
+	// Every actor accounted for. Without this an actor that returned early
+	// would look exactly like one whose admission was refused, and the count
+	// below would balance for the wrong reason.
+	if got := admitted + refused; got != int64(sh.admit) {
+		t.Errorf("%s round %d: %d of %d admitting actors recorded an outcome",
+			sh.name, r, got, sh.admit)
+	}
+	if got := admitted + oneIf(lowered); got != sh.granted() {
+		t.Errorf("%s round %d: %d page claims granted (%d admissions + %d lowering), want exactly %d from a supply of %d against a demand of %d",
+			sh.name, r, got, admitted, oneIf(lowered), sh.granted(), sh.supply(), sh.demand())
+	}
+	if got, want := rd.a.InUse(), admitted*pageSize; got != want {
+		t.Errorf("%s round %d: InUse = %d, want %d (%d admitted enclaves, everything pre-held destroyed)",
+			sh.name, r, got, want, admitted)
+	}
+	// A refused withdrawal changes nothing, so the budget is still the raised
+	// one; a successful withdrawal puts it back where the round started.
+	wantLimit := sh.limit
+	outcome := "succeeded"
+	if !lowered {
+		wantLimit++
+		outcome = "was refused"
+	}
+	if got := rd.a.Limit(); got != wantLimit*pageSize {
+		t.Errorf("%s round %d: Limit = %d, want %d (the withdrawal %s)",
+			sh.name, r, got, wantLimit*pageSize, outcome)
+	}
+}
+
+// oneIf counts a boolean outcome as the one page claim it represents.
+func oneIf(b bool) int64 {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+// TestAllocator_Retune_LoweringLosesTheContestedPage is the deterministic half
+// of the retune/admission race: it parks a budget lowering at the hazard point
+// and lands the conflicting admission by hand, so the interleaving the
+// compare-and-swap exists for happens on every run rather than when the
+// scheduler obliges.
+//
+// [TestAllocator_Retune_RacesAdmission] arranges the same contest at scale and
+// proves it comes out right under real concurrency, but WHICH interleaving it
+// gets is still the scheduler's to give. Measured against a withdrawLocked
+// regressed from compare-and-swap to read-then-subtract, on an ordinarily
+// loaded 8-core host: the storm form of that test went red 3 times in 10, the
+// arranged form 0 times in 10, and this test 25 times in 25 — multi-core,
+// GOMAXPROCS=1 and `taskset -c 0` alike. A race test that catches the
+// regression it was written for on a third of its runs is a coin flip wearing a
+// concurrency hat, and the fix is to stop hoping for the window and enter it.
+//
+// The arrangement: an allocator with exactly ONE page of headroom, so the
+// lowering and the admission want the same page and only one of them can have
+// it.
+//
+//  1. A goroutine calls SetLimit(0). Inside withdrawLocked it reads free = one
+//     page, decides the page is there, and parks on the seam BEFORE the swap.
+//  2. This goroutine then admits that page. It must succeed: the withdrawal has
+//     not committed anything yet, and an admission refused here would mean the
+//     budget had been spent by a decision that had not been made.
+//  3. The withdrawal is released. Its compare-and-swap now fails — the counter
+//     is not what it read — so it loops, sees no headroom, and refuses.
+//
+// What must be true afterwards is the whole contract of the free counter: the
+// admission holds the page, the budget is untouched because a refused lowering
+// changes nothing, and the counter is zero rather than negative. Read
+// differently, the run is the over-commit as it would actually happen: a
+// withdrawal that acted on a stale read would report success, leave a zero
+// budget with a page reserved against it, and drive free to -1.
+//
+// The reverse window — an admission parked while a lowering lands — is not
+// tested this way on purpose. It would need the same seam inside reserve, which
+// is the lock-free path every allocation in the process goes through and the
+// one place this package will not accept an instrumentation branch; the
+// contested rounds of [TestAllocator_Retune_RacesAdmission] cover that
+// direction at scale instead.
+func TestAllocator_Retune_LoweringLosesTheContestedPage(t *testing.T) {
+	a, err := NewAllocator(pageSize)
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
 
+	parked := make(chan struct{})
+	resume := make(chan struct{})
+	var once sync.Once
+	// Set before the withdrawing goroutine is started and never touched again,
+	// so the seam needs no synchronization of its own. One-shot: the retry
+	// iteration must run to completion rather than park a second time.
+	a.stalled = func() {
+		once.Do(func() {
+			close(parked)
+			<-resume
+		})
+	}
+
 	var (
-		admitted     atomic.Int64
-		refusedAdmit atomic.Int64
-		raised       atomic.Int64
-		lowered      atomic.Int64
-		refusedLower atomic.Int64
-		overCommit   atomic.Int64
+		lowerErr error
+		withdraw sync.WaitGroup
 	)
-	// witness samples the admission counter. Called from every goroutine at
-	// every point where a racing pair could have double-spent the page.
-	witness := func() {
-		if a.free.Load() < 0 {
-			overCommit.Add(1)
-		}
+	withdraw.Add(1)
+	go func() {
+		defer withdraw.Done()
+		lowerErr = a.SetLimit(0)
+	}()
+
+	select {
+	case <-parked:
+	case <-time.After(15 * time.Second):
+		// The seam is the entire mechanism. If the withdrawal never reaches it
+		// the run proves nothing, and saying so is the difference between a
+		// harness that broke and a test that passed.
+		t.Fatalf("the withdrawal never reached the seam in withdrawLocked; the contest was never staged and this test proves nothing")
 	}
 
-	const goroutines, iterations = 8, 300
-	var wg sync.WaitGroup
-
-	for g := 0; g < goroutines; g++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for i := 0; i < iterations; i++ {
-				e, err := a.NewSized(32)
-				witness()
-				if err != nil {
-					if !errors.Is(err, ErrBudgetExhausted) {
-						t.Errorf("unexpected NewSized err: %v", err)
-						return
-					}
-					refusedAdmit.Add(1)
-					continue
-				}
-				admitted.Add(1)
-				witness()
-				e.Destroy()
-				witness()
-			}
-		}()
+	// The conflicting admission, made while the withdrawal is parked between
+	// its read of the counter and the swap that acts on it.
+	e, err := a.NewSized(32)
+	if err != nil {
+		t.Fatalf("the admission that must win the contested page was refused: %v", err)
+	}
+	if free := a.free.Load(); free != 0 {
+		t.Errorf("free = %d once the page was admitted, want 0", free)
 	}
 
-	for g := 0; g < goroutines; g++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for i := 0; i < iterations; i++ {
-				// Put a page into circulation, then take it back out. A
-				// lowering that races an admission must lose or win outright,
-				// never share.
-				if err := a.SetLimit(base + pageSize); err != nil {
-					t.Errorf("SetLimit(raise): %v", err)
-					return
-				}
-				raised.Add(1)
-				witness()
-				switch err := a.SetLimit(base); {
-				case err == nil:
-					lowered.Add(1)
-				case errors.Is(err, ErrBudgetInUse):
-					refusedLower.Add(1)
-				default:
-					t.Errorf("unexpected SetLimit(lower) err: %v", err)
-					return
-				}
-				witness()
-			}
-		}()
+	close(resume)
+	waitBounded(t, &withdraw, 30*time.Second, "the parked withdrawal")
+
+	// The surviving state first, the loser's error second.
+	if free := a.free.Load(); free != 0 {
+		t.Errorf("free = %d, want 0: the lowering and the admission both took the same page", free)
+	}
+	if got, want := a.Limit(), pageSize; got != want {
+		t.Errorf("Limit = %d, want %d: a refused lowering must leave the budget exactly as it found it", got, want)
+	}
+	if got, want := a.InUse(), pageSize; got != want {
+		t.Errorf("InUse = %d, want %d: the admitted enclave's reservation", got, want)
+	}
+	if lowerErr == nil {
+		t.Error("SetLimit(0) reported success although the page it had decided to take was admitted first: the budget and the enclave both hold it")
+	} else if !errors.Is(lowerErr, ErrBudgetInUse) {
+		t.Errorf("SetLimit(0) = %v, want a LimitError matching ErrBudgetInUse", lowerErr)
 	}
 
-	waitBounded(t, &wg, 60*time.Second, "the retune/admission race")
-
-	if n := overCommit.Load(); n != 0 {
-		t.Errorf("the allocator over-committed %d times: a lowering and an admission both took the same page", n)
-	}
-	// Controls. Without these the run above could have admitted nothing, or
-	// never contended, and still reported green.
-	if admitted.Load() == 0 {
-		t.Error("no allocation was ever admitted; this test asserted nothing")
-	}
-	if lowered.Load() == 0 {
-		t.Error("no lowering ever succeeded; the shrinking half of the retune path was never exercised")
-	}
-	if raised.Load() == 0 {
-		t.Error("no raise ever ran; the retuners did nothing")
-	}
-	if refusedAdmit.Load() == 0 {
-		t.Error("nothing was ever refused admission; the goroutines never contended and the race was not exercised")
-	}
-	t.Logf("admitted=%d refusedAdmit=%d raised=%d lowered=%d refusedLower=%d",
-		admitted.Load(), refusedAdmit.Load(), raised.Load(), lowered.Load(), refusedLower.Load())
-
-	// Every enclave was destroyed, so every reservation must have come back: the
-	// whole budget is available again, whichever of the two ceilings the last
-	// retune happened to leave in force.
-	if a.InUse() != 0 {
-		t.Errorf("final InUse = %d, want 0 (a reservation or a withdrawal leaked)", a.InUse())
-	}
-	if a.Available() != a.Limit() {
-		t.Errorf("final Available = %d against Limit %d, want them equal", a.Available(), a.Limit())
-	}
-	if l := a.Limit(); l != base && l != base+pageSize {
-		t.Errorf("final Limit = %d, want %d or %d", l, base, base+pageSize)
+	// And the reservation still returns, so the refusal left nothing behind.
+	e.Destroy()
+	if got, want := a.Available(), pageSize; got != want {
+		t.Errorf("Available = %d after Destroy, want %d", got, want)
 	}
 }
 

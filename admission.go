@@ -285,6 +285,30 @@ type Allocator struct {
 	// It is written once, before the allocator is reachable by any other
 	// goroutine, and only read afterwards, so it needs no atomic and no lock.
 	rlimitBound bool
+
+	// stalled is a test seam, and the only one in this package. When it is
+	// non-nil, [Allocator.withdrawLocked] calls it between reading the headroom
+	// counter and the compare-and-swap that acts on what it read — the exact
+	// instruction window in which a concurrent admission can take the bytes the
+	// withdrawal is about to claim, and therefore the whole reason that swap is
+	// a compare-and-swap rather than a subtraction.
+	//
+	// It exists because that window cannot be entered on purpose from the
+	// outside. It is two instructions wide, so a test that hopes to land an
+	// admission inside it is a coin flip, and this repository has measured
+	// exactly that: against a withdrawLocked regressed to read-then-subtract,
+	// the storm form of TestAllocator_Retune_RacesAdmission went red on 3 runs
+	// in 10 on an ordinarily loaded 8-core host, and the arranged form on 0 in
+	// 10. A test that parks the withdrawal here, performs the conflicting
+	// admission, and only then releases it catches the same regression on every
+	// run and on one core as readily as on eight — see
+	// TestAllocator_Retune_LoweringLosesTheContestedPage.
+	//
+	// It is nil in every build; nothing outside a test ever sets it. The cost
+	// is one predicted branch per iteration of a loop that already runs under
+	// the retune mutex, and admission and release never reach it, so the
+	// lock-free paths this type is built around are untouched.
+	stalled func()
 }
 
 // NewAllocator returns an Allocator with the given total budget in LOCKED
@@ -1060,6 +1084,12 @@ func (a *Allocator) withdrawLocked(d int64) bool {
 		free := a.free.Load()
 		if d > free {
 			return false
+		}
+		if a.stalled != nil {
+			// The test seam described on [Allocator.stalled]: this is the
+			// window a racing admission has to land in for the swap below to
+			// matter, and it is nil everywhere but the test that parks here.
+			a.stalled()
 		}
 		if a.free.CompareAndSwap(free, free-d) {
 			return true
