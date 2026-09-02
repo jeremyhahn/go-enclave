@@ -69,6 +69,153 @@ func TestNewMemoryEnclave_Empty(t *testing.T) {
 	}
 }
 
+// TestNewMemoryEnclaveCopy_LeavesTheSourceIntact is the load-bearing test for
+// the copy constructor, and it has two halves on purpose.
+//
+// The half under test is that the source SURVIVES. On its own it would also
+// pass against a build in which NewMemoryEnclave had stopped wiping — a silent
+// security regression in the constructor everything else defaults to, and the
+// live risk here specifically, because the two constructors now share one body
+// and the wipe is the only thing separating them. So the companion half pushes
+// identical bytes through NewMemoryEnclave and requires them gone. Neither half
+// alone shows the two constructors DIFFER; together they do.
+func TestNewMemoryEnclaveCopy_LeavesTheSourceIntact(t *testing.T) {
+	const material = "caller-owned-credential"
+
+	copied := []byte(material)
+	e, err := NewMemoryEnclaveCopy(copied)
+	if err != nil {
+		t.Fatalf("NewMemoryEnclaveCopy: %v", err)
+	}
+	defer e.Destroy()
+
+	if string(copied) != material {
+		t.Errorf("source = %q after NewMemoryEnclaveCopy, want it untouched (%q)", copied, material)
+	}
+	if !e.EqualTo([]byte(material)) {
+		t.Error("the enclave does not hold the material it was handed")
+	}
+	if e.Size() != len(material) {
+		t.Errorf("Size = %d, want %d", e.Size(), len(material))
+	}
+
+	moved := []byte(material)
+	m, err := NewMemoryEnclave(moved)
+	if err != nil {
+		t.Fatalf("NewMemoryEnclave: %v", err)
+	}
+	defer m.Destroy()
+
+	if !bytes.Equal(moved, make([]byte, len(material))) {
+		t.Errorf("source = %q after NewMemoryEnclave, want it wiped", moved)
+	}
+}
+
+// TestNewMemoryEnclaveCopy_IsIndependentOfTheSource covers the other way
+// "leaves the source intact" could be satisfied and still be wrong: an enclave
+// that ALIASED the caller's bytes would pass the wipe assertion above while
+// protecting nothing, and would then be corrupted — or unmapped — by whatever
+// the caller does with its own slice next.
+//
+// So both directions are exercised. A write through the source must not reach
+// the material, and wiping the source afterwards — which is exactly what a
+// careful caller does once it is done — must leave the enclave holding what it
+// was given.
+func TestNewMemoryEnclaveCopy_IsIndependentOfTheSource(t *testing.T) {
+	material := []byte("independent-material")
+
+	src := append([]byte(nil), material...)
+	e, err := NewMemoryEnclaveCopy(src)
+	if err != nil {
+		t.Fatalf("NewMemoryEnclaveCopy: %v", err)
+	}
+	defer e.Destroy()
+
+	src[0] = 0xFF
+	if !e.EqualTo(material) {
+		t.Error("mutating the source changed the enclave: the copy aliases it")
+	}
+
+	Wipe(src)
+	if !e.EqualTo(material) {
+		t.Error("wiping the source emptied the enclave: the copy aliases it")
+	}
+}
+
+// TestNewMemoryEnclaveCopy_PagesAreFrozen pins the writability decision the
+// constructor documents, cheaply and in-process.
+//
+// The real oracle for this property is a fault, not an assertion — a write
+// through frozen pages kills the process, so the end-to-end version lives in a
+// subprocess (TestMemoryEnclave_CopyConstructedPagesAreReadOnly). This one
+// reads the protection state directly so that a build that forgot to freeze
+// fails with a named error rather than a SIGSEGV in a child, and it carries a
+// sized enclave as its control: without it, an assertion that "mutable is
+// false" would pass just as happily against a field that is never true.
+func TestNewMemoryEnclaveCopy_PagesAreFrozen(t *testing.T) {
+	e, err := NewMemoryEnclaveCopy([]byte("frozen-after-copy"))
+	if err != nil {
+		t.Fatalf("NewMemoryEnclaveCopy: %v", err)
+	}
+	defer e.Destroy()
+
+	if e.m.mutable {
+		t.Error("a copy-constructed enclave is writable; a stray write would corrupt it silently instead of faulting")
+	}
+
+	// The control: the field can say "yes", and a sized enclave must, or the
+	// generate-in-place path would fault on its own fill.
+	sized, err := NewMemoryEnclaveSized(16)
+	if err != nil {
+		t.Fatalf("NewMemoryEnclaveSized: %v", err)
+	}
+	defer sized.Destroy()
+
+	if !sized.m.mutable {
+		t.Error("a sized enclave is frozen; the fill path would fault")
+	}
+}
+
+func TestNewMemoryEnclaveCopy_Empty(t *testing.T) {
+	for name, in := range map[string][]byte{"nil": nil, "empty": {}} {
+		t.Run(name, func(t *testing.T) {
+			e, err := NewMemoryEnclaveCopy(in)
+			if !errors.Is(err, ErrEmptyEnclave) {
+				t.Errorf("err = %v, want ErrEmptyEnclave", err)
+			}
+			if e != nil {
+				t.Error("enclave should be nil on error")
+			}
+		})
+	}
+}
+
+// TestNewMemoryEnclaveCopy_IsPublishedToTheLedger asserts the new constructor
+// registers what it hands out. Nothing in ordinary use reveals the omission:
+// the enclave works, and the only symptom is that a shutdown sweep quietly
+// walks past it, leaving the material resident on exit — the failure mode
+// WipeAll was added for in v0.4.0-alpha.
+func TestNewMemoryEnclaveCopy_IsPublishedToTheLedger(t *testing.T) {
+	material := []byte("swept-at-shutdown")
+
+	before := liveCount()
+
+	e, err := NewMemoryEnclaveCopy(material)
+	if err != nil {
+		t.Fatalf("NewMemoryEnclaveCopy: %v", err)
+	}
+	if got := liveCount(); got != before+1 {
+		t.Fatalf("ledger holds %d, want %d: construction did not register", got, before+1)
+	}
+
+	if remaining := sweep(t); remaining != 0 {
+		t.Errorf("WipeAll left %d enclaves, want 0", remaining)
+	}
+	if e.IsAlive() {
+		t.Error("the enclave survived WipeAll")
+	}
+}
+
 func TestNewMemoryEnclaveFromString(t *testing.T) {
 	e, err := NewMemoryEnclaveFromString("AKIAIOSFODNN7EXAMPLE")
 	if err != nil {

@@ -300,6 +300,78 @@ func frozenWriteChild(t *testing.T) {
 }
 
 const (
+	// copyFrozenMarker selects the child half of the copy-constructor frozen
+	// test. It is a separate child from frozenMarker's because the write under
+	// test kills the process: one child can only ever demonstrate one of them.
+	copyFrozenMarker = "GO_ENCLAVE_COPY_FROZEN_WRITE"
+
+	// copyFrozenSurvived is printed by the child if a write through a
+	// copy-constructed enclave's borrow RETURNED. Seeing it is the failure.
+	copyFrozenSurvived = "wrote through a copy-constructed enclave and lived"
+)
+
+// TestMemoryEnclave_CopyConstructedPagesAreReadOnly asserts the freeze for the
+// copy constructor against the only oracle that cannot be faked: the fault
+// itself.
+//
+// NewMemoryEnclaveCopy documents its result as frozen, and the in-process test
+// beside it (TestNewMemoryEnclaveCopy_PagesAreFrozen) reads the mapping's own
+// protection flag — which is a report about what the code believes, not about
+// what the MMU enforces. A build that set the flag without issuing the mprotect
+// would satisfy it and still let a stray write through a retained Open slice
+// corrupt key material in silence. The flag test fails loudly and locates the
+// bug; this one proves the page permission is real.
+//
+// The write is in a child because succeeding at it is what kills the process.
+func TestMemoryEnclave_CopyConstructedPagesAreReadOnly(t *testing.T) {
+	if os.Getenv(copyFrozenMarker) == "1" {
+		copyFrozenWriteChild(t)
+		return
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestMemoryEnclave_CopyConstructedPagesAreReadOnly$", "-test.v")
+	cmd.Env = append(os.Environ(), copyFrozenMarker+"=1")
+	out, cerr := cmd.CombinedOutput()
+
+	if strings.Contains(string(out), copyFrozenSurvived) {
+		t.Fatalf("a write through a copy-constructed enclave returned instead of faulting; "+
+			"its pages are not frozen:\n%s", out)
+	}
+	if cerr == nil {
+		t.Fatalf("the child exited cleanly after writing to frozen pages; it should have faulted:\n%s", out)
+	}
+	if strings.Contains(string(out), "--- SKIP") {
+		t.Skipf("child skipped:\n%s", out)
+	}
+}
+
+func copyFrozenWriteChild(t *testing.T) {
+	t.Helper()
+
+	src := []byte("private-key-material")
+	e, err := NewMemoryEnclaveCopy(src)
+	if err != nil {
+		t.Skipf("could not allocate: %v", err)
+	}
+
+	// The source is deliberately still live and still holds the material — that
+	// is the whole point of this constructor — so a write through it must NOT
+	// be what faults. Only the view into the enclave may.
+	src[0] = 0xFE
+
+	view, err := e.Open()
+	if err != nil {
+		t.Skipf("Open: %v", err)
+	}
+
+	// The write the freeze exists to stop.
+	view[0] = 0xFF
+
+	fmt.Println(copyFrozenSurvived)
+	e.Destroy()
+}
+
+const (
 	// corruptMarker selects the child half of the corrupted-Destroy test.
 	corruptMarker = "GO_ENCLAVE_DESTROY_CORRUPT"
 

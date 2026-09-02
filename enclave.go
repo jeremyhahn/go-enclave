@@ -122,9 +122,12 @@ type MemoryEnclave struct {
 // enclave holding it.
 //
 // It TAKES OWNERSHIP of data: the caller's slice is wiped before this returns,
-// so there is no unprotected copy left behind. Callers that need to keep the
-// original bytes must copy them first — and by doing so accept an unprotected
-// copy, which is exactly what this type exists to avoid.
+// so there is no unprotected copy left behind. That is the right default and
+// should stay the common case. Callers that cannot give up their buffer have
+// [NewMemoryEnclaveCopy], which leaves the source intact — and by keeping it
+// they accept an unprotected copy, which is exactly what this type exists to
+// avoid. Material that has not been produced yet should skip both and be
+// generated straight into locked pages with [NewMemoryEnclaveSized].
 //
 // It returns ErrEmptyEnclave when data is empty, and
 // ErrLockedMemoryUnavailable when the kernel refuses to lock the pages.
@@ -149,29 +152,105 @@ func NewMemoryEnclave(data []byte) (*MemoryEnclave, error) {
 // installing the reservation callback — can finish before [WipeAll] can reach
 // it. Publication is that caller's last statement; see [register].
 func newMemoryEnclave(data []byte) (*MemoryEnclave, error) {
-	if len(data) == 0 {
-		return nil, ErrEmptyEnclave
-	}
-
 	// The caller's slice is wiped on EVERY return path, which is what the
 	// ownership contract above promises — including the mapping-failure path,
 	// where nothing was copied out and the material would otherwise survive in
 	// the caller's memory on exactly the resource-exhaustion case this
 	// constructor exists to handle. Wiping again after a successful move is a
-	// no-op over already-zeroed bytes.
+	// no-op over already-zeroed bytes. It is also a no-op for the empty slice
+	// newMemoryEnclaveCopy refuses, which is why this defer can precede the
+	// refusal rather than being repeated after it.
 	defer wipe(data)
 
-	m, err := newMapping(len(data))
+	// The move constructor IS the copy constructor plus this wipe. Composing
+	// them rather than writing the mapping sequence twice is deliberate: the
+	// two differ in exactly one dimension — who owns the source — and a second
+	// copy of the freeze-and-clean-up dance is how that stops being true. It is
+	// the same divergence the duplicated hand-rolled composition in consumers
+	// was heading for (#29).
+	return newMemoryEnclaveCopy(data)
+}
+
+// NewMemoryEnclaveCopy copies src into a new locked region and returns the
+// enclave holding it, leaving src UNTOUCHED on every path — success, refusal
+// and mapping failure alike.
+//
+// It is the counterpart to [NewMemoryEnclave], which takes ownership and wipes
+// what it is handed. Prefer that one: it leaves nothing behind. This exists for
+// the callers that legitimately cannot honor it — a buffer owned by someone
+// else that the consumer must not modify, a fixture handed back on every call,
+// material compared against the bytes it was built from. Without it those
+// callers hand-roll [NewMemoryEnclaveSized] plus WithBytes plus a Destroy on
+// the error path, which is easy to get subtly wrong: omitting that Destroy
+// leaks a locked page on a path nobody tests.
+//
+// # What the caller is accepting
+//
+// An UNPROTECTED copy of the material stays on the ordinary Go heap for as long
+// as the caller keeps src — swappable, core-dumpable, and beyond the reach of
+// any later wipe, since the compiler and the garbage collector may already have
+// copied it elsewhere. That is precisely what this type exists to avoid, and
+// this constructor does not undo it. It protects the copy it puts inside the
+// enclave and makes no claim whatsoever about the source; nothing here can wipe
+// src later either, because only the caller knows when it is done with it, and
+// [Wipe] is the most that can be done to heap memory anyway.
+//
+// So the choice is between two honest positions. Material that should never be
+// on the heap at all does not belong here: generate it directly into locked
+// pages with [NewMemoryEnclaveSized], the one shape where no unprotected copy
+// ever exists. Material that already exists outside an enclave and can be given
+// up belongs in [NewMemoryEnclave]. Reach for this constructor only when the
+// source genuinely has to survive, and wipe it yourself as soon as it does not.
+//
+// # Mutability
+//
+// The result is FROZEN read-only, exactly like [NewMemoryEnclave]'s and unlike
+// [NewMemoryEnclaveSized]'s. There is nothing left to fill — the material is
+// complete when this returns — so writable pages would buy nothing and would
+// cost the protection against a stray write through a retained
+// [MemoryEnclave.Open] slice. This is stated rather than left to be inferred
+// because the existing constructors disagree, so a caller generalizes from
+// whichever it met first, and because guessing wrong is not an error: a write
+// through a frozen enclave FAULTS the process.
+//
+// It returns ErrEmptyEnclave when src is empty, and ErrLockedMemoryUnavailable
+// when the kernel refuses to lock the pages — the same refusals as the other
+// constructors. Like [NewMemoryEnclave], a successful return can hand back an
+// already-destroyed enclave if [WipeAll] ran between publication and return;
+// see that constructor.
+func NewMemoryEnclaveCopy(src []byte) (*MemoryEnclave, error) {
+	e, err := newMemoryEnclaveCopy(src)
+	if err != nil {
+		return nil, err
+	}
+	return register(e), nil
+}
+
+// newMemoryEnclaveCopy is the body both constructors share, without the
+// publication step, for the same reason [newMemoryEnclave] exists.
+//
+// It never touches src. Everything that wipes a source lives in the caller, so
+// there is exactly one place in this package that can, and adding a third
+// constructor cannot accidentally acquire the behavior.
+func newMemoryEnclaveCopy(src []byte) (*MemoryEnclave, error) {
+	if len(src) == 0 {
+		return nil, ErrEmptyEnclave
+	}
+
+	m, err := newMapping(len(src))
 	if err != nil {
 		return nil, err
 	}
 
-	copy(m.data, data)
+	copy(m.data, src)
 
 	// Freeze once the material is in: from here a write through a retained
-	// slice faults rather than corrupting the enclave. A sized enclave cannot
-	// do this, which is the one behavioral difference between the two
-	// constructors — see [NewMemoryEnclaveSized].
+	// slice faults rather than corrupting the enclave. This covers BOTH
+	// constructors that bring existing material in, which is why a copy-built
+	// enclave is read-only too. A sized enclave cannot be frozen at all — it
+	// exists to be filled — which is the one behavioral difference between
+	// bringing material in and generating it in place; see
+	// [NewMemoryEnclaveSized].
 	//
 	// A freeze failure means an mprotect was refused, and the same refusal is
 	// likely to meet the cleanup below. That is survivable in the way that

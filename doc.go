@@ -96,6 +96,13 @@
 // the key was on swappable, core-dumpable memory in the meantime. Allocator has
 // the admitted form, NewSized.
 //
+// NewMemoryEnclaveCopy is the third constructor and the one to reach for last.
+// It leaves its source intact, for callers that do not own the buffer they were
+// handed, and the price is stated rather than hidden: an unprotected copy of the
+// material stays on the heap for as long as that source lives, which is the
+// thing this package exists to avoid. It is the right tool only when the source
+// genuinely has to survive.
+//
 // Open also exists and returns the slice directly, but the slice aliases the
 // locked pages and is NOT covered by the lock once Open returns: a concurrent
 // Destroy unmaps it and a read through it then faults the process rather than

@@ -91,6 +91,7 @@ pages:
 | Symbol | Purpose |
 |---|---|
 | `NewMemoryEnclave(data []byte)` | Move `data` into a locked enclave; wipes `data`. |
+| `NewMemoryEnclaveCopy(src []byte)` | Copy `src` into a locked enclave and leave `src` **intact**, for callers that do not own their buffer. The result is frozen read-only like `NewMemoryEnclave`'s. The cost is explicit: an unprotected copy stays on the heap for as long as the caller keeps `src`. |
 | `NewMemoryEnclaveSized(n int)` | `n` bytes of locked, **zeroed** memory the caller fills in place through the borrow — generate-in-place, so the material never touches the heap. |
 | `NewMemoryEnclaveFromString(s)` | Boundary helper for string-only APIs (the string cannot be wiped). |
 | `(*MemoryEnclave) WithBytes(fn)` | **Preferred access.** Borrow the bytes for the duration of `fn` under the read lock. |

@@ -6,6 +6,40 @@ All notable changes to go-enclave are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **`NewMemoryEnclaveCopy(src []byte) (*MemoryEnclave, error)` — a constructor
+  that copies without consuming its source.** `NewMemoryEnclave` takes ownership
+  and wipes the caller's slice on every return path; that stays the default and
+  stays right. Some callers cannot honor it — a buffer owned by someone else, a
+  fixture handed back on every call, material compared against the bytes it was
+  built from — and they were composing `NewMemoryEnclaveSized` + `WithBytes` +
+  `Destroy`-on-error by hand instead, the same eight lines in two packages of one
+  consumer already. Omitting that `Destroy` leaks a locked page on a path nobody
+  tests, which is the kind of mistake a constructor should make impossible rather
+  than document.
+
+  **The result is FROZEN read-only**, matching `NewMemoryEnclave` and not
+  `NewMemoryEnclaveSized`. The material is complete when the constructor returns,
+  so writable pages would buy nothing and would give up the protection against a
+  stray write through a retained `Open` slice. The decision is in the doc comment
+  because guessing it wrong is not an error — a write through frozen pages
+  **faults the process** — and because the two older constructors disagree, so a
+  caller generalizes from whichever it met first.
+
+  **What the caller accepts is stated in the doc comment, not glossed:** an
+  unprotected copy of the material remains on the ordinary Go heap for as long as
+  the source lives. That is exactly what this package exists to avoid, and this
+  constructor does not undo it — it protects the copy it holds and makes no claim
+  about the source, which nothing here can wipe later because only the caller
+  knows when it is done. Material that should never touch the heap at all belongs
+  in `NewMemoryEnclaveSized`.
+
+  `NewMemoryEnclave` is now implemented as this constructor plus the wipe, so the
+  two cannot drift apart in the mapping, freeze or cleanup sequence — which is the
+  same divergence the duplicated hand-rolled composition was heading for.
+
+
 ## [v0.4.0-alpha] - 2026-08-26
 
 ### Added

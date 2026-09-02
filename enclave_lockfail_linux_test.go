@@ -11,6 +11,7 @@
 package enclave
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -38,6 +39,13 @@ const (
 	// path — the parent requires this line for the same reason it requires
 	// faultConfirmed.
 	sourceWipeConfirmed = "source slice wiped on the allocation-failure path"
+
+	// copySourceIntactConfirmed is logged by the child once it has observed the
+	// OPPOSITE contract holding for NewMemoryEnclaveCopy on the same failing
+	// path. That constructor promises the source survives on EVERY path, and a
+	// shared body plus a misplaced wipe would break it exactly here, where no
+	// happy-path test looks.
+	copySourceIntactConfirmed = "source slice left intact on the allocation-failure path"
 )
 
 // TestNewMemoryEnclave_LockedMemoryExhausted injects an RLIMIT_MEMLOCK fault
@@ -68,6 +76,9 @@ func TestNewMemoryEnclave_LockedMemoryExhausted(t *testing.T) {
 	}
 	if !strings.Contains(string(out), sourceWipeConfirmed) {
 		t.Fatalf("subprocess did not confirm the source wipe:\n%s", out)
+	}
+	if !strings.Contains(string(out), copySourceIntactConfirmed) {
+		t.Fatalf("subprocess did not confirm the copy constructor left its source intact:\n%s", out)
 	}
 }
 
@@ -117,6 +128,22 @@ func lockedMemoryExhaustionChild(t *testing.T) {
 		}
 	}
 	t.Log(sourceWipeConfirmed)
+
+	// The mirror image, under the same injected ceiling. NewMemoryEnclaveCopy
+	// documents an intact source on every path including this one, and the
+	// mapping failure is the path where the two constructors' contracts are
+	// most easily confused: nothing was copied out, so the material is still in
+	// the caller's slice either way, and only the wipe distinguishes them.
+	copySrc := []byte("copy-material-under-a-ceiling")
+	want := append([]byte(nil), copySrc...)
+
+	if _, err := NewMemoryEnclaveCopy(copySrc); !errors.Is(err, ErrLockedMemoryUnavailable) {
+		t.Fatalf("NewMemoryEnclaveCopy err = %v, want ErrLockedMemoryUnavailable under the injected ceiling", err)
+	}
+	if !bytes.Equal(copySrc, want) {
+		t.Fatalf("source = %q after a failed NewMemoryEnclaveCopy, want it untouched (%q)", copySrc, want)
+	}
+	t.Log(copySourceIntactConfirmed)
 }
 
 const (
