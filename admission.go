@@ -965,8 +965,20 @@ func (a *Allocator) transferTo(dst *Allocator, n int64, dstCeiling LockedMemoryL
 	// point to the same allocator with its own opinion about whether the
 	// ceiling binds, which is the inconsistency #46 was filed about; a
 	// destination is not less over the ceiling for having been pushed there by
-	// a sibling rather than by a setter. Only the destination is checked: the
-	// source's budget goes DOWN, and a shrinking budget needs no ceiling.
+	// a sibling rather than by a setter.
+	//
+	// The argument for leaving it out, recorded because it is a good one and is
+	// still wrong: a transfer is process-CONSERVATIVE. It moves headroom rather
+	// than creating it, so the process's total commitment is unchanged and the
+	// kernel is no worse off than it was a moment ago. That would matter if the
+	// ceiling check were process-wide accounting. It is not, and never was —
+	// two allocators that each passed it can already sum to twice the ceiling,
+	// because each was judged alone. What it asserts is that THIS budget by
+	// itself was never satisfiable, and a destination carried over the ceiling
+	// by a transfer is in precisely that state.
+	//
+	// Only the destination is checked: the source's budget goes DOWN, and a
+	// shrinking budget needs no ceiling.
 	if err := checkRaise(dstCeiling, cerr, dstLimit+n); err != nil {
 		return err
 	}
