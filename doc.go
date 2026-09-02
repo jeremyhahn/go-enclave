@@ -89,12 +89,29 @@
 //	    _, err := io.ReadFull(rand.Reader, key)
 //	    return err
 //	})
+//	if err != nil {
+//	    return err
+//	}
+//
+//	// The fill is done. A refused Freeze leaves the enclave WRITABLE, so the
+//	// fault-on-write property holds only if this error is checked.
+//	if err := e.Freeze(); err != nil {
+//	    return err
+//	}
 //
 // Reach for it wherever the alternative would be to draw the material into a
 // make'd slice and move it in afterwards: the wipe that follows such a move
 // cannot reach copies the compiler or the garbage collector already made, and
 // the key was on swappable, core-dumpable memory in the meantime. Allocator has
 // the admitted form, NewSized.
+//
+// [MemoryEnclave.Freeze] is what leaves a sized enclave with the protection the
+// other constructors give it for free. Pages that have to be filled cannot arrive
+// read-only, so a sized enclave is writable while it is being filled; Freeze
+// mprotects it read-only once the material is final, which bounds the window in
+// which a retained slice could rewrite a key to the fill instead of the enclave's
+// lifetime. It is idempotent, it is not reversible, and it waits out in-flight
+// borrows.
 //
 // NewMemoryEnclaveCopy is the third constructor and the one to reach for last.
 // It leaves its source intact, for callers that do not own the buffer they were
@@ -106,10 +123,10 @@
 // Open also exists and returns the slice directly, but the slice aliases the
 // locked pages and is NOT covered by the lock once Open returns: a concurrent
 // Destroy unmaps it and a read through it then faults the process rather than
-// returning an error. Nor is it a write path — a write faults on an enclave
-// built from existing material, whose pages are frozen read-only, and silently
-// corrupts a sized enclave, whose pages stay writable. Use Open only where no
-// concurrent Destroy is possible, and never retain what it returns.
+// returning an error. Nor is it a write path — a write faults wherever the
+// pages are frozen, and silently corrupts a sized enclave that has not been
+// frozen yet. Use Open only where no concurrent Destroy is possible, and never
+// retain what it returns.
 //
 // # Shutdown
 //

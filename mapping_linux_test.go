@@ -232,14 +232,15 @@ const (
 //
 // An enclave built from existing material has its pages frozen read-only once
 // the material is in, so a write through a retained slice FAULTS. A sized
-// enclave's pages must stay writable — that is what makes generate-in-place
-// possible — so the same write succeeds there, and callers are told to finish
-// the fill before sharing the enclave.
+// enclave's pages must arrive writable — that is what makes generate-in-place
+// possible — so the same write succeeds there until the caller freezes them
+// itself, which is what [MemoryEnclave.Freeze] and
+// TestMemoryEnclave_FrozenSizedPagesFault cover.
 //
 // Asserting only the first half would pass against a build that froze
-// everything, which would break every sized constructor; asserting only the
-// second would pass against a build that froze nothing, which is the security
-// regression. Both halves, one test.
+// everything at construction, which would break every sized constructor;
+// asserting only the second would pass against a build that froze nothing, which
+// is the security regression. Both halves, one test.
 func TestMemoryEnclave_MoveConstructedPagesAreReadOnly(t *testing.T) {
 	if os.Getenv(frozenMarker) == "1" {
 		frozenWriteChild(t)

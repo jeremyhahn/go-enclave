@@ -414,6 +414,63 @@ func TestMapping_FreezeIsIdempotent(t *testing.T) {
 	}
 }
 
+// TestMapping_FrozenRegionIsStillWiped covers what freezing COSTS, at the layer
+// where the cost lives.
+//
+// wipeAndVerify destroys the material first, before any syscall that can be
+// refused — but it can only do that while the region is still writable. A frozen
+// region has to be made writable again before a single byte can be zeroed, so
+// for a frozen enclave the wipe sits BEHIND an mprotect that the kernel could
+// deny. That is the trade [MemoryEnclave.Freeze] makes deliberately, and it is
+// the trade NewMemoryEnclave has always made.
+//
+// This asserts the ordinary path still ends with nothing left behind. The
+// refused-mprotect path is #38's: the release hands the pages back with a bare
+// munmap and reports ErrReleasedWithoutWipe, rather than keeping a region whose
+// material a permanent denial would strand for the process lifetime. A frozen
+// enclave is the only kind that can get there, which is why the two changes meet
+// — see TestMemoryEnclave_FrozenDestroyFallsBackToUnmap.
+func TestMapping_FrozenRegionIsStillWiped(t *testing.T) {
+	m, err := newMapping(64)
+	if err != nil {
+		t.Fatalf("newMapping: %v", err)
+	}
+
+	copy(m.data, bytes.Repeat([]byte{0xA5}, 64))
+
+	if err := m.freeze(); err != nil {
+		t.Fatalf("freeze: %v", err)
+	}
+	if m.mutable {
+		t.Fatal("the mapping is still writable after freeze; this test would be measuring the unfrozen path")
+	}
+
+	// Held across the wipe for the reason TestMapping_WipesBeforeRelease gives:
+	// release nils the fields, and this window is the only place the property is
+	// observable.
+	memory, inner := m.memory, m.inner
+
+	if err := m.wipeAndVerify(); err != nil {
+		t.Fatalf("wipeAndVerify on a frozen mapping: %v", err)
+	}
+	if !m.mutable {
+		t.Error("a frozen mapping was not recorded as melted; release would then skip the melt on a retry " +
+			"and wipe a read-only region")
+	}
+	for i, c := range memory {
+		if c != 0 {
+			t.Fatalf("byte %d of a frozen mapping = %#x after the wipe, want 0", i, c)
+		}
+	}
+
+	if err := memcall.Unlock(inner); err != nil {
+		t.Errorf("Unlock: %v", err)
+	}
+	if err := memcall.Free(memory); err != nil {
+		t.Errorf("Free: %v", err)
+	}
+}
+
 // TestMapping_RejectsUnmappableSizes asserts the layer refuses a size it cannot
 // lay out, rather than handing a nonsense length to mmap. The public
 // constructors check this too, but newMapping is the last line and is reachable

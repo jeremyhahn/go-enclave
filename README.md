@@ -43,11 +43,27 @@ err = e.WithBytes(func(key []byte) error {
     _, err := io.ReadFull(rand.Reader, key) // straight into locked memory
     return err
 })
+if err != nil {
+    return err
+}
+
+// The fill is done. Freeze can be refused — a sandbox denying mprotect leaves
+// the enclave alive and WRITABLE — so the property only holds if this is checked.
+if err := e.Freeze(); err != nil {
+    return err
+}
 ```
 
 Use it wherever the alternative would be `make` + generate + `NewMemoryEnclave`:
 that shape puts the key on swappable, core-dumpable memory first, and the wipe
 that follows cannot reach copies the compiler or the collector already made.
+
+Pages that have to be filled cannot arrive read-only, so a sized enclave is
+writable while it is being filled. `Freeze` `mprotect`s it read-only once the
+material is final, which is what leaves it with the same protection an enclave
+built from existing material has: a write through a retained slice **faults**
+rather than silently corrupting a key. Without it that window is the enclave's
+whole lifetime.
 
 ## Why this exists
 
@@ -96,6 +112,7 @@ pages:
 | `NewMemoryEnclaveFromString(s)` | Boundary helper for string-only APIs (the string cannot be wiped). |
 | `(*MemoryEnclave) WithBytes(fn)` | **Preferred access.** Borrow the bytes for the duration of `fn` under the read lock. |
 | `(*MemoryEnclave) OpenString / EqualTo / Size / IsAlive / String` | Locked, concurrency-safe accessors. |
+| `(*MemoryEnclave) Freeze()` | Make the pages read-only once a sized enclave's fill is done, so a stray write **faults** instead of silently corrupting the material. Idempotent, not reversible, waits out in-flight borrows. A no-op on an enclave that is already frozen. |
 | `(*MemoryEnclave) Open()` | **Unsafe.** Returns a slice not covered by the lock; see its doc. |
 | `(*MemoryEnclave) Destroy()` | Zeroize and release; idempotent, nil-safe, deferrable. |
 | `WipeAll() (int, error)` | **Orderly shutdown only, and only from the program that owns the process** — never from a library, since it destroys enclaves belonging to subsystems it knows nothing about. The **count** is how many are still held; read it as "these were still in use" rather than as a diagnosis, since a read outlasting the bounded bounded retry budget counts the same as a shutdown-ordering mistake. The **error** reports detected canary corruption (matching `ErrEnclaveCorrupted`) and nothing else; a corrupt enclave's pages *are* reclaimed, so it never appears in the count, which is why it needs its own return value. Never panics, and never waits indefinitely on a reader — an enclave being read is retried on later passes with a short backoff between them. Nothing calls it for you. |

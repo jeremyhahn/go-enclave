@@ -143,10 +143,11 @@ func (e *LockedMemoryError) Unwrap() error {
 // optional enclave do not need nil guards at every use.
 //
 // A MemoryEnclave is safe for concurrent use through WithBytes, OpenString,
-// EqualTo, Size, IsAlive, String and Destroy: each holds the enclave's lock
-// across the whole access, so Destroy waits out in-flight readers rather than
-// unmapping pages underneath them. Open is the one exception — it hands back a
-// slice that outlives the lock, and its documentation says so.
+// EqualTo, Size, IsAlive, String, Freeze and Destroy: each holds the enclave's
+// lock across the whole access, so Destroy waits out in-flight readers rather
+// than unmapping pages underneath them, and Freeze waits them out rather than
+// changing the protection under a fill. Open is the one exception — it hands
+// back a slice that outlives the lock, and its documentation says so.
 type MemoryEnclave struct {
 	mu sync.RWMutex
 	m  *mapping
@@ -289,10 +290,11 @@ func newMemoryEnclaveCopy(src []byte) (*MemoryEnclave, error) {
 	// Freeze once the material is in: from here a write through a retained
 	// slice faults rather than corrupting the enclave. This covers BOTH
 	// constructors that bring existing material in, which is why a copy-built
-	// enclave is read-only too. A sized enclave cannot be frozen at all — it
-	// exists to be filled — which is the one behavioral difference between
-	// bringing material in and generating it in place; see
-	// [NewMemoryEnclaveSized].
+	// enclave is read-only too. A sized enclave cannot be frozen HERE — it
+	// exists to be filled, and pages that have to be filled cannot arrive
+	// read-only — so its caller freezes it with [MemoryEnclave.Freeze] once the
+	// fill is done. That is the one behavioral difference between bringing
+	// material in and generating it in place; see [NewMemoryEnclaveSized].
 	//
 	// A freeze failure means an mprotect was refused, and the same refusal is
 	// likely to meet the cleanup below. That is survivable in the way that
@@ -329,6 +331,15 @@ func newMemoryEnclaveCopy(src []byte) (*MemoryEnclave, error) {
 //	    _, err := io.ReadFull(rand.Reader, key) // straight into locked memory
 //	    return err
 //	})
+//	if err != nil {
+//	    return err
+//	}
+//
+//	// The fill is done. A refused Freeze leaves the enclave WRITABLE, so the
+//	// fault-on-write property holds only if this error is checked.
+//	if err := e.Freeze(); err != nil {
+//	    return err
+//	}
 //
 // Do NOT use the make-then-move shape this constructor exists to replace:
 //
@@ -346,16 +357,22 @@ func newMemoryEnclaveCopy(src []byte) (*MemoryEnclave, error) {
 // # Mutability
 //
 // The pages of an enclave built by NewMemoryEnclave are frozen read-only once
-// the material has moved in; the pages behind a sized enclave stay WRITABLE for
-// its whole lifetime, because that is what makes filling them possible. Two
-// obligations follow.
+// the material has moved in. A sized enclave's arrive WRITABLE, because that is
+// what makes filling them possible, and stay writable until
+// [MemoryEnclave.Freeze] is called. Two obligations follow, and Freeze ends the
+// second one.
 //
 // The fill must complete before the enclave is shared with other goroutines:
 // WithBytes takes the read lock, so borrows run concurrently with each other,
-// and two of them writing is a data race like any other. And a slice retained
-// past the borrow that produced it can silently CORRUPT the material of a sized
-// enclave, where the same mistake against a NewMemoryEnclave enclave would
-// fault. Never retain what a borrow hands you.
+// and two of them writing is a data race like any other. Freezing does not help
+// with that one — a race is a race whether or not the pages are read-only
+// afterwards.
+//
+// And a slice retained past the borrow that produced it can silently CORRUPT
+// the material of an UNFROZEN sized enclave, where the same mistake against a
+// NewMemoryEnclave enclave would fault. Never retain what a borrow hands you —
+// and call Freeze once the material is final, which restores fault-on-write and
+// bounds that hazard to the fill rather than to the enclave's lifetime.
 //
 // It returns ErrInvalidSize for a size no enclave can have — non-positive, or
 // too large to map — and ErrLockedMemoryUnavailable when the kernel refuses to
@@ -462,11 +479,12 @@ func (e *MemoryEnclave) withLocked(fn func([]byte) error) error {
 // anywhere in the process could, through memguard's process-wide purge. That is
 // gone — WipeAll is called deliberately, never triggered by a fault.
 //
-// It is not a write path either, and how it fails depends on the constructor:
-// the pages of an enclave built by NewMemoryEnclave are frozen read-only, so a
-// write there faults, while a sized enclave's pages stay writable and a stray
-// write silently CORRUPTS the material instead of announcing itself. See
-// [NewMemoryEnclaveSized].
+// It is not a write path either, and how it fails depends on whether the pages
+// are frozen — which is the constructor for an enclave built by
+// NewMemoryEnclave, frozen as the material moves in, and the caller for a sized
+// one, frozen when it calls [MemoryEnclave.Freeze]. A write to frozen pages
+// faults. A write to a sized enclave that has not been frozen silently CORRUPTS
+// the material instead of announcing itself. See [NewMemoryEnclaveSized].
 //
 // Prefer WithBytes, OpenString or EqualTo, which hold the read lock across the
 // whole access and make Destroy wait. Open remains for callers that can
@@ -517,11 +535,132 @@ func (e *MemoryEnclave) OpenString() (string, error) {
 //
 // It is also how an enclave from [NewMemoryEnclaveSized] is FILLED: the view
 // aliases the locked pages themselves, so material generated into it is never
-// anywhere else. The view is read-only in practice for every enclave built
-// from existing material, whose pages are frozen read-only; a sized enclave's
-// stay writable, with the obligations documented on that constructor.
+// anywhere else. The view is read-only in fact wherever the pages are frozen —
+// every enclave built from existing material, and a sized one from the moment
+// [MemoryEnclave.Freeze] returns — and a write through it there faults. A sized
+// enclave's pages are writable until then, with the obligations documented on
+// that constructor.
 func (e *MemoryEnclave) WithBytes(fn func([]byte) error) error {
 	return e.withLocked(fn)
+}
+
+// Freeze makes this enclave's pages READ-ONLY, so that from here a write
+// through a slice retained past its borrow faults instead of silently
+// corrupting the material. It is the closing half of a sized enclave's fill:
+// call it once the material is final.
+//
+//	e, err := enclave.NewMemoryEnclaveSized(32)
+//	if err != nil {
+//	    return err
+//	}
+//	defer e.Destroy()
+//
+//	if err := e.WithBytes(func(key []byte) error {
+//	    _, err := io.ReadFull(rand.Reader, key)
+//	    return err
+//	}); err != nil {
+//	    return err
+//	}
+//	if err := e.Freeze(); err != nil { // a stray write faults from here
+//	    return err
+//	}
+//
+// That leaves a sized enclave with exactly the protection an enclave from
+// [NewMemoryEnclave] has, which freezes as the material moves in and cannot be
+// filled afterwards. What the method buys is the WINDOW: without it a sized
+// enclave's pages stay writable for its whole LIFETIME, so a retained slice can
+// rewrite a key at any point in it, and silent corruption of key material is a
+// strictly worse failure than a fault. With it the window is the fill.
+//
+// It is IDEMPOTENT and it is NOT reversible. A second Freeze is a no-op, and so
+// is a Freeze on an already-frozen move-constructed enclave — a caller handed an
+// enclave it did not build can freeze it without having to know which
+// constructor made it. There is deliberately no Melt: a re-mutable enclave
+// reopens exactly the window this closes, and the fill is the only reason the
+// pages were ever writable.
+//
+// # Ordering, and what it does not do
+//
+// It takes the WRITE lock, so it waits out every in-flight WithBytes,
+// OpenString, EqualTo, Size and IsAlive exactly as Destroy does. A fill still
+// running cannot be overtaken by the mprotect, which would fault the filling
+// goroutine on its next store — the very failure this exists to prevent. For the
+// same reason it must never be called from INSIDE a borrow on the same enclave:
+// that deadlocks, like any other nested call (see WithBytes).
+//
+// It does NOT make a concurrent fill safe. Two goroutines writing through
+// borrows of the same sized enclave are a data race whether or not a freeze
+// follows, and this bounds the window in which a stray write is possible rather
+// than synchronizing anything inside it.
+//
+// It returns [ErrEnclaveDestroyed] for a nil or destroyed enclave: there are no
+// pages left to protect, and returning nil would report that fault-on-write now
+// holds when nothing established it. That includes an enclave whose material has
+// been wiped while its pages are still held for a retry, which every method on
+// this type reports as destroyed. It returns
+// [ErrLockedMemoryUnavailable] (as a [LockedMemoryError]) when the kernel
+// refuses the mprotect, and a refused freeze leaves the enclave ALIVE, WRITABLE
+// and otherwise untouched — the caller keeps the enclave it had, still owes it a
+// Destroy, and now knows the property was not established. [NewMemoryEnclave]
+// releases the mapping on that same failure only because a constructor cannot
+// hand back a half-built enclave; here the caller already owns one.
+//
+// # What freezing costs
+//
+// It moves the material's wipe at Destroy time BEHIND a syscall that can be
+// refused. Destroy wipes first, before anything deniable, while the region is
+// still writable; a frozen region has to be made writable again first.
+//
+// A denied mprotect sends any enclave down the unwiped-release path, where the
+// pages are handed back with a bare munmap and
+// [MemoryEnclave.DestroyErr] reports [ErrReleasedWithoutWipe]. What is unique to
+// a FROZEN one is that the material is still there when it goes: an unfrozen
+// region was overwritten before the mprotect was ever attempted, and a frozen
+// region cannot be. Measured, not assumed —
+// TestMemoryEnclave_FreezeIsWhatPutsMaterialOnTheFallbackPath reads the data
+// region from inside the unmap seam in both cases.
+//
+// Nothing leaks either way: the pages were mlock'd for their whole life and the
+// kernel zeroes an anonymous page before reuse. But a caller that wants to know
+// its environment is denying mprotect has to call DestroyErr rather than
+// Destroy.
+//
+// That is already true of every enclave built by [NewMemoryEnclave] and
+// [NewMemoryEnclaveCopy], and it is the trade this method makes deliberately: an
+// mprotect refused on a region this process already owns is a far narrower
+// hazard than an unbounded window in which a stray write rewrites a key with
+// nothing to announce it.
+func (e *MemoryEnclave) Freeze() error {
+	if e == nil {
+		return ErrEnclaveDestroyed
+	}
+
+	// The WRITE lock, not the read lock, for two independent reasons. m.mutable
+	// is plain state that freeze mutates, and a concurrent reader of it — a
+	// release, or another Freeze — would be a data race. And the protection
+	// change must not land in the middle of somebody's fill, which the read lock
+	// would happily allow: a borrow writing when the pages turn read-only faults,
+	// so a method whose purpose is to convert silent corruption into a fault
+	// would be manufacturing the fault itself.
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	// wiped means the material is already gone while the pages are still held,
+	// because the munlock or munmap after the wipe was refused and the mapping is
+	// kept so Destroy can be retried (#40). Every other method treats that as
+	// destroyed and so does this one, for a reason beyond consistency: there is
+	// nothing left to protect, so a nil return would report fault-on-write
+	// established over zeroes — and mprotecting the region read-only would make
+	// the retry re-melt pages it had already melted, turning a release that
+	// needs one refusable syscall into one that needs two.
+	if e.m == nil || e.m.wiped {
+		return ErrEnclaveDestroyed
+	}
+
+	// freeze is idempotent at the mapping layer and returns a typed
+	// LockedMemoryError, so there is nothing to translate here. It leaves the
+	// mapping mutable on failure, which is what makes a refusal survivable.
+	return e.m.freeze()
 }
 
 // Size reports the number of bytes held, or 0 once destroyed.

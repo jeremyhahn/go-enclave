@@ -39,6 +39,65 @@ All notable changes to go-enclave are documented here. The format follows
   two cannot drift apart in the mapping, freeze or cleanup sequence — which is the
   same divergence the duplicated hand-rolled composition was heading for.
 
+- **`(*MemoryEnclave) Freeze() error` — restore fault-on-write once a sized
+  enclave's fill is done.** `NewMemoryEnclave` freezes its pages read-only as
+  the material moves in, so a write through a slice retained past its borrow
+  faults. `NewMemoryEnclaveSized` cannot: pages that have to be filled cannot
+  arrive read-only, and until now they stayed writable for the enclave's whole
+  LIFETIME. A stray write there silently corrupted the material, which is a
+  strictly worse failure than a fault, and the window was the lifetime rather
+  than the fill. `Freeze` closes it — after it returns, a sized enclave has
+  exactly the protection a move-constructed one has.
+
+  It is **idempotent** and **not reversible**. A second `Freeze` is a no-op, and
+  so is freezing an enclave that arrived frozen, so a caller handed an enclave
+  can freeze it without knowing which constructor built it. There is
+  deliberately no `Melt`: a re-mutable enclave reopens the window this closes,
+  and the fill is the only reason the pages were ever writable.
+
+  It takes the **write lock**, so it waits out in-flight borrows exactly as
+  `Destroy` does. That is not incidental: under the read lock the `mprotect`
+  could land between two stores of a goroutine that is still filling, and a
+  method whose purpose is to turn silent corruption into a fault would be
+  manufacturing the fault itself. It must therefore never be called from inside
+  a borrow on the same enclave, which deadlocks like any other nested call.
+
+  A refused `mprotect` returns `ErrLockedMemoryUnavailable` (as a
+  `LockedMemoryError`) and leaves the enclave **alive, writable and otherwise
+  untouched** — the caller keeps what it had and knows the property was not
+  established. `NewMemoryEnclave` destroys the mapping on that same failure only
+  because a constructor cannot hand back a half-built enclave; here the caller
+  already owns one, and destroying it underneath them would turn a failed
+  hardening step into lost key material.
+
+  The name is `Freeze`, not `Seal`. It names the mechanism, matches the internal
+  `mapping.freeze` and memguard's spelling, and does not collide with the AEAD
+  `Seal` that consumers of this library have in scope at exactly the call sites
+  that hold key material — the same reasoning that keeps the type from being
+  called a "secret".
+
+  What it costs, stated because it is a real trade: freezing moves the
+  material's wipe at `Destroy` time BEHIND a syscall that can be refused.
+  `Destroy` wipes first, before anything deniable, while the region is still
+  writable; a frozen region has to be made writable again first. A denied
+  `mprotect` sends any enclave down #38's unwiped-release path — pages handed
+  back with a bare `munmap`, `DestroyErr` reporting `ErrReleasedWithoutWipe` —
+  but **a frozen enclave is the only kind whose material is still there when it
+  goes**, because `wipeAndVerify` skips its early wipe exactly when the pages are
+  read-only. That is measured from inside the unmap seam, in both arms, rather
+  than argued. Nothing leaks either way: the pages were `mlock`'d for their whole
+  life and the kernel zeroes an anonymous page before reuse. That is already true of every enclave from
+  `NewMemoryEnclave` and `NewMemoryEnclaveCopy`, and an `mprotect` refused on a
+  region this process already owns is a far narrower hazard than an unbounded
+  window in which a retained slice rewrites a key with nothing to announce it.
+
+  The evidence is by execution, not by assertion: a subprocess fills a sized
+  enclave, freezes it, and writes through a retained slice — it must die, and
+  must not have printed its survival marker. The in-process control does the
+  same write on an unfrozen enclave and requires it to SUCCEED, since an
+  implementation that froze sized enclaves at construction would break every
+  consumer of them. (#6)
+
 ### Changed
 
 - **An enclave whose material has been wiped now reads as DESTROYED even while
@@ -59,12 +118,31 @@ All notable changes to go-enclave are documented here. The format follows
   retry either way; only the answers about the material changed.
 
   **Both branches of the release path are covered.** A frozen enclave loses its
-  material to the release `mprotect`; a mutable one — anything from
-  `NewMemoryEnclaveSized` — loses it to the *early* wipe that runs before any
+  material to the release `mprotect`; a mutable one — a sized enclave that has not
+  been frozen (#6) — loses it to the *early* wipe that runs before any
   syscall that can be refused, so its material is gone even when that `mprotect`
   is the step that fails. The two differ in fact, and the flag follows the fact:
   a genuinely refused wipe still reads as alive, because nothing was destroyed.
 
+### Security
+
+- **A release whose `mprotect` is denied now hands the pages back with a bare
+  `munmap` instead of keeping them, and says so.** The wipe that precedes a
+  release needs the region writable; for a FROZEN enclave that mprotect is the
+  only way in, so a permanent denial — a seccomp filter, a sandbox — left the
+  material resident in locked memory for the process lifetime, and retrying
+  could not help. The release now falls back to unmapping directly. Nothing
+  leaks: the pages were `mlock`'d for their whole life and the kernel zeroes an
+  anonymous page before reuse.
+
+  It is reported rather than silent, through the new `ErrReleasedWithoutWipe`
+  (as an `UnwipedReleaseError`) and the new **`(*MemoryEnclave) DestroyErr()
+  error`** — `Destroy` with its non-fatal report kept rather than discarded,
+  the same relationship `EqualToErr` has to `EqualTo`. It is deliberately not
+  `ErrEnclaveCorrupted` and does not panic: no memory was corrupted and no
+  material outlived its enclave. What it tells an operator is that something in
+  the environment is denying `mprotect`, which reaches every other enclave in
+  the process. (#38)
 
 ## [v0.4.0-alpha] - 2026-08-26
 
