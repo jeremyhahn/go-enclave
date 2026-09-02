@@ -216,6 +216,20 @@ type mapping struct {
 	// corrupted records a failed canary, so release can finish unmapping and
 	// still report it afterwards rather than having to choose between the two.
 	corrupted bool
+	// wiped records that the material is GONE while the pages are still held.
+	//
+	// It exists for the failed-release path: when the wipe succeeded but the
+	// munlock or munmap that follows was refused, the mapping is deliberately
+	// KEPT so the caller can retry -- and without this flag it then read as a
+	// perfectly ordinary live enclave. IsAlive said true, Size said 21, Open
+	// handed back 21 bytes of zeroes, and both guard pages had been left
+	// READ-WRITE by the release path, so the guards were off as well.
+	//
+	// A caller that recovers from Destroy's panic and READS rather than
+	// re-Destroying would then derive from an all-zero secret with no guard
+	// protection, and nothing would say so. The pages being retained is the
+	// truth about the MAPPING; it was never the truth about the ENCLAVE.
+	wiped bool
 }
 
 // newMapping allocates, locks and guards a region for size bytes, and returns
@@ -364,6 +378,16 @@ func (m *mapping) wipeAndVerify() error {
 	// attempt at this fix.
 	if m.mutable {
 		wipe(m.data)
+
+		// The material is gone from HERE, not from the later assignment after
+		// the mprotect. This early wipe is the whole point of doing it first,
+		// and the mprotect below can be refused -- so a mutable mapping whose
+		// data has already been zeroed would otherwise sit at wiped=false all
+		// the way through release's fallback, and if that fallback is refused
+		// too the mapping is KEPT and reads as a live enclave over zeroes.
+		// That is the same defect the flag exists to close, reached down the
+		// other branch.
+		m.wiped = true
 	}
 
 	// The rest needs the WHOLE region readable and writable: the guard pages are
@@ -380,6 +404,11 @@ func (m *mapping) wipeAndVerify() error {
 		!equalConstantTime(m.preguard[:len(m.canary)], m.canary)
 
 	wipe(m.memory)
+
+	// From here the material is gone whatever happens next. Set BEFORE the
+	// error return below, because the case this exists for is precisely the one
+	// where a later step fails and the mapping is kept.
+	m.wiped = true
 
 	if m.corrupted {
 		return ErrEnclaveCorrupted

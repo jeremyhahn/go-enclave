@@ -39,6 +39,32 @@ All notable changes to go-enclave are documented here. The format follows
   two cannot drift apart in the mapping, freeze or cleanup sequence — which is the
   same divergence the duplicated hand-rolled composition was heading for.
 
+### Changed
+
+- **An enclave whose material has been wiped now reads as DESTROYED even while
+  its pages are still held.** `IsAlive` returns false, `Size` returns 0, and
+  `Open`, `WithBytes`, `EqualTo` and `EqualToErr` return `ErrEnclaveDestroyed`.
+
+  The case is the failed release: when the wipe succeeded but the `munlock` or
+  `munmap` after it was refused, the mapping is deliberately **kept** so
+  `Destroy` can be retried. It then read as a perfectly ordinary live enclave —
+  `IsAlive` true, a non-zero `Size`, and `Open` handing back **zeroes** from a
+  region whose guard pages the release path had already left **read-write**. A
+  caller that recovers from `Destroy`'s panic and reads rather than
+  re-destroying would derive from an all-zero secret with the guards off, and
+  nothing said so.
+
+  "The enclave still reports itself alive, which is the truth" was true of the
+  **mapping** and was never true of the **enclave**. The pages stay held for the
+  retry either way; only the answers about the material changed.
+
+  **Both branches of the release path are covered.** A frozen enclave loses its
+  material to the release `mprotect`; a mutable one — anything from
+  `NewMemoryEnclaveSized` — loses it to the *early* wipe that runs before any
+  syscall that can be refused, so its material is gone even when that `mprotect`
+  is the step that fails. The two differ in fact, and the flag follows the fact:
+  a genuinely refused wipe still reads as alive, because nothing was destroyed.
+
 
 ## [v0.4.0-alpha] - 2026-08-26
 

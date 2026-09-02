@@ -254,3 +254,177 @@ func TestDestroyErrIsNilOnAnOrdinaryTeardown(t *testing.T) {
 		t.Fatalf("DestroyErr on a clean teardown = %v, want nil", derr)
 	}
 }
+
+// TestKeptMappingReadsAsDestroyedOnceWiped is the regression for #13.
+//
+// When the wipe succeeded but the munlock or munmap after it was refused, the
+// mapping is deliberately KEPT so Destroy can be retried. Before this it then
+// read as an ordinary live enclave: IsAlive true, a non-zero Size, and Open
+// handing back zeroes from a region whose guard pages the release path had
+// already left READ-WRITE. A caller that recovers from Destroy's panic and reads
+// rather than re-destroying would derive from an all-zero secret with the guards
+// off, and nothing would say so.
+func TestKeptMappingReadsAsDestroyedOnceWiped(t *testing.T) {
+	e, err := newMemoryEnclave([]byte("material that is about to be wiped"))
+	if err != nil {
+		t.Fatalf("newMemoryEnclave: %v", err)
+	}
+	t.Cleanup(func() {
+		if e.m != nil {
+			_ = e.m.release()
+		}
+	})
+
+	// wipeAndVerify is driven directly rather than through release() because
+	// this test is about the state release() LEAVES BEHIND when the munlock or
+	// munmap after a successful wipe is refused: material gone, pages still
+	// held. Calling the step that produces that state is the shortest honest
+	// way to reach it, and needs no syscall stub at all.
+	if err := e.m.wipeAndVerify(); err != nil {
+		t.Fatalf("wipeAndVerify: %v", err)
+	}
+	if !e.m.wiped {
+		t.Fatal("wipeAndVerify did not record that the material is gone, so " +
+			"this test cannot be asserting what it claims")
+	}
+	if e.m.memory == nil {
+		t.Fatal("the mapping was released; this test needs the KEPT-mapping case")
+	}
+
+	if e.IsAlive() {
+		t.Error("IsAlive reports true for an enclave whose material is gone")
+	}
+	if n := e.Size(); n != 0 {
+		t.Errorf("Size = %d, want 0: there is no material left to have a size", n)
+	}
+	if _, err := e.Open(); !errors.Is(err, ErrEnclaveDestroyed) {
+		t.Errorf("Open = %v, want ErrEnclaveDestroyed: it would otherwise hand "+
+			"back zeroes from a region whose guards are already read-write", err)
+	}
+	if err := e.WithBytes(func([]byte) error { return nil }); !errors.Is(err, ErrEnclaveDestroyed) {
+		t.Errorf("WithBytes = %v, want ErrEnclaveDestroyed", err)
+	}
+	// Both comparison spellings go through the same withLocked path, and both
+	// are asserted: EqualTo's bare false is indistinguishable from an ordinary
+	// mismatch, so on its own it would pass against an implementation that
+	// compared the caller's bytes with a region of zeroes and simply found them
+	// different. EqualToErr is what shows the comparison did not RUN.
+	if e.EqualTo([]byte("anything")) {
+		t.Error("EqualTo reported a match against wiped memory")
+	}
+	if _, err := e.EqualToErr([]byte("anything")); !errors.Is(err, ErrEnclaveDestroyed) {
+		t.Errorf("EqualToErr = %v, want ErrEnclaveDestroyed: there is no "+
+			"material left, so the comparison could not have run", err)
+	}
+}
+
+// TestReleaseNeverUnmapsMaterialItCouldNotWipe kills mutant M12 from #14.
+//
+// release()'s wipe guard is what stops it unlocking and unmapping a region that
+// was never wiped. Deleting that guard left the whole suite green, so the
+// property was unpinned: nothing established that a refused wipe prevents the
+// unmap rather than merely being reported alongside it.
+//
+// The assertion is on the SYSCALLS, not on the returned error, because the error
+// is the same either way -- which is exactly why the mutant survived.
+func TestReleaseNeverUnmapsMaterialItCouldNotWipe(t *testing.T) {
+	e, err := newMemoryEnclave([]byte("material that must not be handed back unwiped"))
+	if err != nil {
+		t.Fatalf("newMemoryEnclave: %v", err)
+	}
+	t.Cleanup(func() {
+		if e.m != nil {
+			_ = e.m.release()
+		}
+	})
+
+	denied := errors.New("mprotect denied by policy")
+	prevProtect, prevUnmap := protectMemory, unmapDirectFn
+	t.Cleanup(func() { protectMemory, unmapDirectFn = prevProtect, prevUnmap })
+
+	unmaps := 0
+	protectMemory = func([]byte, memcall.MemoryProtectionFlag) error { return denied }
+	unmapDirectFn = func([]byte) error {
+		unmaps++
+		// Refuse, so the mapping is kept and the test can inspect it.
+		return errors.New("munmap denied too")
+	}
+
+	_ = e.m.release()
+
+	if e.m.wiped {
+		t.Fatal("the mapping reports itself wiped although the wipe was refused")
+	}
+	if e.m.memory == nil {
+		t.Fatal("release dropped a mapping it could not wipe: the pages may " +
+			"still hold material and there is no handle left to retry through")
+	}
+	if unmaps > 1 {
+		t.Errorf("the fallback ran %d times for one release", unmaps)
+	}
+}
+
+// TestKeptMutableMappingReadsAsDestroyedOnceWiped is the other branch of #13,
+// found by the local Codex review of the first fix.
+//
+// wipeAndVerify destroys the material FIRST, before any syscall that can be
+// refused -- but only for a mapping that is still mutable, which is what a
+// [NewMemoryEnclaveSized] enclave is for its whole life. If the mprotect after
+// that early wipe is then refused and release's unmap fallback is refused too,
+// the mapping is KEPT with its material already zeroed. Recording the wipe only
+// after the mprotect left exactly the state the flag exists to close, reached
+// down the branch the frozen-path test cannot see: IsAlive true, a non-zero
+// Size, and Open handing back zeroes.
+func TestKeptMutableMappingReadsAsDestroyedOnceWiped(t *testing.T) {
+	e, err := newMemoryEnclaveSized(32)
+	if err != nil {
+		t.Fatalf("newMemoryEnclaveSized: %v", err)
+	}
+	t.Cleanup(func() {
+		if e.m != nil {
+			_ = e.m.release()
+		}
+	})
+
+	// The premise. A sized enclave is never frozen, and if that ever changes
+	// this test stops exercising the path it is named for.
+	if !e.m.mutable {
+		t.Fatal("the mapping is not mutable, so wipeAndVerify's early wipe " +
+			"would not run and this test would cover nothing")
+	}
+	if err := e.WithBytes(func(b []byte) error { copy(b, "material in a fillable enclave"); return nil }); err != nil {
+		t.Fatalf("WithBytes: %v", err)
+	}
+
+	denied := errors.New("mprotect denied by policy")
+	prevProtect, prevUnmap := protectMemory, unmapDirectFn
+	t.Cleanup(func() { protectMemory, unmapDirectFn = prevProtect, prevUnmap })
+	protectMemory = func([]byte, memcall.MemoryProtectionFlag) error { return denied }
+	unmapDirectFn = func([]byte) error { return errors.New("munmap denied too") }
+
+	_ = e.m.release()
+
+	// Both refusals landed, so the pages are still held -- which is the only
+	// situation in which the questions below have anything to answer.
+	if e.m == nil || e.m.memory == nil {
+		t.Fatal("the mapping was released; this test needs the KEPT-mapping case")
+	}
+
+	if e.IsAlive() {
+		t.Error("IsAlive reports true for a mutable enclave whose material the " +
+			"early wipe already destroyed")
+	}
+	if n := e.Size(); n != 0 {
+		t.Errorf("Size = %d, want 0: there is no material left to have a size", n)
+	}
+	if _, err := e.Open(); !errors.Is(err, ErrEnclaveDestroyed) {
+		t.Errorf("Open = %v, want ErrEnclaveDestroyed: it would otherwise hand "+
+			"back zeroes from a region whose guards are already read-write", err)
+	}
+	if err := e.WithBytes(func([]byte) error { return nil }); !errors.Is(err, ErrEnclaveDestroyed) {
+		t.Errorf("WithBytes = %v, want ErrEnclaveDestroyed", err)
+	}
+	if _, err := e.EqualToErr([]byte("anything")); !errors.Is(err, ErrEnclaveDestroyed) {
+		t.Errorf("EqualToErr = %v, want ErrEnclaveDestroyed", err)
+	}
+}

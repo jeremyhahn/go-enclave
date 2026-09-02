@@ -431,7 +431,14 @@ func (e *MemoryEnclave) withLocked(fn func([]byte) error) error {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
-	if e.m == nil {
+	if e.m == nil || e.m.wiped {
+		// wiped means the material is gone but the PAGES are still held,
+		// because the munlock or munmap after the wipe was refused and the
+		// mapping is kept so Destroy can be retried. Reading it would hand back
+		// zeroes from a region whose guard pages the release path has already
+		// left read-write. The enclave is destroyed even though the mapping is
+		// not yet released, and this is where those two stop being the same
+		// question.
 		return ErrEnclaveDestroyed
 	}
 
@@ -474,7 +481,7 @@ func (e *MemoryEnclave) Open() ([]byte, error) {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
-	if e.m == nil {
+	if e.m == nil || e.m.wiped {
 		return nil, ErrEnclaveDestroyed
 	}
 
@@ -526,7 +533,7 @@ func (e *MemoryEnclave) Size() int {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
-	if e.m == nil {
+	if e.m == nil || e.m.wiped {
 		return 0
 	}
 
@@ -542,7 +549,7 @@ func (e *MemoryEnclave) IsAlive() bool {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
-	return e.m != nil
+	return e.m != nil && !e.m.wiped
 }
 
 // EqualTo reports whether the enclave holds exactly other, comparing in

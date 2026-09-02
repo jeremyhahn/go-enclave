@@ -545,8 +545,17 @@ func TestMemoryEnclave_FailedReleaseKeepsTheReservation(t *testing.T) {
 	if e.m == nil {
 		t.Fatal("the enclave discarded a mapping it never released")
 	}
-	if !e.IsAlive() {
-		t.Error("IsAlive = false while the pages are still mapped")
+	// The MAPPING is retained -- asserted directly, just above. The ENCLAVE is
+	// not alive, and this assertion was inverted deliberately: a.NewSized gives
+	// a MUTABLE mapping, so wipeAndVerify's early wipe destroyed the material
+	// before the syscall that failed. The pages being held is the truth about
+	// the mapping; it was never the truth about the enclave, and reporting
+	// alive here is what let a caller that recovers from the panic read zeroes
+	// and take them for the secret (#13). The retry below is unaffected --
+	// Destroy consults the mapping, not the wiped flag.
+	if e.IsAlive() {
+		t.Error("IsAlive = true although the early wipe already destroyed the " +
+			"material; the caller would read zeroes and not be told")
 	}
 
 	// The retry: same enclave, real region restored.

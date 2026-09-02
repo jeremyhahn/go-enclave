@@ -977,8 +977,15 @@ func TestWipeAll_AFailedReleaseKeepsBothTheChargeAndTheLedgerEntry(t *testing.T)
 		t.Errorf("InUse = %d after a FAILED release, want the unchanged %d: the charge was returned "+
 			"while the kernel still holds the pages, so the allocator will over-admit", got, reserved)
 	}
-	if !e.IsAlive() {
-		t.Error("the enclave reports itself destroyed after a release that failed")
+	// Still on the ledger and still charged -- both asserted directly, just
+	// above -- and NOT alive. Inverted deliberately, for the reason in the
+	// twin assertion in mapping_test.go: a.NewSized is mutable, so
+	// wipeAndVerify's early wipe destroyed the material before the unmap that
+	// failed. The retry the count is asking for still works, because it goes
+	// through the mapping rather than the wiped flag (#13).
+	if e.IsAlive() {
+		t.Error("the enclave reports itself alive although its material was " +
+			"already wiped by the early wipe")
 	}
 
 	// With the region restored, the retry the count was asking for settles both.
