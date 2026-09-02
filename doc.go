@@ -128,6 +128,26 @@
 // frozen yet. Use Open only where no concurrent Destroy is possible, and never
 // retain what it returns.
 //
+// # Sizing a budget against the host
+//
+// An Allocator's budget is in locked bytes, the unit RLIMIT_MEMLOCK is
+// expressed in, so the two can be compared — and NewAllocatorWithinRLimit makes
+// the comparison. It discovers the process's ceiling and REFUSES a budget above
+// it, naming the discovered figure, so a budget that was never satisfiable
+// fails at construction instead of at the first allocation under load. A
+// library must never end its host's process over a resource limit, so this is a
+// constructor error and the decision stays with the application.
+//
+// DiscoverLockedMemoryLimit exposes the same reading, for deriving a budget
+// from the host rather than guessing one and for logging where the figure came
+// from. Neither is a guarantee: the ceiling is process-wide and shared, a
+// cgroup can bind well below it, and it can move afterwards, so the check is an
+// early diagnostic and ErrLockedMemoryUnavailable remains the authority on what
+// this process may actually lock. The ceiling is read on Linux and on the BSDs;
+// where a platform exposes none — Windows bounds a working-set size instead —
+// nothing is refused, and the reported source says the check did not run rather
+// than that the host has no limit.
+//
 // # Shutdown
 //
 // WipeAll destroys every enclave the package has handed out and not yet

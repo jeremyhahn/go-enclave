@@ -98,8 +98,73 @@ All notable changes to go-enclave are documented here. The format follows
   implementation that froze sized enclaves at construction would break every
   consumer of them. (#6)
 
-### Changed
+- **`NewAllocatorWithinRLimit(maxBytes int64) (*Allocator, error)` — the
+  startup check for a locked-memory budget.** It discovers the process's
+  `RLIMIT_MEMLOCK` and **refuses** a budget above it, returning
+  `ErrBudgetExceedsRLimit` (as an `*RLimitError`) naming both the budget and the
+  discovered ceiling. A service whose budget was never satisfiable learns it
+  while starting, from an error that names the number to change, instead of at
+  peak load from an allocation failure several layers from the setting that
+  caused it.
 
+  It fails closed rather than warning and continuing: a guard that reports a
+  problem somewhere nobody correlates with the failure it later causes is the
+  pattern this package exists to remove. And it is a **constructor error**, not
+  an exit — a library must never `os.Exit`, `log.Fatal` or panic over a host's
+  resource configuration, so the decision stays with the application.
+
+  `NewAllocator` is unchanged and still accepts any positive budget, so nothing
+  existing changes behavior.
+
+- **`DiscoverLockedMemoryLimit() (LockedMemoryLimit, error)`**, with
+  `LimitSource` and its `String`, for **deriving** a budget from the host rather
+  than guessing one — and for logging where the figure came from. "8 MiB because
+  `RLIMIT_MEMLOCK` said so" and "8 MiB because nothing bounded us and the config
+  asked for it" are the same number and different facts.
+
+  Three readings are handled explicitly rather than arithmetically. `RLIM_INFINITY`
+  is all-bits-set, which as an `int64` is `-1` — below every budget, so treating
+  it as a number would refuse them all; it reports as unlimited, and so does a
+  finite limit too large to represent as the `int64` a budget is. A process
+  holding **`CAP_IPC_LOCK`** may exceed the limit outright, so the figure is
+  reported as `LimitNotEnforced` and refuses nothing: failing a correctly
+  configured privileged service at startup, over a number the kernel will not
+  apply to it, is worse than the late failure this check exists to prevent.
+
+  The reading is a **snapshot and an upper bound on what may be assumed**, never
+  a guarantee. The ceiling is process-wide and shared, a cgroup v2 `memory.max`
+  frequently binds below it in a container, and it can move afterwards.
+  `ErrLockedMemoryUnavailable` remains the authority on what may actually be
+  locked. It is read once, at construction, and never on the allocation path.
+
+  The ceiling is read on **Linux and on the five BSDs**, all of which define
+  `RLIMIT_MEMLOCK`. `LimitUnsupported` is reported only where a platform
+  genuinely exposes none — Windows bounds a working-set size instead — because
+  reporting it where a ceiling *was* readable is a fail-open guard: the budget
+  was checkable, the constructor said nothing, and the failure lands later under
+  allocation pressure. There the constructor refuses nothing, which is the
+  deliberate contract: a diagnostic that cannot run is absent, not violated, and
+  refusing every budget would push callers back to the unchecked constructor and
+  delete the check where it does work. `LimitUnsupported` rather than
+  `LimitUnlimited` because "we did not look" is not the same claim as "the
+  kernel says there is no ceiling".
+
+  The BSD path has no CI — this repository's runners are Linux-only. Its
+  classification is shared with Linux in `classifyRlimit` and tested against
+  **both** platforms' `RLIM_INFINITY` sentinels, which do not agree: the BSDs
+  use the largest positive `int64` and Linux all-bits-set, so reading one with
+  the other's value silently yields a bounded ceiling of nine exabytes or of
+  -1. Only the syscall and the sentinel constant go unexercised, and a mistake
+  there fails loudly at startup rather than quietly later.
+
+- **`ErrLimitDiscoveryFailed` and `LimitDiscoveryError`** for a ceiling that
+  could not be READ, wrapping the syscall failure and reachable with
+  `errors.As`. Nothing was compared, so it is deliberately neither a verdict on
+  the budget nor a shortage of locked memory.
+
+  Resolves #11 (acceptance criterion 2 of #2).
+
+### Changed
 - **An enclave whose material has been wiped now reads as DESTROYED even while
   its pages are still held.** `IsAlive` returns false, `Size` returns 0, and
   `Open`, `WithBytes`, `EqualTo` and `EqualToErr` return `ErrEnclaveDestroyed`.
