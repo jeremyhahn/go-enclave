@@ -405,6 +405,28 @@ All notable changes to go-enclave are documented here. The format follows
 
 ### Tests
 
+- **`Allocator`'s cacheline budget is asserted rather than assumed (#60).**
+  This type's lock-free argument rests on `free` and `limit` sharing a line that
+  nothing unrelated writes, and nothing enforced it. The slack ran out
+  invisibly: the `stalled` seam (#51) costs 8 bytes and `rlimitBound` (#53)
+  costs 1, but `rlimitBound` lands at offset 48 and a func pointer needs 8-byte
+  alignment, so the bool drags 7 bytes of padding and the pair takes the struct
+  from 56 bytes to exactly 64. Each diff looked free in isolation; the bill only
+  existed in the combined struct, which came into being at a rebase, so no
+  reviewer of either pull request could have been shown it. `TestAllocator_StaysWithinItsCachelineBudget`
+  now fails on the next field of any size — measured: one added `bool` takes it
+  to 72 bytes and the test names it — and separately fails if `free` and `limit`
+  are ever split across lines.
+
+- **The parked withdrawal no longer leaks on the handoff test's failure path
+  (#60).** It parks inside `withdrawLocked` and therefore parks HOLDING `a.mu`,
+  since `SetLimit`'s deferred `Unlock` has not run; a `t.Fatalf` between the park
+  and the release left that goroutine blocked for the life of the process,
+  holding a lock, with nothing joining it. Released through an idempotent
+  `sync.Once` on `t.Cleanup` now. Exercised rather than argued: with `reserve`
+  mutated to refuse every admission, the test fails on that exact line and the
+  cleanup runs.
+
 - **The retune/admission race test no longer inherits the scheduler's luck
   (#51).** `TestAllocator_Retune_RacesAdmission` ran a storm — goroutines
   allocating and destroying in a loop against goroutines raising a page and

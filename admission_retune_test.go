@@ -18,6 +18,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unsafe"
 )
 
 // material returns a non-empty slice for New to take ownership of. Every enclave
@@ -698,10 +699,77 @@ func TestLimitError(t *testing.T) {
 	})
 }
 
+// TestAllocator_StaysWithinItsCachelineBudget guards the budget that
+// [Allocator.stalled] spent the last of.
+//
+// 64 is a FIXED BUDGET here, not a discovered line size, and the difference is
+// worth stating because this test's first name claimed the latter. It is the
+// line size on the platforms this package builds and ships on, and Go gives a
+// portable program no way to ask the machine. On a target with larger lines the
+// assertion is merely conservative; on one with 32-byte lines it would pass
+// while the property it was first named for fails. What it catches on EVERY
+// target is the regression it exists for — a field appended to the hot type,
+// doubling its footprint — so the budget is deliberately a constant rather than
+// a build-tag matrix. For reference, the type is 64 bytes on amd64 and 56 on
+// 386.
+//
+// This type's design is cacheline behavior on two atomic words: admission reads
+// free on every allocation and refusals read limit beside it, and the whole
+// lock-free argument assumes those two are not sharing a line with something
+// being written by an unrelated goroutine. Nothing enforced that.
+//
+// It became worth enforcing because the slack ran out invisibly, in a way
+// neither change could see alone. The seam field cost 8 bytes and #53's
+// rlimitBound cost 1 — but rlimitBound lands at offset 48, a func pointer needs
+// 8-byte alignment, so the bool drags 7 bytes of padding and the pair takes the
+// struct from 56 bytes to exactly 64. Each diff looked free in isolation; the
+// bill only existed in the combined struct, which came into being at a rebase,
+// so no reviewer of either pull request could have been shown it.
+//
+// 64 is the whole line. The NEXT field of any size at all pushes this type into
+// a second cacheline and puts the hot pair at risk of sharing one, and there is
+// no reason a reviewer would notice — which is what this test is for. If it
+// fails, the question is not how to make the number fit; it is whether the new
+// field belongs on the hot type at all, and if it does, whether free and limit
+// should be moved into their own aligned struct.
+func TestAllocator_StaysWithinItsCachelineBudget(t *testing.T) {
+	const line = 64
+
+	got := unsafe.Sizeof(Allocator{})
+	if got > line {
+		t.Errorf("Allocator is %d bytes, over the %d-byte cacheline budget: the field just added pushed the type into a second line — see this test's comment before widening the budget",
+			got, line)
+	}
+	// The two words admission actually touches must stay in the same line as
+	// each other, which is a stronger statement than the size and is the one
+	// the lock-free paths depend on.
+	free, limit := unsafe.Offsetof(Allocator{}.free), unsafe.Offsetof(Allocator{}.limit)
+	if free/line != limit/line {
+		t.Errorf("free is at offset %d and limit at %d, in different %d-byte lines: the two words admission and refusal read together are now split",
+			free, limit, line)
+	}
+	t.Logf("Allocator size=%d budget=%d free@%d limit@%d", got, line, free, limit)
+}
+
 // retuneActors is the number of goroutines that contend for pages in each round
 // of [TestAllocator_Retune_RacesAdmission], besides the one retuner. Each of
 // them either takes exactly one page or gives exactly one back, and every
 // round's arithmetic is written in terms of this count.
+//
+// What bounds it is the process's RLIMIT_MEMLOCK, and the mechanism is worth
+// stating because the plausible guess is the wrong one. These rounds build
+// their allocators with [NewAllocator], so rlimitBound is false, ceilingForRaise
+// returns the unbounded zero value and the ceiling contract added in #53 cannot
+// refuse anything here — measured: the whole file passes under `ulimit -l 32`,
+// below the 36 KiB the raise nominally asks for. The real wall is the kernel
+// refusing the mlock, and the pressure is retuneActors pages rather than one
+// more: the retuner moves BUDGET, and a budget page is not an mlock'd page.
+// Only live enclaves are locked, and every shape holds at most retuneActors of
+// them, admitted plus pre-held. Measured on both sides of that — `ulimit -l 32`,
+// eight pages, exactly retuneActors, passes the whole file; `ulimit -l 16` fails
+// every round with ErrLockedMemoryUnavailable, reported as "unexpected NewSized
+// err" rather than as anything naming a ceiling. Scale the cast and that is the
+// limit to check, and that is the error to expect.
 const retuneActors = 8
 
 // retuneShape describes one kind of arranged round: the budget it opens on, how
@@ -852,6 +920,33 @@ type retuneTally struct {
 // `admitted=600 refusedAdmit=1800 lowered=2400` on every run, which is not a
 // race at all but sixteen goroutines run to completion in turn. A fifty-fold
 // swing in how much of the path ran, none of it under the test's control.
+//
+// # Occupancy, which is the axis the earlier repairs missed
+//
+// The author of the storm fixed two starvations here before this one, and the
+// rule it took from them was about TRUNCATION: whichever side can be cut short
+// by a scheduling order is the side that reports green having done nothing, so
+// let the side you assert about bound the run. That rule is right and it does
+// not cover this failure. Nothing was truncated in the CI run — raised=2400 says
+// the retuner ran every iteration it was asked to. The lowerings were attempted
+// and refused.
+//
+// What starved them is OCCUPANCY: the allocating side holds a page ACROSS a
+// preemption point, descheduled between NewSized and Destroy while owning the
+// contended resource, whereas the retuner holds nothing while it waits. So load
+// does not slow the two sides equally — it inflates occupancy on one side only,
+// pins usage at the ceiling, and makes every lowering legitimately refusable.
+// The storm's design rests on usage sitting at the raised ceiling "a minority of
+// the time", and that minority is a function of load.
+//
+// The arrangement below answers that specifically rather than incidentally, by
+// making occupancy an INPUT instead of an outcome. Each admitting actor takes
+// exactly one page and holds it to the end of the round, so the pages held are
+// the shape's own numbers rather than whatever the scheduler left in flight; and
+// supply() subtracts the pre-held pages while deliberately NOT counting the ones
+// the draining actors give back, so every round is sized for its own worst-case
+// occupancy. A round cannot be starved by a page being held, because the page
+// being held is what it was arranged around.
 //
 // So this version arranges the contest instead of hoping for it. A round
 // releases a fixed cast from one line: actors that each attempt EXACTLY ONE
@@ -1259,12 +1354,30 @@ func TestAllocator_Retune_LoweringLosesTheContestedPage(t *testing.T) {
 
 	parked := make(chan struct{})
 	resume := make(chan struct{})
-	var once sync.Once
+	var (
+		park    sync.Once
+		release sync.Once
+	)
+	// releaseParked lets the withdrawal out of the seam, and it is idempotent
+	// because two paths call it: the ordinary one below, and the cleanup that
+	// covers the failure paths. A t.Fatalf between the park and the release
+	// would otherwise leave that goroutine blocked forever — and blocked
+	// HOLDING a.mu, since SetLimit's deferred Unlock has not run. Nothing joins
+	// it, so it would not hang the suite; it would sit there for the life of
+	// the process holding a lock, which is the kind of leak that turns one
+	// clean failure into two confusing ones the day this package grows a
+	// goroutine-leak check.
+	releaseParked := func() { release.Do(func() { close(resume) }) }
+	t.Cleanup(releaseParked)
 	// Set before the withdrawing goroutine is started and never touched again,
-	// so the seam needs no synchronization of its own. One-shot: the retry
-	// iteration must run to completion rather than park a second time.
+	// so the seam needs no synchronization of its own.
+	//
+	// One-shot, and the reason is the close rather than the park: the
+	// withdrawal's compare-and-swap loop reaches the seam again after its swap
+	// fails, and a second close(parked) panics. The second park would be
+	// harmless on its own, since resume is already closed by then.
 	a.stalled = func() {
-		once.Do(func() {
+		park.Do(func() {
 			close(parked)
 			<-resume
 		})
@@ -1299,7 +1412,7 @@ func TestAllocator_Retune_LoweringLosesTheContestedPage(t *testing.T) {
 		t.Errorf("free = %d once the page was admitted, want 0", free)
 	}
 
-	close(resume)
+	releaseParked()
 	waitBounded(t, &withdraw, 30*time.Second, "the parked withdrawal")
 
 	// The surviving state first, the loser's error second.
