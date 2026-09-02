@@ -292,7 +292,7 @@ func sizedAdmissionChild(t *testing.T) {
 	// then refuses must give its reservation back, so a transient exhaustion
 	// does not shrink the budget permanently. There is no enclave to inspect —
 	// only the counter records whether the release path ran, which makes this
-	// the mutation killer for `a.used.Add(-charge)` in NewSized.
+	// the mutation killer for `a.free.Add(charge)` in NewSized.
 	big, err := NewAllocator(1 << 24)
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)

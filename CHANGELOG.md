@@ -208,6 +208,75 @@ All notable changes to go-enclave are documented here. The format follows
   material outlived its enclave. What it tells an operator is that something in
   the environment is denying `mprotect`, which reaches every other enclave in
   the process. (#38)
+- **`Allocator.SetLimit`, `Allocator.ForceLimit` and `Allocator.TransferTo` — a
+  budget that can be retuned at runtime and rebalanced between allocators.**
+  (#35) Until now `Allocator.limit` was written once in `NewAllocator` and never
+  again, so a process whose locked-memory demand moved — a per-tenant seal
+  barrier gaining and losing tenants, a container resized under it — could not
+  adjust without rebuilding its allocators.
+
+  The two lowering contracts are separate methods because they answer different
+  questions. `SetLimit` **refuses** to shrink below the memory already reserved,
+  returning a `LimitError` matching the new `ErrBudgetInUse` and changing
+  nothing: the reservations belong to live enclaves that only their owners may
+  destroy, and no budget decision may invalidate them. `ForceLimit` records a
+  ceiling that moved regardless of what is reserved, keeps every live enclave
+  working, **returns the over-subscription in bytes** so the caller is told
+  rather than left to discover it, and admits nothing further until reservations
+  drain beneath the new budget. Zero is a legal runtime budget — quiescing an
+  allocator — even though it remains a construction-time error.
+
+- **The admission counter now holds the REMAINING budget rather than the bytes
+  used**, which is what makes a moving budget safe. Every operation reduces to
+  one signed adjustment of that single word: admitting subtracts, releasing
+  adds, raising the budget adds, lowering it subtracts. A budget reduction and
+  an allocation therefore compete on exactly the same terms, through the same
+  compare-and-swap, and one of them loses — where a limit and a usage counter in
+  two separate words would have let a lowering land invisibly between an
+  admission's check and its commit, over-committing locked memory the process
+  cannot actually get.
+
+  Admission is unchanged in cost and remains lock-free: one atomic word, no
+  syscall on refusal. The new mutex serializes budget CHANGES only, and the
+  observability getters take it shared so `InUse()` is an exact figure rather
+  than a torn pair. It is never taken on the allocation or release path.
+
+  A side benefit: the admission predicate is now `charge > free`, a comparison
+  with no arithmetic between the two values, so the overflow class the previous
+  `charge > limit-used` form was carefully written to avoid cannot arise at all.
+  The DIAGNOSTIC path still subtracts, and `BudgetError.InUse` is now documented
+  and tested as never negative: an over-subscribed allocator has a negative
+  headroom counter, and a lock-free reader catching it beside a freshly raised
+  limit would otherwise compute a byte count that wrapped. A wrapped count is not
+  a stale reading but an impossible one, and a consumer graphing it cannot tell
+  the difference. Caught by Codex on PR #44.
+
+  `Available()` reports zero rather than a negative remainder while an allocator
+  is over-subscribed, and `BudgetError.InUse` may now exceed `BudgetError.Limit`
+  — both states are reachable only through `ForceLimit`, and both are what an
+  over-subscribed allocator honestly looks like.
+
+- **`Allocator.TransferTo` moves headroom between two allocators as one
+  operation.** Doing it as a lowering plus a raise leaves a window in which the
+  bytes are in both allocators or in neither, depending on the order; "both"
+  lets each side admit against the same locked memory. The transfer debits the
+  source first and credits the destination second, so the intermediate state is
+  always "in neither" — conservative, recoverable by a retry, and unobservable
+  to any other retune since both locks are held across it. The two locks are
+  taken in a fixed total order (ascending construction id), which is what makes
+  concurrent A→B and B→A transfers impossible to deadlock.
+
+  No parent/child budget hierarchy was introduced; #35 records that as an
+  architecture decision for the owner, and direct transfer does not need one.
+
+  None of the three re-checks `RLIMIT_MEMLOCK`, exactly as `NewAllocator` does
+  not. An allocator built by `NewAllocatorWithinRLimit` (#43) can be raised back
+  above the ceiling that constructor refused, so that check is a startup check
+  and does not carry forward; `SetLimit`'s doc comment says so. Applying it to a
+  retune would be a behavior decision for the owner rather than a gap to fill
+  quietly, and admission fails safe regardless — the kernel refuses the lock and
+  the allocation returns `ErrLockedMemoryUnavailable`.
+
 
 ## [v0.4.0-alpha] - 2026-08-26
 

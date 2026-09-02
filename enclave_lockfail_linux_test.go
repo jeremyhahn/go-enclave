@@ -313,7 +313,7 @@ const (
 // fails, [Allocator.New] returns ErrLockedMemoryUnavailable AND returns the
 // reservation, so a transient exhaustion does not permanently shrink the
 // budget. This is the mutation killer for the release-on-construction-failure
-// path in Allocator.New (`a.used.Add(-n)`): a behavioral check on the enclave
+// path in Allocator.New (`a.free.Add(charge)`): a behavioral check on the enclave
 // cannot see it, because there is no enclave — only the allocator's counter
 // records whether the reservation leaked.
 //
@@ -390,7 +390,7 @@ func allocReleaseChild(t *testing.T) {
 
 	// With survivors accounted for, anything left in the counter is the failed
 	// allocation's reservation, leaked. The release-on-failure path
-	// (`a.used.Add(-n)`) is the only thing that returns it; delete that line
+	// (`a.free.Add(charge)`) is the only thing that returns it; delete that line
 	// and this assertion fails.
 	if got := a.InUse(); got != 0 {
 		t.Fatalf("InUse = %d after releasing survivors, want 0 (failed allocation leaked its reservation)", got)
