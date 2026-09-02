@@ -470,25 +470,49 @@ func (s *Sealer) Seal(data []byte) (*SealedEnclave, error) {
 }
 
 // open recovers a sealed envelope produced by this sealer. It is called by
-// [SealedEnclave.Open] under that value's read lock.
-func (s *Sealer) open(blob, sealed []byte, size int) (*MemoryEnclave, error) {
+// [SealedEnclave.Open] (a is nil) and [SealedEnclave.OpenWith] (a is the
+// caller's Allocator) under that value's read lock.
+//
+// THE DESTINATION IS ALLOCATED FIRST, and that order is load-bearing rather
+// than incidental. It is the one admitted allocation on this path, so taking
+// it first makes it the GATE: an open the budget refuses has allocated no
+// locked memory at all and has not touched a key, and the transient pages
+// below can only exist behind a reservation that was granted. Allocating the
+// DEK first — the order this had before budgets existed — would let a flood
+// of opens each take an unadmitted locked page BEFORE meeting the budget,
+// which is precisely the unbounded consumption an [Allocator] exists to stop.
+//
+// The cost of the order is that a value whose envelope fails to authenticate
+// has had a destination mapped and locked for nothing. That is affordable
+// here and would not be everywhere: this package accepts no foreign sealed
+// bytes, so an envelope reaching this function was produced by this process.
+func (s *Sealer) open(a *Allocator, blob, sealed []byte, size int) (*MemoryEnclave, error) {
+	// The gate. allocSized admits it against a, or allocates it unadmitted
+	// when a is nil, which is how [SealedEnclave.Open] keeps its contract.
+	out, err := allocSized(a, size)
+	if err != nil {
+		return nil, err
+	}
+
 	// The DEK is recovered INTO locked memory: the destination exists before
 	// the provider or hierarchy is asked to fill it, which is what lets a
 	// capable provider write the key straight into locked pages.
+	//
+	// It is NOT admitted, and that is a decision with a rejected alternative
+	// behind it; see [SealedEnclave.OpenWith] for why a second reservation per
+	// open is worse than an unadmitted page that a granted reservation gates.
 	dek, err := NewMemoryEnclaveSized(dekBytes)
 	if err != nil {
+		out.Destroy()
 		return nil, err
 	}
 	defer dek.Destroy()
 
 	if err := s.unprotect(blob, dek); err != nil {
+		out.Destroy()
 		return nil, err
 	}
 
-	out, err := NewMemoryEnclaveSized(size)
-	if err != nil {
-		return nil, err
-	}
 	if err := out.WithBytes(func(pt []byte) error {
 		// The blob is verified as AAD here even though the DEK unwrap already
 		// authenticated it: this is what refuses an envelope whose two halves

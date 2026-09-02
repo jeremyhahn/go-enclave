@@ -290,6 +290,50 @@ All notable changes to go-enclave are documented here. The format follows
 
   Resolves #11 (acceptance criterion 2 of #2).
 
+- **`(*SealedEnclave) OpenWith(a *Allocator) (*MemoryEnclave, error)` — the
+  admitted open (#17).** `Open` allocates through the UNADMITTED constructors,
+  so a caller bounding locked memory through an `Allocator` had no way to bound
+  what opening a credential cost. That matters here because of WHEN this type
+  allocates: `NewSealed` takes locked memory once, for keys, but `Open` takes a
+  fresh locked page on EVERY call — a service opening a secret per connection
+  allocates a locked page per connection, entirely outside the budget it
+  configured. Locked memory is a process-wide ceiling, so that is the
+  request-rate-driven exhaustion an `Allocator` exists to turn into a typed
+  refusal.
+
+  **One reservation per open, taken FIRST.** The destination is the only
+  admitted allocation and it is the gate: an open the budget refuses has
+  allocated no locked memory and has not touched a key. The transient key pages
+  an open needs on the way — the per-value DEK, and for a retired KEK
+  generation that generation's key — are deliberately NOT charged, so the
+  process peak can exceed the budget by up to two pages per open IN FLIGHT,
+  bounded because nothing transient is allocated until a reservation has been
+  granted. The allocation order changed for that reason: the destination now
+  precedes the DEK, where before budgets existed the DEK came first.
+
+  Charging the transients as additional reservations was implemented first and
+  rejected, and the reason is recorded on `OpenWith` because it is the kind of
+  accuracy that costs availability. Two reservations per open let concurrent
+  callers fragment a budget against themselves: under a budget sized for one
+  open, two callers can each take a key page and then BOTH be refused for a
+  destination the budget could have covered for one of them — a flood makes
+  every open fail, including the legitimate ones, which is the outcome an
+  `Allocator` exists to prevent. One reservation per open makes admission a
+  single atomic decision, so contention refuses only the excess.
+
+  **`OpenWith(nil)` is refused with the new `ErrNilAllocator`** rather than
+  falling back to an unadmitted allocation. A caller reaches for this method to
+  bound something; quietly allocating outside the budget would deliver the
+  precise outcome the call was written to prevent, on a path that keeps working
+  and keeps looking bounded. The unbudgeted open is still available and spelled
+  differently — call `Open`, whose contract is unchanged and now says plainly
+  that it allocates outside any budget.
+
+  Not covered, and stated as a boundary rather than an omission: the SEAL path
+  is still unadmitted. There is no `SealWith`; sealing allocates once per value
+  rather than once per use, so it does not scale with request rate the way
+  opening does.
+
 ### Changed
 - **An enclave whose material has been wiped now reads as DESTROYED even while
   its pages are still held.** `IsAlive` returns false, `Size` returns 0, and

@@ -199,7 +199,7 @@ pages:
 | `CoreDumpsDisabled()` | Whether lowering `RLIMIT_CORE` at import succeeded. Best effort by nature — a sandbox can deny it and anything in the process can raise it again — so it is reported rather than promised. Each enclave's pages are separately marked `MADV_DONTDUMP`, which **is** verified and fails the allocation if refused. |
 
 Errors: `ErrEmptyEnclave`, `ErrInvalidSize`, `ErrEnclaveDestroyed`, `ErrLockedMemoryUnavailable`
-(+ `LockedMemoryError`), `ErrBudgetExhausted` (+ `BudgetError`), `ErrInvalidBudget`,
+(+ `LockedMemoryError`), `ErrBudgetExhausted` (+ `BudgetError`), `ErrInvalidBudget`, `ErrNilAllocator`,
 `ErrBudgetExceedsRLimit` (+ `RLimitError`), `ErrLimitDiscoveryFailed` (+ `LimitDiscoveryError`);
 sealing: `ErrSealFailed`, `ErrSealedAuthentication`, `ErrSealerWiped`, `ErrProviderMode`,
 `ErrInvalidMode`, `ErrSealerInstalled`, `ErrNilSealer`, `ErrProviderMessageLimit`,

@@ -492,6 +492,13 @@ func NewSealed(data []byte) (*SealedEnclave, error) {
 // Each call returns an independent enclave; opening twice yields two, and
 // destroying one does not affect the other or the SealedEnclave.
 //
+// It allocates OUTSIDE any [Allocator] budget: the destination, and the key
+// pages the recovery needs on the way, come from the unadmitted constructors.
+// That is the right default for the caller who has no budget, and the wrong
+// one for the caller who does — an Open per connection is a locked page per
+// connection, and none of them are visible to the Allocator that path thought
+// it was bounded by. Callers holding a budget use [SealedEnclave.OpenWith].
+//
 // It returns ErrEnclaveDestroyed once Destroy has run, ErrSealedAuthentication
 // if the envelope does not authenticate, ErrLockedMemoryUnavailable when the
 // kernel refuses to lock the destination — the sealed value SURVIVES that
@@ -501,6 +508,89 @@ func NewSealed(data []byte) (*SealedEnclave, error) {
 // device unreachable, say) surface unchanged, per the [KeyProtector]
 // contract.
 func (s *SealedEnclave) Open() (*MemoryEnclave, error) {
+	// nil is how the open path spells "unadmitted"; see allocSized.
+	return s.openWith(nil)
+}
+
+// OpenWith is [SealedEnclave.Open] with the recovered material ADMITTED
+// AGAINST a — the destination is reserved from a's budget before any locked
+// memory is requested, and the reservation is returned to a when the caller
+// Destroys the returned enclave.
+//
+// It exists because of WHEN this type allocates. [NewSealed] takes locked
+// memory once, for keys; Open takes a fresh locked page on EVERY call, and
+// Open is the hot path — once per use of the credential. A service that opens
+// a Secret per connection allocates a locked page per connection, and through
+// Open every one of them is outside whatever budget that service configured.
+// Locked memory is a process-wide ceiling, so that is not merely unaccounted:
+// it is the unbounded, request-rate-driven consumption an [Allocator] exists
+// to convert into a typed refusal on the abusive path.
+//
+// # A nil Allocator is refused
+//
+// OpenWith(nil) returns [ErrNilAllocator] and allocates nothing. It does NOT
+// fall back to an unbudgeted open: a caller reached for this method to bound
+// something, and quietly allocating outside the budget would deliver exactly
+// the outcome the call was written to prevent, while continuing to look
+// bounded. The unbudgeted open is still available and spelled differently —
+// call Open. The refusal precedes the destroyed check, so a lost allocator is
+// reported as a lost allocator whatever the value's lifecycle happens to be.
+//
+// # What is admitted: the destination, in ONE reservation, taken FIRST
+//
+// The destination is the only admitted allocation, and it is taken before any
+// other work. An open the budget refuses therefore costs nothing at all — no
+// locked page, no key touched — and the budget is a bound on the material a
+// caller HOLDS, which is the quantity that accumulates.
+//
+// The transient key pages an open needs on the way are NOT charged: the
+// per-value DEK, and — only for a value sealed under a retired KEK generation
+// in [ModeRootKey] — that generation's key. So the process's actual peak can
+// exceed the budget, by at most one page (two across a retired unwrap) per
+// open IN FLIGHT. That excess is bounded rather than open-ended, precisely
+// because the destination reservation gates it: nothing transient is
+// allocated until a reservation has been granted, so an open the budget
+// refuses adds nothing to the peak. Size a budget with headroom of a page per
+// concurrent open if the comparison against RLIMIT_MEMLOCK has to be tight.
+//
+// # Why the transients are not admitted, which was tried first
+//
+// Charging them is more accurate and it BREAKS UNDER LOAD, which is the
+// condition an Allocator exists for. Two reservations per open let concurrent
+// callers fragment the budget against themselves: under a budget sized for
+// one open, two callers can each take a key page, and then BOTH be refused
+// for a destination the budget could have covered for one of them. A flood
+// then makes every open fail — including the legitimate ones — which is the
+// outcome an Allocator is supposed to prevent, arriving by a new road.
+//
+// One reservation per open cannot do that. Admission for a whole open is a
+// single atomic decision, so contention refuses only the excess and the
+// callers that were admitted make progress.
+//
+// It returns everything Open returns, plus ErrNilAllocator for a nil
+// Allocator and ErrBudgetExhausted (as a [BudgetError]) when the open would
+// exceed a's budget. A budget refusal leaves the sealed value untouched and
+// is retryable, exactly as ErrLockedMemoryUnavailable is.
+//
+// The SEAL path is not budgeted at all: there is no SealWith, so [NewSealed],
+// [Sealer.Seal] and the one-time hierarchy setup take their locked pages
+// unadmitted. That is a real gap and a deliberate boundary for this change —
+// sealing allocates once per value rather than once per use, so it does not
+// scale with request rate the way opening does.
+func (s *SealedEnclave) OpenWith(a *Allocator) (*MemoryEnclave, error) {
+	if s == nil {
+		return nil, ErrEnclaveDestroyed
+	}
+	if a == nil {
+		return nil, ErrNilAllocator
+	}
+	return s.openWith(a)
+}
+
+// openWith is the shared body of Open and OpenWith. a is nil for an
+// unadmitted open and non-nil for a budgeted one; nothing below branches on
+// it, which is what keeps the two entry points from drifting apart.
+func (s *SealedEnclave) openWith(a *Allocator) (*MemoryEnclave, error) {
 	if s == nil {
 		return nil, ErrEnclaveDestroyed
 	}
@@ -512,7 +602,7 @@ func (s *SealedEnclave) Open() (*MemoryEnclave, error) {
 		return nil, ErrEnclaveDestroyed
 	}
 
-	return s.sealer.open(s.blob, s.sealed, s.size)
+	return s.sealer.open(a, s.blob, s.sealed, s.size)
 }
 
 // IsAlive reports whether the sealed material is still held. It reports on

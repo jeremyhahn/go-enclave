@@ -25,10 +25,11 @@ import (
 // does, and what the mode-asymmetry test needs), and the test can reach into
 // it to mint alias blobs (which the envelope-binding test needs).
 type mapKeyProtector struct {
-	mu       sync.Mutex
-	n        int
-	keys     map[string][]byte
-	protects int
+	mu         sync.Mutex
+	n          int
+	keys       map[string][]byte
+	protects   int
+	unprotects int
 }
 
 func newMapKeyProtector() *mapKeyProtector {
@@ -48,6 +49,7 @@ func (m *mapKeyProtector) Protect(key []byte) ([]byte, error) {
 func (m *mapKeyProtector) Unprotect(blob, key []byte) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.unprotects++
 	k, ok := m.keys[string(blob)]
 	if !ok || len(k) != len(key) {
 		return ErrSealedAuthentication
@@ -62,6 +64,14 @@ func (m *mapKeyProtector) protectCount() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.protects
+}
+
+// unprotectCount reports how many Unprotects ran, so a test can prove that an
+// open refused by its budget never reached the key at all.
+func (m *mapKeyProtector) unprotectCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.unprotects
 }
 
 // alias registers a SECOND valid blob for the key already filed under

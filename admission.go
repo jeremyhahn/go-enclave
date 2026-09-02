@@ -65,6 +65,24 @@ var (
 	// rebalancing a slice of allocators against each other, and because taking
 	// the same lock twice would hang rather than fail.
 	ErrInvalidTransfer = errors.New("enclave: invalid headroom transfer")
+
+	// ErrNilAllocator is returned by [SealedEnclave.OpenWith] for a nil
+	// *Allocator. It REFUSES rather than falling back to an unadmitted
+	// allocation, and that is the whole point of the sentinel.
+	//
+	// A caller reaches OpenWith instead of [SealedEnclave.Open] for exactly
+	// one reason: to hold the open's locked memory inside a budget. A nil
+	// Allocator arriving there is an uninitialized field or a lost
+	// configuration step, and the "helpful" reading — treat nil as no budget
+	// and allocate anyway — silently delivers the precise outcome the caller
+	// wrote OpenWith to prevent, on a path that keeps working and keeps
+	// looking bounded. The unbudgeted allocation is available and spelled
+	// differently: call Open.
+	//
+	// It is a programming error, so it is reported before any state is
+	// consulted; a value that happens to be destroyed does not change the
+	// answer. Open, by contrast, has nothing to refuse and never returns it.
+	ErrNilAllocator = errors.New("enclave: allocator is nil")
 )
 
 // BudgetError reports that an allocation was refused because it would exceed an
@@ -496,6 +514,28 @@ func (a *Allocator) NewSized(n int) (*MemoryEnclave, error) {
 
 	// Publication last, for the reason spelled out in New.
 	return register(e), nil
+}
+
+// allocSized returns an enclave over n bytes of locked, zeroed memory,
+// admitted against a when one was supplied and unadmitted when a is nil.
+//
+// It exists so that a path which allocates locked memory can be made
+// budget-aware by threading ONE parameter, without every allocation site
+// growing its own nil branch — and, more importantly, without any of them
+// silently choosing the unadmitted constructor. Every caller passes an
+// allocator it was given, so nil here means the caller's own caller asked for
+// the unbudgeted behavior.
+//
+// The nil case is deliberately NOT a refusal, unlike [ErrNilAllocator] at the
+// public boundary: the refusal belongs at the entry point a caller chose,
+// where "you asked for a budget and supplied none" is a statement about the
+// call. Down here nil is the legitimate encoding of [SealedEnclave.Open]'s
+// unbudgeted contract, which predates the Allocator and must keep working.
+func allocSized(a *Allocator, n int) (*MemoryEnclave, error) {
+	if a == nil {
+		return NewMemoryEnclaveSized(n)
+	}
+	return a.NewSized(n)
 }
 
 // reserve claims n bytes of the budget, lock-free, and is the sole admission

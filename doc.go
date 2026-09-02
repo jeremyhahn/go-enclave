@@ -274,6 +274,12 @@
 // on Mode. Out of the box — no provider, no configuration — NewSealed is
 // plain software sealing.
 //
+// One thing about opening is worth knowing before a service is built on this:
+// Open allocates OUTSIDE any Allocator budget, and it allocates on EVERY
+// call — so a service opening a credential per connection takes a locked page
+// per connection that its budget cannot see. SealedEnclave.OpenWith is the
+// admitted form, and it refuses a nil Allocator rather than falling back.
+//
 // # FIPS
 //
 // A MemoryEnclave performs no cryptography: it maps, locks and wipes memory,
