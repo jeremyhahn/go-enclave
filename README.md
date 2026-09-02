@@ -65,6 +65,70 @@ built from existing material has: a write through a retained slice **faults**
 rather than silently corrupting a key. Without it that window is the enclave's
 whole lifetime.
 
+## Two enclave types — which one?
+
+`SealedEnclave` (the sealing surface) holds material **encrypted at rest**
+inside the process: plaintext exists only for the duration of an `Open`,
+inside the `MemoryEnclave` that `Open` returns.
+
+```go
+s, err := enclave.NewSealed(credential) // credential is wiped
+if err != nil {
+    return err
+}
+// ... later, per use:
+e, err := s.Open() // plaintext decrypted straight into locked pages
+if err != nil {
+    return err
+}
+defer e.Destroy() // open late, destroy early; s keeps only ciphertext
+```
+
+The two types make **different promises**, and the difference is the
+plaintext's residency window. A `MemoryEnclave`'s protections (mlock, guard
+pages, canary, core-dump exclusion, wipe on destroy) keep the material off
+*disk*; the plaintext is resident, and readable by anything that can read this
+process's live memory, for the object's **whole life**. A `SealedEnclave` is
+unreadable to a memory reader **between opens** — the window narrows from the
+process lifetime to the operations.
+
+Choose by **access pattern**:
+
+- **`MemoryEnclave`** for material in hot or continuous use, or that must be
+  handed to an API needing a stable buffer for its lifetime. Sealing it would
+  buy nothing — it would always be open. Cost: at least one locked page,
+  charged against `RLIMIT_MEMLOCK` (and any `Allocator` budget) continuously.
+- **`SealedEnclave`** for material used intermittently — a credential opened
+  per request, a key touched a few times an hour. The classic secure-buffer
+  versus secret split: buffer-shaped usage converts to `MemoryEnclave`,
+  secret-shaped usage to `SealedEnclave`. Cost: the envelope is near-free
+  heap ciphertext, but **every `Open` allocates a fresh locked page**, today
+  outside any `Allocator` budget (an admitted `OpenWith` is #17) — a service
+  opening per connection should size `RLIMIT_MEMLOCK` for it.
+
+Honestly stated, because it decides whether sealing is worth it to you: the
+sealed **material** never reaches the heap (its plaintext is decrypted only
+into locked pages — verified by sweeping the process's anonymous mappings),
+but the per-value **key** transits the Go heap on every seal and open, because
+building the AEAD expands it into `aes.NewCipher`'s key schedule; that copy
+persists until its heap span is reused. Sealing **narrows a window; it does
+not close one**: it is no protection against an attacker reading memory while
+an `Open` is in flight, or one who can drive `Open`s through your own surface
+— and with the pure-software default the sealing keys themselves live in this
+process, so a live-memory adversary gets everything anyway. Rooting the seal
+in hardware is what the provider seam is for: go-enclave defines
+`KeyProtector`/`RootUnsealer` and ships only the software default; TPM, HSM
+or KMS providers are injected from above (`NewSealer`, `SetSealer`), with two
+modes trading device traffic against what a memory reader obtains — see
+`Mode` for the honest comparison.
+
+One trap: `IsAlive` is a **different predicate** on the two types.
+`MemoryEnclave.IsAlive` means "usable" — false once the material is gone,
+however it went. `SealedEnclave.IsAlive` reports that the *ciphertext* is
+held, and can be true for a value that can no longer be opened (after a
+shutdown `WipeAll` destroyed the sealing keys, `Open` says so with
+`ErrSealerWiped`). An explicit openability probe is #33.
+
 ## Why this exists
 
 Locked memory is a process-wide resource with a hard ceiling, and the obvious
@@ -124,12 +188,22 @@ pages:
 | `LockedSize(n int) int64` | What an enclave of `n` bytes actually costs — `n` rounded up to a whole page. Size budgets with this: every enclave occupies at least one page, so a budget for a hundred small credentials is a hundred **pages**. Returns `int64` to match the budget, so `NewAllocator(100 * LockedSize(32))` needs no conversion. |
 | `NewAllocatorWithinRLimit(maxBytes)` | `NewAllocator` plus a **sticky ceiling check**: discovers `RLIMIT_MEMLOCK` and refuses a budget above it with `ErrBudgetExceedsRLimit`, naming both figures — a budget that was never satisfiable fails at construction rather than at the first allocation under load. It refuses nothing when the ceiling is unlimited, unenforceable (`CAP_IPC_LOCK`), or absent because the platform exposes none: there is no ceiling to be above. A ceiling that could not be **read** is a different case and is not silent — a failing `getrlimit` returns `ErrLimitDiscoveryFailed`, since nothing was compared. Never exits, logs or panics; every one of those is a return value and the decision is the application's. The check **outlives construction**: `SetLimit` re-reads the ceiling (fresh — it moves) and refuses to raise this allocator's budget above it, and `TransferTo` applies the same to the allocator it credits, since a transfer is a raise on the receiving side. Raises only, so an over-ceiling allocator can always move back towards compliance; `ForceLimit` overrides it, as it overrides every other refusal here. A plain `NewAllocator` allocator is never checked, on any path. Nothing was added to the admission path. |
 | `DiscoverLockedMemoryLimit()` | Read the ceiling yourself, to **derive** a budget from the host instead of guessing one. Reports the figure, whether it is a ceiling to rely on, and where it came from (`LimitSource`), so the derivation can be logged next to the number. An unbounded or absent ceiling is not an error — it comes back with `Bounded` false and a source saying which; only a failed read is an error, and it is `ErrLimitDiscoveryFailed`. |
+| `NewSealed(data []byte)` | Seal `data` under the process sealer (software default installed lazily); wipes `data`. Returns a `*SealedEnclave` — heap ciphertext, no locked pages held at rest. |
+| `(*SealedEnclave) Open()` | Decrypt into a **new** locked `MemoryEnclave` the caller owns and must `Destroy`. Fails with `ErrSealedAuthentication` for anything tampered, truncated, re-paired or foreign, and `ErrSealerWiped` after a shutdown sweep. |
+| `(*SealedEnclave) IsAlive / Destroy / String` | Ciphertext-presence probe (see the trap above), idempotent destroy that wipes both envelope halves, masked printing. |
+| `NewSealer(WithProvider(p), WithMode(m))` | An explicitly configured sealer. Refuses a provider that does not implement the selected mode's interface (`ErrProviderMode`, including nil and typed-nil providers) and unknown modes (`ErrInvalidMode`) **at construction**. |
+| `SetSealer(s)` | Install the process sealer `NewSealed` uses — **one-shot**, before anything seals; fails closed with `ErrSealerInstalled` afterwards. |
+| `KeyProtector` / `RootUnsealer` | The provider seam: per-operation key protection and one-shot root unseal. Implementations must supply confidentiality **and** authenticity; both recover into caller-supplied (locked) memory. |
+| `NewSoftwareProvider()` | The pure-software provider (both interfaces); the process default. Its root lives in this process — read its docs for what that trades away. |
 | `Wipe(b []byte)` | Zero a transient plain slice. |
 | `CoreDumpsDisabled()` | Whether lowering `RLIMIT_CORE` at import succeeded. Best effort by nature — a sandbox can deny it and anything in the process can raise it again — so it is reported rather than promised. Each enclave's pages are separately marked `MADV_DONTDUMP`, which **is** verified and fails the allocation if refused. |
 
 Errors: `ErrEmptyEnclave`, `ErrInvalidSize`, `ErrEnclaveDestroyed`, `ErrLockedMemoryUnavailable`
 (+ `LockedMemoryError`), `ErrBudgetExhausted` (+ `BudgetError`), `ErrInvalidBudget`,
-`ErrBudgetExceedsRLimit` (+ `RLimitError`), `ErrLimitDiscoveryFailed` (+ `LimitDiscoveryError`).
+`ErrBudgetExceedsRLimit` (+ `RLimitError`), `ErrLimitDiscoveryFailed` (+ `LimitDiscoveryError`);
+sealing: `ErrSealFailed`, `ErrSealedAuthentication`, `ErrSealerWiped`, `ErrProviderMode`,
+`ErrInvalidMode`, `ErrSealerInstalled`, `ErrNilSealer`, `ErrProviderMessageLimit`,
+`ErrMaterialTooLarge`, `ErrPlaintextEscaped`.
 
 ### The obligation admission control does not remove
 
@@ -187,10 +261,18 @@ every call site ambiguous. Avoid introducing `Secret`, `SecureString`,
 
 ## FIPS
 
-A `MemoryEnclave` performs no cryptography. It maps, locks and wipes memory; the
-only cryptographic primitive anywhere near it is `crypto/rand` filling the
-canary, a FIPS-approved DRBG. The package builds and its tests pass under
-`GOFIPS140=latest GODEBUG=fips140=only` (`make test-fips`).
+The locked-memory core performs no cryptography — `MemoryEnclave`, `Allocator`
+and `WipeAll` touch nothing beyond `crypto/rand` filling the canary. The
+sealing surface performs only FIPS-approved cryptography through the standard
+library — AES-256-GCM via `cipher.NewGCMWithRandomNonce`, and nothing else.
+The whole package builds and its tests pass under `GOFIPS140=latest
+GODEBUG=fips140=only` (`make test-fips`).
+
+`GOEXPERIMENT=boringcrypto` builds cannot seal, deliberately: the only route
+would be `cipher.NewGCM` with caller-supplied nonces, abandoning the
+construction that makes nonce misuse structurally impossible, to serve a
+mechanism superseded by Go's native FIPS 140-3 module. The refusal and its
+reasoning are in the package docs.
 
 Dropping memguard removed a non-approved algorithm from the build graph of
 everything that imports this package: go-enclave never called its
@@ -206,7 +288,7 @@ make security    # gosec, govulncheck, modverify, trivy
 make ci          # the full local gate
 ```
 
-Requires Go 1.26.7. Some tests (`_linux` fault-injection) lower
+Requires Go 1.27.0. Some tests (`_linux` fault-injection) lower
 `RLIMIT_MEMLOCK` in a subprocess and skip where they cannot.
 
 ## License

@@ -31,6 +31,13 @@ import (
 // `[anon: Go: heap]`. Measured, that left one mapping swept and thirty skipped,
 // so a plaintext copy retained on the heap forever went unnoticed by the one
 // test written to catch it.
+//
+// The second lesson is the mirror of the first: an instrument can also SEE TOO
+// MUCH — specifically, itself. The scan buffer holds copies of everything it
+// reads, needle included, and an unwiped buffer becomes heap garbage a later
+// sweep can find and misreport as a leak in the code under test. The first
+// failure mode made the sweep blind; this one made it hallucinate. Both are
+// documented at the code that fixes them.
 
 // rangesOutside returns the matches that do not contain addr — that is, every
 // copy of the needle other than the one the test is holding on purpose.
@@ -70,6 +77,31 @@ func processMemoryFind(needle []byte) ([]string, error) {
 	// missed — the failure mode of a fixed-window scan.
 	overlap := len(needle) - 1
 	buf := make([]byte, chunk+overlap)
+	// THE SCAN BUFFER IS WIPED ON EVERY RETURN PATH, and this line is
+	// load-bearing: without it the instrument PLANTS the very thing it looks
+	// for. Scanning the needle's own (legitimate) mapping copies the needle
+	// into buf — an ordinary heap allocation — and when buf becomes garbage
+	// those bytes linger in the freed span until it is reused. A LATER sweep
+	// then finds the EARLIER sweep's buffer and reports a heap residue that
+	// never existed in the code under test. The same self-contamination shape
+	// was independently hit and fixed in a parent-scans-child probe during
+	// the PR #45 review, where the counts climbed 2->6->10 across scans.
+	//
+	// This buffer is ONE of two ways a sweep-based test was measured to smear
+	// its own needle on PR #45. The other — a control copy in a
+	// stack-allocatable local, stranded intact on the freed old stack when a
+	// growth intervened between fill and wipe — cannot be fixed here or
+	// anywhere, and retired that test's sweep formulation outright. (The
+	// test in question left with the Decrypter/Signer adapter, split out to
+	// issue #50; the forensics — hex-dump of the hit, addr2line on the
+	// surrounding frames — are recorded there and on the PR #45 review.)
+	// Tests that keep using this sweep must keep their needles out of plain
+	// locals: generate into locked pages, hand copies only to callees that
+	// take ownership and wipe (NewSealed), and compare from inside borrows.
+	// The residency tests in this package hold to that; a new sweep-based
+	// test that plants a bare heap or stack control copy will inherit the
+	// flake.
+	defer wipe(buf)
 
 	var hits []string
 	for _, line := range strings.Split(string(maps), "\n") {

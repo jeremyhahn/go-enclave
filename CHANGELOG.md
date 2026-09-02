@@ -8,6 +8,10 @@ All notable changes to go-enclave are documented here. The format follows
 
 ### Changed
 
+- `make lint` pins golangci-lint v2.13.2 — the floor for linting Go 1.27;
+  v2.12.2's vendored analysis tools cannot parse the 1.27 standard library.
+  CI already runs the same version baked into the runner image.
+
 - **The `RLIMIT_MEMLOCK` check is now sticky: an allocator built by
   `NewAllocatorWithinRLimit` carries it for life.** (#46) `SetLimit` re-reads the
   ceiling and refuses to raise that allocator's budget above it with
@@ -50,6 +54,85 @@ All notable changes to go-enclave are documented here. The format follows
 
 
 ### Added
+
+- **The hardware-rootable two-mode sealing seam (#22): `SealedEnclave`,
+  `Sealer`, `KeyProtector`/`RootUnsealer`, and `SoftwareProvider`.**
+  Material sealed at rest as an envelope — a fresh
+  per-value DEK generated into locked memory seals the material with
+  AES-256-GCM (`NewGCMWithRandomNonce`, so nonce misuse is structurally
+  impossible), and the DEK itself is protected by a PLUGGABLE crypto
+  provider. go-enclave ships pure software only and defines the seam; TPM,
+  HSM and cloud-KMS providers are injected from higher layers through
+  `NewSealer(WithProvider, WithMode)` or the one-shot process default
+  (`SetSealer`; `NewSealed` uses it, lazily installing the software default).
+
+  **Providers must supply confidentiality AND authenticity** —
+  `Unprotect`/`Open` fail for any blob the provider's own `Protect` did not
+  produce, so a hardware-sealed value is unforgeable as well as unreadable. A
+  bare RSA decryption key does not qualify (anyone holding its public key
+  could forge an envelope — the finding that sank the earlier
+  confidentiality-only design); a `FromDecrypterSigner` composition closing
+  that gap with stdlib key interfaces was built, fully measured, and SPLIT
+  OUT of this change during review — whether a `crypto.Decrypter` bridge
+  ships at this layer at all is an owner decision, tracked as issue #50
+  with the measurements attached. The wrapped-DEK blob is bound to the ciphertext as
+  AAD, so a re-paired envelope — one value's blob against another's
+  ciphertext, both halves individually authentic — fails the tag.
+
+  **Two config-selected modes, same envelope** (`Mode` carries the honest
+  comparison): `ModePerOperation` calls the device per seal/open, on the DEK
+  only — the key that opens everything never enters the process, and a
+  memory-reading adversary is bounded to values open during their window.
+  `ModeRootKey` (the default) unseals a root once and runs an in-memory KEK
+  hierarchy — the scale accommodation, stated plainly as such: after the
+  unseal a live-memory adversary gets everything; what remains is the origin
+  and gating of the root (device-held, PCR-bindable). KEK generations rotate
+  at 2^31 wraps against the AES-GCM message bound; retired generations are
+  retained as root-wrapped heap blobs — bytes, not locked pages — so rotation
+  never strands a value.
+
+  **A shutdown `WipeAll` destroys the hierarchy's keys and the sealer FAILS
+  CLOSED with the distinct `ErrSealerWiped`** — never silent re-keying, which
+  would make a lifecycle bug present as `ErrSealedAuthentication` and read as
+  a security incident. Mode asymmetry stated on `WipeAll`: a device-held
+  per-operation key survives a sweep, an in-process hierarchy does not.
+  Recovery happens INTO caller-supplied memory throughout — `Open` decrypts
+  straight into locked pages sized exactly (verified by process-memory
+  sweeps), and the seam's recover-into signatures preserve that for providers.
+
+  **Foreign sealed bytes remain out of contract** — no unmarshaller, pinned
+  by an AST guard test whose rationale is rewritten from the obsolete
+  forgery argument to the real one: there is no persistence contract, and an
+  entry point would make the internal format accidentally permanent.
+
+  `GOEXPERIMENT=boringcrypto` builds cannot seal, by decision (#34, closed):
+  the only route would be `cipher.NewGCM` with caller-supplied nonces,
+  weakening every build to serve a mechanism superseded by the native FIPS
+  140-3 module. The refusal is documented in the package docs, on the
+  constructor, and at the AEAD call site.
+
+  Construction fails closed on a nil provider — typed or untyped — with
+  `ErrProviderMode` rather than defaulting (which would silently swap a
+  configured hardware provider for software) or panicking at the first seal
+  (which is where a typed-nil provider detonated before review caught it).
+  One test-infrastructure hardening came out of chasing a flake in the
+  split-out adapter's doc-test: the shared process-memory sweep now WIPES
+  its scan buffer on every return path, because an unwiped buffer let a
+  later sweep find an earlier sweep's copy of the needle and report a heap
+  residue that never existed in the code under test. (The second smear
+  channel found — a control copy stranded on a freed, grown-away goroutine
+  stack, unreachable by any wipe — is a runtime property recorded in the
+  sweep's comments as a constraint on future sweep-based tests.) The
+  dominating key exposure remains the `withAEAD` key-schedule copy that
+  persists past GC in every mode with every provider.
+
+  Supersedes the PR #16 single-process-key implementation per the adopted
+  #22 design; its reviewed AEAD discipline, residency sweeps, key-schedule
+  threat-model audit and locked-memory-exhaustion evidence carry forward
+  into this envelope. New errors: `ErrSealFailed`,
+  `ErrSealedAuthentication`, `ErrPlaintextEscaped`, `ErrMaterialTooLarge`,
+  `ErrSealerWiped`, `ErrProviderMode`, `ErrInvalidMode`,
+  `ErrSealerInstalled`, `ErrNilSealer`, `ErrProviderMessageLimit`.
 
 - **`NewMemoryEnclaveCopy(src []byte) (*MemoryEnclave, error)` — a constructor
   that copies without consuming its source.** `NewMemoryEnclave` takes ownership

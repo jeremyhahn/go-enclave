@@ -186,14 +186,117 @@
 // it destroys enclaves belonging to subsystems it knows nothing about, whose
 // owners are still using them, and it has no way to know that is safe.
 //
+// # Sealing
+//
+// SealedEnclave is the counterpart type: material encrypted AT REST inside the
+// process, decrypted into a fresh MemoryEnclave only for as long as a caller
+// holds it open.
+//
+// # Choosing between MemoryEnclave and SealedEnclave
+//
+// The two types make DIFFERENT security promises, and choosing by name gets
+// it wrong. What separates them is the residency window of the plaintext:
+//
+//   - A MemoryEnclave holds plaintext for the object's WHOLE LIFE — locked so
+//     it cannot reach swap, guard-paged, canaried, kept out of core dumps,
+//     wiped on destroy. Those protections keep the material off DISK; none of
+//     them make it unreadable to something that can read this process's live
+//     memory, at any moment of the object's lifetime.
+//   - A SealedEnclave holds ciphertext; plaintext exists only for the
+//     duration of an Open, inside the MemoryEnclave that Open returns.
+//     Something that reads process memory BETWEEN opens finds ciphertext. A
+//     MemoryEnclave is never unreadable that way; a SealedEnclave is,
+//     whenever it is not open.
+//
+// Choose by ACCESS PATTERN. Material in hot or continuous use — a session key
+// applied to every packet, anything handed to an API that needs a stable
+// buffer for its lifetime — belongs in a MemoryEnclave: sealing it would buy
+// nothing, because it would always be open. Material used INTERMITTENTLY — a
+// credential opened once per request, a root key used a few times an hour, a
+// share held across a ceremony that may never complete — belongs in a
+// SealedEnclave, where the exposure window is the operation rather than the
+// process lifetime. This is the classic secure-buffer versus secret split:
+// the buffer shape converts to MemoryEnclave, the secret shape to
+// SealedEnclave.
+//
+// The costs differ too, and they decide real choices:
+//
+//   - A MemoryEnclave charges at least one locked PAGE against
+//     RLIMIT_MEMLOCK (and any Allocator budget) continuously, for its whole
+//     life. A hundred long-lived 32-byte credentials cost a hundred pages.
+//   - A SealedEnclave's envelope is ordinary heap ciphertext — near-free at
+//     rest; the locked memory behind sealing is the Sealer's keys, shared by
+//     every value. But every Open allocates a fresh locked page for the
+//     plaintext (plus one, transiently, for the per-value key), and TODAY
+//     that allocation is outside any Allocator budget — an admitted variant,
+//     OpenWith, is tracked as issue #17. A service that opens a credential
+//     per connection is allocating locked pages per connection and should
+//     size RLIMIT_MEMLOCK accordingly.
+//   - Sealing is not heap-free even though the MATERIAL is: the plaintext is
+//     decrypted only into locked pages (verified by sweeping the process's
+//     anonymous mappings), but the per-value KEY transits the Go heap on
+//     every seal and open, because building the AEAD expands it into
+//     aes.NewCipher's key schedule — a measured copy that persists past
+//     collection until its span is reused. That is the accepted exposure at
+//     the validated-primitive boundary, audited in full where it happens
+//     (withAEAD); never read "encrypted at rest" as "no key bytes ever on
+//     the heap".
+//
+// What a SealedEnclave does NOT give: protection against an attacker reading
+// memory WHILE an Open is in flight, or against one who can drive Opens
+// through the caller's own surface. It narrows the window to the operations;
+// it does not close it. And how much the closed window is worth depends on
+// the Sealer's mode — with the pure-software default or ModeRootKey, an
+// adversary reading live process memory can recover the sealing keys and
+// open everything anyway (see Mode for the honest comparison); per-operation
+// hardware is what makes "sealed" mean "not recoverable from this process
+// alone".
+//
+// One trap to know when holding both types: IsAlive is a DIFFERENT predicate
+// on each. MemoryEnclave.IsAlive means "usable" — it reports false once the
+// material is gone, however it went. SealedEnclave.IsAlive reports that the
+// CIPHERTEXT is still held, and can be true for a value that can no longer
+// be opened — after a shutdown sweep destroyed the sealing keys, the honest
+// answer arrives as ErrSealerWiped from Open rather than as false from
+// IsAlive. An explicit openability probe (Openable) is tracked as issue #33.
+//
+// Sealing is built on a hardware-rootable provider seam. go-enclave itself is
+// PURE SOFTWARE — it defines the KeyProtector and RootUnsealer interfaces,
+// ships the software default, and calls whatever a higher layer injects; TPM,
+// HSM and cloud-KMS providers live above this package and are passed in
+// through NewSealer or SetSealer. Providers must supply confidentiality AND
+// authenticity — a sealed value is unforgeable as well as unreadable, and a
+// confidentiality-only provider does not satisfy the seam (see KeyProtector;
+// a bare decryption key qualifies only composed with a signing key, a
+// composition tracked as issue #50).
+// Two modes select how often the provider is invoked, trading device traffic
+// against what a memory-reading adversary obtains; the honest comparison is
+// on Mode. Out of the box — no provider, no configuration — NewSealed is
+// plain software sealing.
+//
 // # FIPS
 //
-// A MemoryEnclave performs no cryptography. It maps, locks and wipes memory,
-// and the only cryptographic primitive anywhere near it is crypto/rand filling
-// the canary — a FIPS-approved DRBG. It is safe under GODEBUG=fips140=only,
-// which this repository's CI enforces.
+// A MemoryEnclave performs no cryptography: it maps, locks and wipes memory,
+// and the only primitive near it is crypto/rand filling the canary. Sealing
+// DOES perform cryptography — all of it AES-256-GCM via
+// cipher.NewGCMWithRandomNonce, FIPS-approved through the standard
+// library. The whole suite builds and passes under
+// GODEBUG=fips140=only, which this repository's CI enforces. (memguard was
+// removed in v0.3.0-alpha partly for this reason: its Enclave seals with NaCl
+// secretbox, a non-approved algorithm, in every consumer's build graph.)
 //
-// This is also why the package no longer depends on memguard, whose Enclave and
-// Seal paths use NaCl secretbox: go-enclave never called them, but the
-// dependency put a non-approved algorithm in the build graph of every consumer.
+// # GOEXPERIMENT=boringcrypto builds cannot seal, deliberately
+//
+// On such a build every NewSealed fails with ErrSealFailed wrapping "cipher:
+// NewGCMWithRandomNonce requires aes.Block": that constructor accepts only the
+// standard library's own AES block type, and boringcrypto's aes.NewCipher
+// returns BoringSSL's instead. MemoryEnclave, Allocator and WipeAll are
+// unaffected — they perform no cryptography.
+//
+// This is a REFUSAL, not a gap, and it will not be "fixed" (#34). The only
+// route to sealing under boringcrypto is cipher.NewGCM with a caller-supplied
+// nonce — abandoning the construction that makes nonce misuse structurally
+// impossible, on every build, to serve a mechanism superseded since Go 1.24 by
+// the native FIPS 140-3 module this package targets. A consumer that needs
+// certified crypto uses that module (GOFIPS140=latest), not boringcrypto.
 package enclave

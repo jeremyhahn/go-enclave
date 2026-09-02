@@ -162,14 +162,43 @@ func deregister(e *MemoryEnclave) {
 	registryMu.Unlock()
 }
 
-// WipeAll destroys every enclave this package has handed out and not yet
-// reclaimed. It reports how many it could not, and whether any of them turned
-// out to be corrupt.
+// WipeAll destroys every enclave holding LOCKED MEMORY that this package has
+// handed out and not yet reclaimed. It reports how many it could not, and
+// whether any of them turned out to be corrupt.
 //
 // It is for ORDERLY SHUTDOWN — a signal handler, a defer in main — where the
 // process is about to exit and any locked memory still held is material that
 // should not outlive it. It is not a fault handler and not a garbage collector:
 // nothing calls it for you.
+//
+// # What "every enclave" covers, and what a sweep does to sealing
+//
+// The ledger holds [MemoryEnclave]s — the things that own locked pages, which
+// is what the sweep is for. That includes every key a [Sealer] or
+// [SoftwareProvider] holds: a root, a live KEK generation, the software
+// provider's root. They are swept like any other enclave, deliberately —
+// leaving the key that opens everything mapped and locked at exit is
+// precisely what the sweep exists to prevent, so there is no exemption.
+//
+// A [SealedEnclave] owns no locked pages — its envelope is heap ciphertext —
+// so the sweep does not touch it, and what a sweep means for sealed values
+// splits by [Mode]:
+//
+//   - [ModeRootKey] (and the software default): the hierarchy's keys are
+//     gone, so every sealed value in the process is permanently unopenable —
+//     the STRONGER outcome; one key page wiped is every value destroyed at
+//     once. The sealer fails closed from then on with [ErrSealerWiped], and
+//     never silently re-keys; that error documents why.
+//   - [ModePerOperation] with a hardware provider: there is no in-process
+//     root to destroy. The device still holds the key, sealed values still
+//     open, and sealing still works. A sweep is a statement about THIS
+//     process's memory, and in this mode the material was never protected by
+//     this process's memory.
+//
+// Either way each swept-out value still reports IsAlive — a live-looking
+// handle to material that may be unreachable. Destroy sealed values alongside
+// this call if that would mislead the code holding them; whether the sweep
+// should cover the handles too is open in #33.
 //
 // # It belongs to the program, never to a library
 //

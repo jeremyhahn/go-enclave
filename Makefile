@@ -25,7 +25,12 @@ GOVET    := $(GOCMD) vet
 GOMOD    := $(GOCMD) mod
 PKG      := ./...
 COVERAGE_PROFILE := coverage.out
-GOLANGCI_VERSION := v2.12.2
+# v2.13.2 is the floor for linting Go 1.27: v2.12.2's vendored analysis tools
+# cannot parse the 1.27 stdlib and the whole metalinter dies ("unexpected
+# expr: *ast.KeyValueExpr" in internal/poll). CI pins the same version baked
+# into the runner image; raise the two together (ci.yml explains why the
+# workflow refuses to network-install over the baked copy).
+GOLANGCI_VERSION := v2.13.2
 
 .PHONY: all
 all: ci
@@ -116,7 +121,9 @@ coverage:
 
 ## test-fips: build + unit tests under Go native FIPS 140-3 strict mode
 # Mirrors the `test` scope exactly; only the FIPS env differs (security-review.md
-# §6, nightly.yml). This package performs no cryptography, so it must pass.
+# §6, nightly.yml). The sealing surface performs real cryptography chosen to
+# pass this mode (NewGCMWithRandomNonce et al.), so this gate is load-bearing:
+# strict mode is what caught the NewGCM arbitrary-IV refusal in the first place.
 .PHONY: test-fips
 test-fips:
 	GOFIPS140=latest GODEBUG=fips140=only $(GOCMD) build $(PKG)
