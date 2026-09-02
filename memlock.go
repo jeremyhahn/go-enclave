@@ -267,7 +267,7 @@ func DiscoverLockedMemoryLimit() (LockedMemoryLimit, error) {
 	return discoverLockedMemoryLimit()
 }
 
-// NewAllocatorWithinRLimit is [NewAllocator] with a startup check: it discovers
+// NewAllocatorWithinRLimit is [NewAllocator] with a ceiling check that STICKS: it discovers
 // the process's locked-memory ceiling and REFUSES a budget that exceeds it,
 // naming the discovered figure in the error.
 //
@@ -307,12 +307,25 @@ func DiscoverLockedMemoryLimit() (LockedMemoryLimit, error) {
 // [DiscoverLockedMemoryLimit]. Passing on a host with no discoverable ceiling
 // promises even less, since there was nothing to check against.
 //
-// The ceiling is read ONCE, here, and never again. Re-reading it per allocation
-// would put a syscall on an admission path that is currently one atomic
-// compare-and-swap, and it would buy nothing: a check cannot prevent a lock
-// failure, and the kernel's refusal is already reported as a typed
-// [ErrLockedMemoryUnavailable] by the allocation that hit it. This is a startup
-// diagnostic, not a live invariant.
+// The ceiling is never read on the ADMISSION path. Re-reading it per allocation
+// would put a syscall on a path that is currently one atomic compare-and-swap,
+// and it would buy nothing: a check cannot prevent a lock failure, and the
+// kernel's refusal is already reported as a typed [ErrLockedMemoryUnavailable]
+// by the allocation that hit it.
+//
+// # The check is sticky
+//
+// An allocator returned by this constructor carries the contract for life, and
+// that is the difference between it and [NewAllocator] after construction as
+// well as during it. [Allocator.SetLimit] re-reads the ceiling — freshly, since
+// it moves — and refuses to raise this allocator's budget above it;
+// [Allocator.TransferTo] does the same for the allocator it credits. Both
+// report [ErrBudgetExceedsRLimit], the same sentinel this constructor uses.
+//
+// Without that, the check bound a budget for exactly as long as it took to call
+// SetLimit, and two entry points to one allocator disagreed about whether the
+// kernel ceiling applied (issue #46). Lowering is never checked, and
+// [Allocator.ForceLimit] is the deliberate override; see those methods.
 func NewAllocatorWithinRLimit(maxBytes int64) (*Allocator, error) {
 	// Before the syscall, and before anything can turn this into a story about
 	// the host: a non-positive budget is a caller mistake on every platform.
@@ -330,8 +343,9 @@ func NewAllocatorWithinRLimit(maxBytes int64) (*Allocator, error) {
 	}
 
 	// One construction path, so this constructor cannot drift from the other's
-	// validation or its zero-value contract.
-	return NewAllocator(maxBytes)
+	// validation or its zero-value contract. The flag is what makes the check
+	// above outlive this call: see [Allocator.SetLimit].
+	return newAllocator(maxBytes, true)
 }
 
 // classifyRlimit turns a raw RLIMIT_MEMLOCK soft value into a

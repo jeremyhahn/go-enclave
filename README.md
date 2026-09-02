@@ -122,7 +122,7 @@ pages:
 | `NewAllocator(maxBytes)` / `(*Allocator) New(data)` / `(*Allocator) NewSized(n)` | Bounded allocation with `ErrBudgetExhausted`; admission is decided before anything is mapped, and reservations are released on `Destroy`. The budget is in **locked bytes**, the unit `RLIMIT_MEMLOCK` uses. |
 | `(*Allocator) SetLimit(n)` / `ForceLimit(n)` / `TransferTo(dst, n)` | **Runtime retune.** `SetLimit` raises or lowers the budget and REFUSES (`ErrBudgetInUse`) rather than shrink below the memory already reserved, changing nothing on refusal. `ForceLimit` records a ceiling that moved anyway — a resized container, a lowered `RLIMIT_MEMLOCK` — keeping live enclaves alive, returning the over-subscription in bytes and admitting nothing until it drains. `TransferTo` moves headroom between two allocators in one operation, so a slack one can fund a pressured one; it takes the two locks in a fixed order and passes through "in neither", never "in both". All three are safe against concurrent allocation: a retune and an in-flight admission are decided by the same compare-and-swap on the same word, so they cannot both take the last page. |
 | `LockedSize(n int) int64` | What an enclave of `n` bytes actually costs — `n` rounded up to a whole page. Size budgets with this: every enclave occupies at least one page, so a budget for a hundred small credentials is a hundred **pages**. Returns `int64` to match the budget, so `NewAllocator(100 * LockedSize(32))` needs no conversion. |
-| `NewAllocatorWithinRLimit(maxBytes)` | `NewAllocator` plus a **startup check**: discovers `RLIMIT_MEMLOCK` and refuses a budget above it with `ErrBudgetExceedsRLimit`, naming both figures — a budget that was never satisfiable fails at construction rather than at the first allocation under load. It refuses nothing when the ceiling is unlimited, unenforceable (`CAP_IPC_LOCK`), or absent because the platform exposes none: there is no ceiling to be above. A ceiling that could not be **read** is a different case and is not silent — a failing `getrlimit` returns `ErrLimitDiscoveryFailed`, since nothing was compared. Never exits, logs or panics; every one of those is a return value and the decision is the application's. |
+| `NewAllocatorWithinRLimit(maxBytes)` | `NewAllocator` plus a **sticky ceiling check**: discovers `RLIMIT_MEMLOCK` and refuses a budget above it with `ErrBudgetExceedsRLimit`, naming both figures — a budget that was never satisfiable fails at construction rather than at the first allocation under load. It refuses nothing when the ceiling is unlimited, unenforceable (`CAP_IPC_LOCK`), or absent because the platform exposes none: there is no ceiling to be above. A ceiling that could not be **read** is a different case and is not silent — a failing `getrlimit` returns `ErrLimitDiscoveryFailed`, since nothing was compared. Never exits, logs or panics; every one of those is a return value and the decision is the application's. The check **outlives construction**: `SetLimit` re-reads the ceiling (fresh — it moves) and refuses to raise this allocator's budget above it, and `TransferTo` applies the same to the allocator it credits, since a transfer is a raise on the receiving side. Raises only, so an over-ceiling allocator can always move back towards compliance; `ForceLimit` overrides it, as it overrides every other refusal here. A plain `NewAllocator` allocator is never checked, on any path. Nothing was added to the admission path. |
 | `DiscoverLockedMemoryLimit()` | Read the ceiling yourself, to **derive** a budget from the host instead of guessing one. Reports the figure, whether it is a ceiling to rely on, and where it came from (`LimitSource`), so the derivation can be logged next to the number. An unbounded or absent ceiling is not an error — it comes back with `Bounded` false and a source saying which; only a failed read is an error, and it is `ErrLimitDiscoveryFailed`. |
 | `Wipe(b []byte)` | Zero a transient plain slice. |
 | `CoreDumpsDisabled()` | Whether lowering `RLIMIT_CORE` at import succeeded. Best effort by nature — a sandbox can deny it and anything in the process can raise it again — so it is reported rather than promised. Each enclave's pages are separately marked `MADV_DONTDUMP`, which **is** verified and fails the allocation if refused. |
@@ -150,16 +150,18 @@ which is a deliberate call and never a fault handler. If your process calls
 components still hold. That is the point of a shutdown sweep, and it is the one
 way an enclave you hold can be destroyed by something other than you.
 
-### What the startup check does not promise
+### What the ceiling check does not promise
 
 `NewAllocatorWithinRLimit` is one-sided. A refusal is conclusive — that budget
 could not have been satisfied. Acceptance is not a promise that any particular
 allocation will succeed: `RLIMIT_MEMLOCK` is process-wide and shared with every
 other user of locked memory, a cgroup v2 `memory.max` frequently binds well
 below it in a container, and the limit can be changed afterwards. The ceiling is
-read once, at construction, and never on the allocation path — a syscall there
-would buy nothing, since the kernel's refusal already arrives as
-`ErrLockedMemoryUnavailable` on the allocation that hit it.
+re-read on every budget RAISE — freshly, because it moves — and never on the
+allocation path; a syscall there would buy nothing, since the kernel's refusal
+already arrives as `ErrLockedMemoryUnavailable` on the allocation that hit it.
+Between one raise and the next, nothing is watching the ceiling: this is a check
+on the settings a process chooses, not a monitor of the host.
 
 The ceiling is read on Linux and on the BSDs. On a platform that exposes none —
 Windows bounds a working-set size rather than a locked-memory rlimit — the

@@ -6,6 +6,49 @@ All notable changes to go-enclave are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- **The `RLIMIT_MEMLOCK` check is now sticky: an allocator built by
+  `NewAllocatorWithinRLimit` carries it for life.** (#46) `SetLimit` re-reads the
+  ceiling and refuses to raise that allocator's budget above it with
+  `ErrBudgetExceedsRLimit`, the same sentinel and the same `RLimitError` the
+  constructor uses. `TransferTo` applies it to the allocator it CREDITS, since a
+  transfer is a raise on the receiving side.
+
+  Before this, the check bound a budget for exactly as long as it took to call
+  `SetLimit`: #43 refused an over-ceiling budget at construction and #44 let the
+  same allocator be raised straight back over it, so two entry points to one
+  allocator disagreed about whether the kernel ceiling applied. It was never a
+  safety hole — admission fails safe with `ErrLockedMemoryUnavailable` — but it
+  lost the diagnostic the check exists for, which is failing at the setting that
+  caused the problem rather than at peak load.
+
+  **The ceiling is read fresh on every raise, never cached.** It moves: a
+  setrlimit from any thread, a container resized underneath the process. A
+  budget compared against a figure from startup would refuse a raise the kernel
+  now permits, or permit one it now would not. The syscall is on a control-plane
+  path that runs rarely, and it is taken outside the retune mutex so it cannot
+  stall other retunes or the observability getters. **Nothing was added to the
+  admission path**, which still reads no ceiling at all.
+
+  Three boundaries, each with a test that fails without it:
+
+  - **Opt-in.** A plain `NewAllocator` allocator is never checked, on any path.
+    Applying the ceiling to every allocator would break callers who chose the
+    unchecked constructor deliberately.
+  - **Raises only.** A lowering is never refused on a ceiling, or an
+    over-ceiling allocator could not move back towards compliance.
+  - **`ForceLimit` overrides it**, as it overrides every other refusal on this
+    type — it is the method that exists to do what `SetLimit` refuses. That is
+    documented on the method rather than left implicit, so the contract is not
+    mistaken for one that cannot be bypassed, and it is the escape hatch when
+    discovery itself fails. The allocator stays bound afterwards: an override is
+    not an opt-out.
+
+  A discovery failure during a raise is reported as `ErrLimitDiscoveryFailed`
+  and refuses the raise — nothing was compared, so nothing passed.
+
+
 ### Added
 
 - **`NewMemoryEnclaveCopy(src []byte) (*MemoryEnclave, error)` — a constructor

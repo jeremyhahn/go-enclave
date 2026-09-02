@@ -269,6 +269,22 @@ type Allocator struct {
 	// there for why the order has to be total, and why it is a counter rather
 	// than the obvious pointer comparison.
 	id uint64
+
+	// rlimitBound records that this allocator was constructed through
+	// [NewAllocatorWithinRLimit] and therefore opted into the RLIMIT_MEMLOCK
+	// contract: no operation may RAISE its budget above the ceiling the kernel
+	// reports at the moment of the raise. [NewAllocator] leaves it false and
+	// nothing checks a ceiling for that allocator, ever.
+	//
+	// The contract is a property of the allocator rather than of the call
+	// because that is the only way it can be sticky. A check that lived on the
+	// constructor alone bound the budget for exactly as long as it took to call
+	// SetLimit — which was issue #46 — and one that lived on every allocator
+	// would break callers who deliberately chose the unchecked constructor.
+	//
+	// It is written once, before the allocator is reachable by any other
+	// goroutine, and only read afterwards, so it needs no atomic and no lock.
+	rlimitBound bool
 }
 
 // NewAllocator returns an Allocator with the given total budget in LOCKED
@@ -293,13 +309,52 @@ type Allocator struct {
 //
 // It returns ErrInvalidBudget when maxBytes is not positive.
 func NewAllocator(maxBytes int64) (*Allocator, error) {
+	return newAllocator(maxBytes, false)
+}
+
+// newAllocator is the one construction path, so the two exported constructors
+// cannot drift apart on validation, on the zero-value contract, or on which
+// fields a fresh allocator starts with. rlimitBound records whether the caller
+// came through [NewAllocatorWithinRLimit]; see the field.
+func newAllocator(maxBytes int64, rlimitBound bool) (*Allocator, error) {
 	if maxBytes <= 0 {
 		return nil, ErrInvalidBudget
 	}
-	a := &Allocator{id: allocatorIDs.Add(1)}
+	a := &Allocator{id: allocatorIDs.Add(1), rlimitBound: rlimitBound}
 	a.limit.Store(maxBytes)
 	a.free.Store(maxBytes)
 	return a, nil
+}
+
+// ceilingForRaise reports the ceiling a raise on this allocator must fit under,
+// and whether one applies at all.
+//
+// It returns a zero limit and a nil error for an allocator that never opted in,
+// which is every [NewAllocator] one: those have no ceiling and must not acquire
+// one, since a caller that chose the unchecked constructor chose it on purpose.
+//
+// The reading is taken FRESH on every call rather than cached at construction,
+// and that is the point of the whole exercise. RLIMIT_MEMLOCK moves — a
+// setrlimit from any thread, a container resized underneath the process — and a
+// budget compared against a figure from startup would refuse a raise the kernel
+// would now permit, or permit one it now would not. The cost is a getrlimit on
+// a control-plane path that runs rarely; it is nowhere near the admission path,
+// which still reads no ceiling at all.
+//
+// It is called BEFORE the retune mutex is taken, deliberately. A syscall under
+// that lock would block every other retune and every [Allocator.InUse] reader
+// for its duration. The reading can therefore go stale between here and the
+// store that uses it — but a ceiling can move a nanosecond after any check,
+// under any locking, so there is no version of this that is not a snapshot, and
+// admission fails safe regardless.
+//
+// A discovery failure is returned as-is ([ErrLimitDiscoveryFailed]): nothing
+// was compared, so the raise cannot be said to have passed.
+func (a *Allocator) ceilingForRaise() (LockedMemoryLimit, error) {
+	if !a.rlimitBound {
+		return LockedMemoryLimit{}, nil
+	}
+	return DiscoverLockedMemoryLimit()
 }
 
 // New admits len(data) bytes against the budget and, if admitted, moves data
@@ -613,29 +668,92 @@ func (a *Allocator) Available() int64 {
 // on the same word, so exactly one of them gets the contested bytes; see the
 // [Allocator] free counter for why that is the whole argument.
 //
-// # It does not re-check RLIMIT_MEMLOCK
+// # RLIMIT_MEMLOCK, for an allocator that opted in
 //
-// A budget raised here is not compared against the process's locked-memory
-// ceiling, exactly as [NewAllocator] does not compare it. An allocator built by
-// [NewAllocatorWithinRLimit] can therefore be raised back above the ceiling that
-// constructor refused, and the startup check does not carry forward to it —
-// which is worth knowing before treating that constructor as an ongoing
-// guarantee rather than a startup one. A caller that wants the check applied to
-// a retune makes it itself, with [DiscoverLockedMemoryLimit], and admission
-// keeps failing safe either way: exceeding the kernel's ceiling produces
-// [ErrLockedMemoryUnavailable] at allocation time, because the budget is a
-// policy and the ceiling is the kernel's.
+// An allocator built by [NewAllocatorWithinRLimit] carries that contract for
+// life: a raise here re-reads the process's locked-memory ceiling and is
+// REFUSED with [ErrBudgetExceedsRLimit], as an [RLimitError] naming both
+// figures, when the new budget is above it. One built by [NewAllocator] never
+// opted in and is never checked — a caller who chose the unchecked constructor
+// chose it deliberately.
+//
+// The ceiling is read FRESH, not remembered from construction, because it
+// moves: a setrlimit from any thread, a container resized underneath the
+// process. A budget compared against a startup figure would refuse a raise the
+// kernel now permits. So a ceiling that has genuinely gone UP is seen, and the
+// raise it now allows succeeds. If the reading itself fails, the RAISE is
+// refused with [ErrLimitDiscoveryFailed]: nothing was compared, so nothing
+// passed.
+//
+// Only raises are checked, and that holds for a failed reading as firmly as for
+// a successful one. A lowering is never refused on a ceiling — nor on the
+// absence of one — because an allocator above the ceiling has to be able to
+// move back towards it, and a host that stops answering getrlimit after
+// construction must not be able to strand it up there.
+//
+// [Allocator.ForceLimit] overrides this, as it overrides every other refusal on
+// this type. [Allocator.TransferTo] honors it on the allocator it credits.
+//
+// None of this makes the budget a promise. The ceiling is process-wide and
+// shared, a cgroup may bind below it, and it can move again immediately;
+// admission fails safe regardless, with [ErrLockedMemoryUnavailable] from the
+// allocation that the kernel actually refused.
 func (a *Allocator) SetLimit(newLimit int64) error {
 	if newLimit < 0 {
 		return ErrInvalidBudget
 	}
 
+	// Outside the lock, for the reason given on ceilingForRaise, and
+	// unconditionally rather than only when this looks like a raise. Whether it
+	// IS a raise is not known until old is read under the lock, and deciding it
+	// out here on an unsynchronized read would let a concurrent retune turn a
+	// lowering into a raise between the two, skipping the check entirely. A
+	// wasted getrlimit on a lowering is the price of not having that hole.
+	//
+	// The failure is CARRIED rather than returned: discovering unconditionally
+	// is what closes the race, but acting on the result unconditionally would
+	// refuse lowerings too, which is a contract this method does not have. An
+	// earlier revision of this branch returned cerr right here, and Codex caught
+	// that it stranded an over-ceiling allocator on a host that had stopped
+	// answering getrlimit — refusing the shrink that was the only way back to
+	// compliance, in the name of a rule about raises.
+	//
+	// These two lines must therefore stay two lines. A test cannot defend them:
+	// getrlimit does not fail on a healthy host, so cerr is always nil here and
+	// a branch added on it is never taken during a test run. Measured — that
+	// mutant survives the whole suite. What IS defended is the decision it feeds,
+	// in checkRaise, and the parameterized entry point below that lets a test
+	// supply the failure this one cannot produce.
+	ceiling, cerr := a.ceilingForRaise()
+	return a.setLimit(newLimit, ceiling, cerr)
+}
+
+// setLimit is [Allocator.SetLimit] with the ceiling reading supplied rather than
+// taken, which is the only way the discovery-failure path can be reached in a
+// test: getrlimit does not fail on a healthy host, and the case that matters —
+// a sandbox installed after construction — cannot be produced from inside the
+// process. It is a method rather than four lines inline for the same reason
+// [LockedMemoryLimit.refuse] is one.
+//
+// cerr is the discovery failure, or nil. It is consulted ONLY on the raise
+// branch, so a lowering still succeeds on a host that has stopped answering.
+func (a *Allocator) setLimit(newLimit int64, ceiling LockedMemoryLimit, cerr error) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
 	old := a.limit.Load()
 	switch {
 	case newLimit > old:
+		// Only a RAISE is checked. Refusing a lowering that is still above the
+		// ceiling would block an over-subscribed allocator from moving TOWARDS
+		// compliance — a forced 10 GiB budget under an 8 GiB ceiling could not
+		// be set to 9 GiB — which is the opposite of what the contract is for.
+		// That applies to a failed reading as much as to a successful one: an
+		// allocator whose host stopped answering getrlimit must still be able
+		// to shrink.
+		if err := checkRaise(ceiling, cerr, newLimit); err != nil {
+			return err
+		}
 		a.raiseLocked(old, newLimit)
 	case newLimit < old:
 		if !a.withdrawLocked(old - newLimit) {
@@ -678,6 +796,28 @@ func (a *Allocator) SetLimit(newLimit int64) error {
 // newLimit of zero is legal and quiesces the allocator. A negative newLimit
 // returns [ErrInvalidBudget], and in that case nothing is changed and the
 // returned excess is 0.
+//
+// # It is the override, including for RLIMIT_MEMLOCK
+//
+// This method exists to do what [Allocator.SetLimit] refuses, and it is exempt
+// from BOTH of that method's refusals rather than only the obvious one. It
+// lowers beneath live reservations, and on an allocator built by
+// [NewAllocatorWithinRLimit] it will also RAISE a budget above the process's
+// locked-memory ceiling, without reading that ceiling at all.
+//
+// That is deliberate and is stated here so the contract is not mistaken for one
+// that cannot be bypassed. An operator who knows the ceiling is about to be
+// raised, or whose getrlimit is failing and who cannot wait for it, needs a way
+// through, and a resource contract with no override is one people work around
+// by abandoning the checked constructor entirely — which loses the check on
+// every other path too. The override is explicit, it is named Force, and it is
+// this one method.
+//
+// What it does not do is make the budget achievable. Raising above the ceiling
+// buys nothing from the kernel; the allocations simply fail later with
+// [ErrLockedMemoryUnavailable], which is exactly the late, uncorrelated failure
+// [NewAllocatorWithinRLimit] exists to spare a service. Use it when you know
+// something the ceiling does not.
 func (a *Allocator) ForceLimit(newLimit int64) (int64, error) {
 	if newLimit < 0 {
 		return 0, ErrInvalidBudget
@@ -731,7 +871,15 @@ func (a *Allocator) ForceLimit(newLimit int64) (int64, error) {
 //     [Allocator.ForceLimit] records a ceiling that already moved, whereas
 //     handing another allocator headroom this one cannot spare would create the
 //     over-commit outright;
-//   - dst's budget would overflow int64 — [ErrInvalidBudget].
+//   - dst's budget would overflow int64 — [ErrInvalidBudget];
+//   - dst opted into the RLIMIT_MEMLOCK contract through
+//     [NewAllocatorWithinRLimit] and the credit would take its budget above the
+//     process's locked-memory ceiling — [ErrBudgetExceedsRLimit], as an
+//     [RLimitError]; or the ceiling could not be read at all —
+//     [ErrLimitDiscoveryFailed]. Only the DESTINATION is checked, since the
+//     source's budget goes down and a shrinking budget needs no ceiling. See
+//     [Allocator.SetLimit] for the contract; a transfer is a raise on the
+//     receiving side and is treated as one.
 //
 // # Why two calls would not do
 //
@@ -780,6 +928,19 @@ func (a *Allocator) TransferTo(dst *Allocator, n int64) error {
 		return ErrInvalidTransfer
 	}
 
+	// Before either lock: this is a syscall when dst opted in, and holding two
+	// retune mutexes across one would stall both allocators' observers.
+	dstCeiling, cerr := dst.ceilingForRaise()
+	return a.transferTo(dst, n, dstCeiling, cerr)
+}
+
+// transferTo is [Allocator.TransferTo] with the destination's ceiling reading
+// supplied rather than taken, for the testing reason given on
+// [Allocator.setLimit].
+//
+// Unlike setLimit this consults cerr unconditionally, because a transfer is
+// always a raise on the receiving side; there is no lowering branch to spare.
+func (a *Allocator) transferTo(dst *Allocator, n int64, dstCeiling LockedMemoryLimit, cerr error) error {
 	first, second := a, dst
 	if second.id < first.id {
 		first, second = second, first
@@ -798,6 +959,17 @@ func (a *Allocator) TransferTo(dst *Allocator, n int64) error {
 	if n > math.MaxInt64-dstLimit {
 		return ErrInvalidBudget
 	}
+	// A transfer RAISES the destination's budget, so a destination that opted
+	// into the RLIMIT_MEMLOCK contract is checked here exactly as it would be
+	// in SetLimit. Leaving it out would have made a transfer the third entry
+	// point to the same allocator with its own opinion about whether the
+	// ceiling binds, which is the inconsistency #46 was filed about; a
+	// destination is not less over the ceiling for having been pushed there by
+	// a sibling rather than by a setter. Only the destination is checked: the
+	// source's budget goes DOWN, and a shrinking budget needs no ceiling.
+	if err := checkRaise(dstCeiling, cerr, dstLimit+n); err != nil {
+		return err
+	}
 
 	srcLimit := a.limit.Load()
 	if !a.withdrawLocked(n) {
@@ -813,6 +985,28 @@ func (a *Allocator) TransferTo(dst *Allocator, n int64) error {
 	a.limit.Store(srcLimit - n)
 	dst.raiseLocked(dstLimit, dstLimit+n)
 	return nil
+}
+
+// checkRaise reports the refusal a raise to newLimit earns against a ceiling
+// reading, and nil when there is none. It is the whole decision the sticky
+// RLIMIT_MEMLOCK contract makes, in one place so [Allocator.setLimit] and
+// [Allocator.transferTo] cannot drift apart on it.
+//
+// A failed READING refuses the raise: nothing was compared, so nothing passed,
+// and letting a raise through on a ceiling nobody could read would make the
+// contract evaporate exactly when the host got strange. It is reported as the
+// discovery error rather than as a budget verdict, because those are different
+// answers — see [ErrLimitDiscoveryFailed] — and [Allocator.ForceLimit] is the
+// way past it for a caller who knows better than the reading that would not
+// come.
+//
+// An allocator that never opted in reaches here with a zero ceiling and a nil
+// error, which refuses nothing: the zero [LockedMemoryLimit] is not Bounded.
+func checkRaise(ceiling LockedMemoryLimit, cerr error, newLimit int64) error {
+	if cerr != nil {
+		return cerr
+	}
+	return ceiling.refuse(newLimit)
 }
 
 // raiseLocked grows the budget to newLimit and puts the difference into
