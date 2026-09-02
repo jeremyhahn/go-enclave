@@ -50,6 +50,48 @@ var (
 	ErrLockedMemoryUnavailable = errors.New("enclave: could not allocate locked memory")
 )
 
+// ErrReleasedWithoutWipe reports that an enclave's pages were returned to the
+// kernel WITHOUT the in-process overwrite, because the mprotect that makes a
+// frozen region writable was refused.
+//
+// The material is gone: the pages are unmapped, the kernel zeroes an anonymous
+// page before any reuse, and they were mlock'd for their whole life so nothing
+// reached swap. Nothing leaked. What it tells an operator is that something in
+// the environment -- a seccomp filter, a sandbox -- is denying mprotect, which
+// is worth knowing because the same denial reaches every other enclave in the
+// process.
+//
+// It is deliberately NOT [ErrEnclaveCorrupted]: no memory was corrupted, and the
+// invariant this package exists to hold -- material does not outlive its enclave
+// -- was kept. [MemoryEnclave.Destroy] therefore does not panic on it.
+var ErrReleasedWithoutWipe = errors.New("enclave: pages unmapped without an in-process wipe; mprotect was denied")
+
+// UnwipedReleaseError reports a release that fell back to unmapping because the
+// mprotect making the region writable was refused. It carries that refusal.
+//
+// Match on [ErrReleasedWithoutWipe]; errors.Is reports it for every
+// UnwipedReleaseError.
+type UnwipedReleaseError struct {
+	// Cause is the mprotect failure that forced the fallback.
+	Cause error
+}
+
+// Error implements error.
+func (e *UnwipedReleaseError) Error() string {
+	if e.Cause == nil {
+		return ErrReleasedWithoutWipe.Error()
+	}
+	return ErrReleasedWithoutWipe.Error() + ": " + e.Cause.Error()
+}
+
+// Is reports every UnwipedReleaseError as ErrReleasedWithoutWipe.
+func (e *UnwipedReleaseError) Is(target error) bool {
+	return target == ErrReleasedWithoutWipe
+}
+
+// Unwrap returns the underlying mprotect failure so errors.As can reach it.
+func (e *UnwipedReleaseError) Unwrap() error { return e.Cause }
+
 // LockedMemoryError reports that the pages backing an enclave could not be
 // allocated or locked.
 //
@@ -566,8 +608,31 @@ func (e *MemoryEnclave) EqualToErr(other []byte) (bool, error) {
 // called core.Panic — except that it no longer destroys every other enclave in
 // the process on its way out.
 func (e *MemoryEnclave) Destroy() {
+	// The non-fatal report is discarded here and only here. Destroy is the
+	// deferable form and cannot return anything; DestroyErr is the same teardown
+	// with the report kept, exactly as EqualToErr is EqualTo with the reason
+	// kept. A caller that cares whether the environment is denying the
+	// wipe-enabling mprotect must use that one.
+	_ = e.DestroyErr()
+}
+
+// DestroyErr is [MemoryEnclave.Destroy] with its non-fatal report returned
+// rather than discarded.
+//
+// It returns [ErrReleasedWithoutWipe] when the pages had to be handed back with
+// a bare unmap because the mprotect that makes a frozen region writable was
+// refused. Nothing leaked -- the pages are gone and the kernel zeroes an
+// anonymous page before reuse -- but the denial reaches every other enclave in
+// the process, and `defer e.Destroy()` is the pattern this library is used
+// through, so without this the only signal that a sandbox has removed part of
+// the teardown contract is invisible on the main path.
+//
+// It returns nil for an ordinary release, and PANICS on detected corruption for
+// the reasons given on Destroy: that is the one condition a caller cannot act
+// on, because the state it would act on is the state that is wrong.
+func (e *MemoryEnclave) DestroyErr() error {
 	if e == nil {
-		return
+		return nil
 	}
 
 	err := e.releaseMapping()
@@ -578,19 +643,40 @@ func (e *MemoryEnclave) Destroy() {
 	// unmap does not: the kernel still holds those pages, and telling the
 	// allocator they are available would let it admit allocations the process
 	// cannot satisfy. releaseOnce keeps the accounting exact across the retry.
-	if e.release != nil && (err == nil || errors.Is(err, ErrEnclaveCorrupted)) {
+	if e.release != nil && releasedPages(err) {
 		e.releaseOnce.Do(e.release)
 	}
 
 	// Off the registry once the pages are actually gone. A release that failed
 	// leaves it registered so a later WipeAll still tries.
-	if err == nil || errors.Is(err, ErrEnclaveCorrupted) {
+	if releasedPages(err) {
 		deregister(e)
 	}
 
-	if err != nil {
+	// ErrReleasedWithoutWipe is NOT a panic. The pages are gone and nothing
+	// leaked; what it reports is a denied mprotect in the environment, which is
+	// an operator's problem and not a state a caller cannot reason about. Only
+	// detected corruption keeps the panic, because there the state a caller
+	// would act on is the state that is wrong.
+	if err != nil && !errors.Is(err, ErrReleasedWithoutWipe) {
 		panic(err)
 	}
+
+	return err
+}
+
+// releasedPages reports whether err came back with the pages actually returned
+// to the kernel. Three cases qualify: a clean release, a failed canary (a report
+// about what already happened), and a release that fell back to unmapping
+// because mprotect was denied. Everything else means the region is still mapped.
+//
+// It exists so the handle-drop, the reservation return and the deregistration
+// cannot answer this question differently -- three copies of one predicate drift,
+// and the failure mode is an enclave that is alive over freed memory.
+func releasedPages(err error) bool {
+	return err == nil ||
+		errors.Is(err, ErrEnclaveCorrupted) ||
+		errors.Is(err, ErrReleasedWithoutWipe)
 }
 
 // releaseMapping wipes, verifies and unmaps the pages under the write lock, and
@@ -637,7 +723,14 @@ func (e *MemoryEnclave) releaseLocked() error {
 	}
 
 	err := e.m.release()
-	if err != nil && !errors.Is(err, ErrEnclaveCorrupted) {
+	// Drop the handle exactly when the PAGES are gone. Two errors are returned
+	// with the memory already released -- a failed canary, and a release that
+	// fell back to unmapping because mprotect was denied -- and keeping the
+	// mapping for either would leave the enclave reporting itself alive over
+	// memory the kernel has taken back, which is a use-after-free waiting for a
+	// reader. Every other error means the region is still mapped, so the handle
+	// is kept and Destroy can be retried.
+	if err != nil && !errors.Is(err, ErrEnclaveCorrupted) && !errors.Is(err, ErrReleasedWithoutWipe) {
 		return err
 	}
 	e.m = nil

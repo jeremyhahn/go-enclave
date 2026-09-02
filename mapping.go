@@ -51,6 +51,22 @@ import (
 // written once, from init, before any goroutine can observe it.
 var coreDumpErr = memcall.DisableCoreDumps()
 
+// protectMemory is memcall.Protect behind a package-private seam so a test can
+// deny the release-path mprotect and observe what the code does about it.
+//
+// Unexported and never assigned outside this package's own tests, so nothing
+// downstream can swap a syscall out from under a security primitive. It exists
+// because the condition it models -- a seccomp filter refusing mprotect -- is
+// not reachable any other way from a unit test, and the behavior under it is
+// exactly what #12 is about: without the fallback the material stays resident
+// for the process lifetime.
+var protectMemory = memcall.Protect
+
+// unmapDirectFn is unmapDirect behind the same kind of package-private seam, so
+// a test can deny the fallback as well and pin what happens when BOTH the wipe
+// path and the bypass are refused. Never assigned outside this package's tests.
+var unmapDirectFn = unmapDirect
+
 // CoreDumpsDisabled reports whether this package succeeded in disabling core
 // dumps process-wide at import, returning the failure if it did not.
 //
@@ -353,7 +369,7 @@ func (m *mapping) wipeAndVerify() error {
 	// The rest needs the WHOLE region readable and writable: the guard pages are
 	// PROT_NONE, and inner is read-only if it was frozen. A refusal here is
 	// reported, and release will keep the mapping rather than strand it.
-	if err := memcall.Protect(m.memory, memcall.ReadWrite()); err != nil {
+	if err := protectMemory(m.memory, memcall.ReadWrite()); err != nil {
 		return &LockedMemoryError{Cause: err}
 	}
 	m.mutable = true
@@ -394,7 +410,36 @@ func (m *mapping) release() error {
 	// now would hand the kernel back pages that may still hold material, and
 	// would lose the only handle for trying again.
 	if err := m.wipeAndVerify(); err != nil && !errors.Is(err, ErrEnclaveCorrupted) {
-		return err
+		// The region could not be made writable, so it was NOT wiped. For a
+		// FROZEN enclave that is the whole exposure: wipeAndVerify skips its
+		// early wipe when the pages are read-only, so under a PERMANENT denial
+		// of this mprotect -- a seccomp filter is the realistic threat -- the
+		// material would stay resident in locked memory for the process
+		// lifetime. Retrying cannot help; the denial does not go away.
+		//
+		// So hand the pages back to the kernel with a bare munmap instead of
+		// giving up. memcall.Free cannot do this: it begins with the same
+		// Protect(ReadWrite()) that was just refused. The kernel zeroes an
+		// anonymous page before reuse and these were mlock'd for their whole
+		// life, so nothing can read the material afterwards and no copy reached
+		// swap.
+		//
+		// Reported, never silent. Returning nil here would collapse "released
+		// the normal way" into "released after the wipe was refused", and the
+		// caller could not tell a healthy teardown from a sandbox quietly
+		// removing a security step.
+		if uerr := unmapDirectFn(m.memory); uerr != nil {
+			// The bypass failed too: keep everything: the region is still
+			// mapped and may still hold material, and dropping the handle
+			// would strand it with no way to retry.
+			return errors.Join(err, uerr)
+		}
+
+		m.memory, m.data, m.inner = nil, nil, nil
+		m.preguard, m.postguard, m.canary = nil, nil, nil
+		m.mutable, m.corrupted = false, false
+
+		return &UnwipedReleaseError{Cause: err}
 	}
 
 	if err := memcall.Unlock(m.inner); err != nil {

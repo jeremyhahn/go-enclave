@@ -274,6 +274,7 @@ func WipeAll() (int, error) {
 	// enclave is deregistered like any other, so by the time the count is taken
 	// this fact exists nowhere else.
 	corrupt := 0
+	unwiped := 0
 
 	for pass := 0; pass < maxSweepPasses; pass++ {
 		// Snapshot under the lock, then release it before destroying anything.
@@ -326,14 +327,28 @@ func WipeAll() (int, error) {
 			}
 
 			// Return the Allocator reservation on the same terms Destroy uses:
-			// only when the pages actually went back.
-			if e.release != nil && (err == nil || errors.Is(err, ErrEnclaveCorrupted)) {
+			// only when the pages actually went back. THE SAME PREDICATE, not a
+			// second copy of it -- this sweep and Destroy previously each spelled
+			// out "nil or corrupted", and when a third released-with-pages-gone
+			// case appeared only one of them learned about it. The enclave was
+			// then destroyed but left registered with its reservation unreturned,
+			// and a final pass reported it as still held.
+			if e.release != nil && releasedPages(err) {
 				e.releaseOnce.Do(e.release)
 			}
 
-			if err != nil && !errors.Is(err, ErrEnclaveCorrupted) {
+			if !releasedPages(err) {
 				// The pages are still mapped, so it stays on the ledger.
 				continue
+			}
+
+			if errors.Is(err, ErrReleasedWithoutWipe) {
+				// Wiped-by-unmapping because mprotect was denied. The pages ARE
+				// gone, so like corruption this never appears in the count --
+				// which is exactly why it needs reporting of its own. A sweep
+				// that retried and then saw nil would swallow it entirely, and
+				// the denial reaches every other enclave in the process.
+				unwiped++
 			}
 
 			if errors.Is(err, ErrEnclaveCorrupted) {
@@ -357,12 +372,23 @@ func WipeAll() (int, error) {
 	remaining := len(live)
 	registryMu.Unlock()
 
+	// Both conditions are reported, and both can hold at once. Neither appears
+	// in the count -- the pages went back in either case -- which is the whole
+	// reason each needs a return value rather than being inferred from a number.
+	var errs []error
 	if corrupt > 0 {
 		// One error however many were corrupt, carrying the count. Joining N
 		// copies of a sentinel that has no per-enclave identity would repeat the
 		// same sentence N times and say less than the number does.
-		return remaining, fmt.Errorf("enclave: %d of the swept enclaves failed canary verification: %w",
-			corrupt, ErrEnclaveCorrupted)
+		errs = append(errs, fmt.Errorf("enclave: %d of the swept enclaves failed canary verification: %w",
+			corrupt, ErrEnclaveCorrupted))
+	}
+	if unwiped > 0 {
+		errs = append(errs, fmt.Errorf("enclave: %d of the swept enclaves were unmapped without an in-process wipe because mprotect was denied: %w",
+			unwiped, ErrReleasedWithoutWipe))
+	}
+	if len(errs) > 0 {
+		return remaining, errors.Join(errs...)
 	}
 	return remaining, nil
 }
