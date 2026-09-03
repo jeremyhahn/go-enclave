@@ -6,6 +6,64 @@ All notable changes to go-enclave are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **`providertest` — the conformance suite for the provider seam** (#64).
+  go-enclave ships it; any implementer of `KeyProtector` or `RootUnsealer` — a
+  TPM, an HSM, a cloud KMS — runs `providertest.TestProvider` against its own
+  provider in its own repository. The shape is `fstest.TestFS`'s: one call, an
+  error naming every property that failed, no import of `testing` and no
+  dependency in either direction.
+
+  **The property it enforces is RETENTION, not destination.**
+  `Unprotect(blob, key []byte)` and `UnsealRoot(dst []byte)` constrain where the
+  plaintext is written and say nothing about what the provider KEEPS. A provider
+  may write into the caller's locked slice and hold its own copy forever, and
+  from this package's side a conforming signature and a retaining implementation
+  are indistinguishable. That is the unenforced half of `KeyProtector`'s
+  "protects short key material outside this process", and it is the same gap
+  that produced #33's fail-open: #33 made in-process retention *declarable*, and
+  this makes it *detectable*.
+
+  It does NOT assert that a provider never materializes plaintext. Measured
+  against go-xkms's backends, every one returns a fresh `[]byte` from its
+  decrypt — the native TPM2 path is `RSADecrypt(...) ([]byte, error)`, the
+  PKCS#11 wrapper returns a slice, and the AWS, GCP, Azure and Vault backends
+  return HTTP response bodies. No hardware decrypts into an arbitrary caller
+  page, so demanding that would fail every real backend for conforming. What is
+  required is the wipe of the transient, which the interface already states in
+  words and the sweep below measures.
+
+  Two instruments, ranked and not interchangeable. The **spy** is primary and
+  deterministic: the suite is the caller, so it owns every slice the provider is
+  handed, records the exact destination, asserts under a control that it held
+  the material *at return time* — without which a later zero reading cannot be
+  told apart from a destination that was never populated — and then requires
+  that no later call disturbs it in either direction. The **residue sweep** is
+  corroboration: it is the only instrument that can see a retained COPY, so it
+  cannot be dropped, but a sweep that does not wipe its scan buffer replants its
+  own needle and a sweep-based residue claim is unfalsifiable for anything
+  transiting a stack local (both measured, #45). It wipes after every mapping,
+  refuses to report a negative it has not first proven it could turn positive,
+  and is skippable only with a recorded reason echoed into the log.
+
+  Every property has a planted violator in the package's own tests that breaks
+  exactly that property, and the test asserts the suite goes red and names it —
+  including the headline control, a provider that retains a copy on purpose.
+  A conformance suite that cannot fail is worse than none, because it certifies.
+
+  `SoftwareProvider` passes the whole suite in both modes; that run is the
+  positive control against the suite over-asserting.
+
+  Two escape hatches, both taking a **reason** rather than a boolean, and both
+  echoed into the log so a green run cannot hide what it did not measure:
+  `SkipResidueSweep` for a transit the provider cannot reach (a cloud KMS
+  receives its plaintext in an HTTP response body owned by `net/http`), and
+  `SingleUseRoot` for a provider that consumes a one-shot handle on a
+  successful unseal — the seam guarantees only that a `Sealer` calls
+  `UnsealRoot` at most once, so a suite that calls it twice would fail a
+  provider for honoring the contract.
+
 ### Changed
 
 - **The test suite runs across `-cpu=1,2,8`** in CI and in `make test` /

@@ -194,6 +194,7 @@ pages:
 | `NewSealer(WithProvider(p), WithMode(m))` | An explicitly configured sealer. Refuses a provider that does not implement the selected mode's interface (`ErrProviderMode`, including nil and typed-nil providers) and unknown modes (`ErrInvalidMode`) **at construction**. |
 | `SetSealer(s)` | Install the process sealer `NewSealed` uses — **one-shot**, before anything seals; fails closed with `ErrSealerInstalled` afterwards. |
 | `KeyProtector` / `RootUnsealer` | The provider seam: per-operation key protection and one-shot root unseal. Implementations must supply confidentiality **and** authenticity; both recover into caller-supplied (locked) memory. |
+| `providertest.TestProvider(cfg)` | **Conformance suite for the provider seam** — `providertest` is a subpackage go-enclave ships and any implementer runs against its own provider, in the shape of `fstest.TestFS`. It enforces the half the signatures cannot: that a provider RETAINS nothing. See [Implementing a provider](#implementing-a-provider). |
 | `NewSoftwareProvider()` | The pure-software provider (both interfaces); the process default. Its root lives in this process — read its docs for what that trades away. |
 | `Wipe(b []byte)` | Zero a transient plain slice. |
 | `CoreDumpsDisabled()` | Whether lowering `RLIMIT_CORE` at import succeeded. Best effort by nature — a sandbox can deny it and anything in the process can raise it again — so it is reported rather than promised. Each enclave's pages are separately marked `MADV_DONTDUMP`, which **is** verified and fails the allocation if refused. |
@@ -249,6 +250,93 @@ everywhere is its classification: `classifyRlimit` is shared, and its tests run
 both platforms' `RLIM_INFINITY` sentinels — the BSDs use the largest positive
 `int64`, Linux all-bits-set, and reading one with the other's value silently
 produces a ceiling of nine exabytes or of -1.
+
+## Implementing a provider
+
+A `KeyProtector` or `RootUnsealer` lives above this package — a TPM, an HSM, a
+cloud KMS — and is injected through `NewSealer(WithProvider(p), WithMode(m))`.
+Nothing hardware-specific ever lands here.
+
+**Run the conformance suite.** `providertest` is shipped for exactly this and
+takes no dependency in either direction:
+
+```go
+func TestConformance(t *testing.T) {
+    err := providertest.TestProvider(providertest.Config{
+        New:   func() (any, error) { return NewTPMProvider(dev) },
+        Modes: []enclave.Mode{enclave.ModePerOperation},
+        Logf:  t.Logf,
+    })
+    if err != nil {
+        t.Fatal(err)
+    }
+}
+```
+
+### The property it enforces is retention, not destination
+
+`Unprotect(blob, key []byte)` and `UnsealRoot(dst []byte)` constrain where the
+plaintext is **written**. They constrain nothing about what a provider **keeps**.
+A provider may write into the caller's locked slice and hold its own copy
+indefinitely, and from this package's side a conforming signature and a
+retaining implementation are indistinguishable. That is the unenforced half of
+`KeyProtector`'s "protects short key material outside this process".
+
+The suite does **not** demand that a provider never materializes plaintext.
+Every real backend returns a fresh `[]byte` from its decrypt — the native TPM2
+path is `RSADecrypt(...) ([]byte, error)`, PKCS#11 wrappers return a slice, and
+the cloud KMS backends return HTTP response bodies. No hardware decrypts
+directly into an arbitrary caller page, so a conforming provider materializes the
+plaintext in its own memory and copies into the destination. What it must then
+do is **wipe that transient**, which is what the interface requires in words and
+what the suite measures.
+
+### Name only the modes you serve
+
+`Config.Modes` is a claim the suite checks in both directions: each named mode
+must be accepted by `NewSealer`, and each **unnamed** one must be refused with
+`ErrProviderMode`. The second direction is what finds a stub. A provider built
+for `ModePerOperation` that also carries an `UnsealRoot` — added by someone who
+thought the seam required both halves, returning a constant — is accepted in
+`ModeRootKey` by a `Sealer` with no way to tell a placeholder from an unseal,
+and every value in the process is then sealed under a root the provider never
+produced.
+
+### What it can and cannot see
+
+The **spy** is the primary instrument and is deterministic: the suite is the
+caller, so it owns every slice the provider is handed, and it watches each one
+afterwards. It catches retention **by reference** — a `Protect` that filed the
+caller's slice instead of copying out of it, an `Unprotect` that writes into a
+destination the caller has already wiped and released. Every assertion carries a
+control that fails first if the setup did not hold, so a destination that was
+never populated cannot read as one that was respected.
+
+The **residue sweep** is corroboration and Linux-only. It is the only instrument
+that can see a retained **copy**, so it is not optional, but it has two measured
+limits: a sweep that does not wipe its scan buffer replants its own needle, and
+a sweep-based residue claim is unfalsifiable for anything transiting a stack
+local, because a stack growth strands the pre-wipe bytes on the freed old stack.
+It refuses to report a negative it has not first proven it could turn positive.
+
+`Config.SkipResidueSweep` takes a **reason**, not a boolean, and the reason is
+echoed into the log. The legitimate one is a transit the provider cannot reach:
+a cloud KMS receives its plaintext in an HTTP response body owned by
+`net/http`, and no wipe reclaims the `bufio` buffer behind it. Skipping is then
+honest; claiming the property is not.
+
+`Config.SingleUseRoot` is the same shape for the other direction. The seam
+guarantees only that a `Sealer` calls `UnsealRoot` **at most once**, so a
+provider that consumes a session, an authorization or a one-shot handle on a
+successful unseal honors the contract while failing a suite that calls it
+twice. The default stays the strong one — the full-width-write proof and the
+destination spy both need a second call — and a genuinely one-shot provider
+names its reason, which is logged along with exactly which proofs were not
+taken.
+
+There is no residue sweep for `RootUnsealer`, and the asymmetry is deliberate: a
+root unsealer legitimately **retains** the root — that is the whole of what it
+does, and `SoftwareProvider` holds it in a locked enclave in this process.
 
 ## Vocabulary
 
