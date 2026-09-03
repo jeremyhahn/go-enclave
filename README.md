@@ -102,9 +102,12 @@ Choose by **access pattern**:
   per request, a key touched a few times an hour. The classic secure-buffer
   versus secret split: buffer-shaped usage converts to `MemoryEnclave`,
   secret-shaped usage to `SealedEnclave`. Cost: the envelope is near-free
-  heap ciphertext, but **every `Open` allocates a fresh locked page**, today
-  outside any `Allocator` budget (an admitted `OpenWith` is #17) — a service
-  opening per connection should size `RLIMIT_MEMLOCK` for it.
+  heap ciphertext, but **every `Open` allocates a fresh locked page**, and
+  `Open` charges it to no `Allocator` budget — it takes no `Allocator`.
+  `OpenWith` is the admitted variant (#17): it takes the destination
+  `Allocator` and charges the page against that budget, refusing a nil one
+  rather than falling back. Either way a service opening per connection
+  should size `RLIMIT_MEMLOCK` for it.
 
 Honestly stated, because it decides whether sealing is worth it to you: the
 sealed **material** never reaches the heap (its plaintext is decrypted only
@@ -127,7 +130,11 @@ One trap: `IsAlive` is a **different predicate** on the two types.
 however it went. `SealedEnclave.IsAlive` reports that the *ciphertext* is
 held, and can be true for a value that can no longer be opened (after a
 shutdown `WipeAll` destroyed the sealing keys, `Open` says so with
-`ErrSealerWiped`). An explicit openability probe is #33.
+`ErrSealerWiped`). `Openable` is the explicit probe (#33): `nil` when nothing
+this package can see prevents an open, `ErrSealerWiped` after a sweep,
+`ErrEnclaveDestroyed` when the value is gone, and `ErrOpenabilityUnknown` when
+a sweep has run and the provider reports no health, so the answer is not
+knowable without opening.
 
 ## Why this exists
 

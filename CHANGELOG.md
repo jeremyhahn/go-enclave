@@ -124,6 +124,36 @@ All notable changes to go-enclave are documented here. The format follows
   A discovery failure during a raise is reported as `ErrLimitDiscoveryFailed`
   and refuses the raise — nothing was compared, so nothing passed.
 
+- **The package docs no longer present shipped API as future work** (#65).
+  `doc.go` and `README.md` described `OpenWith` as "tracked as issue #17" and
+  `Openable` as "tracked as issue #33" after both had shipped, and both files
+  plus `provider.go` called the `crypto.Decrypter` composition an open
+  decision after it was ruled will-not-ship (#50). These are package docs, so
+  they reach `go doc` and pkg.go.dev: a reader was told a method they could
+  call right now was a plan.
+
+  The sentences were replaced rather than deleted, because each was doing real
+  work — explaining why an obvious gap existed. `OpenWith` is now described as
+  the admitted variant, keeping the reasoning about `Open` charging no budget;
+  `Openable` is described by the four answers it returns, keeping the point
+  that `IsAlive` cannot answer that question and must not try; and the
+  `Decrypter` composition is stated as settled, on SCOPE — this package
+  defines the seam and ships the software default, so a bridge adapting device
+  backends belongs with the layer that owns them.
+
+  The scope wording replaced an earlier draft that gave a MEMORY reason:
+  that `crypto.Decrypter` returns a fresh slice and so "structurally cannot"
+  decrypt into caller-locked memory. That claim is false, and `provider.go`
+  itself refutes it thirty lines further down, where `KeyProtector`'s contract
+  says in as many words that a provider whose underlying API returns a fresh
+  slice must copy into the destination and wipe its transient. Every realistic
+  backend is in exactly that position — the native TPM2 path is
+  `RSADecrypt(...) ([]byte, error)`, PKCS#11 wrappers return a slice, and the
+  cloud KMS backends return response bodies — so a fresh-slice return is the
+  normal case the contract already accommodates, not a disqualifier. A public
+  doc asserting a structural impossibility that the adjacent contract permits
+  is worse than one that simply says where the code belongs.
+
 
 ### Added
 
@@ -595,6 +625,122 @@ All notable changes to go-enclave are documented here. The format follows
   the allocation returns `ErrLockedMemoryUnavailable`.
 
 ### Tests
+
+- **A stale forward reference in the docs now fails the suite (#65).**
+  `docs_issue_refs_test.go` classifies every issue citation in the documented
+  surface — the non-test `*.go` comments, `README.md` and `CLAUDE.md` — as
+  `classHistorical` (describes something already done or decided),
+  `classPending` (presents the issue as unresolved future work) or
+  `classExternal` (another repository's numbering).
+
+  It is deliberately NOT "fail when the docs cite a closed issue". All 27
+  citations in this package resolve to closed issues, because the docs earn
+  their keep by explaining why the code is shaped as it is; that check would
+  fire on everything and be suppressed the same day. What rots is the CLAIM
+  around the citation, so the claim is what is recorded.
+
+  **The ledger is keyed by a digest of the citing SENTENCE, not by file and
+  issue number.** The first version keyed at `<file>#<number>` and review on
+  PR #66 killed it with the obvious mutation: reword `doc.go`'s
+  "`SealedEnclave.Openable` is the explicit probe (issue #33)" into "an
+  openability probe is tracked as issue #33" — the exact defect this guard
+  exists for — and it PASSED, because `doc.go#33` was already classified and
+  nothing looked at the prose. A second sentence in the same file presenting
+  the same issue as pending went through the same hole. With a sentence-level
+  key a classification covers exactly the words classified: reword it and the
+  old entry orphans while the new one is undeclared, so the suite fails twice
+  until someone re-reads the sentence. Rewrapping a paragraph changes nothing,
+  because the digest is taken after whitespace and comment markers are
+  normalized away.
+
+  Two halves, each with teeth on its own. The offline half compares the
+  citations found in the tree against the ledger and fails on any difference in
+  either direction. It needs no network. The online half resolves every
+  `classPending` entry against Gitea and fails if the issue is closed.
+
+  **The online half skips only for genuine transport unavailability.** A
+  rejected token, a wrong repository or a malformed endpoint is a
+  configuration failure and FAILS the suite rather than disabling the check
+  while printing green — the second finding on PR #66, and the
+  silent-instrument pattern this repository keeps catching. Setting
+  `ENCLAVE_ISSUE_API` is what asks for the check; leaving it unset is the
+  opt-out, so nobody's build breaks over a credential they did not ask for.
+
+  An intermediate design warned instead of failing when nothing was
+  `classPending`. It was removed after measuring that the warning could never
+  be seen: a PASSING test in a non-verbose run emits nothing at all — not
+  `t.Log`, not `os.Stderr`, not `os.Stdout` — and neither `ci.yml` nor
+  `make test` runs `go test -v`. A state nobody can observe is not a state,
+  and an invisible warning is the same defect one level up from the one this
+  guard is for.
+
+  **Merging #64 found two more extractor defects, and both were the silent
+  kind.** `providertest` writes `PKCS#11` twice, which a bare `#(\d+)` reads as
+  a citation of issue 11 — a guard that invents citations gets its ledger
+  padded with nonsense until someone deletes the check. And `providertest`
+  lives in a subdirectory, which the root-only file scan never read, so a whole
+  new package's docs were excluded while the scan reported clean. A `#`
+  preceded by a letter or digit is now part of a word rather than a citation
+  unless the token before it looks like `owner/repo`, the file walk is
+  recursive, and `TestCitationExtraction` and
+  `TestDocIssueRefFilesReachesSubpackages` pin both. Walked paths are
+  normalized with `filepath.ToSlash`, since the ledger is checked-in text and
+  must not classify the same tree differently depending on the host separator.
+
+  **The repository is checked on every lookup, not just the control.** The
+  control proves the endpoint answers for this repository; it does not prove it
+  does so for every number, and the pending loop branched on `state` alone. An
+  endpoint, proxy or mistyped base serving the control correctly and a pending
+  issue from elsewhere would have reported the docs verified against the wrong
+  tracker — the same asymmetry as the control check, one level down. A
+  wrong-repository answer is now a failure and does not count towards
+  `Checked`, because it resolved nothing.
+
+  The guard states what it CANNOT catch, in its own doc comment: it records
+  the claim a human made about a sentence, not the claim the sentence makes,
+  so a careless `classHistorical` defeats it; a forward reference carrying no
+  issue number is invisible; and the online half is opt-in through the
+  environment.
+
+  **The online half's own policy is now tested, hermetically.** It was not,
+  and that was the third finding on PR #66: with no `classPending` entries and
+  `ENCLAVE_ISSUE_API` unset, the default run skipped, so the control lookup,
+  the pending lookup, HTTP and auth failure, a malformed response, a closed
+  pending issue, and the fatal branch of the policy itself were covered by
+  nothing. A regression turning any of them fail-open would have left
+  `go test ./...` green — the defect this guard exists to prevent, living
+  inside the guard.
+
+  The decision is now a VALUE: `evaluateIssueState` returns what should happen
+  and why, and the test function only translates that into a skip, a log or a
+  failure. `TestIssueStatePolicy` walks 18 rows against a stubbed
+  `http.RoundTripper` — no network, no Gitea, no credentials, and not even a
+  loopback port, since a guard whose own tests need a listening socket cannot
+  run in a socket-restricted runner — asserting the action AND a fragment of
+  its explanation, so a row cannot pass by producing the right verdict for the
+  wrong reason. `misconfigured` remains the single place the fatal-versus-
+  warn split is decided, and `TestMisconfiguredIsTheOnlyFatalWarnDecision`
+  pins that every misconfiguration path routes through it.
+
+  Two fail-open paths were found by that table and by review while writing it.
+  An `ENCLAVE_ISSUE_API` with no scheme — `gitea.local/api/v1/...` — is
+  accepted by `http.NewRequestWithContext` and refused by `http.Client.Do`, so
+  it took the SKIP path under the very policy meant to catch it; the base URL
+  is now validated up front. And narrowing "transport failure" to `net.Error`
+  was not enough on its own, because `*url.Error` — which the client wraps
+  EVERY failure in — implements `net.Error` itself, so the check matched
+  unconditionally and classified everything as transport. The inner error is
+  what is asked now. The second defect was caught by the table row written for
+  the first.
+
+  A third: the instrument check asserted only that the control issue is
+  closed, which identifies no repository — measured on this server,
+  go-blockstore, go-luks2, go-quicbaas and go-qrdb all have a closed #17 too,
+  so a probe aimed at any of them would have passed and then resolved
+  `classPending` entries against unrelated issues whose numbers merely
+  collide. The control now also requires `repository.full_name` to be this
+  repository, and that is verified live: pointed at go-blockstore with a valid
+  token, it fails.
 
 - **`Allocator`'s cacheline budget is asserted rather than assumed (#60).**
   This type's lock-free argument rests on `free` and `limit` sharing a line that

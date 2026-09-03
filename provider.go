@@ -52,11 +52,19 @@ const RootKeyBytes = 32
 // anyone holding that key can wrap a key of their choosing and forge a sealed
 // value that opens successfully to attacker-chosen material. That gap is why
 // this contract exists; a provider holding only a decryption key must be
-// COMPOSED with a signing key to qualify — whether go-enclave ships such a
-// composition is an open owner decision (issue #50), and until it lands the
-// composition is the provider author's to build. Every realistic
-// authenticated backend qualifies on its own: cloud-KMS Encrypt/Decrypt is authenticated, an HSM can AES-GCM
-// under a device key, and TPM 2.0 seal/unseal is integrity-protected.
+// COMPOSED with a signing key to qualify — go-enclave does not ship such a
+// composition, and that is settled rather than pending (issue #50). The
+// reason is SCOPE, not memory: this package defines the seam and ships the
+// software default, and device-backed providers are built and injected by the
+// layer that owns those devices. A generic crypto.Decrypter bridge here would
+// put the bottom of the dependency graph in the business of adapting backends
+// it cannot exercise; the same bridge, written where those backends live, can
+// be held to the conformance suite in providertest. No capability is lost by
+// that: every realistic authenticated backend has a native operation below
+// crypto.Decrypter and qualifies on its own — cloud-KMS Encrypt/Decrypt is
+// authenticated, an HSM can AES-GCM under a device key, and TPM 2.0
+// seal/unseal is integrity-protected. The composition is the provider
+// author's to build.
 //
 // A blob that fails authentication is reported with an error matching
 // [ErrSealedAuthentication], so a forgery reads as what it is at every layer

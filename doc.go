@@ -227,11 +227,15 @@
 //   - A SealedEnclave's envelope is ordinary heap ciphertext — near-free at
 //     rest; the locked memory behind sealing is the Sealer's keys, shared by
 //     every value. But every Open allocates a fresh locked page for the
-//     plaintext (plus one, transiently, for the per-value key), and TODAY
-//     that allocation is outside any Allocator budget — an admitted variant,
-//     OpenWith, is tracked as issue #17. A service that opens a credential
-//     per connection is allocating locked pages per connection and should
-//     size RLIMIT_MEMLOCK accordingly.
+//     plaintext (plus one, transiently, for the per-value key), and Open
+//     charges that allocation to no Allocator budget at all — it takes no
+//     Allocator and so cannot. SealedEnclave.OpenWith is the admitted
+//     variant (issue #17): it takes the destination Allocator, charges the
+//     plaintext page against that budget, and refuses a nil one rather than
+//     falling back to the unbudgeted path. Either way a service that opens a
+//     credential per connection allocates a locked page per connection and
+//     should size RLIMIT_MEMLOCK accordingly; with OpenWith the budget can
+//     see it, so exhaustion arrives as a refusal rather than a surprise.
 //   - Sealing is not heap-free even though the MATERIAL is: the plaintext is
 //     decrypted only into locked pages (verified by sweeping the process's
 //     anonymous mappings), but the per-value KEY transits the Go heap on
@@ -258,7 +262,16 @@
 // CIPHERTEXT is still held, and can be true for a value that can no longer
 // be opened — after a shutdown sweep destroyed the sealing keys, the honest
 // answer arrives as ErrSealerWiped from Open rather than as false from
-// IsAlive. An explicit openability probe (Openable) is tracked as issue #33.
+// IsAlive. SealedEnclave.Openable is the explicit probe (issue #33), and it
+// exists precisely because IsAlive cannot answer this and must not try:
+// IsAlive reports on the ciphertext, which survives a sweep, and the keys do
+// not. Openable answers with one of four distinct facts — nil, meaning
+// nothing this package can see prevents an open; ErrSealerWiped, when a
+// shutdown sweep destroyed this sealer's keys; ErrEnclaveDestroyed, when the
+// value itself is gone; and ErrOpenabilityUnknown, when a sweep has run and
+// the provider reports no sealing-state health, so openability is not
+// knowable without opening. nil and ErrOpenabilityUnknown are not variants of
+// each other, and collapsing the second into the first is a fail-open.
 //
 // Sealing is built on a hardware-rootable provider seam. go-enclave itself is
 // PURE SOFTWARE — it defines the KeyProtector and RootUnsealer interfaces,
@@ -267,8 +280,12 @@
 // through NewSealer or SetSealer. Providers must supply confidentiality AND
 // authenticity — a sealed value is unforgeable as well as unreadable, and a
 // confidentiality-only provider does not satisfy the seam (see KeyProtector;
-// a bare decryption key qualifies only composed with a signing key, a
-// composition tracked as issue #50).
+// a bare decryption key qualifies only composed with a signing key, and
+// go-enclave does not ship that composition — decided, not pending, on issue
+// #50, and decided on SCOPE rather than on mechanism: this package defines
+// the seam and ships the software default, so a bridge adapting device
+// backends belongs with the layer that owns them rather than at the bottom of
+// the dependency graph. The composition is the provider author's to build).
 // Two modes select how often the provider is invoked, trading device traffic
 // against what a memory-reading adversary obtains; the honest comparison is
 // on Mode. Out of the box — no provider, no configuration — NewSealed is
