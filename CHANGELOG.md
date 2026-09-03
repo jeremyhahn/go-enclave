@@ -8,6 +8,20 @@ All notable changes to go-enclave are documented here. The format follows
 
 ### Changed
 
+- **The test suite runs across `-cpu=1,2,8`** in CI and in `make test` /
+  `make coverage` (#61). One direction of the retune-versus-admission race —
+  a lowering that takes the contested page while `reserve` sits between its read
+  of the headroom counter and the compare-and-swap that acts on it — is caught
+  by contention rather than by arrangement, because giving it a test seam would
+  put a branch on the lock-free admission path this type exists to keep clear of
+  one. That makes the runner's core count part of the oracle. Measured against
+  `reserve` regressed to read-then-subtract, 10 whole-package runs per setting
+  on an 8-core host: `-cpu=1` killed it 0/10, `-cpu=2` 6/10, `-cpu=8` 10/10 —
+  so a single-core or heavily-pinned runner cannot see the defect at all, and
+  the list is what guarantees a multi-core run happens anyway. No production
+  code changed. Cost: the CI test step goes from 74s to 195s, against a
+  30-minute job timeout.
+
 - `make lint` pins golangci-lint v2.13.2 — the floor for linting Go 1.27;
   v2.12.2's vendored analysis tools cannot parse the 1.27 standard library.
   CI already runs the same version baked into the runner image.

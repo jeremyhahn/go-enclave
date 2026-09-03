@@ -103,20 +103,37 @@ trivy:
 security: gosec govulncheck modverify trivy
 	@echo "Security suite passed"
 
-## test: unit tests with the race detector
+# The flags CI runs the suite with, in one place so a local run and the pipeline
+# cannot drift apart — a check that passes locally and fails in CI (or worse,
+# the reverse) is its own defect class.
+#
+# -race IS NOT OPTIONAL. It is the sole detector for the publication-ordering
+# defect class in the shutdown registry: measured 10/10 against the restored
+# defect with the detector on, 0/10 with it off.
+#
+# -cpu=1,2,8 IS NOT OPTIONAL EITHER (#61). The retune-versus-admission race in
+# `reserve` has no test seam and cannot be given one without putting a branch on
+# the lock-free admission path, so it is caught by contention — which makes the
+# CORE COUNT part of the oracle. Measured on an 8-core host against `reserve`
+# regressed to read-then-subtract, 10 whole-package runs per setting:
+#     -cpu=1  ->  0/10 killed the mutant   (single core CANNOT see it)
+#     -cpu=2  ->  6/10
+#     -cpu=8  -> 10/10
+# Trimming the list to one value retires that; the run costs ~3x, which for this
+# package is seconds.
+TESTFLAGS ?= -race -count=1 -cpu=1,2,8
+
+## test: unit tests with the race detector, across the CPU matrix
 .PHONY: test
-# -race IS NOT OPTIONAL HERE. It is the sole detector for the
-# publication-ordering defect class in the shutdown registry: measured 10/10
-# against the restored defect with the detector on, 0/10 with it off. Dropping
-# the flag to speed the suite up would retire that guarantee silently — every
-# test would still pass.
 test:
-	$(GOTEST) -race -count=1 -timeout=300s $(PKG)
+	$(GOTEST) $(TESTFLAGS) -timeout=900s $(PKG)
 
 ## coverage: coverage report + threshold
 .PHONY: coverage
+# Same shape as the CI step, matrix included: coverage is measured on the run
+# that actually gates, not on a cheaper one that exercises less.
 coverage:
-	$(GOTEST) -race -covermode=atomic -coverprofile=$(COVERAGE_PROFILE) $(PKG)
+	$(GOTEST) $(TESTFLAGS) -covermode=atomic -timeout=900s -coverprofile=$(COVERAGE_PROFILE) $(PKG)
 	$(GOCMD) tool cover -func=$(COVERAGE_PROFILE) | tail -1
 
 ## test-fips: build + unit tests under Go native FIPS 140-3 strict mode

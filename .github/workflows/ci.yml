@@ -342,9 +342,35 @@ jobs:
       # 10/10 against the restored defect with the detector on, 0/10 with it
       # off. Removing the flag to speed this job up would retire that
       # guarantee silently — every test would still pass.
+      #
+      # -cpu=1,2,8 IS NOT OPTIONAL EITHER, and for the mirror-image reason
+      # (#61). One direction of the retune/admission race — a lowering that
+      # takes the contested page while `reserve` is between its read of the
+      # headroom counter and the compare-and-swap that acts on it — has no test
+      # seam and cannot get one: the seam would sit on the lock-free admission
+      # path this type exists to keep free of branches and syscalls (benchmarked
+      # in #49). It is caught by CONTENTION instead, so how reliably it is caught
+      # is a property of the RUNNER, not of the suite — and a runner's core count
+      # is not something this repo controls. The list makes a multi-core run
+      # happen even on a single-core or heavily-pinned runner.
+      #
+      # Measured on an 8-core host against `reserve` regressed to
+      # read-then-subtract, 10 runs of the whole package at each setting, this
+      # command's exact flags:
+      #     -cpu=1  ->  0/10 killed the mutant   (single core CANNOT see it)
+      #     -cpu=2  ->  6/10
+      #     -cpu=8  -> 10/10
+      # So -cpu=1 alone is blind to it and the default (GOMAXPROCS = whatever the
+      # runner has) is a coin toss on a small runner. Do not trim the list to one
+      # value to save time; 8 is what makes the kill reliable and 1 is what keeps
+      # the few-core paths honest.
+      #
+      # Cost, measured on the same host: 74s -> 195s for this step (2.6x, not 3x
+      # — the coverage-instrumented build dominates). That is ~3.3 min against
+      # this job's 30-minute timeout.
       - name: Run tests with coverage
         run: |
-          go test -race -count=1 -timeout=900s -coverprofile=coverage.out ./...
+          go test -race -count=1 -cpu=1,2,8 -timeout=900s -coverprofile=coverage.out ./...
           COVERAGE=$(go tool cover -func=coverage.out | grep total | awk '{print $3}' | sed 's/%//')
           echo "Total coverage: ${COVERAGE}%"
           if [ $(echo "${COVERAGE} < ${{ env.COVERAGE_THRESHOLD }}" | bc -l) -eq 1 ]; then

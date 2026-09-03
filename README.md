@@ -282,7 +282,7 @@ That matters to anyone who has to certify what their binary contains.
 ## Development
 
 ```
-make test        # race suite
+make test        # race suite, across -cpu=1,2,8
 make test-fips   # build + tests under FIPS 140-3 strict mode
 make security    # gosec, govulncheck, modverify, trivy
 make ci          # the full local gate
