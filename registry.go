@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -122,7 +123,65 @@ var (
 	// far more frequent than the single sweep, so it is the operation to keep
 	// cheap.
 	live = make(map[*MemoryEnclave]struct{})
+
+	// sweepGen is the sweep sequence behind [SealedEnclave.Openable]'s
+	// fallback for providers that can report nothing about their own sealing
+	// state. [WipeAll] bumps it TWICE — once before it destroys anything and
+	// once after it finishes — so its PARITY carries the extra fact a plain
+	// counter cannot:
+	//
+	//	even  no sweep is running
+	//	odd   a sweep is in flight RIGHT NOW
+	//
+	// The parity is not decoration. A plain counter cannot distinguish a value
+	// sealed safely from one sealed while a sweep was midway through: the seal
+	// would record the already-bumped number, later compare equal to it, and
+	// report nil about material the rest of that same sweep went on to
+	// destroy. That is the fail-open this mechanism exists to close, so a
+	// value sealed under an ODD generation is treated as suspect no matter
+	// what the count later says. It is the standard sequence-lock reading of a
+	// counter and is used here for the standard reason.
+	//
+	// Monotonic and never reset — a reset would make a later value read as
+	// older than an earlier one, which is the one thing the comparison must
+	// never do. Written ONLY by WipeAll.
+	sweepGen atomic.Uint64
+
+	// sweepParkedForTest runs after the generation is bumped and BEFORE
+	// anything is destroyed. It is nil in every build but the test that pins
+	// that ordering, which is the only way to observe the window from
+	// outside. Same shape as the Allocator's stalled seam and for the same
+	// reason: an ordering claim that cannot be entered cannot be tested.
+	sweepParkedForTest func()
+
+	// sweepMu serializes [WipeAll] end to end. The parity of sweepGen is a
+	// SINGLE-WRITER invariant — the standard requirement of the sequence-lock
+	// reading it uses — and two concurrent sweeps break it outright: the
+	// second one's opening bump takes the sequence from odd back to EVEN
+	// while both are still running, so a value sealed in that window records
+	// an even sequence, reads "no sweep was in flight", and can then be
+	// reported openable after one of those sweeps has already destroyed the
+	// provider's key. That is the fail-open the sequence exists to close.
+	//
+	// Serializing rather than counting active sweeps: a count needs a second
+	// word, and reading two words that must agree is the problem this design
+	// avoided in the first place. WipeAll is a teardown operation called once
+	// or twice in a process's life, so the contention cost is nil, and a
+	// second caller waiting for the first to finish is the behavior a
+	// concurrent caller wanted anyway.
+	//
+	// Taken BEFORE registryMu and never while holding it, which is the whole
+	// lock order in this file.
+	sweepMu sync.Mutex
 )
+
+// sweepGeneration reports the current sweep sequence. A sealed value records
+// it BEFORE it seals and [SealedEnclave.Openable] compares against it; an odd
+// value means a sweep was in flight at that moment. See [sweepGen].
+func sweepGeneration() uint64 { return sweepGen.Load() }
+
+// sweepInFlight reports whether g was taken while a sweep was running.
+func sweepInFlight(g uint64) bool { return g%2 == 1 }
 
 // register adds e to the shutdown ledger and returns it, so constructors can
 // wrap their return value rather than growing a second statement that a future
@@ -195,10 +254,31 @@ func deregister(e *MemoryEnclave) {
 //     process's memory, and in this mode the material was never protected by
 //     this process's memory.
 //
-// Either way each swept-out value still reports IsAlive — a live-looking
-// handle to material that may be unreachable. Destroy sealed values alongside
-// this call if that would mislead the code holding them; whether the sweep
-// should cover the handles too is open in #33.
+// Either way each swept-out value still reports IsAlive — that method answers
+// "the ciphertext is still here", which stays true. Whether it can still be
+// OPENED is [SealedEnclave.Openable]: nil, [ErrSealerWiped] once this sweep
+// has taken the keys it needed, or [ErrOpenabilityUnknown] when the provider
+// reports no health and this call is all that is known to have happened.
+//
+// This call BUMPS A SWEEP GENERATION BEFORE IT DESTROYS ANYTHING, which is
+// what lets a sealed value tell that a sweep ran during its lifetime. The
+// order is deliberate and load-bearing; see the comment at the top of the
+// function body. Destroy sealed values alongside this
+// call if a live handle to unopenable material would mislead the code holding
+// them.
+//
+// The sweep will NOT be extended to cover them (#33, decided), for three
+// reasons worth stating where the count is defined. The COUNT means "still
+// holding locked memory" and that invariant is this function's whole value; a
+// SealedEnclave holds none, so including it would either corrupt the number
+// or require a second one. Sweeping would also be WRONG rather than merely
+// costly: in [ModePerOperation] the device still holds the key, so destroying
+// sealed values would destroy recoverable application data that this
+// process's memory never protected — under a call whose callers are
+// documented as sweeping and continuing to run. And it would REGRESS
+// diagnostics, since a swept value would then report ErrEnclaveDestroyed
+// ("you destroyed this") in place of ErrSealerWiped ("a sweep did"), which
+// sends an operator to the wrong code.
 //
 // # It belongs to the program, never to a library
 //
@@ -299,6 +379,39 @@ func deregister(e *MemoryEnclave) {
 // reports no corruption: the corrupt enclaves are gone, and the error describes
 // what THIS sweep detected rather than a standing condition.
 func WipeAll() (int, error) {
+	// Held for the whole sweep, so the sequence's odd/even meaning is true for
+	// a sweep's entire lifetime rather than only when one runs at a time by
+	// luck. See sweepMu.
+	sweepMu.Lock()
+	defer sweepMu.Unlock()
+
+	// THE GENERATION IS BUMPED BEFORE ANYTHING IS DESTROYED, and the order is
+	// the correctness of the openability fallback rather than a detail of it.
+	//
+	// Bump-then-destroy leaves, at worst, a window where a sweep is in flight
+	// and a value whose provider cannot be interrogated reports
+	// ErrOpenabilityUnknown while its key material is in fact still intact —
+	// a brief false "I cannot tell", which is the SAFE direction and resolves
+	// as soon as the sweep finishes.
+	//
+	// Destroy-then-bump would invert exactly that: a window in which the keys
+	// are already gone and the generation still reads old, so Openable returns
+	// nil — "nothing prevents an open" — about a value that can no longer be
+	// opened. That is the fail-open this fallback exists to close, narrowed to
+	// a race that only appears under load, which is the worst form to ship it
+	// in. Pinned by TestWipeAll_BumpsTheGenerationBeforeDestroying, which
+	// parks in the window rather than trusting the statement order to survive
+	// a later edit.
+	sweepGen.Add(1)
+	// Balancing bump on EVERY return path, so the sequence returns to even
+	// however this call ends. A sweep that exited early while leaving the
+	// count odd would mark every later seal in the process suspect forever.
+	defer sweepGen.Add(1)
+
+	if sweepParkedForTest != nil {
+		sweepParkedForTest()
+	}
+
 	// Tallied, not read from the ledger, for the reason given above: a corrupt
 	// enclave is deregistered like any other, so by the time the count is taken
 	// this fact exists nowhere else.

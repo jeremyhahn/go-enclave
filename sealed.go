@@ -412,8 +412,19 @@ func newKeyEnclave(n int) (*MemoryEnclave, error) {
 // [SealedEnclave.IsAlive] while [SealedEnclave.Open] fails. The sealer FAILS
 // CLOSED from that point — [ErrSealerWiped], never silent re-keying — and the
 // two modes differ in whether sealed values survive; see [ErrSealerWiped] and
-// [WipeAll]. Whether the sweep should cover this type's handles too is open
-// in #33.
+// [WipeAll].
+//
+// The sweep does not and will not cover this type (#33, decided): its count
+// means "still holding locked memory", and a sealed value holds none, so
+// covering it would either corrupt that number or need a second one. More
+// than costly, it would be WRONG — a per-operation hardware value stays
+// legitimately openable after a sweep, and destroying it would destroy
+// recoverable application data that this process's memory never protected,
+// under a call documented for sweep-and-keep-running callers. What the sweep
+// leaves behind is answered instead by [SealedEnclave.Openable], which
+// reports [ErrSealerWiped] where a destroyed handle reports
+// [ErrEnclaveDestroyed]; a swept-then-destroyed value would have reported the
+// wrong one of those.
 //
 // The zero value is not usable; construct one with [NewSealed] or
 // [Sealer.Seal]. A nil *SealedEnclave is a valid receiver for every method.
@@ -440,6 +451,16 @@ type SealedEnclave struct {
 	// exactly — an exact capacity is what keeps the AEAD from allocating and
 	// putting the plaintext on the heap.
 	size int
+
+	// sealedAtGen is the sweep generation current when this value was sealed.
+	// WRITTEN ONCE, at construction, and never again — which is what lets
+	// Openable compare it with a single atomic load and no lock. If a later
+	// change ever makes it mutable, that comparison needs revisiting.
+	//
+	// It exists so a value can tell whether a [WipeAll] has run during its
+	// lifetime, which is the only thing this package can honestly say about a
+	// provider that reports nothing; see [ErrOpenabilityUnknown].
+	sealedAtGen uint64
 }
 
 // NewSealed encrypts data under the PROCESS Sealer and returns the sealed
@@ -605,10 +626,22 @@ func (s *SealedEnclave) openWith(a *Allocator) (*MemoryEnclave, error) {
 	return s.sealer.open(a, s.blob, s.sealed, s.size)
 }
 
-// IsAlive reports whether the sealed material is still held. It reports on
-// THIS value's ciphertext, not on whether an Open could succeed: after a
-// shutdown sweep the material is unreachable while the handle remains alive
-// (see [SealedEnclave] and #33).
+// IsAlive reports whether this value still HOLDS ITS CIPHERTEXT — that
+// [SealedEnclave.Destroy] has not run. It is a local, lock-cheap fact about
+// this handle and nothing else.
+//
+// It is NOT the question "can this be opened", and the two genuinely differ:
+// a shutdown [WipeAll] destroys the sealing keys without touching this value,
+// so a swept sealer leaves every value it sealed reporting IsAlive while
+// [SealedEnclave.Open] fails with [ErrSealerWiped]. Ask
+// [SealedEnclave.Openable] for openability; it consults the sealer, which
+// IsAlive deliberately does not.
+//
+// The distinction is worth stating because the name reads the other way
+// elsewhere in this package: [MemoryEnclave.IsAlive] reports false once its
+// material is wiped, so there it does answer "usable". A SealedEnclave's
+// usability lives in a sealer this value does not own and cannot cheaply
+// speak for, so the two methods split rather than one of them lying.
 func (s *SealedEnclave) IsAlive() bool {
 	if s == nil {
 		return false
@@ -616,6 +649,82 @@ func (s *SealedEnclave) IsAlive() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.sealed != nil
+}
+
+// Openable reports whether an [SealedEnclave.Open] could still recover this
+// material, without recovering it: nil if nothing known prevents it,
+// [ErrEnclaveDestroyed] if this value was destroyed (or is nil),
+// [ErrSealerWiped] if a shutdown [WipeAll] destroyed the in-process keys the
+// sealer needs, and [ErrOpenabilityUnknown] if a sweep has run since this
+// value was sealed and the provider can report nothing about its own sealing
+// state.
+//
+// # The four answers are four different facts
+//
+// nil and ErrOpenabilityUnknown are NOT variations of each other. nil is a
+// positive claim that nothing known prevents an open; the sentinel says this
+// package cannot see far enough to make that claim. Collapsing the second
+// into the first is a fail-open, and it is what this method did before
+// providers could report their own health: an out-of-package [KeyProtector]
+// cannot implement an unexported interface, so one keeping its key in this
+// process's locked memory was silently assumed healthy, reported nil, and
+// then failed to Open. Supply [WithProviderHealth] and the answer becomes
+// precise again.
+//
+// It exists because [SealedEnclave.IsAlive] cannot answer this and must not
+// try. IsAlive reports on the ciphertext, which survives a sweep; the keys do
+// not. Without Openable, code holding a swept value sees a live-looking
+// handle and learns otherwise only by opening it — a live-looking handle to
+// material that yields nothing.
+//
+// # It is a snapshot, not a promise
+//
+// A nil return does not reserve anything: a sweep between this call and the
+// Open makes the answer stale, and Open is the operation that decides. Use it
+// for diagnostics — a health endpoint, a shutdown-ordering assertion, a log
+// line that says WHICH failure a caller is about to hit — not as a gate in
+// front of every Open, which would double the sealer lock traffic to
+// re-answer a question Open answers anyway.
+//
+// # nil is narrower than "will succeed"
+//
+// It reports the states that are knowable cheaply and locally. It does
+// NOT predict [ErrSealedAuthentication] (which needs the crypto),
+// ErrLockedMemoryUnavailable (a kernel condition at the moment of the call),
+// or a hardware provider's own failures (a device unreachable — which is a
+// device liveness question, not a question about this process's memory, and
+// deliberately not answered here). In [ModePerOperation] with a real
+// hardware provider, nil is the correct answer: the device holds the key, a
+// sweep of this process's memory does not invalidate it, and values stay
+// openable. Say so with [WithProviderHealth] — a provider that reports its
+// health is BELIEVED, and its answer is terminal. Without it, this package
+// falls back to whether a sweep has happened at all and returns
+// ErrOpenabilityUnknown, because it has no way to tell that provider apart
+// from one keeping its key in memory the sweep just destroyed.
+//
+// The pure-software provider is the exception in that mode, since its root IS
+// an in-process enclave, and it reports the sweep directly.
+//
+// A sweep is deliberately NOT reported as ErrEnclaveDestroyed. The two say
+// different things to whoever reads the log — "you destroyed this" against "a
+// sweep did" — and conflating them sends an operator to the wrong code.
+func (s *SealedEnclave) Openable() error {
+	if s == nil {
+		return ErrEnclaveDestroyed
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	// Both conditions are the destroyed state: Destroy clears them together
+	// under this same lock. Testing the sealer too is what keeps the
+	// documented return set exact — a nil sealer can never reach openable
+	// below, so ErrNilSealer is not among the errors this can return.
+	if s.sealed == nil || s.sealer == nil {
+		return ErrEnclaveDestroyed
+	}
+
+	return s.sealer.openable(s.sealedAtGen)
 }
 
 // Destroy wipes the sealed material and releases it. It is idempotent and

@@ -49,6 +49,36 @@ var (
 	// like the hierarchy does.)
 	ErrSealerWiped = errors.New("enclave: this sealer's keys were destroyed by a shutdown sweep; sealed values are unrecoverable and re-initializing requires constructing a new Sealer")
 
+	// ErrOpenabilityUnknown is returned by [SealedEnclave.Openable] when a
+	// shutdown sweep has run since this value was sealed AND the sealer's
+	// provider can report nothing about its own sealing state.
+	//
+	// It says "I cannot determine this", which is different from both of the
+	// other answers and must not be collapsed into either. It is NOT
+	// [ErrSealerWiped] — nothing is known to have been destroyed, and telling
+	// an operator their keys are gone when they may be intact is its own
+	// wrong answer — and it is emphatically not nil, which would be the
+	// fail-open this sentinel exists to close.
+	//
+	// # When a caller sees it, and what to do
+	//
+	// Only in [ModePerOperation], only after a [WipeAll], and only with a
+	// provider that supplies no health report. A provider that keeps its
+	// sealing key wholly outside this process is unaffected by a sweep and
+	// should say so with [WithProviderHealth]; one that does gets a precise
+	// answer instead of this one. Until it does, the honest report is that
+	// this package cannot see far enough to answer.
+	//
+	// The action is to OPEN THE VALUE and let the result decide. Open is the
+	// operation that knows; this is a diagnostic, and an inconclusive
+	// diagnostic is not a failure of the value.
+	//
+	// IT IS PUBLIC API. Callers will match on it with [errors.Is], so its
+	// identity is part of this package's compatibility surface — adding it is
+	// not free, and it was weighed as such rather than treated as an
+	// implementation detail.
+	ErrOpenabilityUnknown = errors.New("enclave: a shutdown sweep has run since this value was sealed and its provider reports no sealing-state health, so openability cannot be determined; open the value to find out")
+
 	// ErrProviderMode is returned by [NewSealer] when the injected provider
 	// does not implement the interface the selected [Mode] requires —
 	// [KeyProtector] for ModePerOperation, [RootUnsealer] for ModeRootKey.
@@ -251,8 +281,15 @@ type Sealer struct {
 	// Exactly one of kp / ru is non-nil, established at construction against
 	// the mode; protect and unprotect are bound there too, so the mode is
 	// decided once instead of branched on per operation.
-	kp        KeyProtector
-	ru        RootUnsealer
+	kp KeyProtector
+	ru RootUnsealer
+
+	// health is the provider's optional report on its own IN-PROCESS sealing
+	// state, supplied with [WithProviderHealth]. nil when the provider
+	// offered none, which is the case the sweep-generation fallback covers.
+	// Set once at construction and never written again, so it is read without
+	// the lock like kp and ru.
+	health    func() error
 	protect   func(dek *MemoryEnclave) ([]byte, error)
 	unprotect func(blob []byte, dek *MemoryEnclave) error
 
@@ -279,6 +316,7 @@ type sealerConfig struct {
 	// is indistinguishable from absence by value alone.
 	providerSet bool
 	mode        Mode
+	health      func() error
 }
 
 // SealerOption configures [NewSealer].
@@ -304,6 +342,51 @@ type SealerOption func(*sealerConfig)
 // error belongs.
 func WithProvider(p any) SealerOption {
 	return func(c *sealerConfig) { c.provider, c.providerSet = p, true }
+}
+
+// WithProviderHealth supplies a callback reporting whether the provider's
+// IN-PROCESS sealing state is still intact: nil if this provider can still
+// unprotect what it protected, [ErrSealerWiped] if a shutdown [WipeAll]
+// destroyed key material it depends on.
+//
+// # What it is for, and what it is NOT for
+//
+// It answers ONE question: did a sweep of THIS PROCESS's memory take
+// something this provider needs. It is not a device liveness probe. A
+// provider whose key lives in a TPM, an HSM or a cloud KMS is unaffected by a
+// sweep and should report nil unconditionally — reporting a momentarily
+// unreachable device here would make [SealedEnclave.Openable] mean two
+// different things depending on which provider is installed, and a caller
+// could no longer read its result without knowing the deployment. A liveness
+// probe for a device is a different API, and should be designed as one.
+//
+// # Why a callback rather than an interface
+//
+// The health seam inside this package is an unexported interface, which by
+// Go's rules NO out-of-package type can satisfy — so before this option, an
+// external provider had no way to report a sweep at all and
+// [SealedEnclave.Openable] silently assumed it was fine. Exporting that
+// interface would have invited the device-liveness confusion above; a
+// callback keeps the question narrow and makes opting in explicit.
+//
+// # It is authoritative
+//
+// A provider that supplies this is BELIEVED: its answer is terminal, and the
+// sweep-generation fallback behind [ErrOpenabilityUnknown] does not
+// second-guess it. That is deliberate — a provider volunteering a health
+// report is asserting knowledge about its own key storage, and this package
+// has no better source. Supplying a callback that lies is therefore worse
+// than supplying none.
+//
+// The trade is deliberate: a provider that opts in and answers wrongly is
+// believed. It is still strictly better than the alternative it replaced,
+// where EVERY out-of-package provider was silently assumed healthy and had no
+// way to say otherwise.
+//
+// Ignored in [ModeRootKey], where the sealer's own hierarchy is in-process
+// and this package can and does inspect it directly.
+func WithProviderHealth(fn func() error) SealerOption {
+	return func(c *sealerConfig) { c.health = fn }
 }
 
 // WithMode selects the [Mode]. Omitting it selects [ModeRootKey], which with
@@ -353,7 +436,7 @@ func NewSealer(opts ...SealerOption) (*Sealer, error) {
 		return nil, ErrProviderMode
 	}
 
-	s := &Sealer{mode: cfg.mode}
+	s := &Sealer{mode: cfg.mode, health: cfg.health}
 	if err := bind(s, cfg.provider); err != nil {
 		return nil, err
 	}
@@ -448,6 +531,14 @@ func (s *Sealer) Seal(data []byte) (*SealedEnclave, error) {
 		return nil, err
 	}
 
+	// Taken BEFORE any key is touched, and deliberately not after. A sweep
+	// that runs to completion during this call would leave the after-reading
+	// equal to the current sequence, so the value would compare clean against
+	// a sweep it actually lived through. Read first, and any sweep that
+	// overlaps this seal shows up either as a changed sequence or as an odd
+	// one.
+	sealedAtGen := sweepGeneration()
+
 	dek, err := newKeyEnclave(dekBytes)
 	if err != nil {
 		return nil, err
@@ -466,7 +557,10 @@ func (s *Sealer) Seal(data []byte) (*SealedEnclave, error) {
 		return nil, err
 	}
 
-	return &SealedEnclave{sealer: s, sealed: sealed, blob: blob, size: len(data)}, nil
+	return &SealedEnclave{
+		sealer: s, sealed: sealed, blob: blob, size: len(data),
+		sealedAtGen: sealedAtGen,
+	}, nil
 }
 
 // open recovers a sealed envelope produced by this sealer. It is called by
@@ -523,6 +617,128 @@ func (s *Sealer) open(a *Allocator, blob, sealed []byte, size int) (*MemoryEncla
 		return nil, err
 	}
 	return out, nil
+}
+
+// sealHealth is the optional capability a provider implements to report that
+// it can no longer unprotect — today only [SoftwareProvider], whose root is an
+// in-process enclave a shutdown sweep destroys.
+//
+// It is UNEXPORTED, and that is a decision rather than an oversight. A
+// provider outside this package protects keys in a device, and a device
+// survives a sweep of this process's memory: "still openable" is the correct
+// answer for every such provider, so there is nothing for one to opt into.
+// Exporting it would instead invite a provider to report transient
+// infrastructure health (a device momentarily unreachable) through a question
+// that is about THIS process's memory, and [SealedEnclave.Openable] would
+// start meaning two different things depending on the provider. A liveness
+// probe for a device is a different API, designed as one if it is ever wanted.
+type sealHealth interface {
+	openable() error
+}
+
+// openable reports whether this sealer could still open a value it sealed,
+// answering only the question [SealedEnclave.Openable] documents: is the
+// in-process key material this sealer depends on still there. It performs no
+// crypto, generates nothing, and initializes nothing — a wiped sealer must
+// never be rebuilt by being asked a question.
+//
+// It dispatches on STATE rather than on [Mode] deliberately. A switch on the
+// mode needs a default arm, and a default arm is where a future mode silently
+// acquires "reports openable, checks nothing". Both branches below are
+// self-selecting: only a hierarchy mode has a root, and only a
+// provider-per-operation mode has a KeyProtector, so a new mode is covered by
+// whichever of the two it actually uses.
+func (s *Sealer) openable(sealedAtGen uint64) error {
+	if err := s.hierarchyOpenable(); err != nil {
+		return err
+	}
+
+	// AN EXPLICIT ANSWER IS AUTHORITATIVE AND TERMINAL. Both arms below
+	// return whatever the provider says, including nil, and the
+	// sweep-generation fallback beneath them does not get to second-guess it.
+	//
+	// That precedence is the whole design, not a convenience, and the argument
+	// matters more than the rule: a reader holding only "explicit wins" will
+	// eventually decide that applying the fallback as well is the safer,
+	// belt-and-braces choice, and will reintroduce the defect.
+	//
+	// It is not safer. The fallback exists BECAUSE a provider cannot be
+	// interrogated; applying it on top of a provider that CAN be would mean a
+	// provider supplying a health report could never return nil after a sweep
+	// — its considered "the device still holds this key, the value still
+	// opens" would be overwritten with "I cannot tell", so the report could
+	// not express the one thing it exists to express. That is the same defect
+	// as answering "unknown" unconditionally, which was weighed and rejected
+	// for exactly this reason: an answer that reads the same whatever the
+	// truth is cannot report anything.
+	//
+	// Both arms below are terminal, and each needs its own check because the
+	// two are reached by different providers:
+	//
+	//	callback arm    TestSealedEnclave_OpenableBelievesAProviderThatReports
+	//	                OpenableSplitsByMode/deviceHeldKeySurvivesTheSweep
+	//	sealHealth arm  TestSealedEnclave_OpenableBelievesTheInPackageHealthSeam
+	//
+	// All three go RED if the fallback is allowed to override an explicit
+	// answer. Run them before concluding that the extra check is free. The
+	// sealHealth one had to be written specially: SoftwareProvider is that
+	// seam's only production implementor and always reports wiped after a
+	// sweep, so without a provider that reports HEALTHY after one, that arm's
+	// precedence is unobservable — measured, by a mutant that survived the
+	// entire suite until the test existed.
+	if h, ok := s.kp.(sealHealth); ok {
+		return h.openable()
+	}
+	// Gated on kp so the option is IGNORED in ModeRootKey exactly as it is
+	// documented to be. Without the gate a caller reusing one health callback
+	// across both modes could get ErrSealerWiped from a sealer whose own root
+	// and KEK are demonstrably alive and whose Open would succeed — the
+	// hierarchy above is authoritative in that mode, and a provider callback
+	// must not be able to overrule it.
+	if s.kp != nil && s.health != nil {
+		return s.health()
+	}
+
+	// Nothing can answer. Fall back to whether a sweep has happened at all.
+	//
+	// Gated on kp because only ModePerOperation reaches here without an
+	// answer: in ModeRootKey the hierarchy above IS the authoritative answer —
+	// the root and KEK are this package's own enclaves and it inspects them
+	// directly — so a nil from it is knowledge, not ignorance, and must not be
+	// downgraded to ErrOpenabilityUnknown by a sweep that provably did not
+	// take them.
+	//
+	// Reading one atomic word against a field written once at seal time and
+	// never again: there is no pair to tear here and no lock to take that this
+	// path does not already hold.
+	// Two ways to be suspect, and the second is the one a plain counter
+	// misses: a sweep has run since this value was sealed, OR the value was
+	// sealed WHILE a sweep was in flight. In the second case the sequence can
+	// read equal at both ends while the rest of that same sweep destroyed the
+	// provider's key in between; see [sweepGen] on why the parity carries it.
+	if s.kp != nil && (sweepInFlight(sealedAtGen) || sweepGeneration() != sealedAtGen) {
+		return ErrOpenabilityUnknown
+	}
+	return nil
+}
+
+// hierarchyOpenable applies unprotectRootKey's wiped predicate without
+// unwrapping anything. It is nil for a sealer that has no hierarchy at all —
+// ModePerOperation, or a ModeRootKey sealer that has never sealed. The second
+// case cannot be reached through [SealedEnclave.Openable], since a sealed
+// value's existence means protectRootKey ran; if it somehow were, the honest
+// answer is still nil, because nothing has been WIPED — an open would fail
+// authentication, which is a different question and a different error.
+func (s *Sealer) hierarchyOpenable() error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	// root is set once and never cleared, precisely so that a dead root is a
+	// detectable state rather than an absent one; see the field comment.
+	if s.root != nil && (!s.root.IsAlive() || !s.kek.IsAlive()) {
+		return ErrSealerWiped
+	}
+	return nil
 }
 
 // protectPerOperation wraps the DEK by calling the provider, inside the DEK's

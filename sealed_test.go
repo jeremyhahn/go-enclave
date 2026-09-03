@@ -727,11 +727,17 @@ func TestSealedEnclave_WipeAllFailsClosed(t *testing.T) {
 	}
 
 	// The sealed value is NOT on the ledger, so the sweep did not reach it:
-	// the handle stays alive while the material is unreachable. That
-	// contradiction is documented on SealedEnclave and open in #33.
+	// the handle stays alive because IsAlive reports on the CIPHERTEXT, which
+	// the sweep does not touch. Not covering this type is the #33 decision,
+	// and the apparent contradiction is resolved by Openable rather than by
+	// extending the sweep; see TestSealedEnclave_OpenableReportsTheSweep.
 	if !s.IsAlive() {
 		t.Error("WipeAll destroyed the SealedEnclave; the ledger holds MemoryEnclaves and this type is not one. " +
-			"If that changed deliberately, WipeAll's contract, SealedEnclave's documentation and #33 all need updating")
+			"If that changed deliberately, WipeAll's contract, SealedEnclave's documentation and the #33 decision all need updating")
+	}
+	if err := s.Openable(); !errors.Is(err, ErrSealerWiped) {
+		t.Errorf("Openable after the sweep = %v, want ErrSealerWiped: the openability question is "+
+			"what a caller has instead of a swept handle", err)
 	}
 
 	// Open fails with the DISTINCT error — not ErrSealedAuthentication,

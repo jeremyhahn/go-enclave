@@ -348,6 +348,43 @@ All notable changes to go-enclave are documented here. The format follows
   rather than once per use, so it does not scale with request rate the way
   opening does.
 
+- **`(*SealedEnclave) Openable() error` — the openability question `IsAlive`
+  cannot answer (#33).** Returns nil, `ErrSealerWiped`, or
+  `ErrEnclaveDestroyed`, consulting the sealer.
+
+  It closes a NAME COLLISION. Since #40, `MemoryEnclave.IsAlive` reports false
+  once its material is wiped, so across this package `IsAlive` reads as "you
+  can actually use this" — while `SealedEnclave.IsAlive` tests ciphertext
+  presence, which a shutdown sweep does not touch. A swept value therefore read
+  alive and yielded nothing usable, which is the shape #13 was about; a doc
+  comment is a weak fix for a name that means something else next door.
+
+  `IsAlive` is deliberately UNCHANGED — its cheap, local meaning and its lock
+  profile are worth keeping — and is now documented as reporting on the
+  ciphertext, with `Openable` as the openability question.
+
+- **`WithProviderHealth(fn func() error)` and `ErrOpenabilityUnknown` — an
+  out-of-package provider can now report that a sweep took its sealing key
+  (#33).** `SealedEnclave.Openable` consulted an UNEXPORTED interface, which by
+  Go's rules no external package can satisfy, so a third-party `KeyProtector`
+  keeping its key in this process's locked memory was silently assumed healthy:
+  after `WipeAll` destroyed that key, `Openable` returned nil and the following
+  `Open` failed. A fail-open in a health API — and it reported
+  `ErrEnclaveDestroyed` rather than `ErrSealerWiped`, the same misattribution
+  the decision below argues against.
+
+  Providers that can answer now do so precisely and their answer is
+  **authoritative and terminal**: the sweep-generation fallback never overrides
+  it, or a provider reporting "the device still holds this key" after a sweep
+  could not express the one thing the callback exists for. The callback is
+  deliberately narrow — this process's sealing state, not device liveness —
+  because a probe answering both would make `Openable` mean two things
+  depending on which provider was installed.
+
+  `ErrOpenabilityUnknown` **is public API**: callers match on it, so its
+  identity is part of this package's compatibility surface. Added with that
+  cost weighed, not as an implementation detail.
+
 ### Changed
 - **An enclave whose material has been wiped now reads as DESTROYED even while
   its pages are still held.** `IsAlive` returns false, `Size` returns 0, and
@@ -372,6 +409,44 @@ All notable changes to go-enclave are documented here. The format follows
   syscall that can be refused, so its material is gone even when that `mprotect`
   is the step that fails. The two differ in fact, and the flag follows the fact:
   a genuinely refused wipe still reads as alive, because nothing was destroyed.
+
+- **`WipeAll` will not be extended to sweep `SealedEnclave` values (#33,
+  decided; no behavior change).** Three grounds, now recorded where the count is
+  defined rather than left open in an issue. The COUNT means "still holding
+  locked memory" and that invariant is the function's whole value; a
+  `SealedEnclave` holds none — its envelope is heap ciphertext — so covering it
+  would either corrupt the number or require a second one. Sweeping would also
+  be WRONG rather than merely costly: in `ModePerOperation` the device still
+  holds the key, so a swept value stays legitimately openable, and destroying it
+  would destroy recoverable application data that this process's memory never
+  protected — under a call documented for sweep-and-keep-running callers. And it
+  would REGRESS diagnostics, since a swept value would report
+  `ErrEnclaveDestroyed` ("you destroyed this") in place of `ErrSealerWiped` ("a
+  sweep did"), sending an operator to the wrong code.
+
+- **`Openable` now answers "I cannot tell" instead of guessing, and `WipeAll`
+  bumps a sweep generation before it destroys anything (#33).** For a provider
+  that reports no health, `Openable` returns nil until a sweep has run and
+  `ErrOpenabilityUnknown` afterwards. Gating on a sweep having actually
+  happened is what keeps it a signal: an answer that read "unknown" both before
+  and after would be structurally unable to report the one event it exists to
+  report, and would replace a true nil with a permanent false alarm for every
+  contract-abiding hardware provider.
+
+  The ORDER inside `WipeAll` is the correctness of this, not a detail. Bump
+  then destroy leaves at worst a brief false "unknown" while a sweep is in
+  flight, which is the safe direction. Destroy then bump would leave a window
+  where the keys are gone and the generation still reads old, so `Openable`
+  returns nil about a value that can no longer be opened — the same fail-open,
+  narrowed to a race that only appears under load. Pinned by a test that PARKS
+  between the two steps rather than trusting statement order to survive an
+  edit, with controls asserting the seam fired and the enclave was still alive
+  inside the window.
+
+  The fallback is scoped to `ModePerOperation`. In `ModeRootKey` the hierarchy
+  is this package's own enclaves and it inspects them directly, so a nil there
+  is knowledge rather than ignorance and a sweep elsewhere must not downgrade
+  it.
 
 ### Security
 

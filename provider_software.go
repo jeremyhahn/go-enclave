@@ -107,6 +107,24 @@ func (p *SoftwareProvider) rootLocked() (*MemoryEnclave, error) {
 	return root, nil
 }
 
+// openable implements sealHealth: it reports [ErrSealerWiped] once a shutdown
+// sweep has destroyed this provider's root, and nil otherwise.
+//
+// It uses rootLocked's dead-root predicate but NOT rootLocked itself, because
+// asking whether a value can be opened must not generate a root that did not
+// exist — that would turn a diagnostic into an allocation of locked memory
+// and a call to the CSPRNG. A nil root therefore reports nil: nothing was
+// sealed through this provider, so nothing it holds is unopenable.
+func (p *SoftwareProvider) openable() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.root != nil && !p.root.IsAlive() {
+		return ErrSealerWiped
+	}
+	return nil
+}
+
 // swept translates an [ErrEnclaveDestroyed] surfacing from a use of the root
 // enclave. Only [WipeAll] can destroy it — this provider never does — so the
 // honest report is [ErrSealerWiped], for the same misattribution reason
