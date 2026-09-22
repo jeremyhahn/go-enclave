@@ -65,9 +65,9 @@ jobs:
     name: Lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version: ${{ env.GO_VERSION }}
 
@@ -80,6 +80,22 @@ jobs:
 
       - name: Vet
         run: go vet ./...
+
+      # THE PIN GATE (#70). Every `uses:` in every workflow must name a 40-hex
+      # commit, not a tag and never a branch.
+      #
+      # This runs here, on every push, because the pin does not hold by itself.
+      # A sibling repo re-pinned the same line four times; each regression
+      # arrived as collateral in a fleet rollout of a workflow template whose
+      # real payload was something else, and four reviewers read past it. A
+      # one-line ref change inside a large mechanical diff is precisely what
+      # human review is worst at, so the check has to be mechanical too.
+      #
+      # It parses the YAML rather than grepping it — see the rationale in
+      # test/buildgates/action_pins_test.go — and it lives in its own Go module
+      # so that the parser never enters the root module's dependency graph.
+      - name: Action refs are pinned to commit shas
+        run: make check-action-pins
 
       # USE THE BAKED TOOL; DO NOT INSTALL OVER THE NETWORK.
       #
@@ -162,9 +178,9 @@ jobs:
       GOMEMLIMIT: 10GiB
       GOMAXPROCS: 8
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version: ${{ env.GO_VERSION }}
 
@@ -227,7 +243,7 @@ jobs:
       - name: Upload gosec SARIF
         # Gitea has no code-scanning API; the upload 404s and fails the job.
         if: always() && github.server_url == 'https://github.com'
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@3ea06614dafe36dec890db3446326e0d40ce53d4 # v3
         with:
           sarif_file: gosec.sarif
           category: gosec
@@ -291,9 +307,9 @@ jobs:
     name: Build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version: ${{ env.GO_VERSION }}
 
@@ -326,9 +342,9 @@ jobs:
     needs: [lint, build]
     timeout-minutes: 30       # give the suite honest headroom
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version: ${{ env.GO_VERSION }}
 

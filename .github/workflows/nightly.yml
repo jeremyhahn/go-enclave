@@ -53,9 +53,9 @@ jobs:
       # deliberate exemption with the owner's approval.
       GODEBUG: fips140=only
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version: ${{ env.GO_VERSION }}
 
@@ -77,7 +77,7 @@ jobs:
     name: Trivy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       # skip-dirs — benchmark harnesses, examples, vendored
       # adapters; nothing that ships in a release may be skipped.
@@ -85,7 +85,25 @@ jobs:
         # trivy-action's setup checks out aquasecurity/trivy from github.com
         # with the runner token, which a Gitea token cannot authenticate.
         if: github.server_url == 'https://github.com'
-        uses: aquasecurity/trivy-action@master
+        # PINNED TO A RELEASE TAG, AND THAT IS NOT WHERE `@master` POINTED.
+        #
+        # Both trivy-action steps in this job used to say `@master`. A branch is
+        # worse than a movable tag: it is re-resolved on every nightly, so this
+        # job ran whatever upstream merged that day, against a write-scoped
+        # token that uploads SARIF. Nobody reviewed those changes and no commit
+        # here recorded them.
+        #
+        # `master` has no version to preserve, so pinning it had to CHOOSE a
+        # commit, and the choice is deliberate: v0.36.0, the latest release, not
+        # master's head. They differ. A release tag is an artifact upstream
+        # decided to cut, and it gives the trailing comment something a human
+        # can read and bump against; master's head is whichever commit happened
+        # to be last, and a bare sha with no version beside it is unbumpable.
+        #
+        # Re-pin by raising BOTH trivy steps to the next release together, and
+        # take the `^{}` PEELED sha -- these tags are annotated, so the
+        # unpeeled sha is the tag object and fails at checkout.
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: fs
           scan-ref: .
@@ -98,14 +116,18 @@ jobs:
 
       - name: Upload Trivy SARIF
         if: always() && github.server_url == 'https://github.com'
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@3ea06614dafe36dec890db3446326e0d40ce53d4 # v3
         with:
           sarif_file: trivy-results.sarif
           category: trivy-fs
 
       - name: Trivy gate (fail on CRITICAL/HIGH)
         if: github.server_url == 'https://github.com'
-        uses: aquasecurity/trivy-action@master
+        # Same release as the SARIF step above, deliberately -- the scan and the
+        # gate must see identical scanner behaviour, or the gate passes on a
+        # finding the uploaded SARIF reported. Bump the two together. See the
+        # note on that step for why this is a release tag and not master.
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: fs
           scan-ref: .

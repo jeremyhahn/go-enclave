@@ -56,6 +56,14 @@ fmt-check:
 vet:
 	$(GOVET) $(PKG)
 
+## check-action-pins: every `uses:` in a workflow names a 40-hex commit
+# Its own module under test/ (see test/buildgates/doc.go): the gate needs a
+# YAML parser and the root module's two-dependency invariant is not negotiable
+# for a test helper. That is why this cannot be a plain `go test ./...` target.
+.PHONY: check-action-pins
+check-action-pins:
+	@cd test/buildgates && $(GOVET) $(PKG) && $(GOTEST) -count=1 $(PKG)
+
 ## tidy: go mod tidy
 .PHONY: tidy
 tidy:
@@ -153,7 +161,7 @@ build:
 
 ## ci: the full local gate
 .PHONY: ci
-ci: tidy fmt-check vet lint staticcheck security test build
+ci: tidy fmt-check vet check-action-pins lint staticcheck security test build
 	@echo "CI pipeline completed successfully"
 
 ## deps-latest: bump internal dependencies to their latest tags (none today)
