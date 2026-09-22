@@ -4,7 +4,11 @@ All notable changes to go-enclave are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [v0.6.0-alpha] - 2026-09-22
+
+The release the go-truststrap go-enclave adoption wave (#7, #19, #60) builds
+against: it settles the one question that held that wave, which allocator a
+library admits against, in the shared library rather than in each consumer.
 
 ### Added
 
@@ -40,6 +44,24 @@ All notable changes to go-enclave are documented here. The format follows
   dropping the one-shot check, defaulting around a failed discovery, ignoring
   `Bounded`, and dropping the install lock each fail a named test. The last one
   fails under `-race`.
+
+### Changed
+
+- **`golang.org/x/sys` v0.45.0 → v0.48.0** (#72), per the owner's standing rule
+  to take the latest of every stack dependency. go-enclave sits under every
+  Layer 0–3 library, so this pin is the floor each of them inherits. The `go`
+  directive stays at the portfolio floor, `1.27.0`.
+- **go-enclave is a Software Factory project** (2026-09-22). The in-repo
+  review and automerge workflows (`opencode-review.yml`, `claude-review.yml`,
+  `automerge.yml`) are removed. QuicBaaS reviews every pull request and posts
+  `quicbaas/review`, which `main`'s protection now requires alongside
+  `CI / CI Gate`. CI, nightly and release workflows are unchanged.
+
+### Fixed
+
+- `CLAUDE.md` no longer tells a contributor to clone the handbook from the
+  retired Gitea at `198.51.100.91` (#73). It names the server the way the
+  other factory projects do, through `git remote get-url origin`.
 
 ## [v0.5.0-alpha] - 2026-09-03
 
