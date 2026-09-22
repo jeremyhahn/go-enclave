@@ -82,6 +82,10 @@ var (
 	// It is a programming error, so it is reported before any state is
 	// consulted; a value that happens to be destroyed does not change the
 	// answer. Open, by contrast, has nothing to refuse and never returns it.
+	//
+	// [SetAllocator] returns it too, for the same reason: installing a nil
+	// process allocator would turn every library's admitted allocation into
+	// a nil dereference.
 	ErrNilAllocator = errors.New("enclave: allocator is nil")
 )
 
@@ -360,18 +364,28 @@ func NewAllocator(maxBytes int64) (*Allocator, error) {
 	return newAllocator(maxBytes, false)
 }
 
-// newAllocator is the one construction path, so the two exported constructors
-// cannot drift apart on validation, on the zero-value contract, or on which
-// fields a fresh allocator starts with. rlimitBound records whether the caller
-// came through [NewAllocatorWithinRLimit]; see the field.
+// newAllocator is the validated construction path, so the two exported
+// constructors cannot drift apart on validation, on the zero-value contract, or
+// on which fields a fresh allocator starts with. rlimitBound records whether the
+// caller came through [NewAllocatorWithinRLimit]; see the field.
 func newAllocator(maxBytes int64, rlimitBound bool) (*Allocator, error) {
 	if maxBytes <= 0 {
 		return nil, ErrInvalidBudget
 	}
+	return buildAllocator(maxBytes, rlimitBound), nil
+}
+
+// buildAllocator is the ONE place an Allocator's fields are initialized. It
+// performs no validation: callers either validated the budget already
+// ([newAllocator]) or derived it from the kernel's own reading, where a zero
+// budget is the true answer rather than a mistake (the process default, whose
+// ceiling may be an RLIMIT_MEMLOCK of zero). A zero budget is otherwise legal
+// only at runtime, through [Allocator.SetLimit].
+func buildAllocator(maxBytes int64, rlimitBound bool) *Allocator {
 	a := &Allocator{id: allocatorIDs.Add(1), rlimitBound: rlimitBound}
 	a.limit.Store(maxBytes)
 	a.free.Store(maxBytes)
-	return a, nil
+	return a
 }
 
 // ceilingForRaise reports the ceiling a raise on this allocator must fit under,

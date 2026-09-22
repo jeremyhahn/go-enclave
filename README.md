@@ -194,6 +194,7 @@ pages:
 | `(*Allocator) SetLimit(n)` / `ForceLimit(n)` / `TransferTo(dst, n)` | **Runtime retune.** `SetLimit` raises or lowers the budget and REFUSES (`ErrBudgetInUse`) rather than shrink below the memory already reserved, changing nothing on refusal. `ForceLimit` records a ceiling that moved anyway — a resized container, a lowered `RLIMIT_MEMLOCK` — keeping live enclaves alive, returning the over-subscription in bytes and admitting nothing until it drains. `TransferTo` moves headroom between two allocators in one operation, so a slack one can fund a pressured one; it takes the two locks in a fixed order and passes through "in neither", never "in both". All three are safe against concurrent allocation: a retune and an in-flight admission are decided by the same compare-and-swap on the same word, so they cannot both take the last page. |
 | `LockedSize(n int) int64` | What an enclave of `n` bytes actually costs — `n` rounded up to a whole page. Size budgets with this: every enclave occupies at least one page, so a budget for a hundred small credentials is a hundred **pages**. Returns `int64` to match the budget, so `NewAllocator(100 * LockedSize(32))` needs no conversion. |
 | `NewAllocatorWithinRLimit(maxBytes)` | `NewAllocator` plus a **sticky ceiling check**: discovers `RLIMIT_MEMLOCK` and refuses a budget above it with `ErrBudgetExceedsRLimit`, naming both figures — a budget that was never satisfiable fails at construction rather than at the first allocation under load. It refuses nothing when the ceiling is unlimited, unenforceable (`CAP_IPC_LOCK`), or absent because the platform exposes none: there is no ceiling to be above. A ceiling that could not be **read** is a different case and is not silent — a failing `getrlimit` returns `ErrLimitDiscoveryFailed`, since nothing was compared. Never exits, logs or panics; every one of those is a return value and the decision is the application's. The check **outlives construction**: `SetLimit` re-reads the ceiling (fresh — it moves) and refuses to raise this allocator's budget above it, and `TransferTo` applies the same to the allocator it credits, since a transfer is a raise on the receiving side. Raises only, so an over-ceiling allocator can always move back towards compliance; `ForceLimit` overrides it, as it overrides every other refusal here. A plain `NewAllocator` allocator is never checked, on any path. Nothing was added to the admission path. |
+| `SetAllocator(a)` / `ProcessAllocator()` | **One budget per process.** `RLIMIT_MEMLOCK` is process-wide, so admission bounds anything only when every library admits against the same allocator. The **binary** sizes it once at startup and installs it with `SetAllocator`; that is one-shot and fails closed with `ErrAllocatorInstalled`, the same contract as `SetSealer`. A **library** never builds or installs one. It calls `ProcessAllocator()` and allocates through the result. With nothing installed, the first call installs a default whose budget is the discovered ceiling (sticky, like `NewAllocatorWithinRLimit`), a zero budget for a zero ceiling, or unbounded where no ceiling binds. It leaves no headroom, because sizing is the binary's call. A ceiling that could not be read returns `ErrLimitDiscoveryFailed` and installs nothing. |
 | `DiscoverLockedMemoryLimit()` | Read the ceiling yourself, to **derive** a budget from the host instead of guessing one. Reports the figure, whether it is a ceiling to rely on, and where it came from (`LimitSource`), so the derivation can be logged next to the number. An unbounded or absent ceiling is not an error — it comes back with `Bounded` false and a source saying which; only a failed read is an error, and it is `ErrLimitDiscoveryFailed`. |
 | `NewSealed(data []byte)` | Seal `data` under the process sealer (software default installed lazily); wipes `data`. Returns a `*SealedEnclave` — heap ciphertext, no locked pages held at rest. |
 | `(*SealedEnclave) Open()` | Decrypt into a **new** locked `MemoryEnclave` the caller owns and must `Destroy`. Fails with `ErrSealedAuthentication` for anything tampered, truncated, re-paired or foreign, and `ErrSealerWiped` after a shutdown sweep. |
@@ -207,7 +208,7 @@ pages:
 | `CoreDumpsDisabled()` | Whether lowering `RLIMIT_CORE` at import succeeded. Best effort by nature — a sandbox can deny it and anything in the process can raise it again — so it is reported rather than promised. Each enclave's pages are separately marked `MADV_DONTDUMP`, which **is** verified and fails the allocation if refused. |
 
 Errors: `ErrEmptyEnclave`, `ErrInvalidSize`, `ErrEnclaveDestroyed`, `ErrLockedMemoryUnavailable`
-(+ `LockedMemoryError`), `ErrBudgetExhausted` (+ `BudgetError`), `ErrInvalidBudget`, `ErrNilAllocator`,
+(+ `LockedMemoryError`), `ErrBudgetExhausted` (+ `BudgetError`), `ErrInvalidBudget`, `ErrNilAllocator`, `ErrAllocatorInstalled`,
 `ErrBudgetExceedsRLimit` (+ `RLimitError`), `ErrLimitDiscoveryFailed` (+ `LimitDiscoveryError`);
 sealing: `ErrSealFailed`, `ErrSealedAuthentication`, `ErrSealerWiped`, `ErrProviderMode`,
 `ErrInvalidMode`, `ErrSealerInstalled`, `ErrNilSealer`, `ErrProviderMessageLimit`,
@@ -231,6 +232,34 @@ which is a deliberate call and never a fault handler. If your process calls
 `WipeAll` at shutdown, every enclave in it is destroyed, including ones other
 components still hold. That is the point of a shutdown sweep, and it is the one
 way an enclave you hold can be destroyed by something other than you.
+
+### One budget per process: the binary sizes it, libraries draw from it
+
+A library that builds its own `Allocator` has bounded only itself. Two libraries
+doing that in one binary can each stay inside budget while together locking past
+the single `RLIMIT_MEMLOCK` ceiling. The split is the same as for `WipeAll`:
+
+```go
+// main — the only code that owns the process
+budget, err := enclave.NewAllocatorWithinRLimit(64 << 20)
+if err != nil {
+	log.Fatal(err)
+}
+if err := enclave.SetAllocator(budget); err != nil { // before anything allocates
+	log.Fatal(err)
+}
+defer enclave.WipeAll()
+
+// any library
+a, err := enclave.ProcessAllocator()
+if err != nil {
+	return err
+}
+key, err := a.NewSized(32) // ErrBudgetExhausted: refuse this request, not the process
+```
+
+A library must not call `SetAllocator` or `WipeAll`: each one makes a
+process-wide decision on behalf of components the library knows nothing about.
 
 ### What the ceiling check does not promise
 

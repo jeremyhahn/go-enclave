@@ -4,6 +4,43 @@ All notable changes to go-enclave are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **`SetAllocator` / `ProcessAllocator`: one locked-memory budget per process** (#71).
+  `RLIMIT_MEMLOCK` is process-wide, so admission bounds anything only when every
+  library in the process admits against the SAME allocator. Until now each
+  consumer had to construct its own `Allocator`, and N of them could each stay
+  inside budget while together locking past the one ceiling. go-truststrap#19
+  had been blocked on that exact question ("allocator shape unruled") through
+  four triage passes. go-libsignal admitted nothing at all.
+
+  The contract is `SetSealer`'s, applied to the second process-wide resource.
+  The **binary** sizes the budget once and installs it with `SetAllocator`,
+  which is one-shot and fails closed with the new `ErrAllocatorInstalled`
+  (`ErrNilAllocator` for nil). **Libraries** call `ProcessAllocator()` and
+  allocate through it, and never install one, for the same reason they never
+  call `WipeAll`. With nothing installed, the first `ProcessAllocator` call
+  installs a default derived from the discovered ceiling:
+
+  - the ceiling itself when it binds, kept sticky like `NewAllocatorWithinRLimit`;
+  - a zero budget for a zero ceiling, which admits nothing because that is the
+    kernel's answer;
+  - unbounded where no ceiling binds (`RLIM_INFINITY`, `CAP_IPC_LOCK`, or no
+    platform figure).
+
+  The default leaves no headroom, because sizing is the binary's decision. A
+  ceiling that could not be read is returned as `ErrLimitDiscoveryFailed`, and
+  nothing is installed, so a later call retries. It is not defaulted around:
+  an unread ceiling is not "no ceiling".
+
+  The package-level constructors (`NewMemoryEnclave*`) are unchanged and remain
+  unadmitted, so nothing moves under an existing consumer. Verified by mutation:
+  dropping the one-shot check, defaulting around a failed discovery, ignoring
+  `Bounded`, and dropping the install lock each fail a named test. The last one
+  fails under `-race`.
+
 ## [v0.5.0-alpha] - 2026-09-03
 
 ### Added

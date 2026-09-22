@@ -148,6 +148,50 @@
 // nothing is refused, and the reported source says the check did not run rather
 // than that the host has no limit.
 //
+// # One budget per process
+//
+// RLIMIT_MEMLOCK is one figure for the whole process, so admission only bounds
+// anything when every library in the process admits against the SAME
+// allocator. N libraries each constructing an Allocator stay inside N budgets
+// while together locking past the one ceiling they share.
+//
+// ProcessAllocator is that shared allocator, and it splits the work the way
+// WipeAll does:
+//
+//   - The BINARY sizes it, once, at startup, before anything allocates:
+//     build it (NewAllocatorWithinRLimit is the usual choice) and install it
+//     with SetAllocator. Installation is one-shot and fails closed with
+//     ErrAllocatorInstalled afterwards, the same contract as SetSealer.
+//   - A LIBRARY never constructs or installs one. It calls ProcessAllocator
+//     and allocates through what it returns, so an unauthenticated request that
+//     would take locked memory is refused with ErrBudgetExhausted before any is
+//     requested, and fails alone.
+//
+// A binary that installs nothing still gets a bounded process: the first
+// ProcessAllocator call installs a default whose budget is the discovered
+// ceiling, or unbounded where no ceiling binds. The default leaves no
+// headroom, since headroom is a sizing decision and that is the binary's to
+// make.
+//
+//	func main() {
+//		budget, err := enclave.NewAllocatorWithinRLimit(64 << 20)
+//		if err != nil {
+//			log.Fatal(err)
+//		}
+//		if err := enclave.SetAllocator(budget); err != nil {
+//			log.Fatal(err)
+//		}
+//		defer enclave.WipeAll()
+//		// ... construct the libraries that allocate locked memory ...
+//	}
+//
+//	// In a library:
+//	a, err := enclave.ProcessAllocator()
+//	if err != nil {
+//		return err
+//	}
+//	key, err := a.NewSized(32)
+//
 // # Shutdown
 //
 // WipeAll destroys every enclave the package has handed out and not yet
