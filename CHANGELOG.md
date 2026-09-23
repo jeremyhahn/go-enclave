@@ -4,6 +4,51 @@ All notable changes to go-enclave are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Tests
+
+- **`TestAllocator_Refusal_NeverReportsNegativeInUse` is bounded by the
+  refusals it collects, not by the retuners' iteration count** (#75). The race
+  it drives ran only while the retuners ran, and the retuners stopped after a
+  fixed 4000 iterations — so on a loaded host the window closed on whatever
+  the refusers had managed to see in it. `make test` on a factory runner at
+  load average ~26 collected 231 refusals against a floor of 500 and failed on
+  the vacuity guard, on an admission path the branch had not touched.
+
+  The guard and its threshold are unchanged; what changed is which counter
+  ends the run. The retuners now carry both floors — their own iteration count
+  AND the shared refusal target — and the refusers sample for as long as a
+  retuner is still running. A refuser iteration was never a refusal: a raise
+  to `MaxInt64` admits, and an admitted iteration counts for nothing, so a
+  starved refuser used to get no more window than a scheduled one and now gets
+  more. `refusersDone` is closed on every refuser exit path, the error returns
+  included, so a failing refuser still releases the retuners, and the wait
+  stays bounded by `waitBounded` so a real hang is a named failure rather than
+  a suite timeout.
+
+  **Which side carries the refusal target is the whole of it**, and the first
+  version of this fix put it on the wrong one. Letting a refuser return as
+  soon as the shared count was met reads as equivalent and is not: the
+  allocator refuses from a standing start — zero budget, negative free — so
+  two refusers scheduled ahead of the retuners can take the entire target off
+  that static pair and be gone before the first retune lands, leaving 4000
+  retunes with nobody watching. Measured with a 2ms delay forcing that order:
+  18/18 green at `-cpu=1,2,8` against a build with the wrap guard REMOVED,
+  every reading the unskewed `0-(-pageSize)`. Caught by codex reviewing PR
+  #79; with the target on the retuners the same forced order kills the same
+  broken build on 10/10 runs at `-cpu=8` and 9/10 at `-cpu=2`.
+
+  Measured, by simulating the reported regime rather than waiting for it: a
+  50µs sleep between the raise and the drop — a retuner preempted mid-cycle,
+  which is what a loaded host does to it — holds the budget open so the
+  refusers are admitted instead of refused. Against that, the old bound failed
+  2 of 4 runs at 143 and 199 refusals, the reported shape; the new one
+  collected its 500 on 6 of 6. Unforced, the defect the test exists for is
+  still killed: with the wrap guard removed from `inUseFrom`, 19/20 runs at
+  `-cpu=8` and 10/10 at `-cpu=2` report a negative `InUse`, at 37 to 3037
+  wrapped readings each. No seam was added to the lock-free admission path.
+
 ## [v0.6.0-alpha] - 2026-09-22
 
 The release the go-truststrap go-enclave adoption wave (#7, #19, #60) builds

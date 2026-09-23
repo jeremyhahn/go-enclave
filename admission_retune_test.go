@@ -1702,9 +1702,12 @@ func TestAllocator_budgetSnapshot_FallsBackWhenSkewed(t *testing.T) {
 // not scaffolding.
 //
 // It does reach the window, and that is measured rather than assumed: removing
-// the guard in inUseFrom fails this test on 5/5 multi-core runs, at 18 to 37
-// wrapped readings each. Like the other race tests here it needs parallelism —
-// 3/3 GOMAXPROCS=1 runs pass against the same broken build — which is why
+// the guard in inUseFrom fails this test on 19/20 runs at -cpu=8 and 10/10 at
+// -cpu=2, at 37 to 3037 wrapped readings each. Those figures were re-measured
+// for #75, which changed what ends the run, and they replace the 5/5 at 18 to
+// 37 readings the first version was measured at. Like the other race tests
+// here it needs parallelism — the same broken build is caught on 1/10
+// single-core runs — which is why
 // TestAllocator_budgetSnapshot_FallsBackWhenSkewed exists alongside it and
 // drives the same window deterministically.
 //
@@ -1741,14 +1744,50 @@ func TestAllocator_Refusal_NeverReportsNegativeInUse(t *testing.T) {
 	var wg sync.WaitGroup
 	start := make(chan struct{})
 	retunersDone := make(chan struct{})
-	var retunersLeft atomic.Int64
+	refusersDone := make(chan struct{})
+	var retunersLeft, refusersLeft atomic.Int64
 	retunersLeft.Store(2)
+	refusersLeft.Store(2)
 
-	// The refusers have a floor of their own and the retuners run until they
-	// are finished, for the reason spelled out in
+	// Each side has a floor of its own and stops only once the other side has
+	// reached its floor, for the reason spelled out in
 	// TestAllocator_TransferTo_ConcurrentOppositeDirections: whichever side can
 	// be cut short by a scheduling order is the side that reports green having
 	// done nothing.
+	//
+	// So the RETUNERS carry both floors — their own iteration count and the
+	// shared refusal target — and the refusers sample for as long as there is
+	// a retuner running. That is the correction #75 is about: the retuners
+	// used to stop at retuneIterations alone, which decided the length of the
+	// run by a counter the assertion below does not read. A refuser iteration
+	// is not a refusal — a raise to MaxInt64 admits, and an admitted iteration
+	// counts for nothing — so on a host where the refusers were mostly
+	// admitted the window closed on however few refusals had been seen in it.
+	// Measured on vm-host-4 at load average ~26: 231 of them, and the
+	// vacuity guard fired on a test that had never stopped working.
+	//
+	// It matters WHICH side carries the refusal target, and the first version
+	// of this fix put it on the wrong one. Letting a refuser return as soon as
+	// the shared count was met looks equivalent and is not: this allocator
+	// refuses from a standing start, with a zero budget and a negative free,
+	// so two refusers scheduled before the retuners can collect the whole
+	// target off that static pair and be gone before a single retune lands.
+	// The retuners then run their 4000 iterations with nobody watching, and
+	// both assertions pass against a build with the wrap guard REMOVED —
+	// measured 18/18 green at -cpu=1,2,8 with a 2ms delay forcing that order,
+	// every reading the unskewed 0-(-pageSize). Caught by codex on review of
+	// PR #79. A refuser that stops early is a refuser that stopped sampling,
+	// which is the same vacuity the guard exists for, one level down. With the
+	// target moved onto the retuners that same forced order kills the same
+	// broken build on 10/10 runs at -cpu=8 and 9/10 at -cpu=2.
+	//
+	// The regime the issue reports reproduces on demand, which is how the
+	// bound was checked rather than argued: a 50µs sleep inserted between the
+	// raise and the drop — a retuner preempted mid-cycle, which is what a
+	// loaded host does to it — holds the budget open so the refusers are
+	// ADMITTED rather than refused. Against that simulation the old bound
+	// failed 2 of 4 runs, at 143 and 199 refusals, which is the shape reported
+	// in #75; this one collected its 500 on 6 of 6.
 	retune := func() {
 		defer wg.Done()
 		defer func() {
@@ -1757,7 +1796,27 @@ func TestAllocator_Refusal_NeverReportsNegativeInUse(t *testing.T) {
 			}
 		}()
 		<-start
-		for i := 0; i < retuneIterations; i++ {
+		// retuneIterations is a floor here, not a ceiling: past it the
+		// retuners keep widening the window until the refusers have their
+		// count, so a starved refuser is given MORE window rather than less.
+		// Both floors, because either alone is a run that can assert nothing —
+		// the iteration count without the refusal target is the #75 failure,
+		// and the refusal target without the iteration count would let a
+		// single lucky retune satisfy the whole run.
+		for i := 0; ; i++ {
+			if i >= retuneIterations && refusals.Load() >= minRefusals {
+				return
+			}
+			// refusersDone is closed on every refuser exit path, the error
+			// returns included, so a failing refuser releases the retuners
+			// rather than leaving them spinning until the bounded wait fires.
+			// Nothing else closes it: a healthy refuser stops only when the
+			// retuners do, so this is not a second way to end a healthy run.
+			select {
+			case <-refusersDone:
+				return
+			default:
+			}
 			// Raising to MaxInt64 is what widens the difference past int64;
 			// ForceLimit back to zero restores the negative free the next raise
 			// needs.
@@ -1777,14 +1836,21 @@ func TestAllocator_Refusal_NeverReportsNegativeInUse(t *testing.T) {
 
 	refuse := func() {
 		defer wg.Done()
+		defer func() {
+			if refusersLeft.Add(-1) == 0 {
+				close(refusersDone)
+			}
+		}()
 		<-start
-		for i := 0; ; i++ {
-			if i >= minRefusals {
-				select {
-				case <-retunersDone:
-					return
-				default:
-				}
+		// The refusers have no floor of their own and no count to reach: they
+		// sample until the last retuner has stopped, which is the only state
+		// in which another sample could tell us anything. Bounded, because a
+		// retuner stops on its own two floors.
+		for {
+			select {
+			case <-retunersDone:
+				return
+			default:
 			}
 			e, err := a.NewSized(32)
 			if err == nil {
