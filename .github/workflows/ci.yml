@@ -97,6 +97,21 @@ jobs:
       - name: Action refs are pinned to commit shas
         run: make check-action-pins
 
+      # THE PUBLIC-RELEASABILITY GATE (#80). No tracked file names the lab
+      # fleet — an address, a host, the owner's paths — and no agent-only file
+      # (CLAUDE.md, task-worker.yml) is tracked. The public tree is
+      # byte-identical to the release tag, so the scrub has to hold in the
+      # source on every push, not be redone at publication. Rules, waivers and
+      # rationale: test/buildgates/releasability_test.go.
+      - name: Tracked tree is publicly releasable
+        run: make check-releasability
+
+      # The CHANGELOG fragment assembly `make release-alpha` runs before
+      # tagging (#80, release-versioning §5): every fragment lands in the
+      # version's section exactly once and is then deleted.
+      - name: CHANGELOG fragments assemble into the release
+        run: make check-changelog-assembly
+
       # USE THE BAKED TOOL; DO NOT INSTALL OVER THE NETWORK.
       #
       # This step used to `go install golangci-lint@v2.12.2` unconditionally,

@@ -1763,7 +1763,7 @@ func TestAllocator_Refusal_NeverReportsNegativeInUse(t *testing.T) {
 	// is not a refusal — a raise to MaxInt64 admits, and an admitted iteration
 	// counts for nothing — so on a host where the refusers were mostly
 	// admitted the window closed on however few refusals had been seen in it.
-	// Measured on vm-host-4 at load average ~26: 231 of them, and the
+	// Measured on a factory runner at load average ~26: 231 of them, and the
 	// vacuity guard fired on a test that had never stopped working.
 	//
 	// It matters WHICH side carries the refusal target, and the first version

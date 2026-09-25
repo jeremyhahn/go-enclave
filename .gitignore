@@ -43,3 +43,10 @@ gosec-results.json
 .serena/
 .claude/
 local.mk
+
+# Agent instruction files. The public GitHub tree is byte-identical to the
+# Gitea release tag (handbook version-control §5a), so anything tracked here is
+# published; agent working notes are kept out of it (#80). The releasability
+# gate (test/buildgates/releasability_test.go) fails if one is tracked anyway.
+CLAUDE.md
+AGENTS.md

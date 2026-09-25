@@ -409,8 +409,17 @@ That matters to anyone who has to certify what their binary contains.
 make test        # race suite, across -cpu=1,2,8
 make test-fips   # build + tests under FIPS 140-3 strict mode
 make security    # gosec, govulncheck, modverify, trivy
+make check-releasability  # no tracked file names the lab fleet
 make ci          # the full local gate
 ```
+
+Every tracked file is published, so the tree must not name private hosts,
+addresses or paths. `make check-releasability` enforces it; the rules and the
+waiver syntax are in `test/buildgates/releasability_test.go`.
+
+Changes are recorded as fragments in `changelog.d/<issue>-<slug>.md`, not as
+edits to `CHANGELOG.md`; `make release-alpha` folds them into the version's
+section before tagging (`scripts/changelog-assemble.sh`).
 
 Requires Go 1.27.0. Some tests (`_linux` fault-injection) lower
 `RLIMIT_MEMLOCK` in a subprocess and skip where they cannot.

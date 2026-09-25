@@ -205,9 +205,6 @@ var docIssueRefLedger = []docIssueRef{
 	{"README.md", 17, classHistorical, "f58ce4a9862b", "is the admitted variant (#17): it takes the destination"},
 	{"README.md", 33, classHistorical, "02c7543b895c", "is the explicit probe (#33): `nil` when nothing this"},
 
-	// CLAUDE.md — the repository's own working notes.
-	{"CLAUDE.md", 61, classHistorical, "90eb3a81ee76", "admission path — so the core count is part of the oracle (#61)."},
-
 	// Implementation comments that carry decision history. Every one of these
 	// describes a decision already taken; none presents work as pending.
 	{"admission.go", 2, classHistorical, "edda89f9cc92", "That is gone (issue #2): go-enclave maps its own memory, and"},
@@ -238,10 +235,13 @@ var docIssueRefLedger = []docIssueRef{
 }
 
 // docIssueRefFiles is the documented surface this guard covers: the package
-// docs, the two Markdown files a consumer or an agent actually reads, and the
-// implementation comments that carry decision history.
+// docs, the README a consumer actually reads, and the implementation comments
+// that carry decision history.
 //
 // Deliberately NOT covered:
+//   - CLAUDE.md, which is untracked (#80): agent working notes are kept out of
+//     the published tree. A file some checkouts have and others lack cannot be
+//     in a ledger that fails on an orphaned entry.
 //   - CHANGELOG.md, which is a historical record by construction. Every entry
 //     cites the issue it closed, and every one of those is closed; classifying
 //     them would be noise that teaches readers to add classHistorical without
@@ -276,7 +276,7 @@ func docIssueRefFiles(t *testing.T) []string {
 			return nil
 		case strings.HasSuffix(name, ".go"):
 			files = append(files, filepath.ToSlash(path))
-		case name == "README.md", name == "CLAUDE.md":
+		case name == "README.md":
 			files = append(files, filepath.ToSlash(path))
 		}
 		return nil

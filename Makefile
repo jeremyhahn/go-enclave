@@ -62,7 +62,25 @@ vet:
 # for a test helper. That is why this cannot be a plain `go test ./...` target.
 .PHONY: check-action-pins
 check-action-pins:
-	@cd test/buildgates && $(GOVET) $(PKG) && $(GOTEST) -count=1 $(PKG)
+	@cd test/buildgates && $(GOVET) $(PKG) && $(GOTEST) -count=1 -skip '^(TestReleasability|TestChangelogAssemble)' $(PKG)
+
+## check-releasability: no tracked file names the lab fleet or is agent-only
+# The public GitHub tree is byte-identical to the Gitea release tag (handbook
+# version-control §5a), so every tracked file is published and a scrub has to
+# happen here, in the source, before tagging. The gate reads the git index —
+# what is published — and fails naming the file, the line and what to use
+# instead. Rules, waivers and the rationale: test/buildgates/releasability_test.go.
+.PHONY: check-releasability
+check-releasability:
+	@cd test/buildgates && $(GOVET) $(PKG) && $(GOTEST) -count=1 -run '^TestReleasability' $(PKG)
+
+## check-changelog-assembly: the release step folds every fragment in exactly once
+# scripts/changelog-assemble.sh is what `make release-alpha` runs before
+# tagging; its tests (test/buildgates/changelog_assemble_test.go) drive it on
+# scratch trees, so a defect in it is found here rather than in a tag.
+.PHONY: check-changelog-assembly
+check-changelog-assembly:
+	@cd test/buildgates && $(GOVET) $(PKG) && $(GOTEST) -count=1 -run '^TestChangelogAssemble' $(PKG)
 
 ## tidy: go mod tidy
 .PHONY: tidy
@@ -161,7 +179,7 @@ build:
 
 ## ci: the full local gate
 .PHONY: ci
-ci: tidy fmt-check vet check-action-pins lint staticcheck security test build
+ci: tidy fmt-check vet check-action-pins check-releasability check-changelog-assembly lint staticcheck security test build
 	@echo "CI pipeline completed successfully"
 
 ## deps-latest: bump internal dependencies to their latest tags (none today)
@@ -190,6 +208,21 @@ deps-latest:
 # reader chasing a missing command at the exact moment a release just failed.
 # Single-quoted here. Reported upstream so the template can take the same change
 # before the other fifteen repos adopt it.
+#
+# A second fix, the one release-alpha.mk v2.3 made (its defect 1): VERSION is
+# written UNPREFIXED, `$(VERSION:v%=%)`. The tag is `v0.6.0-alpha`; the file is
+# `0.6.0-alpha` (release-versioning §2). Writing the tag string verbatim is how
+# v0.6.0-alpha shipped a VERSION reading `v0.6.0-alpha` (#80).
+#
+# Third, CHANGELOG fragments (release-versioning §5, adopted in #80): before
+# VERSION is written, scripts/changelog-assemble.sh folds every changelog.d/
+# fragment, and whatever [Unreleased] still holds, into the new version's
+# section and deletes the fragments; the release commit carries CHANGELOG.md,
+# the deletions and VERSION together, so the tag's CHANGELOG has every entry
+# exactly once. The assembly is committed here, before tagging, because
+# release.yml only rewrites the runner-workspace copy. If the section was
+# written by hand and a fragment is still waiting, the script refuses rather
+# than tag a CHANGELOG that leaves it out.
 .PHONY: release-alpha
 release-alpha:
 	@test -n '$(AGENT_GIT)' || { echo 'ERROR: AGENT_GIT is unset - point it at your commit-signing/release wrapper (maintainer tooling; not needed to build or test)'; exit 1; }
@@ -200,9 +233,10 @@ release-alpha:
 	@! git rev-parse -q --verify "refs/tags/$(VERSION)" >/dev/null || { echo "ERROR: tag $(VERSION) already exists locally"; exit 1; }
 	@! git ls-remote --exit-code --tags dev "refs/tags/$(VERSION)" >/dev/null 2>&1 || { echo "ERROR: tag $(VERSION) already exists on dev (a local check alone would miss this and fail the push AFTER committing VERSION)"; exit 1; }
 	@test -z "$$(git status --porcelain)" || { echo "ERROR: working tree not clean"; exit 1; }
+	sh scripts/changelog-assemble.sh "$(VERSION)" "$$(date -u +%Y-%m-%d)"
 	@grep -Eq '^#+ +\[?'"$(VERSION)"'\]?' CHANGELOG.md || { echo "ERROR: CHANGELOG.md has no release SECTION heading for $(VERSION) (an unanchored prose mention does not count)"; exit 1; }
-	@echo "$(VERSION)" > VERSION
-	$(AGENT_GIT) $(REPO_NAME) add VERSION
+	@echo "$(VERSION:v%=%)" > VERSION
+	$(AGENT_GIT) $(REPO_NAME) add -A -- VERSION CHANGELOG.md changelog.d
 	$(AGENT_GIT) $(REPO_NAME) commit -m "chore(release): $(VERSION)"
 	$(AGENT_GIT) $(REPO_NAME) tag -a "$(VERSION)" -m "$(VERSION)"
 	$(AGENT_GIT) $(REPO_NAME) push dev HEAD "refs/tags/$(VERSION)"

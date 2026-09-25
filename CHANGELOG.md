@@ -105,7 +105,7 @@ library admits against, in the shared library rather than in each consumer.
 ### Fixed
 
 - `CLAUDE.md` no longer tells a contributor to clone the handbook from the
-  retired Gitea at `198.51.100.91` (#73). It names the server the way the
+  retired Gitea host by its address (#73). It names the server the way the
   other factory projects do, through `git remote get-url origin`.
 
 ## [v0.5.0-alpha] - 2026-09-03
@@ -1278,8 +1278,3 @@ library admits against, in the shared library rather than in each consumer.
   `ErrBudgetExhausted` / `BudgetError`, so callers can cap unauthenticated
   locked-memory allocation below the RLIMIT_MEMLOCK ceiling that triggers a
   purge. Reservations are released on `Destroy`.
-
-[v0.3.0-alpha]: http://198.51.100.91:3001/jeremyhahn/go-enclave/releases/tag/v0.3.0-alpha
-[v0.2.1-alpha]: http://198.51.100.91:3001/jeremyhahn/go-enclave/releases/tag/v0.2.1-alpha
-[v0.2.0-alpha]: http://198.51.100.91:3001/jeremyhahn/go-enclave/releases/tag/v0.2.0-alpha
-[v0.1.0-alpha]: http://198.51.100.91:3001/jeremyhahn/go-enclave/releases/tag/v0.1.0-alpha
