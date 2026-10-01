@@ -21,6 +21,7 @@ transport itself, behind the `KeyProtector`/`RootUnsealer` interfaces.
 | Release ciphertext | `(*SealedEnclave).Destroy()` | N/A |
 | Implement a provider | `KeyProtector`, `RootUnsealer`, `RootKeyBytes` | N/A |
 | Software provider | `enclave.NewSoftwareProvider()` | N/A |
+| Check key-schedule erasure | `enclave.KeyScheduleErasure()` | N/A |
 
 Schemas and error mapping: [engineering.md](engineering.md). No permission
 scope; no pagination.

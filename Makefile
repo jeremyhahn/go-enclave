@@ -251,7 +251,8 @@ $(call raw_bind,$(EXTERNAL_VARS))
 # built it.
 CROSS_TARGETS := linux/amd64 linux/arm64 linux/386 linux/arm \
 	darwin/amd64 darwin/arm64 freebsd/amd64 openbsd/amd64 netbsd/amd64 dragonfly/amd64 \
-	illumos/amd64 solaris/amd64 aix/ppc64 windows/amd64 windows/386
+	illumos/amd64 solaris/amd64 aix/ppc64 windows/amd64 windows/386 \
+	android/arm64
 
 # Packages, for the per-package targets (project-scaffold §4: test-<pkg>,
 # coverage-<pkg>, bench-<pkg>, integration-test-<pkg>). The root package is
@@ -500,6 +501,35 @@ test-fips:
 	GOFIPS140=latest GODEBUG=fips140=only "$$GOCMD" build $(PKG)
 	GOFIPS140=latest GODEBUG=fips140=only "$$GOCMD" test -count=1 -timeout=900s $(PKG)
 
+## test-runtimesecret: unit tests built with GOEXPERIMENT=runtimesecret (key-schedule erasure, #98)
+# The erasing build is a different program — every AES operation runs under
+# runtime/secret.Do — and secret_erase_test.go, which proves the key schedule
+# is gone from process memory, only exists in it. The go binary is the
+# module's own toolchain, resolved with the experiment UNSET: an older go
+# command on PATH cannot parse an experiment it predates and dies before it
+# would switch toolchains.
+#
+# The erasure PROOF runs on its own, without -race: it measures what freed heap
+# memory still holds, and the race detector's instrumented allocator changes
+# exactly that — measured, its control (an UNERASED operation's key schedule
+# must be findable) goes blind under -race, which would make the proof vacuous.
+# Everything else in the erasing build runs under the full TESTFLAGS matrix.
+ERASURE_PROOF := ^TestWithAEAD_ErasesTheKeyScheduleUnderRuntimeSecret$$
+.PHONY: test-runtimesecret
+test-runtimesecret:
+	@gobin=$$(GOEXPERIMENT= "$$GOCMD" env GOROOT)/bin/go || exit 1; \
+	for t in linux/amd64=secret_erase.go linux/arm64=secret_erase.go linux/386=secret_noerase.go \
+	  android/amd64=secret_noerase.go android/arm64=secret_noerase.go darwin/arm64=secret_noerase.go; do \
+	  target=$${t%=*}; want=$${t#*=}; \
+	  files=$$(GOEXPERIMENT=runtimesecret GOOS=$${target%/*} GOARCH=$${target#*/} CGO_ENABLED=0 "$$gobin" list -f '{{join .GoFiles " "}}' .) || exit 1; \
+	  case " $$files " in *" $$want "*) echo "erasure selection $$target: $$want";; \
+	    *) echo "ERROR: GOEXPERIMENT=runtimesecret on $$target does not build $$want (KeyScheduleErasure would lie)"; exit 1;; esac; \
+	done; \
+	echo "GOEXPERIMENT=runtimesecret $$gobin test $(TESTFLAGS) -skip '$(ERASURE_PROOF)' -timeout=900s $(PKG)"; \
+	GOEXPERIMENT=runtimesecret "$$gobin" test $(TESTFLAGS) -skip '$(ERASURE_PROOF)' -timeout=900s $(PKG) || exit 1; \
+	echo "GOEXPERIMENT=runtimesecret $$gobin test -count=5 -cpu=1,2,8 -run '$(ERASURE_PROOF)' ."; \
+	GOEXPERIMENT=runtimesecret "$$gobin" test -count=5 -cpu=1,2,8 -run '$(ERASURE_PROOF)' .
+
 ## bench: every benchmark, with allocation counts (no unit tests)
 .PHONY: bench
 bench:
@@ -612,7 +642,7 @@ check-scripts:
 # the same set. `integration-test` joins `ci`, and only `ci`, when the
 # devcontainer suite lands (#91).
 .PHONY: ci-fast
-ci-fast: tidy-check lint check-action-pins check-releasability check-changelog-assembly check-scripts staticcheck security coverage build cross-build
+ci-fast: tidy-check lint check-action-pins check-releasability check-changelog-assembly check-scripts staticcheck security coverage test-runtimesecret build cross-build
 	@echo "ci-fast completed successfully"
 
 ## ci: the full local gate — what a PR must pass, security included (devops §4)

@@ -13,7 +13,11 @@
 Know what sealing does not do. This package never writes recovered plaintext
 to the heap, but it does write keys there: every seal and open leaves that value's AES key schedule in heap
 memory that is not wiped, so a reader of this process's memory (live, or via
-swap or a core dump) can recover recently used values in any mode. With the
+swap or a core dump) can recover recently used values in any mode. (Built
+with `GOEXPERIMENT=runtimesecret` on linux/amd64 or linux/arm64 (not Android), those
+schedules are erased at the next garbage collection instead;
+`enclave.KeyScheduleErasure()` reports which build you have. See
+[engineering.md](engineering.md#erasure-under-runtimesecret).) With the
 default software sealer the keys that unwrap **every** value are in this
 process too. A hardware `KeyProtector` in `ModePerOperation` keeps the
 long-lived key in the device, which limits the exposure to values sealed or
@@ -148,7 +152,7 @@ A wiped sealer never re-keys. Construct a new `Sealer` and re-seal from source.
 | `ErrSealerInstalled` from `SetSealer` | Something sealed first | Install earlier in `main`. |
 | `ErrProviderMode` from `NewSealer` | Provider lacks the mode's interface, or is nil/typed nil | Pick the mode the provider implements; check the provider variable is set. |
 | `ErrOpenFailed` intermittently | Deadline too short, or device/KMS unavailable | If the error matches none of `ErrSealedAuthentication`, `ErrSealerWiped` or `ErrEnclaveDestroyed`, the value is intact. Classify any provider cause first (`errors.As` on its types): never retry a permanent one, even if a cancellation is joined with it; retry a transient one; retry a bare cancellation with a live context. |
-| `ErrSealerWiped` | A shutdown `WipeAll` destroyed this sealer's keys — or, while a sweep runs, a per-call key; or the provider returned it | Check `Openable()` on a value: `ErrSealerWiped` there means the sealer is dead (expected at exit; mid-run, something called `WipeAll` too early). |
+| `ErrSealerWiped` | A shutdown `WipeAll` destroyed this sealer's own keys (its root or current KEK in `ModeRootKey`), or the provider returned it. A sweep that destroys only one call's working key gives `ErrEnclaveDestroyed` instead | Check `Openable()` on a value: `ErrSealerWiped` there means the sealer is dead (expected at exit; mid-run, something called `WipeAll` too early). |
 | `ErrProviderMessageLimit` | `SoftwareProvider` used in `ModePerOperation` past 2^31 seals | Use `ModeRootKey` (rotates KEKs) or a hardware provider. |
 | Locked memory grows with traffic | Each `Open` takes a locked page | Destroy opened enclaves promptly; use `OpenWith` so the budget sees it. |
 

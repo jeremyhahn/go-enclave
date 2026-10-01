@@ -219,6 +219,18 @@ const sealedOverhead = 12 + 16
 // process at all, which is exactly what a hardware [KeyProtector] in
 // [ModePerOperation] provides.
 func withAEAD(key *MemoryEnclave, fn func(cipher.AEAD) error) error {
+	// Every AES construction and use in this package runs here, inside
+	// secretDo (#98): in a build with GOEXPERIMENT=runtimesecret on
+	// linux/amd64 or linux/arm64 (not Android) the key schedule and every other temporary
+	// of the operation are erased once unreachable (KeyScheduleErasure
+	// reports which build this is). No cipher.Block or cipher.AEAD outlives
+	// the call — none is cached anywhere — so nothing escapes the erasure.
+	var err error
+	secretDo(func() { err = withAEADErasable(key, fn) })
+	return err
+}
+
+func withAEADErasable(key *MemoryEnclave, fn func(cipher.AEAD) error) error {
 	return key.WithBytes(func(k []byte) error {
 		// The key leaves locked memory HERE, and only here. See this
 		// function's documentation for the measured extent of it.

@@ -1047,8 +1047,23 @@ func TestDestroyReportsTheDeniedMprotect(t *testing.T) {
 	t.Cleanup(func() { protectMemory = prev })
 	protectMemory = func([]byte, protection) error { return denied }
 
-	if derr := e.Destroy(); !errors.Is(derr, ErrReleasedWithoutWipe) {
+	derr := e.Destroy()
+	if !errors.Is(derr, ErrReleasedWithoutWipe) {
 		t.Fatalf("Destroy = %v, want ErrReleasedWithoutWipe", derr)
+	}
+	// Disjoint from "pages still held" (#98): the pages are GONE, so this must
+	// not match ErrLockedMemoryUnavailable, and the cause it carries is the
+	// refusal itself — still reachable — not a LockedMemoryError wrapper.
+	if errors.Is(derr, ErrLockedMemoryUnavailable) {
+		t.Errorf("Destroy = %v matches ErrLockedMemoryUnavailable too; an unwiped release must be distinguishable from pages still held", derr)
+	}
+	var ure *UnwipedReleaseError
+	if !errors.As(derr, &ure) || !errors.Is(ure.Cause, denied) {
+		t.Errorf("Destroy = %v: want an *UnwipedReleaseError whose Cause is the mprotect refusal", derr)
+	}
+	var lme *LockedMemoryError
+	if errors.As(derr, &lme) {
+		t.Errorf("Destroy = %v carries a *LockedMemoryError; the cause should be the raw refusal", derr)
 	}
 	if e.IsAlive() {
 		t.Error("the enclave reports itself alive after Destroy")

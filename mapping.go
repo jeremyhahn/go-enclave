@@ -611,7 +611,22 @@ func (m *mapping) release() error {
 		}
 
 		m.forget()
-		return &UnwipedReleaseError{Cause: err}
+		// The refusal arrives wrapped as a LockedMemoryError, and carrying
+		// that wrapper would make this error ALSO match
+		// ErrLockedMemoryUnavailable — which callers read as "the pages are
+		// still held", the opposite of what happened here: they are gone,
+		// unmapped without the in-process wipe. The two classes are kept
+		// disjoint (#98): the underlying OS failure is carried directly, so
+		// errors.As still reaches the errno, but only ErrReleasedWithoutWipe
+		// matches.
+		cause := err
+		var lme *LockedMemoryError
+		if errors.As(err, &lme) {
+			if c, ok := lme.Cause.(error); ok {
+				cause = c
+			}
+		}
+		return &UnwipedReleaseError{Cause: cause}
 	}
 
 	// Step 2. At most ONE successful unlock per mapping, recorded so a retry

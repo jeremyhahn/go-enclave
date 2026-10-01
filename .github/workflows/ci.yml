@@ -291,6 +291,12 @@ jobs:
       - name: Tests with coverage (race, CPU matrix, threshold)
         run: make coverage
 
+      # The erasing build (#98): every AES operation under runtime/secret.Do,
+      # and the test that proves the key schedule is gone from memory, exist
+      # only with GOEXPERIMENT=runtimesecret, so they get a run of their own.
+      - name: Unit tests with key-schedule erasure (GOEXPERIMENT=runtimesecret)
+        run: make test-runtimesecret
+
   # a repo that builds container images adds an `image` job here that
   # builds each image and gates it with `trivy image --severity CRITICAL,HIGH
   # --exit-code 1` BEFORE any push to either registry. Never

@@ -61,7 +61,11 @@ recover between opens:
    promptly ([sealed.go](../../sealed.go), `withAEAD`). Each seal and each open
    leaves its value's DEK schedule behind, and that schedule plus the value's
    heap ciphertext recovers the value until the allocator reuses the memory.
-   This holds in **every** mode, hardware included.
+   This holds in **every** mode, hardware included — except in a build with
+   `GOEXPERIMENT=runtimesecret` on linux/amd64 or linux/arm64 (not Android), where every
+   AES operation runs under `runtime/secret.Do` and its schedule is erased at
+   the next garbage collection (`KeyScheduleErasure`); the table below
+   describes the default build.
 
 | Configuration | Long-lived wrapping key | Residual heap key schedules |
 |---|---|---|
@@ -159,7 +163,8 @@ TPM, HSM and KMS providers live in higher layers and are injected through
   recovers, and must honor its context.
 - **Process memory.** Plaintext material is decrypted only into locked pages;
   per-value keys transit the Go heap inside AES key schedules (see
-  [engineering.md](engineering.md#key-schedule-heap-exposure)).
+  [engineering.md](engineering.md#key-schedule-heap-exposure)), erased at
+  the next GC only in a `runtime/secret` build.
 - **Sealing narrows a window; it does not close one.** No protection against a
   reader while an `Open` is in flight, or against anyone who can drive `Open`
   through the caller's own surface.

@@ -24,6 +24,7 @@
 | `RootUnsealer` | `UnsealRoot(ctx, dst []byte) error` |
 | `RootKeyBytes = 32` | Length of every root and of every key handed to a provider. |
 | `SoftwareProvider`, `NewSoftwareProvider()` | Implements both interfaces; root generated into a locked enclave at first use. |
+| `KeyScheduleErasure() bool` | Whether this build erases AES key schedules (`GOEXPERIMENT=runtimesecret`, linux/amd64 or linux/arm64 (not Android)). See [Erasure under `runtime/secret`](#erasure-under-runtimesecret). |
 
 ## Provider contract
 
@@ -133,7 +134,7 @@
 | `ErrSealedAuthentication` | open paths, providers | Tampered, truncated, forged, re-paired or foreign. Deliberately indistinguishable between causes. |
 | `ErrSealerWiped` | all sealing paths, `Openable` | **This sealer could not serve this operation because an enclave it was using is gone** — not, on its own, proof that the sealer is dead. See [Where `ErrSealerWiped` comes from](#where-errsealerwiped-comes-from). |
 | `ErrOpenabilityUnknown` | `Openable` | A sweep ran since sealing (or during it), `ModePerOperation`, and the provider reports no health. Open the value to find out. |
-| `ErrEnclaveDestroyed` | `Open`, `OpenWith`, `Openable`; seal paths | From `Openable`, and from `Open`/`OpenWith` before any work: the `SealedEnclave` was destroyed (or is nil). From later in a seal or open: an enclave **this call** allocated was destroyed by a concurrent `WipeAll`, and the sealed value may be intact — the DEK while sealing the material under it (either mode), the open's destination or DEK while decrypting into it (either mode), or the DEK while a `ModePerOperation` provider uses it. A provider returning it is passed through too. In `ModeRootKey`, a destroyed DEK *during the wrap or unwrap under the KEK* is reported as `ErrSealerWiped` instead (see below). |
+| `ErrEnclaveDestroyed` | `Open`, `OpenWith`, `Openable`; seal paths | From `Openable`, and from `Open`/`OpenWith` before any work: the `SealedEnclave` was destroyed (or is nil). From later in a seal or open: an enclave **this call** allocated was destroyed by a concurrent `WipeAll`, and the sealed value may be intact — the DEK while sealing the material under it (either mode), the open's destination or DEK while decrypting into it (either mode), or the DEK while a `ModePerOperation` provider uses it. A provider returning it is passed through too. In `ModeRootKey` the same holds for a per-call key destroyed during the wrap or unwrap under the KEK; only when a **hierarchy** key (the root or the current KEK) is dead does the failure become `ErrSealerWiped` (see below). |
 | `ErrLockedMemoryUnavailable` | seal, open | Kernel refused a locked page; the sealed value survives an open failure. |
 | `ErrNilAllocator` / `ErrBudgetExhausted` | `OpenWith` | Nil allocator (never falls back) / over budget. Decided before any provider call. |
 | `ErrEmptyEnclave`, `ErrMaterialTooLarge` | seal | Empty input; input above AES-GCM's single-message limit, (2^32−2)·16 bytes. |
@@ -169,20 +170,14 @@ matches one of these sentinels, and is joined under `op` otherwise
 
 ### Where `ErrSealerWiped` comes from
 
-Four paths produce it. Paths 1 and 3 are permanent for that sealer; path 2 is
-not; path 4 is whatever the provider means by it:
+Three paths produce it. Paths 1 and 2 are permanent for that sealer; path 3 is
+whatever the provider means by it:
 
 1. **The hierarchy is dead** (`ModeRootKey`): the root or the current KEK was
    destroyed by a sweep, or a sweep overlapped initialization and the retained
    root was discarded. Every later seal and open that reaches the hierarchy
    fails the same way.
-2. **A per-call key was destroyed mid-operation** (`ModeRootKey`).
-   `hierarchyFailure` ([sealer.go](../../sealer.go)) converts *any*
-   `ErrEnclaveDestroyed` from a key operation into `ErrSealerWiped`, including
-   the call's own DEK (wrap on seal, unwrap on open), a transient retired-KEK
-   enclave, or a KEK being minted. That happens only when a concurrent `WipeAll`
-   destroyed that per-call enclave; the hierarchy may still be alive.
-3. **`SoftwareProvider`'s root is dead** (a sweep destroyed it). Permanent for
+2. **`SoftwareProvider`'s root is dead** (a sweep destroyed it). Permanent for
    the PROVIDER: it refuses every later `Protect`, `Unprotect` and
    `UnsealRoot` rather than minting a new root. That makes it permanent for a
    `ModePerOperation` sealer using the provider, and for a `ModeRootKey`
@@ -191,16 +186,29 @@ not; path 4 is whatever the provider means by it:
    root into the sealer's OWN locked root, and that sealer consults only its
    own root and KEK — if the sweep skipped those (they were borrowed) and no
    initialization or rotation overlap invalidated them, it keeps working.
-4. **A provider or a `WithProviderHealth` callback returned it.** Its
+3. **A provider or a `WithProviderHealth` callback returned it.** Its
    permanence is the provider's own statement; a hardware provider may use it
    for a key that is gone for good, or for a device that is merely unreachable.
    Inspect the provider's cause before acting on it.
 
-So never infer permanence from `ErrSealerWiped` alone. Read it as "this sealer
-could not serve this operation", and check the sealer's health — `Openable()` on
-a value it sealed reports `ErrSealerWiped` only for path 1 or 3 (or a health
-callback's report). Separating case 2 from hierarchy loss in the code is
-tracked as a planned change; until then the conflation stands as described.
+A sweep that destroys only a **per-call** enclave — the call's own DEK, or a
+retired KEK materialized for one unwrap — is not one of these paths:
+`hierarchyFailure` ([sealer.go](../../sealer.go)) reports `ErrSealerWiped` only
+when a hierarchy key the operation used (the root, or the current KEK) is
+itself dead, and otherwise passes `ErrEnclaveDestroyed` through. That failure
+is this call losing its working key, and the sealer keeps working.
+
+A KEK being **minted** is the exception, deliberately. Any sweep that overlaps
+initialization or rotation — even one that spared the root and the current KEK
+because they were borrowed — wipes the whole hierarchy and reports
+`ErrSealerWiped` (path 1): publishing a generation minted across a sweep would
+hand back a working sealer after a `WipeAll`, the silent re-keying
+`ErrSealerWiped` exists to prevent.
+
+Path 3 is the one whose permanence the package cannot vouch for, so still
+check the sealer's health before acting on `ErrSealerWiped` from a provider —
+`Openable()` on a value it sealed reports it for path 1 or 2, or a health
+callback's report.
 
 ### Classifying an open failure
 
@@ -211,10 +219,10 @@ first match:
 2. `ErrSealerWiped` — this sealer could not serve the operation. Check
    `Openable()` before concluding anything: `ErrSealerWiped` there means the
    sealer's own keys are gone (or its health callback says so); `nil` or
-   `ErrOpenabilityUnknown` means they are not known to be gone — a sweep in
-   progress destroyed a per-call enclave, or the provider itself returned
-   `ErrSealerWiped` (inspect the provider's error). Do not retry during a
-   shutdown sweep.
+   `ErrOpenabilityUnknown` means they are not known to be gone — the provider
+   itself returned `ErrSealerWiped` (inspect the provider's error). A sweep
+   that destroys only a per-call enclave is not reported this way; it is
+   `ErrEnclaveDestroyed`. Do not retry during a shutdown sweep.
 3. `ErrEnclaveDestroyed` — the value was destroyed, or a sweep destroyed this
    call's working enclaves during shutdown; do not retry.
 4. `ErrNilAllocator`, `ErrBudgetExhausted`, `ErrLockedMemoryUnavailable` —
@@ -267,6 +275,25 @@ the process, but DEK schedules still do: values sealed or opened recently remain
 recoverable until their schedules' memory is reused. This is accepted rather than replacing the standard library's AES (see [architecture.md](architecture.md#rejected-alternatives)); the full audit is
 on `withAEAD` in [sealed.go](../../sealed.go), and a test fails if the exposure
 stops appearing (so the audit is re-measured when it changes).
+
+### Erasure under `runtime/secret`
+
+Built with `GOEXPERIMENT=runtimesecret` for `linux/amd64` or `linux/arm64`,
+every AES operation in the package (`withAEAD`), and the derivation of a
+`ModeRootKey` sealer's wrapping key from its root (`deriveWrappingKey`), runs
+under `runtime/secret.Do`, which erases the operation's registers and stack when it returns
+and its heap allocations — the key schedule included — once the garbage
+collector finds them unreachable. No `cipher.Block` or `cipher.AEAD` outlives
+the call, so nothing escapes it. In that build the table above describes a
+window that closes at the next collection instead of at heap reuse.
+`KeyScheduleErasure()` reports which build is running; a deployment that
+relies on erasure should check it at startup.
+
+Everywhere else (`KeyScheduleErasure() == false`) the exposure is exactly as
+described above. `make test-runtimesecret` proves the claim by sweeping the
+process's memory for a key after GC: a control run outside `secret.Do` must
+find the schedule (so the sweep can see what it claims is erased), and the
+same operations through `withAEAD` must leave nothing.
 
 ## FIPS 140-3
 

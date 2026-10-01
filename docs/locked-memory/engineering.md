@@ -74,16 +74,22 @@ with `ErrEnclaveDestroyed`, `Destroy` returns `nil`.
 | `ErrEnclaveCorrupted` | `Destroy` **panic value** | Canary or guard mismatch. See below. |
 | `ErrCoreDumpLimitUnsupported` | `CoreDumpsDisabled` | Windows: no process-wide core-dump limit exists. |
 
-### `ErrReleasedWithoutWipe` also matches `ErrLockedMemoryUnavailable`
+### `ErrReleasedWithoutWipe` and `ErrLockedMemoryUnavailable` are disjoint on release
 
-`*UnwipedReleaseError` wraps the refused `mprotect`, which is itself a
-`*LockedMemoryError` ([mapping.go](../../mapping.go), `release`;
-`UnwipedReleaseError.Unwrap` in [enclave.go](../../enclave.go)). So a release
-that **completed** without the wipe matches both sentinels, and a constructor
-whose freeze failed and whose rollback took the unwiped path returns an error
-(the freeze failure joined with the rollback's) that matches both too. A
-release that was refused outright — pages still held — matches only
-`ErrLockedMemoryUnavailable`. Test `ErrReleasedWithoutWipe` **first**:
+A release has two failure outcomes, and each matches exactly one sentinel:
+
+- **Released without the wipe** (`mprotect` denied, pages unmapped):
+  `ErrReleasedWithoutWipe` only. `*UnwipedReleaseError.Cause` is the raw
+  operating-system failure (an `*os.SyscallError` carrying the errno), not a
+  `*LockedMemoryError`, precisely so the error does not also read as "pages
+  still held" ([mapping.go](../../mapping.go), `release`).
+- **Refused** (pages still held): `ErrLockedMemoryUnavailable` only.
+
+A **constructor** failure is different: a refused freeze always matches
+`ErrLockedMemoryUnavailable` (the construction failed), and when its rollback
+took the unwiped path the rollback's `ErrReleasedWithoutWipe` is joined in, so
+that one error matches both. Testing `ErrReleasedWithoutWipe` first classifies
+every case correctly:
 
 ```go
 err := e.Destroy()

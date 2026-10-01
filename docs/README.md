@@ -14,7 +14,7 @@ legacy documents to migrate.
 |---|---|
 | [locked-memory](locked-memory/user.md) | `MemoryEnclave`: constructors, borrowing, `Freeze`, `Destroy` and its one panic, guard pages and canary, platform and core-dump matrix |
 | [locked-memory-budget](locked-memory-budget/user.md) | `Allocator`, `RLIMIT_MEMLOCK` discovery, retuning, the process allocator, refunds for failed constructions |
-| [sealing](sealing/user.md) | `SealedEnclave`, `Sealer` modes, the `KeyProtector`/`RootUnsealer` seam, contexts, `Openable`, FIPS, the key-schedule heap exposure |
+| [sealing](sealing/user.md) | `SealedEnclave`, `Sealer` modes, the `KeyProtector`/`RootUnsealer` seam, contexts, `Openable`, FIPS, the key-schedule heap exposure and its erasure under `runtime/secret` |
 | [shutdown-sweep](shutdown-sweep/user.md) | `WipeAll(ctx)`: admission, waiting for borrows, termination, the count and `SweepError` |
 | [provider-conformance](provider-conformance/user.md) | `providertest.TestProvider(ctx, cfg)` for TPM/HSM/KMS provider authors |
 
@@ -26,6 +26,7 @@ code, is in the linked section.
 | Change | Before (v0.6) | After (v0.7) | Details |
 |---|---|---|---|
 | Release report | `e.Destroy()` + `e.DestroyErr() error` | `e.Destroy() error` | [locked-memory](locked-memory/user.md#migrating-from-v06) |
+| Unwiped release | matched `ErrReleasedWithoutWipe` **and** `ErrLockedMemoryUnavailable` | matches `ErrReleasedWithoutWipe` only; `UnwipedReleaseError.Cause` is the raw OS error | [locked-memory](locked-memory/user.md#migrating-from-v06) |
 | Windows core-dump status | `CoreDumpsDisabled()` returned `nil` | returns `ErrCoreDumpLimitUnsupported` | [locked-memory](locked-memory/user.md#migrating-from-v06) |
 | OS layer dependency | `github.com/awnumar/memcall` | `golang.org/x/sys` only | [locked-memory](locked-memory/user.md#migrating-from-v06) |
 | Shutdown sweep | `WipeAll() (int, error)`, fixed backoff | `WipeAll(ctx) (int, error)`, waits for borrows | [shutdown-sweep](shutdown-sweep/user.md#migrating-from-v06) |
@@ -34,6 +35,7 @@ code, is in the linked section.
 | Provider seam | `Protect(key)`, `Unprotect(blob, key)`, `UnsealRoot(dst)` | each takes `ctx` first | [sealing](sealing/user.md#migrating-from-v06) |
 | Provider failures on open | returned bare | joined under new `ErrOpenFailed` | [sealing](sealing/user.md#migrating-from-v06) |
 | `SealedEnclave.Destroy` | waited for in-flight `Open` | does not wait | [sealing](sealing/user.md#migrating-from-v06) |
+| A sweep destroying a per-call key | `ModeRootKey` reported `ErrSealerWiped` | `ErrEnclaveDestroyed` unless a hierarchy key is dead | [sealing](sealing/user.md#migrating-from-v06) |
 | Opened plaintext | `Open`/`OpenWith` returned a writable enclave | returns a frozen (read-only) enclave | [sealing](sealing/user.md#migrating-from-v06) |
 | Conformance suite | `TestProvider(cfg)` | `TestProvider(ctx, cfg)`; new `ErrAborted` | [provider-conformance](provider-conformance/user.md#migrating-from-v06) |
 

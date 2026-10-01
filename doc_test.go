@@ -280,6 +280,11 @@ var docIssueRefLedger = []docIssueRef{
 	{"sealer.go", 102, classHistorical, "16b2d64244df", "WHO OWNS A REFUSED RELEASE (#102)."},
 	{"sealer.go", 102, classHistorical, "cc715bfb038c", "— never silently dropped as destroyTransient would (#102)."},
 	{"sealer.go", 102, classHistorical, "df5e3c794397", "hierarchy's cleanup is retried (#102): whatever path inside"},
+	{"enclave.go", 98, classHistorical, "563cd7a158a6", "which means pages are still held (#98)."},
+	{"mapping.go", 98, classHistorical, "e60768d19eb3", "two classes are kept disjoint (#98): the underlying OS failure"},
+	{"sealed.go", 98, classHistorical, "0e1bcb14a202", "runs here, inside secretDo (#98): in a build with"},
+	{"sealer.go", 98, classHistorical, "a66642dd5f38", "a key operation that involved the hierarchy keys given (#98)."},
+	{"secret_erase.go", 98, classHistorical, "b9926170a0e4", "runs f under runtime/secret.Do (#98): the registers and stack f"},
 	{"sealer.go", 99, classHistorical, "b5d25e5f0904", "whose material is complete (#99): a stray write through a"},
 
 	// providertest — the conformance suite added by #64, in its own package.

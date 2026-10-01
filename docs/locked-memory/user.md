@@ -79,7 +79,7 @@ writing at once is a data race.
 
 ```go
 if err := e.Destroy(); err != nil {
-	switch { // order matters: an unwiped release matches both sentinels
+	switch {
 	case errors.Is(err, enclave.ErrReleasedWithoutWipe):
 		// Pages are gone; the environment denies mprotect (seccomp/sandbox).
 	case errors.Is(err, enclave.ErrLockedMemoryUnavailable):
@@ -113,7 +113,7 @@ mapping.
 | `ErrLockedMemoryUnavailable` from a constructor | `RLIMIT_MEMLOCK` reached (or no privilege on AIX/Solaris/illumos), or a sandbox denies `mlock`/`madvise` | Raise the limit; destroy enclaves you no longer need; budget them ([locked-memory-budget](../locked-memory-budget/user.md)). |
 | `ErrInvalidSize` | `NewMemoryEnclaveSized(n)` with `n <= 0` or absurdly large | Fix the size computation. |
 | `ErrEnclaveDestroyed` on an enclave you did not destroy | A shutdown `WipeAll` ran, or the constructor raced one | Stop workers before the shutdown sweep. |
-| `ErrReleasedWithoutWipe` from `Destroy` | `mprotect` denied by seccomp or a sandbox | Allow `mprotect` on the process's own memory. The pages were released (never swapped; zeroed by the kernel before reuse), but the in-process wipe was skipped. The error also matches `ErrLockedMemoryUnavailable`. |
+| `ErrReleasedWithoutWipe` from `Destroy` | `mprotect` denied by seccomp or a sandbox | Allow `mprotect` on the process's own memory. The pages were released (never swapped; zeroed by the kernel before reuse), but the in-process wipe was skipped. It does not match `ErrLockedMemoryUnavailable`, which means the pages are still held. |
 | Process crashes (SIGSEGV) reading a slice | A slice from `Open` (or one kept past `WithBytes`) outlived the enclave | Use `WithBytes`; never retain borrowed slices. |
 | Process crashes writing through a slice | Writing to a frozen enclave — including one `SealedEnclave.Open` returned, which is always frozen | Writes are only for sized enclaves, inside `WithBytes`, before `Freeze`; to edit opened plaintext, copy it into your own sized enclave inside the borrow. |
 | Panic matching `ErrEnclaveCorrupted` | Buffer underflow or memory corruption elsewhere | Treat as a security incident; find the writer. |
@@ -133,10 +133,16 @@ if err := e.Destroy(); err != nil { /* ... */ }
 defer e.Destroy() // still compiles; still discards the report
 ```
 
-Semantics are `DestroyErr`'s: `nil`, `ErrReleasedWithoutWipe` (released
-without the wipe; this error also matches `ErrLockedMemoryUnavailable`, so test
-it first), or `ErrLockedMemoryUnavailable` alone (refused; retry by calling
-`Destroy` again). Corruption still panics.
+Semantics are `DestroyErr`'s, with one correction: `nil`,
+`ErrReleasedWithoutWipe` (released without the wipe), or
+`ErrLockedMemoryUnavailable` (refused; retry by calling `Destroy` again).
+**The two no longer overlap.** In v0.6 an unwiped release also matched
+`ErrLockedMemoryUnavailable`, which reads as "pages still held" although they
+were gone; in v0.7 it matches only `ErrReleasedWithoutWipe`, and
+`UnwipedReleaseError.Cause` is the raw OS error rather than a
+`*LockedMemoryError`. Code that treated `ErrLockedMemoryUnavailable` from
+`Destroy` as "retry" no longer retries a release that already happened.
+Corruption still panics.
 
 **`CoreDumpsDisabled()` on Windows returns `ErrCoreDumpLimitUnsupported`**
 instead of `nil`. Code that treats any non-nil result as fatal now fails on

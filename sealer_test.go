@@ -1121,25 +1121,117 @@ func TestSealer_RootUnsealFailureSurfacesAndRetries(t *testing.T) {
 }
 
 // TestSealer_SweptTranslation pins the two translation helpers directly.
-// They exist for a race window — a WipeAll destroying hierarchy or provider
-// keys between an op's liveness check and its borrow — that no unit test can
-// hold open deterministically, so the translation itself is pinned as a pure
-// function: a destroyed hierarchy key reports the sealer wiped, and every
-// other error passes through untouched.
+// They exist for a race window — a WipeAll destroying keys between an op's
+// liveness check and its borrow — that no unit test can hold open
+// deterministically, so the translation itself is pinned as a pure function.
+//
+// hierarchyFailure distinguishes the two things a destroyed enclave can mean
+// (#98): a dead HIERARCHY key reports the sealer wiped; a destroyed PER-CALL
+// enclave with the hierarchy intact stays ErrEnclaveDestroyed, because the
+// sealer is not wiped and saying so would tell an operator their keys are gone
+// when they are not. Every other error passes through untouched.
 func TestSealer_SweptTranslation(t *testing.T) {
 	other := errors.New("unrelated failure")
-	for name, fn := range map[string]func(error) error{"swept": swept, "hierarchyFailure": hierarchyFailure} {
-		if got := fn(ErrEnclaveDestroyed); !errors.Is(got, ErrSealerWiped) {
-			t.Errorf("%s(ErrEnclaveDestroyed) = %v, want ErrSealerWiped: a mid-operation sweep would "+
-				"surface as a destroyed enclave the caller never created", name, got)
+
+	if got := swept(ErrEnclaveDestroyed); !errors.Is(got, ErrSealerWiped) {
+		t.Errorf("swept(ErrEnclaveDestroyed) = %v, want ErrSealerWiped", got)
+	}
+	if got := swept(other); !errors.Is(got, other) || errors.Is(got, ErrSealerWiped) {
+		t.Errorf("swept(unrelated) = %v, want it untouched", got)
+	}
+
+	alive, err := NewMemoryEnclaveSized(kekBytes)
+	if err != nil {
+		t.Fatalf("allocating a live key: %v", err)
+	}
+	defer func() { _ = alive.Destroy() }()
+	dead, err := NewMemoryEnclaveSized(kekBytes)
+	if err != nil {
+		t.Fatalf("allocating a key to kill: %v", err)
+	}
+	if err := dead.Destroy(); err != nil {
+		t.Fatalf("destroying it: %v", err)
+	}
+
+	if got := hierarchyFailure(ErrEnclaveDestroyed, alive, dead); !errors.Is(got, ErrSealerWiped) {
+		t.Errorf("hierarchyFailure with a dead hierarchy key = %v, want ErrSealerWiped", got)
+	}
+	got := hierarchyFailure(ErrEnclaveDestroyed, alive)
+	if errors.Is(got, ErrSealerWiped) || !errors.Is(got, ErrEnclaveDestroyed) {
+		t.Errorf("hierarchyFailure with the hierarchy intact = %v, want ErrEnclaveDestroyed and NOT ErrSealerWiped: "+
+			"a per-call enclave lost to a sweep is not a wiped sealer", got)
+	}
+	if got := hierarchyFailure(other, dead); !errors.Is(got, other) || errors.Is(got, ErrSealerWiped) {
+		t.Errorf("hierarchyFailure(unrelated) = %v, want it untouched", got)
+	}
+	if got := hierarchyFailure(ErrSealedAuthentication, dead); !errors.Is(got, ErrSealedAuthentication) {
+		t.Errorf("hierarchyFailure must not rewrite authentication failures; got %v", got)
+	}
+}
+
+// TestSealer_PerCallLossDuringRotationIsNotAWipe pins how a wrap failure is
+// classified while the KEK rotates on every wrap: a seal whose own DEK is
+// lost mid-wrap — the per-call case — reports ErrEnclaveDestroyed, never
+// ErrSealerWiped, however rotation interleaves.
+//
+// What it cannot pin is WHERE the translation runs. protectRootKeyInner
+// translates before releasing s.mu because rotation, under the write lock,
+// destroys the outgoing KEK before publishing the next, so a check after the
+// unlock could see a retired generation dead and call it a sweep. That window
+// is a few instructions wide with no seam to hold it open, and the atomic
+// kekUsed accounting orders the goroutines enough that the race detector does
+// not see the unlocked read either (measured against the pre-fix code); the
+// placement is held by review and by the comment at the call site.
+func TestSealer_PerCallLossDuringRotationIsNotAWipe(t *testing.T) {
+	ctx := t.Context()
+	s, err := NewSealer(WithKEKRotationLimit(1))
+	if err != nil {
+		t.Fatalf("NewSealer: %v", err)
+	}
+	v, err := s.Seal(ctx, []byte("initialize"))
+	if err != nil {
+		t.Fatalf("Seal: %v", err)
+	}
+	v.Destroy()
+
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+	for range 4 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				v, err := s.Seal(ctx, []byte("rotate on every wrap"))
+				if err != nil {
+					t.Errorf("rotating Seal: %v", err)
+					return
+				}
+				v.Destroy()
+			}
+		}()
+	}
+	for range 200 {
+		dead, err := NewMemoryEnclaveSized(dekBytes)
+		if err != nil {
+			t.Fatalf("NewMemoryEnclaveSized: %v", err)
 		}
-		if got := fn(other); !errors.Is(got, other) || errors.Is(got, ErrSealerWiped) {
-			t.Errorf("%s(unrelated) = %v, want it untouched", name, got)
+		if err := dead.Destroy(); err != nil {
+			t.Fatalf("Destroy: %v", err)
 		}
-		if got := fn(ErrSealedAuthentication); !errors.Is(got, ErrSealedAuthentication) {
-			t.Errorf("%s must not rewrite authentication failures; got %v", name, got)
+		_, err = s.protectRootKeyInner(ctx, dead)
+		if !errors.Is(err, ErrEnclaveDestroyed) || errors.Is(err, ErrSealerWiped) {
+			close(stop)
+			wg.Wait()
+			t.Fatalf("wrap of a lost per-call DEK during rotation = %v, want ErrEnclaveDestroyed and not ErrSealerWiped", err)
 		}
 	}
+	close(stop)
+	wg.Wait()
 }
 
 // TestSealer_WipedDoesNotReconsultAWillingProvider is the sealer-level half

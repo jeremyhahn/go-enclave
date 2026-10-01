@@ -73,7 +73,10 @@ var ErrReleasedWithoutWipe = errors.New("enclave: pages unmapped without an in-p
 // Match on [ErrReleasedWithoutWipe]; errors.Is reports it for every
 // UnwipedReleaseError.
 type UnwipedReleaseError struct {
-	// Cause is the mprotect failure that forced the fallback.
+	// Cause is the operating-system failure of the mprotect that forced the
+	// fallback (an *os.SyscallError carrying the errno). It is deliberately
+	// NOT a LockedMemoryError: this error never matches
+	// ErrLockedMemoryUnavailable, which means pages are still held (#98).
 	Cause error
 }
 
@@ -1166,3 +1169,17 @@ func (e *MemoryEnclave) String() string {
 func Wipe(b []byte) {
 	wipe(b)
 }
+
+// KeyScheduleErasure reports whether this build erases the temporaries of the
+// package's AES operations — most importantly the key schedule crypto/aes
+// expands, on the ordinary heap, from every DEK, KEK and wrapping key it uses
+// — and of the HKDF that derives a sealer's wrapping key from its root.
+//
+// It is true only when the program was built with GOEXPERIMENT=runtimesecret
+// for linux/amd64 or linux/arm64 (not Android): there every AES operation runs under
+// runtime/secret.Do, which erases its registers and stack before returning and
+// its heap allocations as soon as the garbage collector finds them
+// unreachable. Everywhere else it is false, and the documented exposure
+// applies: a key schedule stays on the heap, unwiped, until its memory is
+// reused. A deployment that relies on erasure can check this at startup.
+func KeyScheduleErasure() bool { return keyScheduleErasure }

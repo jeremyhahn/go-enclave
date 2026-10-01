@@ -257,20 +257,28 @@ const wrappingKeyInfo = "go-enclave v1 ModeRootKey KEK-wrapping key"
 // again: a sealed value opens only through the sealer that sealed it.
 //
 // HKDF (crypto/hkdf, SP 800-56C) is in Go's FIPS 140-3 module. Its output is a
-// heap slice, copied into dst and wiped at once; the HMAC state it builds from
-// the root is heap memory too, the same class of exposure as an AES key
-// schedule (see withAEAD).
+// heap slice, copied over the root and wiped at once; the HMAC state it builds
+// from the root is heap memory too, the same class of exposure as an AES key
+// schedule (see withAEAD), and erased the same way where KeyScheduleErasure
+// reports true.
 //
 // It derives IN PLACE: root holds the provider's root on entry and the
 // wrapping key on a nil return, so the provider's root exists in locked
 // memory only for the length of the derivation.
 func deriveWrappingKey(root, salt []byte) error {
-	k, err := hkdf.Key(sha256.New, root, salt, wrappingKeyInfo, len(root))
+	// Under secretDo, like every AES operation (see withAEAD): in an erasing
+	// build the HMAC state keyed by the root is erased once unreachable.
+	var err error
+	secretDo(func() {
+		var k []byte
+		if k, err = hkdf.Key(sha256.New, root, salt, wrappingKeyInfo, len(root)); err == nil {
+			copy(root, k)
+			wipe(k)
+		}
+	})
 	if err != nil {
 		return errors.Join(ErrSealFailed, err)
 	}
-	copy(root, k)
-	wipe(k)
 	return nil
 }
 
@@ -1104,16 +1112,31 @@ func shapeProviderFailure(op, err error, passThrough ...error) error {
 	return errors.Join(op, err)
 }
 
-// hierarchyFailure translates a hierarchy-key failure. Root and KEK enclaves
-// are used only under s.mu once published, and before publication only by
-// the holder of initSlot; nothing in either position destroys one it is
-// using — so an [ErrEnclaveDestroyed] from one of them means exactly one
-// thing: a shutdown sweep ran, and the honest report is [ErrSealerWiped], not
-// a generic destroyed-enclave error pointing at an enclave the caller never
-// knew existed.
-func hierarchyFailure(err error) error {
-	if errors.Is(err, ErrEnclaveDestroyed) {
-		return ErrSealerWiped
+// hierarchyFailure translates a failure from a key operation that involved
+// the hierarchy keys given (#98). An [ErrEnclaveDestroyed] there has two
+// possible sources, and they mean different things to a caller:
+//
+//   - a HIERARCHY key (the root or a KEK generation) is dead — a sweep ran,
+//     the sealer cannot serve anything again, and the honest report is
+//     [ErrSealerWiped];
+//   - only a PER-CALL enclave died — the operation's own DEK, or a retired
+//     KEK materialized for this one unwrap — while the hierarchy is intact.
+//     That is this operation losing its working key to a sweep, not the
+//     sealer being wiped, and reporting it as ErrSealerWiped would tell an
+//     operator their keys are gone when they are not. It stays
+//     ErrEnclaveDestroyed.
+//
+// Root and KEK enclaves are used only under s.mu once published, and before
+// publication only by the holder of initSlot; nothing in either position
+// destroys one it is using, so a dead one can only be a sweep's doing.
+func hierarchyFailure(err error, hierarchy ...*MemoryEnclave) error {
+	if !errors.Is(err, ErrEnclaveDestroyed) {
+		return err
+	}
+	for _, k := range hierarchy {
+		if k != nil && !k.IsAlive() {
+			return ErrSealerWiped
+		}
 	}
 	return err
 }
@@ -1176,10 +1199,17 @@ func (s *Sealer) protectRootKeyInner(ctx context.Context, dek *MemoryEnclave) ([
 			body = b
 			return nil
 		})
+		if err != nil {
+			// Translated BEFORE the read lock is released: a rotation waiting
+			// on the write lock replaces s.kek and destroys the outgoing
+			// generation, and a check after the unlock would race that write
+			// and read an ordinary retirement as a sweep.
+			err = hierarchyFailure(err, s.hierarchyLocked()...)
+		}
 		s.mu.RUnlock()
 
 		if err != nil {
-			return nil, hierarchyFailure(err)
+			return nil, err
 		}
 		return append(header, body...), nil
 	}
@@ -1277,7 +1307,7 @@ func (s *Sealer) unprotectRootKeyRLocked(_ context.Context, blob []byte, dek *Me
 	if uerr := dek.WithBytes(func(k []byte) error {
 		return openWithKeyInto(kek, body, header, k)
 	}); uerr != nil {
-		return hierarchyFailure(uerr)
+		return hierarchyFailure(uerr, s.hierarchyLocked()...)
 	}
 	return nil
 }
@@ -1295,9 +1325,21 @@ func (s *Sealer) unwrapRetiredKEKLocked(kekBlob []byte) (*MemoryEnclave, error) 
 		return openWithKeyInto(s.root, kekBlob[blobHeaderLen:], kekBlob[:blobHeaderLen], k)
 	}); uerr != nil {
 		destroyTransient(kek)
-		return nil, hierarchyFailure(uerr)
+		// The current KEK counts too: a sweep can destroy it and this
+		// transient while another borrow keeps the root alive, and that is a
+		// dead hierarchy, not a per-call loss.
+		return nil, hierarchyFailure(uerr, s.hierarchyLocked()...)
 	}
 	return kek, nil
+}
+
+// hierarchyLocked is the set of keys whose death means this sealer is wiped:
+// the root and the current KEK. Every translation of a key operation's
+// failure inside s.mu passes exactly this set to hierarchyFailure, read under
+// the lock the caller holds (read or write) so a concurrent rotation cannot
+// change it between the failure and the check.
+func (s *Sealer) hierarchyLocked() []*MemoryEnclave {
+	return []*MemoryEnclave{s.root, s.kek}
 }
 
 // initHierarchy performs the once-per-sealer root unseal and mints the first
@@ -1710,9 +1752,9 @@ func newGeneration(root *MemoryEnclave, gen uint32) (*MemoryEnclave, []byte, err
 		// the WipeAll ledger from here (see wipeHierarchyLocked) — never
 		// silently dropped as destroyTransient would (#102).
 		if derr := kek.Destroy(); derr != nil {
-			return nil, nil, errors.Join(hierarchyFailure(err), derr)
+			return nil, nil, errors.Join(hierarchyFailure(err, root), derr)
 		}
-		return nil, nil, hierarchyFailure(err)
+		return nil, nil, hierarchyFailure(err, root)
 	}
 	return kek, append(header, body...), nil
 }

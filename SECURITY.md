@@ -81,7 +81,10 @@ show the documentation understates them are in scope):
   `/proc/<pid>/mem`, a debugger): a `MemoryEnclave` is readable for its whole
   life, and with the software sealer or `ModeRootKey` the sealing keys are too.
 - AES key schedules left on the heap by seals and opens, as described in
-  [docs/sealing/engineering.md](docs/sealing/engineering.md#key-schedule-heap-exposure).
+  [docs/sealing/engineering.md](docs/sealing/engineering.md#key-schedule-heap-exposure),
+  in builds where `KeyScheduleErasure()` is false. Where it is true (a
+  `GOEXPERIMENT=runtimesecret` build on linux/amd64 or linux/arm64 (not Android)), a schedule
+  that survives the garbage collection after its operation IS in scope.
 - Core dumps on Windows, darwin, NetBSD, AIX, Solaris and illumos, where no
   per-mapping exclusion is available; and copies the caller makes itself
   (`OpenString`, `Open`, `NewMemoryEnclaveCopy` sources).
