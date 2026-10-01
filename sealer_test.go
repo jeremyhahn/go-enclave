@@ -20,9 +20,9 @@ import (
 	"unsafe"
 )
 
-// mapKeyProtector is a working KeyProtector whose "device" is a plain map:
-// Protect files a HEAP COPY of the key under a fresh opaque blob, Unprotect
-// looks it up. Deliberately insecure — it exists to stand in for a hardware
+// mapKeyProtector is a working KeyProtector whose "device" is a map of locked
+// mappings outside the package ledger: Protect files a copy of the key under a
+// fresh opaque blob, Unprotect looks it up. It stands in for a hardware
 // provider in tests, with two properties no real provider offers: its key
 // store survives a WipeAll untouched (which is exactly what a device-held key
 // does, and what the mode-asymmetry test needs), and the test can reach into
@@ -1239,6 +1239,380 @@ func failNextLock(t *testing.T) {
 	lockMemory = func([]byte) error {
 		lockMemory = prev
 		return errors.New("mlock: cannot allocate memory")
+	}
+}
+
+// TestSealer_RotationOverlappingASweepLeavesTheSealerWiped is the regression
+// for #102. Rotation mints the next KEK generation while borrowing the root
+// and the new KEK; a WipeAll landing in that window destroyed the old current
+// KEK, skipped the borrowed pair, and rotation then published the new
+// generation — a working sealer after a sweep. The sweep is injected from
+// inside the new KEK's mlock, which is mid-rotation by construction, with an
+// already-ended context so it never waits on a borrow.
+func TestSealer_RotationOverlappingASweepLeavesTheSealerWiped(t *testing.T) {
+	s, err := NewSealer() // software provider, ModeRootKey
+	if err != nil {
+		t.Fatalf("NewSealer: %v", err)
+	}
+	ctx := t.Context()
+	earlier, err := s.Seal(ctx, []byte("sealed before the rotation"))
+	if err != nil {
+		t.Fatalf("Seal: %v", err)
+	}
+	defer earlier.Destroy()
+
+	s.kekUsed.Store(kekMessageLimit + 1) // the next rotation is due
+
+	registryMu.Lock()
+	before := make(map[*MemoryEnclave]struct{}, len(live))
+	for e := range live {
+		before[e] = struct{}{}
+	}
+	registryMu.Unlock()
+
+	// The sweep must land while the ROOT is borrowed — that is the window in
+	// which WipeAll skips the root yet reclaims the old current KEK. In
+	// production the borrower is the rotation's own wrap; here the test holds
+	// the borrow across the sweep and lets go before the mint goes on, which
+	// leaves exactly the state the defect needs: old KEK gone, root standing,
+	// a new generation about to be published.
+	s.mu.RLock()
+	root := s.root
+	s.mu.RUnlock()
+	prev := lockMemory
+	t.Cleanup(func() { lockMemory = prev })
+	swept := false
+	lockMemory = func(b []byte) error {
+		if !swept {
+			swept = true
+			held, release, done := make(chan struct{}), make(chan struct{}), make(chan error, 1)
+			go func() {
+				done <- root.WithBytes(func([]byte) error { close(held); <-release; return nil })
+			}()
+			<-held
+			ended, cancel := context.WithCancel(context.Background())
+			cancel()
+			_, _ = WipeAll(ended) // an ended ctx sweeps what is free and never waits
+			close(release)
+			if err := <-done; err != nil {
+				t.Errorf("the borrow holding the root across the sweep failed: %v", err)
+			}
+		}
+		return prev(b)
+	}
+
+	if err := s.rotateKEK(); !errors.Is(err, ErrSealerWiped) {
+		t.Fatalf("rotateKEK with a sweep inside its mint = %v, want ErrSealerWiped", err)
+	}
+	if !swept {
+		t.Fatal("the injected sweep never ran: the rotation allocated nothing, so this test would be vacuous")
+	}
+	lockMemory = prev
+
+	s.mu.RLock()
+	rootAlive, kekAlive := s.root.IsAlive(), s.kek.IsAlive()
+	s.mu.RUnlock()
+	if rootAlive || kekAlive {
+		t.Fatalf("after an overlapping sweep: root alive %t, current KEK alive %t; want both destroyed", rootAlive, kekAlive)
+	}
+	if root.IsAlive() {
+		t.Fatal("the root the sweep skipped (it was borrowed) survived the rotation that overlapped it")
+	}
+	if _, err := s.Seal(ctx, []byte("after the sweep")); !errors.Is(err, ErrSealerWiped) {
+		t.Fatalf("Seal after rotation overlapped a sweep = %v, want ErrSealerWiped (no silent re-keying)", err)
+	}
+	// A value sealed BEFORE the sweep must not open afterwards either: its
+	// KEK generation's blob is retained, so a revived root would open it.
+	if _, err := earlier.Open(ctx); !errors.Is(err, ErrSealerWiped) {
+		t.Fatalf("Open of a value sealed before the sweep = %v, want ErrSealerWiped", err)
+	}
+	if err := earlier.Openable(); !errors.Is(err, ErrSealerWiped) {
+		t.Fatalf("Openable of a value sealed before the sweep = %v, want ErrSealerWiped", err)
+	}
+	// The discarded generation itself must be gone, not merely unreachable: a
+	// final WipeAll would reclaim a leaked KEK and still return zero, so the
+	// check is that nothing the rotation registered is still alive.
+	registryMu.Lock()
+	var leaked int
+	for e := range live {
+		if _, ok := before[e]; !ok && e.IsAlive() {
+			leaked++
+		}
+	}
+	registryMu.Unlock()
+	if leaked != 0 {
+		t.Fatalf("%d enclave(s) the overlapped rotation created are still alive: the discarded KEK leaked", leaked)
+	}
+}
+
+// TestSealer_RotationCleanupReportsAndRetriesARefusedRelease covers the
+// cleanup half of #102: when the kernel refuses the unmap of the keys a sweep
+// overlapped, rotation must REPORT it (not return a clean ErrSealerWiped). The
+// sealer then retries the keys it still references — the published root and
+// KEK — at the seal/open boundary until the kernel allows it; the discarded,
+// never-published generation is owned by the WipeAll ledger, which reclaims
+// it on the next sweep.
+func TestSealer_RotationCleanupReportsAndRetriesARefusedRelease(t *testing.T) {
+	s, err := NewSealer()
+	if err != nil {
+		t.Fatalf("NewSealer: %v", err)
+	}
+	ctx := t.Context()
+	v, err := s.Seal(ctx, []byte("sealed before the rotation"))
+	if err != nil {
+		t.Fatalf("Seal: %v", err)
+	}
+	defer v.Destroy()
+	s.kekUsed.Store(kekMessageLimit + 1)
+
+	s.mu.RLock()
+	root := s.root
+	s.mu.RUnlock()
+	prevLock, prevUnmap := lockMemory, unmapMemory
+	t.Cleanup(func() { lockMemory, unmapMemory = prevLock, prevUnmap })
+	refused := errors.New("munmap: cannot allocate memory")
+	swept := false
+	lockMemory = func(b []byte) error {
+		if !swept {
+			swept = true
+			// The sweep runs with the root borrowed (as the rotation's own
+			// wrap would hold it), so the mint completes and the overlap is
+			// caught at the end — the path that discards a fully minted
+			// generation. From here every unmap is refused: the sweep's own
+			// and the rotation's cleanup alike; wiping still happens first.
+			held, release, done := make(chan struct{}), make(chan struct{}), make(chan error, 1)
+			go func() {
+				done <- root.WithBytes(func([]byte) error { close(held); <-release; return nil })
+			}()
+			<-held
+			unmapMemory = func([]byte) error { return refused }
+			ended, cancel := context.WithCancel(context.Background())
+			cancel()
+			_, _ = WipeAll(ended)
+			close(release)
+			if err := <-done; err != nil {
+				t.Errorf("the borrow holding the root across the sweep failed: %v", err)
+			}
+		}
+		return prevLock(b)
+	}
+
+	err = s.rotateKEK()
+	lockMemory = prevLock
+	if !errors.Is(err, ErrSealerWiped) || !errors.Is(err, ErrLockedMemoryUnavailable) {
+		t.Fatalf("rotateKEK with its cleanup refused = %v, want ErrSealerWiped joined with the refusal (ErrLockedMemoryUnavailable)", err)
+	}
+	// Through the PUBLIC path: a dead sealer never rotates again, so the
+	// retry of the keys it still references — the published root and KEK —
+	// rides on the seals and opens that keep arriving. While the kernel still
+	// refuses, each reports the outstanding failure...
+	if _, err := s.Seal(ctx, []byte("while unmap is still refused")); !errors.Is(err, ErrSealerWiped) || !errors.Is(err, ErrLockedMemoryUnavailable) {
+		t.Fatalf("Seal with the cleanup still refused = %v, want ErrSealerWiped joined with the refusal", err)
+	}
+	if _, err := v.Open(ctx); !errors.Is(err, ErrSealerWiped) || !errors.Is(err, ErrLockedMemoryUnavailable) {
+		t.Fatalf("Open with the cleanup still refused = %v, want ErrSealerWiped joined with the refusal", err)
+	}
+
+	// ...and once it allows the unmap, the next seal releases them: a clean
+	// ErrSealerWiped, the published keys off the ledger WITHOUT a sweep. The
+	// discarded generation was never published; its refusal was reported
+	// above and the ledger owns it, so the next sweep reclaims it.
+	unmapMemory = prevUnmap
+	if _, err := s.Seal(ctx, []byte("after the refusal lifted")); !errors.Is(err, ErrSealerWiped) || errors.Is(err, ErrLockedMemoryUnavailable) {
+		t.Fatalf("Seal with unmap allowed = %v, want a clean ErrSealerWiped", err)
+	}
+	s.mu.RLock()
+	rootK, curK := s.root, s.kek
+	s.mu.RUnlock()
+	registryMu.Lock()
+	_, rootOnLedger := live[rootK]
+	_, kekOnLedger := live[curK]
+	registryMu.Unlock()
+	if rootOnLedger || kekOnLedger {
+		t.Fatalf("after the public retry: root on ledger %t, KEK on ledger %t; want both released without a sweep", rootOnLedger, kekOnLedger)
+	}
+	if n, err := WipeAll(ctx); n != 0 || err != nil {
+		t.Fatalf("WipeAll = (%d, %v), want (0, nil)", n, err)
+	}
+}
+
+// TestSealer_RotationKeepsAFailedMintsRefusedKEK covers the mint-FAILURE half
+// of #102's cleanup: the sweep reclaims the root itself mid-mint, so wrapping
+// fails, and the kernel then refuses to release the half-made KEK. The refusal
+// must be REPORTED with the failure — never silently dropped — and the KEK,
+// never published, is owned by the WipeAll ledger, which reclaims it once the
+// refusal lifts.
+func TestSealer_RotationKeepsAFailedMintsRefusedKEK(t *testing.T) {
+	s, err := NewSealer()
+	if err != nil {
+		t.Fatalf("NewSealer: %v", err)
+	}
+	ctx := t.Context()
+	v, err := s.Seal(ctx, []byte("sealed before the rotation"))
+	if err != nil {
+		t.Fatalf("Seal: %v", err)
+	}
+	defer v.Destroy()
+	s.kekUsed.Store(kekMessageLimit + 1)
+
+	prevLock, prevUnmap := lockMemory, unmapMemory
+	t.Cleanup(func() { lockMemory, unmapMemory = prevLock, prevUnmap })
+	var newKEK uintptr
+	refused := errors.New("munmap: cannot allocate memory")
+	lockMemory = func(b []byte) error {
+		if newKEK == 0 {
+			newKEK = uintptr(unsafe.Pointer(unsafe.SliceData(b)))
+			// Nothing is borrowed: the sweep reclaims the root and the
+			// current KEK, so the wrap that follows fails.
+			ended, cancel := context.WithCancel(context.Background())
+			cancel()
+			_, _ = WipeAll(ended)
+			// From here only the NEW KEK's unmap is refused.
+			unmapMemory = func(region []byte) error {
+				lo := uintptr(unsafe.Pointer(unsafe.SliceData(region)))
+				if newKEK >= lo && newKEK < lo+uintptr(len(region)) {
+					return refused
+				}
+				return prevUnmap(region)
+			}
+		}
+		return prevLock(b)
+	}
+
+	err = s.rotateKEK()
+	lockMemory = prevLock
+	if !errors.Is(err, ErrSealerWiped) || !errors.Is(err, ErrLockedMemoryUnavailable) {
+		t.Fatalf("rotateKEK whose mint failed and whose KEK release was refused = %v, want ErrSealerWiped joined with the refusal", err)
+	}
+	// The failed mint's KEK was never published: its refusal is reported
+	// above, and the WipeAll ledger owns it from here. Once the refusal
+	// lifts, the next sweep reclaims it.
+	unmapMemory = prevUnmap
+	if n, err := WipeAll(ctx); n != 0 || err != nil {
+		t.Fatalf("WipeAll after the refusal lifted = (%d, %v), want (0, nil): the ledger did not own the refused KEK", n, err)
+	}
+	registryMu.Lock()
+	var leftover int
+	for e := range live {
+		if !e.IsAlive() && e.m != nil {
+			leftover++
+		}
+	}
+	registryMu.Unlock()
+	if leftover != 0 {
+		t.Fatalf("%d wiped enclave(s) still mapped on the ledger after the public retry", leftover)
+	}
+}
+
+// TestSealer_InitializationReportsAFailedMintsRefusedRelease is the
+// initialization counterpart of the failed-mint case (#102): the first KEK is
+// being minted under a root just unsealed, a sweep reclaims that root, the
+// wrap fails, and the kernel refuses to release the half-made KEK. The first
+// seal must report the refusal along with ErrSealerWiped — not let the sweep's
+// verdict replace it — and the ledger must own the KEK, reclaiming it once the
+// refusal lifts.
+func TestSealer_InitializationReportsAFailedMintsRefusedRelease(t *testing.T) {
+	s, err := NewSealer() // ModeRootKey: the first seal initializes
+	if err != nil {
+		t.Fatalf("NewSealer: %v", err)
+	}
+	ctx := t.Context()
+
+	prevLock, prevUnmap := lockMemory, unmapMemory
+	t.Cleanup(func() { lockMemory, unmapMemory = prevLock, prevUnmap })
+	var newKEK uintptr
+	refused := errors.New("munmap: cannot allocate memory")
+	lockMemory = func(b []byte) error {
+		// The root has been unsealed and is pending publication, so this
+		// allocation is the first KEK's mint (same goroutine: no race).
+		if newKEK == 0 && s.pendingRoot != nil {
+			newKEK = uintptr(unsafe.Pointer(unsafe.SliceData(b)))
+			ended, cancel := context.WithCancel(context.Background())
+			cancel()
+			_, _ = WipeAll(ended) // reclaims the pending root: nothing borrows it
+			unmapMemory = func(region []byte) error {
+				lo := uintptr(unsafe.Pointer(unsafe.SliceData(region)))
+				if newKEK >= lo && newKEK < lo+uintptr(len(region)) {
+					return refused
+				}
+				return prevUnmap(region)
+			}
+		}
+		return prevLock(b)
+	}
+
+	_, err = s.Seal(ctx, []byte("the first seal initializes"))
+	lockMemory = prevLock
+	if newKEK == 0 {
+		t.Fatal("the hook never saw the first KEK's mint; this test would be vacuous")
+	}
+	if !errors.Is(err, ErrSealerWiped) || !errors.Is(err, ErrLockedMemoryUnavailable) {
+		t.Fatalf("the first Seal = %v, want ErrSealerWiped joined with the refused KEK release", err)
+	}
+
+	unmapMemory = prevUnmap
+	if n, err := WipeAll(ctx); n != 0 || err != nil {
+		t.Fatalf("WipeAll after the refusal lifted = (%d, %v), want (0, nil): the ledger did not own the refused KEK", n, err)
+	}
+}
+
+// TestSealer_DeadHierarchyCleanupRunsAtTheBoundary pins where #102's cleanup
+// lives: at the seal/open boundary, for EVERY path that reports ErrSealerWiped
+// while the published hierarchy is dead — not only the liveness check, but a
+// wait for initialization that found the hierarchy already swept, or a
+// retired-generation unwrap whose root a sweep destroyed mid-call. Driving the
+// boundary directly with the bare sentinel stands in for all of them: a
+// refused release of the dead keys is reported, and released once allowed.
+func TestSealer_DeadHierarchyCleanupRunsAtTheBoundary(t *testing.T) {
+	s, err := NewSealer()
+	if err != nil {
+		t.Fatalf("NewSealer: %v", err)
+	}
+	ctx := t.Context()
+	v, err := s.Seal(ctx, []byte("initializes the hierarchy"))
+	if err != nil {
+		t.Fatalf("Seal: %v", err)
+	}
+	defer v.Destroy()
+
+	prevUnmap := unmapMemory
+	t.Cleanup(func() { unmapMemory = prevUnmap })
+	unmapMemory = func([]byte) error { return errors.New("munmap: cannot allocate memory") }
+	_, _ = WipeAll(ctx) // wipes the root and KEK; their unmaps are refused
+
+	if err := s.withDeadHierarchyCleanup(ErrSealerWiped); !errors.Is(err, ErrSealerWiped) || !errors.Is(err, ErrLockedMemoryUnavailable) {
+		t.Fatalf("boundary over a dead hierarchy with refused releases = %v, want ErrSealerWiped joined with the refusal", err)
+	}
+	unmapMemory = prevUnmap
+	if err := s.withDeadHierarchyCleanup(ErrSealerWiped); !errors.Is(err, ErrSealerWiped) || errors.Is(err, ErrLockedMemoryUnavailable) {
+		t.Fatalf("boundary once the refusal lifted = %v, want a clean ErrSealerWiped", err)
+	}
+	s.mu.RLock()
+	rootK, curK := s.root, s.kek
+	s.mu.RUnlock()
+	registryMu.Lock()
+	_, rootOnLedger := live[rootK]
+	_, kekOnLedger := live[curK]
+	registryMu.Unlock()
+	if rootOnLedger || kekOnLedger {
+		t.Fatalf("after the boundary retry: root on ledger %t, KEK on ledger %t; want both released", rootOnLedger, kekOnLedger)
+	}
+	// A live hierarchy is never touched: the sentinel alone is not proof.
+	live2, err := NewSealer()
+	if err != nil {
+		t.Fatalf("NewSealer: %v", err)
+	}
+	if _, err := live2.Seal(ctx, []byte("live")); err != nil {
+		t.Fatalf("Seal: %v", err)
+	}
+	if err := live2.withDeadHierarchyCleanup(ErrSealerWiped); !errors.Is(err, ErrSealerWiped) {
+		t.Fatalf("boundary on a live hierarchy = %v, want the error unchanged", err)
+	}
+	live2.mu.RLock()
+	alive := live2.root.IsAlive() && live2.kek.IsAlive()
+	live2.mu.RUnlock()
+	if !alive {
+		t.Fatal("the boundary destroyed a LIVE hierarchy because an error said ErrSealerWiped")
 	}
 }
 

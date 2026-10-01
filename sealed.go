@@ -358,7 +358,11 @@ func newKeyEnclave(n int) (*MemoryEnclave, error) {
 		return nil, err
 	}
 	if err := e.WithBytes(fillRandom); err != nil {
-		destroyTransient(e)
+		// A refused release is reported with the failure and owned by the
+		// WipeAll ledger from here, not silently dropped (#102).
+		if derr := e.Destroy(); derr != nil {
+			return nil, errors.Join(ErrSealFailed, err, derr)
+		}
 		return nil, errors.Join(ErrSealFailed, err)
 	}
 	return e, nil

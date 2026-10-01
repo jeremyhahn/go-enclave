@@ -287,6 +287,13 @@ var docIssueRefLedger = []docIssueRef{
 	{"sealed.go", 87, classHistorical, "70b1c0bb2895", "It does NOT wait for an Open in flight, and that changed in #87."},
 	{"sealer.go", 87, classHistorical, "3a66b10d87a6", "guarantee callers can rely on (#87): a provider stalled inside"},
 	{"sealer.go", 87, classHistorical, "5f877366db29", "Until #87 this whole function ran under mu held exclusively, so a"},
+	{"sealer.go", 102, classHistorical, "54917efdbb2d", "before anything is looked at (#102): any sweep that runs at"},
+	{"sealer.go", 102, classHistorical, "fa5aa3548b04", "wiped, exactly as one overlapping initialization does (#102)."},
+	{"sealed.go", 102, classHistorical, "1b148e47dd6f", "by the WipeAll ledger from here, not silently dropped (#102)."},
+	{"sealer.go", 102, classHistorical, "41d5e489a270", "a release the kernel refused, which the ledger now owns (#102)."},
+	{"sealer.go", 102, classHistorical, "16b2d64244df", "WHO OWNS A REFUSED RELEASE (#102)."},
+	{"sealer.go", 102, classHistorical, "cc715bfb038c", "— never silently dropped as destroyTransient would (#102)."},
+	{"sealer.go", 102, classHistorical, "df5e3c794397", "hierarchy's cleanup is retried (#102): whatever path inside"},
 
 	// providertest — the conformance suite added by #64, in its own package.
 	// Scanned because the file walk is recursive; a root-only scan would have

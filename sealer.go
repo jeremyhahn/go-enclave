@@ -1007,7 +1007,7 @@ func hierarchyFailure(err error) error {
 // the unseal succeeded and must not be repeated — but the caller that asked
 // for it is told it was abandoned rather than handed a seal it stopped
 // waiting for.
-func (s *Sealer) protectRootKey(ctx context.Context, dek *MemoryEnclave) ([]byte, error) {
+func (s *Sealer) protectRootKeyInner(ctx context.Context, dek *MemoryEnclave) ([]byte, error) {
 	for {
 		if err := contextFailure(ctx, ErrSealFailed, nil); err != nil {
 			return nil, err
@@ -1024,7 +1024,7 @@ func (s *Sealer) protectRootKey(ctx context.Context, dek *MemoryEnclave) ([]byte
 		}
 		if !s.root.IsAlive() || !s.kek.IsAlive() {
 			s.mu.RUnlock()
-			return nil, ErrSealerWiped
+			return nil, ErrSealerWiped // cleanup is retried at the boundary
 		}
 
 		// Reserve a message from the current generation BEFORE wrapping, so a
@@ -1067,7 +1067,48 @@ func (s *Sealer) protectRootKey(ctx context.Context, dek *MemoryEnclave) ([]byte
 // path makes no provider call — the root was unsealed once, at the first seal
 // — and is in-process crypto under the read lock, so there is nothing for a
 // context to bound that open's entry check has not already covered.
-func (s *Sealer) unprotectRootKey(_ context.Context, blob []byte, dek *MemoryEnclave) error {
+// protectRootKey and unprotectRootKey are the single boundary every root-mode
+// seal and open passes through, and the one place a dead hierarchy's cleanup
+// is retried (#102): whatever path inside reported ErrSealerWiped — the
+// liveness check, a wait for initialization that found the hierarchy already
+// swept, a retired-generation unwrap whose root a sweep destroyed mid-call —
+// the error is checked against the published hierarchy here, with no lock
+// held, and if it is really dead the release of its keys is retried and any
+// refusal joined in. Doing it at the boundary rather than at each exit is what
+// keeps a new exit from silently skipping it.
+func (s *Sealer) protectRootKey(ctx context.Context, dek *MemoryEnclave) ([]byte, error) {
+	blob, err := s.protectRootKeyInner(ctx, dek)
+	return blob, s.withDeadHierarchyCleanup(err)
+}
+
+func (s *Sealer) unprotectRootKey(ctx context.Context, blob []byte, dek *MemoryEnclave) error {
+	return s.withDeadHierarchyCleanup(s.unprotectRootKeyRLocked(ctx, blob, dek))
+}
+
+// withDeadHierarchyCleanup returns err unchanged unless it reports
+// ErrSealerWiped AND the published hierarchy is dead; then it retries the
+// release of the hierarchy's keys and joins any refusal. The caller must not
+// hold s.mu.
+func (s *Sealer) withDeadHierarchyCleanup(err error) error {
+	if err == nil || !errors.Is(err, ErrSealerWiped) {
+		return err
+	}
+	s.mu.RLock()
+	dead := s.root != nil && (!s.root.IsAlive() || !s.kek.IsAlive())
+	s.mu.RUnlock()
+	if !dead {
+		return err
+	}
+	s.mu.Lock()
+	cerr := s.wipeHierarchyLocked(nil)
+	s.mu.Unlock()
+	if cerr != nil {
+		return errors.Join(err, cerr)
+	}
+	return err
+}
+
+func (s *Sealer) unprotectRootKeyRLocked(_ context.Context, blob []byte, dek *MemoryEnclave) error {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -1079,7 +1120,7 @@ func (s *Sealer) unprotectRootKey(_ context.Context, blob []byte, dek *MemoryEnc
 		return ErrSealedAuthentication
 	}
 	if !s.root.IsAlive() || !s.kek.IsAlive() {
-		return ErrSealerWiped
+		return ErrSealerWiped // cleanup is retried at the boundary
 	}
 
 	kind, gen, body, err := parseBlobHeader(blob)
@@ -1288,7 +1329,10 @@ func (s *Sealer) initHierarchyHeld(ctx context.Context) error {
 	kek, blob, err := newGeneration(root, 1)
 	if err != nil {
 		if derr := s.discardIfSwept(); derr != nil {
-			return derr
+			// Both halves are reported: the sweep's verdict, and whatever the
+			// failed mint said — including a release the kernel refused, which
+			// the ledger now owns (#102).
+			return errors.Join(derr, err)
 		}
 		// root stays in pendingRoot: the next attempt mints again under it.
 		// A sweep that destroyed it during the mint surfaces here as
@@ -1393,6 +1437,16 @@ func (s *Sealer) rotateKEK() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// The sweep sequence is read FIRST, before anything is looked at (#102):
+	// any sweep that runs at any point from here on — including one that
+	// slips in while the liveness checks below hold a key's read lock, which
+	// a sweep skips — shows up as an odd value now or a different one at the
+	// end. Reading it after those checks left a window: with releases
+	// refused, a sweep could wipe the old KEK after its check and finish
+	// before a later read, and rotation would publish a fresh generation
+	// under the surviving root.
+	gen := sweepGeneration()
+
 	if s.root == nil {
 		// Unreachable: rotation is only requested by a seal that found the
 		// hierarchy initialized, and nothing un-initializes one. Guarded so a
@@ -1400,6 +1454,9 @@ func (s *Sealer) rotateKEK() error {
 		return errors.Join(ErrSealFailed, errHierarchyUninitialized)
 	}
 	if !s.root.IsAlive() || !s.kek.IsAlive() {
+		if err := s.wipeHierarchyLocked(nil); err != nil {
+			return errors.Join(ErrSealerWiped, err)
+		}
 		return ErrSealerWiped
 	}
 	if s.kekUsed.Load() <= kekMessageLimit {
@@ -1408,7 +1465,27 @@ func (s *Sealer) rotateKEK() error {
 		return nil
 	}
 
+	// A sweep that overlaps the rotation must leave the sealer wiped, exactly
+	// as one overlapping initialization does (#102). newGeneration borrows the
+	// root and the new KEK while it wraps, and WipeAll skips a borrowed
+	// enclave — so a sweep landing here can destroy the OLD current KEK and
+	// leave the root standing, and publishing the new generation afterwards
+	// would hand the caller a working sealer after a WipeAll: the silent
+	// re-keying ErrSealerWiped exists to prevent. gen was read before any of
+	// this; an odd value (a sweep already in flight) or any change by the
+	// time the mint returns is an overlap.
 	kek, blob, err := newGeneration(s.root, s.kekGen+1)
+	if sweepInFlight(gen) || sweepGeneration() != gen {
+		// Finish what the sweep set out to do: no key of this hierarchy may
+		// outlive it. A refused release is reported, never suppressed.
+		if werr := s.wipeHierarchyLocked(kek); werr != nil {
+			err = errors.Join(err, werr)
+		}
+		if err != nil {
+			return errors.Join(ErrSealerWiped, err)
+		}
+		return ErrSealerWiped
+	}
 	if err != nil {
 		// The current generation stays in place: it is over its wrap budget
 		// for NEW seals, so the next seal will retry this rotation, but every
@@ -1421,6 +1498,35 @@ func (s *Sealer) rotateKEK() error {
 	s.kekBlobs[s.kekGen] = blob
 	s.kekUsed.Store(0)
 	return nil
+}
+
+// wipeHierarchyLocked destroys every key of a hierarchy a sweep has
+// overlapped or already killed: a just-minted generation that will not be
+// published (newKEK, may be nil), the current KEK and the root. Each Destroy is
+// idempotent on what the sweep already reclaimed, and detected canary
+// corruption panics, as Destroy does.
+//
+// WHO OWNS A REFUSED RELEASE (#102). The package has one owner for every
+// release the kernel refuses: the WipeAll ledger. A refused Destroy keeps the
+// mapping registered — wiped first, so it holds no key material, only locked
+// pages — and the next sweep retries it; every transient enclave a seal or
+// open creates already relies on that. On top of it, the sealer REPORTS every
+// refusal here, joined into the error the caller gets, and RETRIES the keys it
+// still references — the published root and KEK — every time a seal or open
+// finds the hierarchy dead (see withDeadHierarchyCleanup). A generation that was never
+// published is not referenced after this call: its refusal is reported once
+// and the ledger owns it from then on. Requires s.mu held exclusively.
+func (s *Sealer) wipeHierarchyLocked(newKEK *MemoryEnclave) error {
+	var errs []error
+	for _, k := range []*MemoryEnclave{newKEK, s.kek, s.root} {
+		if k == nil {
+			continue
+		}
+		if err := k.Destroy(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // newGeneration mints KEK generation gen: a fresh key in locked memory, plus
@@ -1441,7 +1547,12 @@ func newGeneration(root *MemoryEnclave, gen uint32) (*MemoryEnclave, []byte, err
 		body = b
 		return nil
 	}); err != nil {
-		destroyTransient(kek)
+		// A refused release is REPORTED, joined into the error, and owned by
+		// the WipeAll ledger from here (see wipeHierarchyLocked) — never
+		// silently dropped as destroyTransient would (#102).
+		if derr := kek.Destroy(); derr != nil {
+			return nil, nil, errors.Join(hierarchyFailure(err), derr)
+		}
 		return nil, nil, hierarchyFailure(err)
 	}
 	return kek, append(header, body...), nil
