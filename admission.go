@@ -819,10 +819,15 @@ func (a *Allocator) Available() int64 {
 // number fit; use [Allocator.ForceLimit] when the smaller ceiling is a fact to
 // be recorded rather than a request to be granted.
 //
-// newLimit of zero is legal and quiesces the allocator: it admits nothing until
-// raised again, while every live enclave keeps working and returns its
-// reservation on Destroy as usual. A negative newLimit returns
-// [ErrInvalidBudget].
+// newLimit of zero is legal. LOWERING a positive budget to zero succeeds only
+// when nothing is reserved — with live reservations it is a lowering below the
+// bytes in use, so it returns [ErrBudgetInUse] and changes nothing, exactly as
+// above. A budget that is ALREADY zero (after ForceLimit(0), say) is left as it
+// is: a newLimit equal to the current budget changes nothing and returns nil,
+// whatever is reserved. To stop admission while live enclaves keep working,
+// use [Allocator.ForceLimit] with zero, which records the over-subscription
+// and lets each Destroy return its reservation as usual. A negative newLimit
+// returns [ErrInvalidBudget].
 //
 // It is safe to call concurrently with allocation, release and other retunes.
 // A lowering and an in-flight admission are decided by the same compare-and-swap

@@ -1,0 +1,109 @@
+# Provider conformance — engineering contract
+
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-01
+> Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
+
+## Exported surface
+
+Package `providertest` (import path `github.com/jeremyhahn/go-enclave/providertest`).
+
+| Identifier | Contract |
+|---|---|
+| `TestProvider(ctx context.Context, cfg Config) error` | Runs the suite. `nil` = every property it could measure held. |
+| `Config.New func() (any, error)` | Returns a fresh provider. Called twice by the mode-pairing check (once per mode) and once by each other check that runs: up to 2 + 8 + 3 = 13 times when both modes are claimed. Nil or typed-nil results are failures. |
+| `Config.Modes []enclave.Mode` | The modes the provider **claims**. Must be non-empty and valid. Checked in both directions. |
+| `Config.SkipResidueSweep string` | Non-empty reason skips the residue sweep; echoed to `Logf`. |
+| `Config.SingleUseRoot string` | Non-empty reason relaxes the two `RootUnsealer` checks that need a second `UnsealRoot` call; echoed to `Logf`. |
+| `Config.Logf func(format string, args ...any)` | Receives what was measured, skipped and why. Pass `t.Logf`. |
+| `ErrInvalidConfig` / `*ConfigError{Field, Reason}` | `cfg` cannot be run; no provider was tested. |
+| `ErrAborted` / `*AbortedError{Err}` | `ctx` ended before the run finished; unwraps to `ctx.Err()`. Never a pass. |
+| `*PropertyError{Property, Detail}` | One failed assertion; several can share a `Property`. Walk them via the joined error's `Unwrap() []error`. |
+
+## Properties checked
+
+| Property (as reported) | Mode | Evidence the suite collects |
+|---|---|---|
+| mode/interface pairing | both | `NewSealer` must accept each claimed mode and refuse each unclaimed one with `ErrProviderMode`. |
+| Protect/Unprotect round trip | per-operation | Recovers the key (exact compare); `Protect` does not mutate its input; the blob contains no run of 8 consecutive key bytes. |
+| Protect does not retain the caller's key slice | per-operation | Spy |
+| Unprotect does not write into a destination the caller has finished with | per-operation | Spy, with populated-destination control |
+| a later provider call does not disturb an earlier destination | per-operation | Spy |
+| a blob this provider did not produce is refused | per-operation | Nil, empty, truncated, extended, random and a sample of bit-flipped blobs must fail as `ErrSealedAuthentication`; the destination must hold no run of 8 consecutive key bytes afterwards. |
+| a destination of the wrong length is an authentication failure | per-operation | |
+| Protect and Unprotect refuse a context that has already ended | per-operation | Already-canceled and already-expired contexts; error must match that context's error, not `ErrSealedAuthentication`; the destination must hold no run of 8 consecutive key bytes; the next call still works. |
+| no copy of the key is findable in the process after Unprotect returns | per-operation | Residue sweep for the whole 32-byte key (Linux; skippable with a reason; limits below) |
+| UnsealRoot writes a root across the whole destination | root-key | Not a placeholder (not all-zero, not constant) |
+| UnsealRoot does not retain the caller's destination | root-key | Spy (needs a second call) |
+| UnsealRoot refuses a context that has already ended, and consumes nothing | root-key | Ended contexts must fail with that context's error; the destination must hold no run of 8 consecutive bytes of the root a later live call returns; that later call must succeed |
+
+## Contract versus evidence
+
+The provider's **contract** is what the seam requires
+([sealing/engineering.md](../sealing/engineering.md#provider-contract)): retain
+nothing, write nothing on a refused call, refuse every forgery, honor the
+context. The suite collects **evidence** for that contract, sampled and
+heuristic in places, so a pass is weaker than the contract:
+
+- **"No key material in the destination"** is checked as "no run of 8
+  consecutive bytes of the expected key" (`containsRun`). A provider that writes
+  shorter fragments, or transformed key bytes, is not detected.
+- **Tamper refusal** is checked for a fixed set of malformed blobs and a bounded
+  sample of single-bit flips, not every forgery.
+- **The residue sweep** searches, at one moment, the anonymous mappings that
+  `/proc/self/maps` lists as readable, for the **whole** 32-byte key, excluding
+  the needle's own mapping. It skips unreadable and file-backed mappings, stops
+  scanning a mapping at the first read error, and cannot see partial copies or
+  copies in another form. It runs only on Linux, and a skipped or inconclusive
+  sweep is logged, not reported as a pass.
+- **Context handling** is checked only for contexts that ended before the call;
+  cancellation arriving mid-call is not measured.
+
+The harness itself never copies a provider's root onto the ordinary heap.
+Against a real device `UnsealRoot` hands back that device's actual root key, so
+every destination, comparison snapshot and control the root checks use is a
+locked enclave, borrowed across each check's observation window and destroyed
+afterwards. The one exception is the destination of an ended-context call the
+run may abandon: it can outlive the check, so it is an ordinary buffer holding
+the caller's canary — root material appears there only if the provider broke
+the contract, which is what that check reports.
+
+## Invariants
+
+1. **An ended run is never a pass.** It returns an error matching `ErrAborted`,
+   joined with any properties that had already failed while `ctx` was live.
+2. **Never a false finding from the run's own context.** A failure recorded
+   after `ctx` ended is dropped (the run reports aborted instead).
+3. **Calls with an ended context run on their own goroutine**, so a provider
+   that never returns cannot hold a run whose `ctx` is bounded. With an
+   unbounded `ctx` such a provider hangs the run; `go test -timeout` reports it.
+4. **No vacuous assertion.** Each spy check proves its setup first; the residue
+   sweep proves it can see the needle before it reports a negative, and
+   otherwise logs "not run".
+5. **Platform honesty.** On non-Linux hosts the residue sweep logs that it did
+   not run; it never reports a pass for an unmeasured property.
+
+## Error semantics
+
+| Return | Meaning | Caller action |
+|---|---|---|
+| `nil` | Every measurable property held | Read `Logf` output for what was not measured. |
+| matches `ErrInvalidConfig` | `New` nil, `Modes` empty or invalid | Fix the test harness. |
+| matches `ErrAborted` | Run incomplete | Re-run with a longer deadline; inspect any joined `*PropertyError`. |
+| joined `*PropertyError`s | Provider violates the seam | Fix the provider. |
+
+## Configuration and persistence
+
+Only `Config`. Nothing persisted.
+
+## Test strategy
+
+The suite is itself tested in `providertest` against `SoftwareProvider` (which
+must pass) and against deliberately defective providers (which each property
+must catch), so a check that cannot fail is found. `make test-providertest` and
+`make coverage-providertest` run it alone.
+
+## Observability
+
+`Config.Logf` is the only output besides the returned error: what was measured,
+what was skipped and why (residue sweep, single-use root, non-Linux host), and
+the residue sweep's mapping counts.

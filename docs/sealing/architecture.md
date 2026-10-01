@@ -1,0 +1,168 @@
+# Sealing and the provider seam — architecture
+
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-01
+> Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
+
+## Problem
+
+A `MemoryEnclave` holds plaintext for its whole life. Material used
+intermittently — a credential opened once per request, a root key used a few
+times an hour — is then readable by a live-memory adversary for the whole
+process lifetime when it only needs to exist for the operation. Separately,
+sealing must be rootable in a TPM, HSM or cloud KMS **without** this
+bottom-layer package importing any hardware code.
+
+## Shape chosen
+
+A `SealedEnclave` holds an **envelope** on the ordinary heap — both halves are
+ciphertext — and decrypts it into a fresh `MemoryEnclave` only for an `Open`:
+
+- a per-value 32-byte **DEK**, generated into locked memory, seals the material
+  with AES-256-GCM (`cipher.NewGCMWithRandomNonce`) and is destroyed before the
+  seal returns;
+- a **blob**: that DEK protected by the `Sealer`. The blob is the AEAD's
+  additional authenticated data, so pairing one value's blob with another
+  value's ciphertext fails the tag.
+
+The `Sealer` decides what protects the DEK, by **mode**:
+
+```mermaid
+flowchart TB
+  subgraph RK["ModeRootKey (default; zero value)"]
+    RU["RootUnsealer.UnsealRoot — at most one successful call per Sealer"] --> ROOT["root key<br/>locked enclave"]
+    ROOT --> KEK["current KEK generation<br/>locked enclave"]
+    ROOT --> RET["retired KEK generations<br/>root-wrapped blobs on the heap"]
+    KEK --> DEK1["per-value DEK blob"]
+  end
+  subgraph PO["ModePerOperation"]
+    KP["KeyProtector.Protect / Unprotect<br/>on every seal and open, DEK only"] --> DEK2["per-value DEK blob"]
+  end
+  DEK1 --> ENV["SealedEnclave envelope<br/>ciphertext + blob (AAD)"]
+  DEK2 --> ENV
+  ENV -- "Open(ctx)" --> ME["new MemoryEnclave<br/>plaintext decrypted in place"]
+```
+
+The provider seam is **two interfaces**, `KeyProtector` and `RootUnsealer`,
+so `NewSealer` can refuse a provider that does not implement the selected
+mode at construction (`ErrProviderMode`), instead of at the first credential
+read. go-enclave ships one provider, `SoftwareProvider`, which implements both.
+
+### What each mode buys against a live-memory reader
+
+Two separate questions decide what an adversary who can read this process's
+memory (live, or through swap or a core dump the hardening did not stop) can
+recover between opens:
+
+1. **Where the long-lived wrapping key lives** — the key that unwraps every
+   value's DEK.
+2. **Residual per-value keys on the heap.** Every AES-GCM operation expands its
+   key into a heap-allocated key schedule that Go neither zeroes nor frees
+   promptly ([sealed.go](../../sealed.go), `withAEAD`). Each seal and each open
+   leaves its value's DEK schedule behind, and that schedule plus the value's
+   heap ciphertext recovers the value until the allocator reuses the memory.
+   This holds in **every** mode, hardware included.
+
+| Configuration | Long-lived wrapping key | Residual heap key schedules |
+|---|---|---|
+| Default (`SoftwareProvider`, `ModeRootKey`) | Root and current KEK in this process's locked memory: recovers every value. | DEK schedules (per seal/open), KEK schedules (per DEK wrap/unwrap), root schedules (each KEK mint at first seal and at rotation, each retired-generation open). |
+| Hardware `RootUnsealer`, `ModeRootKey` | Same as the default after the one unseal. Hardware adds only the **origin and gating** of the root (e.g. a TPM PCR policy at unseal time). | Same as the default. |
+| Hardware `KeyProtector`, `ModePerOperation` | Held by the device, if the provider keeps it there; go-enclave never holds it. | DEK schedules of values sealed or opened since their memory was last reused: those values are recoverable; values never touched in that window are not. |
+| `SoftwareProvider`, `ModePerOperation` | The provider's root in this process: recovers every value. For tests and shape parity only. | DEK and root schedules, as above. |
+
+So no configuration makes previously used values unrecoverable from this
+process's memory. Per-operation hardware bounds the exposure to values used
+recently; it does not reduce it to values open right now. What sealing does
+guarantee in every mode is that this package decrypts **plaintext material**
+only into locked pages, never onto the heap.
+
+## Concurrency and lock ordering
+
+No mutex of a `Sealer` or `SealedEnclave` is held across a provider call.
+
+```mermaid
+flowchart LR
+  IS["Sealer.initSlot<br/>one-slot channel; select on ctx.Done()<br/>serializes one initialization attempt:<br/>UnsealRoot, KEK mint, overlap cleanup,<br/>publication"] --> MU["Sealer.mu (RWMutex)<br/>read: wrap/unwrap DEKs<br/>write: publish hierarchy, rotate KEK<br/>never across a provider call"]
+  MU --> EL["MemoryEnclave.mu<br/>borrows of root / KEK / DEK"]
+  EL --> RG["registryMu<br/>leaf: one map operation"]
+  SE["SealedEnclave.mu<br/>envelope lifecycle and snapshots<br/>(pin/unpin, Destroy, IsAlive, Openable)<br/>never held across a provider call"]
+```
+
+Arrows read "may be held while acquiring". The only lock spanning a provider
+call is the init slot — and the read borrow of the private, per-call enclave the
+provider writes into. A caller queued on the slot leaves when its own context
+ends, so a provider stalled in `UnsealRoot` stalls only callers that need the
+hierarchy it is producing, each for no longer than its own context allows.
+`SealedEnclave` pins its envelope (an in-flight counter) instead of holding its
+lock across an open, so `Destroy` — which takes no context — never waits on a
+provider.
+
+### First seal in ModeRootKey
+
+```mermaid
+sequenceDiagram
+  participant C as caller (ctx)
+  participant S as Sealer
+  participant P as RootUnsealer
+  C->>S: Seal(ctx, data)
+  S->>S: check ctx; record the value's sweep generation (for Openable)
+  S->>S: new DEK (locked)
+  S->>S: acquire initSlot (or ctx ends → ErrSealFailed + ctx.Err())
+  S->>S: read sweep generation g; allocate root destination (locked)
+  S->>P: UnsealRoot(ctx, dst)
+  P-->>S: root written (or error → retried by a later seal)
+  S->>S: sweep since g? → destroy root, ErrSealerWiped (never asks again)
+  S->>S: mint KEK gen 1 (failure keeps root for retry of the mint only)
+  S->>S: mu.Lock: publish root + KEK; mu.Unlock
+  S->>S: release initSlot; re-check ctx
+  S->>S: wrap DEK under KEK (mu.RLock); seal data under DEK, blob as AAD
+  S-->>C: *SealedEnclave (data wiped on every path)
+```
+
+## Rejected alternatives
+
+| Alternative | Why rejected |
+|---|---|
+| Send the material itself to the device | Bulk traffic across the device boundary, and the plaintext would come back into an ordinary heap buffer instead of being decrypted into locked pages. The device sees the 32-byte DEK only. |
+| One provider interface | A mismatch between provider and mode would surface at the first seal, hours after boot. |
+| `sync.Once` for the root unseal | One transient failure (memlock ceiling, device hiccup) would be permanent for the process. |
+| A mutex for first-time initialization | A mutex wait cannot be abandoned when a caller's context ends. The init slot is a channel selected against `ctx.Done()`. |
+| Holding `Sealer.mu` across `UnsealRoot` (before v0.7) | A stalled provider stalled every `Seal`, `Open` and `Openable` on that sealer, with no way to give up. |
+| `cipher.NewGCM` with caller-supplied nonces (and with it `GOEXPERIMENT=boringcrypto`) | FIPS 140-only mode refuses GCM with arbitrary IVs. `NewGCMWithRandomNonce` removes caller-managed nonces; random 96-bit nonces can still collide, so collision risk is bounded by per-key usage limits: 2^31 DEK wraps per KEK generation before rotation (`kekMessageLimit`, [sealer.go](../../sealer.go)) and 2^31 `Protect` calls per `SoftwareProvider` root (`softwareProtectLimit`, [provider_software.go](../../provider_software.go)), half of crypto/cipher's documented 2^32 bound. boringcrypto builds therefore cannot seal; Go's native FIPS 140-3 module is the supported route. |
+| XSalsa20-Poly1305 / ChaCha20-Poly1305 (no key schedule) | Not FIPS-approved. |
+| A hand-written AES whose schedule lives in locked memory | Unvalidated, unreviewed cryptography; a worse class of defect than the bounded heap exposure it removes. |
+| Shipping a `crypto.Decrypter` + signer composition | Out of scope for the bottom layer: device adapters belong with the layer that owns the devices, where they can be held to the conformance suite. Confidentiality-only providers (bare RSA-OAEP) do not satisfy the seam. |
+| Unmarshalling foreign sealed bytes | Would make an internal, unversioned, process-scoped format accidentally permanent. There is no constructor that accepts sealed bytes. |
+| Re-keying silently after a shutdown sweep | The next seal would succeed and old values would fail as `ErrSealedAuthentication`, presenting a lifecycle bug as an attack. The sealer fails closed with `ErrSealerWiped`. |
+| Sweeping `SealedEnclave` values in `WipeAll` | They hold no locked pages; in `ModePerOperation` they remain legitimately openable. `Openable` reports the state instead. |
+| Exporting the provider-health interface | Invites device-liveness answers to a question about this process's memory. `WithProviderHealth` takes a narrow callback instead. |
+| Charging `OpenWith`'s transient key pages to the budget | Two reservations per open let concurrent callers fragment the budget so every open fails under load. One reservation (the destination) gates the transients. |
+
+## Component boundaries
+
+| Concern | File |
+|---|---|
+| Seam interfaces, `RootKeyBytes`, provider context contract | [provider.go](../../provider.go) |
+| `SoftwareProvider` | [provider_software.go](../../provider_software.go) |
+| `Sealer`, modes, options, hierarchy, init slot, rotation, `SetSealer` | [sealer.go](../../sealer.go) |
+| `SealedEnclave`, envelope, AEAD use and its heap audit (`withAEAD`) | [sealed.go](../../sealed.go) |
+| Conformance suite for providers | [providertest](../../providertest/providertest.go) — see [provider-conformance](../provider-conformance/architecture.md) |
+
+TPM, HSM and KMS providers live in higher layers and are injected through
+`NewSealer(WithProvider(p), WithMode(m))` or `SetSealer`.
+
+## Trust boundaries
+
+- **Provider boundary.** A provider must supply confidentiality **and**
+  authenticity, must not retain the key it is handed or the plaintext it
+  recovers, and must honor its context.
+- **Process memory.** Plaintext material is decrypted only into locked pages;
+  per-value keys transit the Go heap inside AES key schedules (see
+  [engineering.md](engineering.md#key-schedule-heap-exposure)).
+- **Sealing narrows a window; it does not close one.** No protection against a
+  reader while an `Open` is in flight, or against anyone who can drive `Open`
+  through the caller's own surface.
+
+## Scope fence
+
+No persistence or transport format; no `SealWith` (seals are unbudgeted); no
+device liveness probe; no hardware code; no boringcrypto support.

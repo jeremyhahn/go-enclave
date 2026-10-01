@@ -197,17 +197,6 @@ type docIssueRef struct {
 // paste it; the classification is the whole point, and see "What this guard
 // CANNOT catch" above for what a careless one costs.
 var docIssueRefLedger = []docIssueRef{
-	// doc.go — the package overview, the text that reaches pkg.go.dev.
-	{"doc.go", 2, classHistorical, "bb4ba84cacb0", "the lock that made the first hazard survivable (issue #2)."},
-	{"doc.go", 17, classHistorical, "8717c0e85f04", "is the admitted variant (issue #17): it takes the destination"},
-	{"doc.go", 33, classHistorical, "b314e65b07e6", "is the explicit probe (issue #33), and it exists precisely"},
-	{"doc.go", 34, classHistorical, "1dcbdd445ab4", "This is a REFUSAL, not a gap, and it will not be \"fixed\" (#34)."},
-	{"doc.go", 50, classHistorical, "e418c60f0f70", "decided, not pending, on issue #50, and decided on SCOPE rather"},
-
-	// README.md — the same story for a reader who never runs go doc.
-	{"README.md", 17, classHistorical, "f58ce4a9862b", "is the admitted variant (#17): it takes the destination"},
-	{"README.md", 33, classHistorical, "02c7543b895c", "is the explicit probe (#33): `nil` when nothing this"},
-
 	// Implementation comments that carry decision history. Every one of these
 	// describes a decision already taken; none presents work as pending.
 	{"admission.go", 2, classHistorical, "edda89f9cc92", "That is gone (issue #2): go-enclave maps its own memory, and"},
@@ -259,7 +248,6 @@ var docIssueRefLedger = []docIssueRef{
 	// #88 (lifecycle API): Destroy returns its report, WipeAll takes a context
 	// and waits for borrows as an event. Every citation describes the change as
 	// made.
-	{"README.md", 88, classHistorical, "e5207ba8e7e0", "Replaces v0.6's `Destroy()` + `DestroyErr()` pair (#88)."},
 	{"enclave.go", 88, classHistorical, "a4f99c749f97", "release that takes it to zero wakes a waiting [WipeAll] (#88)."},
 	{"enclave.go", 88, classHistorical, "237399c1726e", "Until #88 this method returned nothing and the report needed a"},
 	{"registry.go", 88, classHistorical, "611eba1dce00", "What a borrow does add since #88 is two atomic adds on its own"},
@@ -272,7 +260,6 @@ var docIssueRefLedger = []docIssueRef{
 	// #86 — go-enclave's own OS memory layer over golang.org/x/sys, replacing
 	// memcall: one system call per primitive, one unmap, and an honest
 	// CoreDumpsDisabled on Windows.
-	{"README.md", 86, classHistorical, "7243c4763bdb", "maps its own memory, and since #86 it does so directly over"},
 	{"mapping.go", 86, classHistorical, "880801b2fa85", "told, as memcall told it before #86, that the hardening had"},
 	{"osmem.go", 86, classHistorical, "85a2203e82db", "That is the reason this layer exists (#86)."},
 	{"osmem_unix.go", 86, classHistorical, "e1a3017ced32", "hardening a consumer had before #86 is the hardening it has now."},
@@ -280,7 +267,6 @@ var docIssueRefLedger = []docIssueRef{
 	// #87 — context on every provider-reaching call, and no Sealer or
 	// SealedEnclave lock held across a provider: the init slot, the
 	// sweep-overlap check, and Destroy no longer waiting on an Open.
-	{"doc.go", 87, classHistorical, "05a27d6c4f2c", "holds up no other caller beyond that caller's own context (#87)."},
 	{"provider.go", 87, classHistorical, "509dfca3c542", "or any other, waits behind it beyond its own context (#87)."},
 	{"sealed.go", 87, classHistorical, "6ba7f5dff856", "and no mutex of this package's may be held across one (#87)."},
 	{"sealed.go", 87, classHistorical, "28fabaeb7549", "it there, as this did until #87, made Destroy — a call"},
@@ -307,8 +293,14 @@ var docIssueRefLedger = []docIssueRef{
 }
 
 // docIssueRefFiles is the documented surface this guard covers: the package
-// docs, the README a consumer actually reads, and the implementation comments
-// that carry decision history.
+// docs, the README a consumer actually reads, the implementation comments
+// that carry decision history, and the published prose documents — every
+// Markdown file under docs/ and SECURITY.md.
+//
+// The published prose is scanned under a STRICTER rule than the rest: it may
+// cite no local issue at all (see isCitationFreeDoc). Feature documentation
+// and the security policy ship to readers outside the issue tracker, so a
+// number there points at nothing they can open.
 //
 // Deliberately NOT covered:
 //   - CLAUDE.md, which is untracked (#80): agent working notes are kept out of
@@ -350,6 +342,8 @@ func docIssueRefFiles(t *testing.T) []string {
 			files = append(files, filepath.ToSlash(path))
 		case name == "README.md":
 			files = append(files, filepath.ToSlash(path))
+		case isCitationFreeDoc(filepath.ToSlash(path)):
+			files = append(files, filepath.ToSlash(path))
 		}
 		return nil
 	})
@@ -375,6 +369,16 @@ func docIssueRefFiles(t *testing.T) []string {
 	// would have excluded a whole new package's docs — silently, which is the
 	// one failure mode this file is not allowed to have.
 	return files
+}
+
+// isCitationFreeDoc reports whether file (slash-separated, relative to the
+// module root) is published prose that must carry no issue citation at all:
+// any Markdown file under docs/, and SECURITY.md. A citation found in one is a
+// failure whatever the ledger says, and a ledger entry naming one is a failure
+// too, so the count of such entries stays at zero.
+func isCitationFreeDoc(file string) bool {
+	return file == "SECURITY.md" ||
+		(strings.HasPrefix(file, "docs/") && strings.HasSuffix(file, ".md"))
 }
 
 // issueRef matches "#123" and captures the number, and qualifiedRef matches the
@@ -657,6 +661,10 @@ func TestDocIssueRefsAreClassified(t *testing.T) {
 
 	byKey := map[string]docIssueRef{}
 	for _, e := range docIssueRefLedger {
+		if isCitationFreeDoc(e.File) {
+			t.Errorf("docIssueRefLedger classifies a citation in %s, which must cite no "+
+				"issue at all: remove the citation from the document and this entry", e.File)
+		}
 		key := fmt.Sprintf("%s#%d@%s", e.File, e.Issue, e.Digest)
 		if _, dup := byKey[key]; dup {
 			t.Errorf("docIssueRefLedger has two entries for %s; one sentence is "+
@@ -668,6 +676,13 @@ func TestDocIssueRefsAreClassified(t *testing.T) {
 	seen := map[string]bool{}
 	for _, c := range citations {
 		seen[c.key()] = true
+		if isCitationFreeDoc(c.file) {
+			t.Errorf("%s:%d cites issue #%d. Published documentation (docs/**/*.md, "+
+				"SECURITY.md) must cite no issue: readers outside the tracker cannot "+
+				"open it. Say what the issue decided instead.\n  sentence: %s",
+				c.file, c.line, c.issue, c.sentence)
+			continue
+		}
 		entry, ok := byKey[c.key()]
 		if !ok {
 			t.Errorf("%s:%d cites issue #%d in a sentence that is not classified "+
@@ -783,8 +798,14 @@ func TestCitationExtraction(t *testing.T) {
 func TestDocIssueRefFilesReachesSubpackages(t *testing.T) {
 	files := docIssueRefFiles(t)
 
-	var sawRoot, sawSub bool
+	var sawRoot, sawSub, sawDocs, sawSecurity bool
 	for _, f := range files {
+		if strings.HasPrefix(f, "docs/") && strings.HasSuffix(f, ".md") {
+			sawDocs = true
+		}
+		if f == "SECURITY.md" {
+			sawSecurity = true
+		}
 		if f == "doc.go" {
 			sawRoot = true
 		}
@@ -805,6 +826,13 @@ func TestDocIssueRefFilesReachesSubpackages(t *testing.T) {
 	}
 	if !sawRoot {
 		t.Error("doc.go is not in the scan set: the root package docs are the whole point")
+	}
+	if !sawDocs {
+		t.Error("no docs/**/*.md file is in the scan set: the feature documentation " +
+			"must be scanned, or a citation planted there passes unseen")
+	}
+	if !sawSecurity {
+		t.Error("SECURITY.md is not in the scan set")
 	}
 	if !sawSub {
 		t.Error("no file in a subdirectory is in the scan set. If this package " +
