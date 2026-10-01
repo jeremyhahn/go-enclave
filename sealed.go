@@ -130,7 +130,7 @@ const sealedOverhead = 12 + 16
 // withAEAD runs fn with an AES-GCM AEAD built from a key held in a
 // [MemoryEnclave], holding the key inside a borrow for exactly the duration
 // of the call. Every AES-GCM operation in this package — the value under its
-// DEK, a DEK under a KEK, a KEK under the root, the software provider's
+// DEK, a DEK under a KEK, a KEK under a sealer's wrapping key, the software provider's
 // wrapping — goes through here, so this is the one place the key leaves
 // locked memory and the audit of that exposure lives at the call site rather
 // than only in the type documentation:
@@ -162,9 +162,10 @@ const sealedOverhead = 12 + 16
 //
 // What this means per key CLASS, because they differ in what a recovered copy
 // is worth: a DEK opens exactly one value and its Block becomes garbage
-// within one call; a KEK opens every DEK of its generation; the ROOT opens
-// everything, and in [ModeRootKey] its schedule transits the heap on every
-// retired-generation unwrap. [ModePerOperation] exists precisely so the key
+// within one call; a KEK opens every DEK of its generation; a [ModeRootKey]
+// sealer's WRAPPING KEY (derived from the provider's root) opens everything
+// that sealer sealed, and its schedule transits the heap on every KEK mint
+// and retired-generation unwrap. [ModePerOperation] exists precisely so the key
 // that opens everything never enters the process and never reaches this
 // function at all.
 //

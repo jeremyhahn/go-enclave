@@ -29,9 +29,10 @@ The `Sealer` decides what protects the DEK, by **mode**:
 ```mermaid
 flowchart TB
   subgraph RK["ModeRootKey (default; zero value)"]
-    RU["RootUnsealer.UnsealRoot — at most one successful call per Sealer"] --> ROOT["root key<br/>locked enclave"]
-    ROOT --> KEK["current KEK generation<br/>locked enclave"]
-    ROOT --> RET["retired KEK generations<br/>root-wrapped blobs on the heap"]
+    RU["RootUnsealer.UnsealRoot — at most one successful call per Sealer"] --> ROOT["provider root<br/>locked enclave, replaced in place"]
+    ROOT -->|"HKDF-SHA256, per-sealer salt"| WK["wrapping key<br/>locked enclave"]
+    WK --> KEK["current KEK generation<br/>locked enclave"]
+    WK --> RET["retired KEK generations<br/>wrapped blobs on the heap"]
     KEK --> DEK1["per-value DEK blob"]
   end
   subgraph PO["ModePerOperation"]
@@ -64,10 +65,10 @@ recover between opens:
 
 | Configuration | Long-lived wrapping key | Residual heap key schedules |
 |---|---|---|
-| Default (`SoftwareProvider`, `ModeRootKey`) | Root and current KEK in this process's locked memory: recovers every value. | DEK schedules (per seal/open), KEK schedules (per DEK wrap/unwrap), root schedules (each KEK mint at first seal and at rotation, each retired-generation open). |
+| Default (`SoftwareProvider`, `ModeRootKey`) | Wrapping key (derived from the root) and current KEK in this process's locked memory: recovers every value. | DEK schedules (per seal/open), KEK schedules (per DEK wrap/unwrap), wrapping-key schedules (each KEK mint at first seal and at rotation, each retired-generation open), and the root's HMAC state once per sealer (the derivation). |
 | Hardware `RootUnsealer`, `ModeRootKey` | Same as the default after the one unseal. Hardware adds only the **origin and gating** of the root (e.g. a TPM PCR policy at unseal time). | Same as the default. |
 | Hardware `KeyProtector`, `ModePerOperation` | Held by the device, if the provider keeps it there; go-enclave never holds it. | DEK schedules of values sealed or opened since their memory was last reused: those values are recoverable; values never touched in that window are not. |
-| `SoftwareProvider`, `ModePerOperation` | The provider's root in this process: recovers every value. For tests and shape parity only. | DEK and root schedules, as above. |
+| `SoftwareProvider`, `ModePerOperation` | The provider's root in this process: recovers every value. For tests and shape parity only. | DEK schedules, and the provider root's schedule on every `Protect`/`Unprotect`. |
 
 So no configuration makes previously used values unrecoverable from this
 process's memory. Per-operation hardware bounds the exposure to values used
@@ -110,6 +111,7 @@ sequenceDiagram
   S->>S: read sweep generation g; allocate root destination (locked)
   S->>P: UnsealRoot(ctx, dst)
   P-->>S: root written (or error → retried by a later seal)
+  S->>S: same borrow: replace root with HKDF-SHA256(root, fresh salt) — the wrapping key
   S->>S: sweep since g? → destroy root, ErrSealerWiped (never asks again)
   S->>S: mint KEK gen 1 (failure keeps root for retry of the mint only)
   S->>S: mu.Lock: publish root + KEK; mu.Unlock
@@ -127,7 +129,7 @@ sequenceDiagram
 | `sync.Once` for the root unseal | One transient failure (memlock ceiling, device hiccup) would be permanent for the process. |
 | A mutex for first-time initialization | A mutex wait cannot be abandoned when a caller's context ends. The init slot is a channel selected against `ctx.Done()`. |
 | Holding `Sealer.mu` across `UnsealRoot` (before v0.7) | A stalled provider stalled every `Seal`, `Open` and `Openable` on that sealer, with no way to give up. |
-| `cipher.NewGCM` with caller-supplied nonces (and with it `GOEXPERIMENT=boringcrypto`) | FIPS 140-only mode refuses GCM with arbitrary IVs. `NewGCMWithRandomNonce` removes caller-managed nonces; random 96-bit nonces can still collide, so collision risk is bounded by per-key usage limits: 2^31 DEK wraps per KEK generation before rotation (`kekMessageLimit`, [sealer.go](../../sealer.go)) and 2^31 `Protect` calls per `SoftwareProvider` root (`softwareProtectLimit`, [provider_software.go](../../provider_software.go)), half of crypto/cipher's documented 2^32 bound. boringcrypto builds therefore cannot seal; Go's native FIPS 140-3 module is the supported route. |
+| `cipher.NewGCM` with caller-supplied nonces (and with it `GOEXPERIMENT=boringcrypto`) | FIPS 140-only mode refuses GCM with arbitrary IVs. `NewGCMWithRandomNonce` removes caller-managed nonces; random 96-bit nonces can still collide, so collision risk is bounded by per-key usage limits: at most 2^31 DEK wraps per KEK generation before rotation (`kekMessageLimit`, [sealer.go](../../sealer.go); `WithKEKRotationLimit` can only lower it), at most 2^31 KEK generations per sealer wrapping key (`maxKEKGenerations`; past it a seal fails with `ErrSealerExhausted`) — a key each sealer derives from the provider's root with HKDF-SHA256 under its own random salt, so sealers sharing a root, or restarts unsealing the same one, never share it — and 2^31 `Protect` calls per `SoftwareProvider` root (`softwareProtectLimit`, [provider_software.go](../../provider_software.go)), half of crypto/cipher's documented 2^32 bound. boringcrypto builds therefore cannot seal; Go's native FIPS 140-3 module is the supported route. |
 | XSalsa20-Poly1305 / ChaCha20-Poly1305 (no key schedule) | Not FIPS-approved. |
 | A hand-written AES whose schedule lives in locked memory | Unvalidated, unreviewed cryptography; a worse class of defect than the bounded heap exposure it removes. |
 | Shipping a `crypto.Decrypter` + signer composition | Out of scope for the bottom layer: device adapters belong with the layer that owns the devices, where they can be held to the conformance suite. Confidentiality-only providers (bare RSA-OAEP) do not satisfy the seam. |

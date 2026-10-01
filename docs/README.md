@@ -34,6 +34,7 @@ code, is in the linked section.
 | Provider seam | `Protect(key)`, `Unprotect(blob, key)`, `UnsealRoot(dst)` | each takes `ctx` first | [sealing](sealing/user.md#migrating-from-v06) |
 | Provider failures on open | returned bare | joined under new `ErrOpenFailed` | [sealing](sealing/user.md#migrating-from-v06) |
 | `SealedEnclave.Destroy` | waited for in-flight `Open` | does not wait | [sealing](sealing/user.md#migrating-from-v06) |
+| Opened plaintext | `Open`/`OpenWith` returned a writable enclave | returns a frozen (read-only) enclave | [sealing](sealing/user.md#migrating-from-v06) |
 | Conformance suite | `TestProvider(cfg)` | `TestProvider(ctx, cfg)`; new `ErrAborted` | [provider-conformance](provider-conformance/user.md#migrating-from-v06) |
 
 The budget API (`Allocator`, `SetAllocator`, `ProcessAllocator`) is unchanged.

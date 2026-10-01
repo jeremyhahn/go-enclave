@@ -30,7 +30,7 @@ if err != nil {
 defer s.Destroy()
 
 // Later, per use: open late, destroy early.
-e, err := s.Open(ctx) // plaintext decrypted straight into locked pages
+e, err := s.Open(ctx) // decrypted into locked pages, which are then made read-only
 if err != nil {
 	return err
 }
@@ -192,5 +192,22 @@ Behavior changes to check for:
   "anything not `ErrSealedAuthentication`" as one class can now match
   `ErrOpenFailed`.
 - `(*SealedEnclave).Destroy` no longer waits for an `Open` in flight.
+- **`Open` and `OpenWith` return a FROZEN (read-only) enclave**, like every
+  constructor whose material is final. Reading through `WithBytes` is
+  unchanged; a write into the opened plaintext now faults. Code that edited an
+  opened value must copy it into its own `NewMemoryEnclaveSized` enclave
+  inside the borrow. A refused freeze fails the open closed instead of
+  handing back writable plaintext: no enclave is returned and the destination
+  is wiped. `OpenWith`'s reservation is returned once the destination's pages
+  are; if the kernel also refuses that release, the charge stays until a
+  `WipeAll` reclaims them.
+- A `ModeRootKey` sealer refuses a seal that would need a KEK generation past
+  2^31 (the bound on its wrapping key, which each sealer derives from the
+  root under its own salt) with `ErrSealerExhausted`, joined with
+  `ErrSealFailed`. Existing values keep opening; new seals need a new
+  `Sealer`, which derives a fresh wrapping key even over the same root. Only a very small `WithKEKRotationLimit` can reach it.
+- New option `WithKEKRotationLimit(n)` sets a `ModeRootKey` KEK generation's
+  crypto-period (1 to 2^31 wraps); out-of-range values, or the option with
+  `ModePerOperation`, fail `NewSealer` with `ErrInvalidRotationLimit`.
 - `providertest.TestProvider(cfg)` became `TestProvider(ctx, cfg)`; see
   [provider-conformance](../provider-conformance/user.md#migrating-from-v06).

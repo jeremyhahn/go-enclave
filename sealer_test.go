@@ -630,12 +630,23 @@ func TestSealer_ProviderRootReachesTheHierarchy(t *testing.T) {
 		})
 	}
 
-	// The provider's known root unwraps the sealer's KEK blob: the hierarchy
-	// is keyed by what UnsealRoot supplied, not by anything self-minted.
+	// The wrapping key derived from the provider's known root under the
+	// sealer's salt unwraps the sealer's KEK blob: the hierarchy is keyed by
+	// what UnsealRoot supplied, not by anything self-minted.
+	s.mu.RLock()
+	salt := append([]byte(nil), s.wrapSalt...)
+	s.mu.RUnlock()
 	providerRoot := buildRoot(0x5A)
 	defer providerRoot.Destroy()
+	if err := unwrapInto(providerRoot, kekBlob[:blobHeaderLen]); !errors.Is(err, ErrSealedAuthentication) {
+		t.Fatalf("the provider's root itself unwrapping the KEK blob = %v, want ErrSealedAuthentication: "+
+			"the sealer must wrap under a key derived from the root, never the root", err)
+	}
+	if err := providerRoot.WithBytes(func(r []byte) error { return deriveWrappingKey(r, salt) }); err != nil {
+		t.Fatalf("deriveWrappingKey: %v", err)
+	}
 	if err := unwrapInto(providerRoot, kekBlob[:blobHeaderLen]); err != nil {
-		t.Fatalf("the provider-supplied root does not unwrap the sealer's KEK blob (%v): "+
+		t.Fatalf("the key derived from the provider-supplied root does not unwrap the sealer's KEK blob (%v): "+
 			"the hierarchy is not keyed by the injected provider's root", err)
 	}
 
@@ -1613,6 +1624,399 @@ func TestSealer_DeadHierarchyCleanupRunsAtTheBoundary(t *testing.T) {
 	live2.mu.RUnlock()
 	if !alive {
 		t.Fatal("the boundary destroyed a LIVE hierarchy because an error said ErrSealerWiped")
+	}
+}
+
+// TestSealer_WithKEKRotationLimitIsValidated pins the option's bounds (#99):
+// a crypto-period of zero, one above the package's safe bound, or one given
+// for ModePerOperation (which has no KEK) is a configuration mistake refused at
+// construction; the bounds themselves are accepted.
+func TestSealer_WithKEKRotationLimitIsValidated(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		opts []SealerOption
+		ok   bool
+	}{
+		{"zero", []SealerOption{WithKEKRotationLimit(0)}, false},
+		{"above the safe bound", []SealerOption{WithKEKRotationLimit(kekMessageLimit + 1)}, false},
+		{"per-operation mode has no KEK", []SealerOption{WithMode(ModePerOperation), WithKEKRotationLimit(10)}, false},
+		{"one", []SealerOption{WithKEKRotationLimit(1)}, true},
+		{"the safe bound", []SealerOption{WithKEKRotationLimit(kekMessageLimit)}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, err := NewSealer(tc.opts...)
+			if tc.ok {
+				if err != nil {
+					t.Fatalf("NewSealer = %v, want success", err)
+				}
+				return
+			}
+			if !errors.Is(err, ErrInvalidRotationLimit) || s != nil {
+				t.Fatalf("NewSealer = (%v, %v), want (nil, ErrInvalidRotationLimit)", s, err)
+			}
+		})
+	}
+}
+
+// TestSealer_RotatesAtTheConfiguredLimit drives rotation through the public
+// API (#99): with a crypto-period of three wraps, ten seals span four KEK
+// generations, every retired generation's blob is retained, and every value —
+// whichever generation sealed it — still opens to its material.
+func TestSealer_RotatesAtTheConfiguredLimit(t *testing.T) {
+	s, err := NewSealer(WithKEKRotationLimit(3))
+	if err != nil {
+		t.Fatalf("NewSealer: %v", err)
+	}
+	ctx := t.Context()
+	var vals []*SealedEnclave
+	for i := 0; i < 10; i++ {
+		v, err := s.Seal(ctx, []byte(fmt.Sprintf("value-%02d", i)))
+		if err != nil {
+			t.Fatalf("Seal %d: %v", i, err)
+		}
+		vals = append(vals, v)
+	}
+	defer func() {
+		for _, v := range vals {
+			v.Destroy()
+		}
+	}()
+	s.mu.RLock()
+	gen, blobs := s.kekGen, len(s.kekBlobs)
+	s.mu.RUnlock()
+	if gen != 4 || blobs != 4 {
+		t.Fatalf("after 10 seals at 3 wraps per generation: generation %d with %d retained blobs, want 4 and 4", gen, blobs)
+	}
+	for i, v := range vals {
+		e, err := v.Open(ctx)
+		if err != nil {
+			t.Fatalf("Open of value %d: %v", i, err)
+		}
+		want := []byte(fmt.Sprintf("value-%02d", i))
+		if !e.EqualTo(want) {
+			t.Errorf("value %d opened to the wrong material", i)
+		}
+		if err := e.Destroy(); err != nil {
+			t.Fatalf("Destroy: %v", err)
+		}
+	}
+}
+
+// TestSealedEnclave_OpenReturnsAFrozenEnclave pins #99: the plaintext an open
+// returns is final, so it is read-only like every other complete constructor's
+// material; and a refused freeze fails the open closed — no enclave, no
+// reservation kept — rather than handing back writable plaintext.
+//
+// It seals through a sealer of its own rather than the process sealer, so its
+// outcome does not depend on which test installed that one or swept it.
+func TestSealedEnclave_OpenReturnsAFrozenEnclave(t *testing.T) {
+	ctx := t.Context()
+	s, err := NewSealer()
+	if err != nil {
+		t.Fatalf("NewSealer: %v", err)
+	}
+	v, err := s.Seal(ctx, []byte("final plaintext"))
+	if err != nil {
+		t.Fatalf("Seal: %v", err)
+	}
+	defer v.Destroy()
+
+	e, err := v.Open(ctx)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	e.mu.RLock()
+	mutable := e.m.mutable
+	e.mu.RUnlock()
+	if mutable {
+		t.Error("Open returned a writable enclave; final plaintext must be frozen")
+	}
+	if err := e.Destroy(); err != nil {
+		t.Fatalf("Destroy: %v", err)
+	}
+
+	a, err := NewAllocator(16 * pageSize)
+	if err != nil {
+		t.Fatalf("NewAllocator: %v", err)
+	}
+	prev := protectMemory
+	t.Cleanup(func() { protectMemory = prev })
+	protectMemory = func(b []byte, p protection) error {
+		if p == protReadOnly {
+			return errors.New("mprotect denied by policy")
+		}
+		return prev(b, p)
+	}
+	got, err := v.OpenWith(ctx, a)
+	protectMemory = prev
+	if err == nil {
+		_ = got.Destroy()
+		t.Fatal("OpenWith succeeded although its freeze was refused: writable plaintext was returned")
+	}
+	if !errors.Is(err, ErrLockedMemoryUnavailable) {
+		t.Errorf("OpenWith with the freeze refused = %v, want ErrLockedMemoryUnavailable", err)
+	}
+	if got != nil {
+		t.Error("OpenWith returned an enclave alongside its error")
+	}
+	if used := a.InUse(); used != 0 {
+		t.Errorf("InUse = %d after the open failed closed, want 0: the reservation was kept", used)
+	}
+}
+
+// TestSealedEnclave_OpenWithKeepsTheChargeWhenARefusedFreezeCannotRelease
+// covers the corner of the fail-closed open the refund cannot reach: the
+// freeze is refused AND so is the release of the destination. The open still
+// fails closed with no enclave, and the destination was wiped before the
+// unmap was attempted, but the kernel still holds its pages, so OpenWith's
+// reservation stays charged until the WipeAll ledger reclaims them — returning
+// it early would let the allocator admit memory the process cannot lock.
+func TestSealedEnclave_OpenWithKeepsTheChargeWhenARefusedFreezeCannotRelease(t *testing.T) {
+	ctx := t.Context()
+	s, err := NewSealer()
+	if err != nil {
+		t.Fatalf("NewSealer: %v", err)
+	}
+	v, err := s.Seal(ctx, []byte("final plaintext"))
+	if err != nil {
+		t.Fatalf("Seal: %v", err)
+	}
+	defer v.Destroy()
+	a, err := NewAllocator(16 * pageSize)
+	if err != nil {
+		t.Fatalf("NewAllocator: %v", err)
+	}
+
+	prevProtect, prevUnmap := protectMemory, unmapMemory
+	// The stranded destination is on the orphan ledger, so it is reclaimed the
+	// way production reclaims it — by a sweep once the refusal lifts.
+	t.Cleanup(func() {
+		protectMemory, unmapMemory = prevProtect, prevUnmap
+		_, _ = WipeAll(context.Background())
+	})
+	protectMemory = func(b []byte, p protection) error {
+		if p == protReadOnly {
+			return errors.New("mprotect denied by policy")
+		}
+		return prevProtect(b, p)
+	}
+	unmapMemory = func([]byte) error { return errors.New("munmap: cannot allocate memory") }
+
+	got, err := v.OpenWith(ctx, a)
+	protectMemory, unmapMemory = prevProtect, prevUnmap
+	if err == nil {
+		_ = got.Destroy()
+		t.Fatal("OpenWith succeeded although its freeze was refused")
+	}
+	if got != nil {
+		t.Error("OpenWith returned an enclave alongside its error")
+	}
+	if !errors.Is(err, ErrLockedMemoryUnavailable) {
+		t.Errorf("OpenWith = %v, want ErrLockedMemoryUnavailable", err)
+	}
+	if used := a.InUse(); used == 0 {
+		t.Fatal("InUse = 0 although the destination's pages were never released: the charge was refunded early")
+	}
+
+	// Once the refusal lifts, the ledger reclaims the pages and the charge
+	// goes back with them.
+	if _, err := WipeAll(ctx); err != nil {
+		t.Fatalf("WipeAll: %v", err)
+	}
+	if used := a.InUse(); used != 0 {
+		t.Errorf("InUse = %d after the sweep reclaimed the destination, want 0", used)
+	}
+}
+
+// TestSealer_ConcurrentSealsRotateWithoutLosingAValue drives rotation from
+// many goroutines at the smallest crypto-periods, where nearly every seal
+// crosses a limit: every value must open to its own material, and no
+// generation may wrap more than the limit allows.
+func TestSealer_ConcurrentSealsRotateWithoutLosingAValue(t *testing.T) {
+	for _, limit := range []uint64{1, 3} {
+		t.Run(fmt.Sprintf("limit=%d", limit), func(t *testing.T) {
+			ctx := t.Context()
+			s, err := NewSealer(WithKEKRotationLimit(limit))
+			if err != nil {
+				t.Fatalf("NewSealer: %v", err)
+			}
+			const workers, each = 8, 12
+			vals := make([][]*SealedEnclave, workers)
+			errs := make(chan error, workers)
+			var wg sync.WaitGroup
+			for w := range workers {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					for i := range each {
+						v, err := s.Seal(ctx, []byte(fmt.Sprintf("worker-%d-value-%02d", w, i)))
+						if err != nil {
+							errs <- err
+							return
+						}
+						vals[w] = append(vals[w], v)
+					}
+				}()
+			}
+			wg.Wait()
+			close(errs)
+			for err := range errs {
+				t.Fatalf("concurrent Seal: %v", err)
+			}
+			s.mu.RLock()
+			gen := uint64(s.kekGen)
+			s.mu.RUnlock()
+			if minGen := (workers*each + limit - 1) / limit; gen < minGen {
+				t.Errorf("generation %d after %d seals at %d per generation, want at least %d", gen, workers*each, limit, minGen)
+			}
+			perGen := map[uint32]uint64{}
+			for w := range workers {
+				for _, v := range vals[w] {
+					_, g, _, err := parseBlobHeader(v.blob)
+					if err != nil {
+						t.Fatalf("parseBlobHeader: %v", err)
+					}
+					if perGen[g]++; perGen[g] > limit {
+						t.Fatalf("generation %d wrapped %d DEKs, over its limit of %d", g, perGen[g], limit)
+					}
+				}
+			}
+			for w := range workers {
+				for i, v := range vals[w] {
+					e, err := v.Open(ctx)
+					if err != nil {
+						t.Fatalf("Open worker %d value %d: %v", w, i, err)
+					}
+					if !e.EqualTo([]byte(fmt.Sprintf("worker-%d-value-%02d", w, i))) {
+						t.Errorf("worker %d value %d opened to the wrong material", w, i)
+					}
+					_ = e.Destroy()
+					v.Destroy()
+				}
+			}
+		})
+	}
+}
+
+// TestSealer_SealersSharingARootWrapUnderDistinctKeys pins why the
+// generation ceiling bounds a real key: two sealers over the same provider —
+// as two sealers in one process, or one sealer on each boot of a hardware
+// root, get — must not wrap under the same key, or each would bring its own
+// allowance of random-nonce GCM messages under it. Each derives its wrapping
+// key from the root under its own salt, so neither's KEK blob unwraps under
+// the other's wrapping key.
+func TestSealer_SealersSharingARootWrapUnderDistinctKeys(t *testing.T) {
+	ctx := t.Context()
+	p := &fixedRootUnsealer{fill: 0x5A}
+	var sealers [2]*Sealer
+	for i := range sealers {
+		s, err := NewSealer(WithProvider(p), WithMode(ModeRootKey))
+		if err != nil {
+			t.Fatalf("NewSealer: %v", err)
+		}
+		v, err := s.Seal(ctx, []byte("initialize-the-hierarchy"))
+		if err != nil {
+			t.Fatalf("Seal: %v", err)
+		}
+		v.Destroy()
+		sealers[i] = s
+	}
+	a, b := sealers[0], sealers[1]
+	if bytes.Equal(a.wrapSalt, b.wrapSalt) {
+		t.Fatal("two sealers drew the same wrapping salt")
+	}
+	if ok, err := a.root.EqualToErr(mustBytes(t, b.root)); ok || err != nil {
+		t.Fatalf("two sealers over one root wrap under the same key (equal=%t, err=%v)", ok, err)
+	}
+	blob := a.kekBlobs[1]
+	kek, err := NewMemoryEnclaveSized(kekBytes)
+	if err != nil {
+		t.Fatalf("NewMemoryEnclaveSized: %v", err)
+	}
+	defer kek.Destroy()
+	err = kek.WithBytes(func(k []byte) error {
+		return openWithKeyInto(b.root, blob[blobHeaderLen:], blob[:blobHeaderLen], k)
+	})
+	if !errors.Is(err, ErrSealedAuthentication) {
+		t.Fatalf("one sealer's KEK blob under the other's wrapping key = %v, want ErrSealedAuthentication", err)
+	}
+}
+
+// mustBytes copies an enclave's material out for a comparison in a test.
+func mustBytes(t *testing.T, e *MemoryEnclave) []byte {
+	t.Helper()
+	var out []byte
+	if err := e.WithBytes(func(b []byte) error { out = append(out, b...); return nil }); err != nil {
+		t.Fatalf("WithBytes: %v", err)
+	}
+	return out
+}
+
+// TestSealer_RefusesAGenerationPastTheRootCeiling pins the root's usage bound:
+// one root wrap per KEK generation, refused once maxKEKGenerations are spent
+// (which also keeps the uint32 generation identifier from wrapping onto a
+// retired generation). The refusal is fail-closed for new seals only: nothing
+// is minted, the hierarchy stays published, and every existing value opens.
+func TestSealer_RefusesAGenerationPastTheRootCeiling(t *testing.T) {
+	ctx := t.Context()
+	s, err := NewSealer(WithKEKRotationLimit(1))
+	if err != nil {
+		t.Fatalf("NewSealer: %v", err)
+	}
+	first, err := s.Seal(ctx, []byte("sealed under generation 1"))
+	if err != nil {
+		t.Fatalf("Seal: %v", err)
+	}
+	defer first.Destroy()
+
+	// Position the counters one generation below the ceiling: generation 1's
+	// key is relabelled as the second-to-last generation, keeping its blob
+	// under the old identifier as well so the value above still opens.
+	s.mu.Lock()
+	s.kekGen = maxKEKGenerations - 1
+	s.kekBlobs[s.kekGen] = s.kekBlobs[1]
+	s.mu.Unlock()
+
+	// One more generation is allowed: the seal spends generation
+	// maxKEKGenerations-1's budget and rotates to the last one.
+	last, err := s.Seal(ctx, []byte("sealed under the last generation"))
+	if err != nil {
+		t.Fatalf("Seal into the last generation: %v", err)
+	}
+	defer last.Destroy()
+	s.mu.RLock()
+	gen := s.kekGen
+	s.mu.RUnlock()
+	if gen != maxKEKGenerations {
+		t.Fatalf("generation = %d after the last allowed rotation, want %d", gen, uint32(maxKEKGenerations))
+	}
+
+	// The last generation's one wrap is spent; the next rotation is refused.
+	for i := range 2 {
+		v, err := s.Seal(ctx, []byte("one too many"))
+		if err == nil {
+			v.Destroy()
+			t.Fatalf("seal %d past the ceiling succeeded", i)
+		}
+		if !errors.Is(err, ErrSealerExhausted) || !errors.Is(err, ErrSealFailed) {
+			t.Fatalf("seal %d past the ceiling = %v, want ErrSealerExhausted joined with ErrSealFailed", i, err)
+		}
+	}
+	s.mu.RLock()
+	gen, alive := s.kekGen, s.root.IsAlive() && s.kek.IsAlive()
+	s.mu.RUnlock()
+	if gen != maxKEKGenerations || !alive {
+		t.Fatalf("after the refusal: generation %d, hierarchy alive %t; want %d and true", gen, alive, uint32(maxKEKGenerations))
+	}
+
+	for name, v := range map[string]*SealedEnclave{"first": first, "last": last} {
+		e, err := v.Open(ctx)
+		if err != nil {
+			t.Fatalf("Open of the %s value after the refusal: %v", name, err)
+		}
+		if err := e.Destroy(); err != nil {
+			t.Fatalf("Destroy: %v", err)
+		}
 	}
 }
 

@@ -115,7 +115,7 @@ mapping.
 | `ErrEnclaveDestroyed` on an enclave you did not destroy | A shutdown `WipeAll` ran, or the constructor raced one | Stop workers before the shutdown sweep. |
 | `ErrReleasedWithoutWipe` from `Destroy` | `mprotect` denied by seccomp or a sandbox | Allow `mprotect` on the process's own memory. The pages were released (never swapped; zeroed by the kernel before reuse), but the in-process wipe was skipped. The error also matches `ErrLockedMemoryUnavailable`. |
 | Process crashes (SIGSEGV) reading a slice | A slice from `Open` (or one kept past `WithBytes`) outlived the enclave | Use `WithBytes`; never retain borrowed slices. |
-| Process crashes writing through a slice | Writing to a frozen enclave | Writes are only for sized enclaves, inside `WithBytes`, before `Freeze`. |
+| Process crashes writing through a slice | Writing to a frozen enclave — including one `SealedEnclave.Open` returned, which is always frozen | Writes are only for sized enclaves, inside `WithBytes`, before `Freeze`; to edit opened plaintext, copy it into your own sized enclave inside the borrow. |
 | Panic matching `ErrEnclaveCorrupted` | Buffer underflow or memory corruption elsewhere | Treat as a security incident; find the writer. |
 | Build error `undefined: go_enclave_does_not_support_this_GOOS` | Unsupported GOOS (js, wasip1, plan9) | Not supported by design. |
 

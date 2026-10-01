@@ -11,6 +11,7 @@
 | `NewSealer(opts ...SealerOption) (*Sealer, error)` | No options: `SoftwareProvider`, `ModeRootKey`, cannot fail. Touches no provider and no locked memory until the first seal. |
 | `WithProvider(p any) SealerOption` | `p` must implement the mode's interface; nil or typed-nil is refused. |
 | `WithMode(m Mode) SealerOption` | `ModeRootKey` (zero value) or `ModePerOperation`. |
+| `WithKEKRotationLimit(n uint64) SealerOption` | `ModeRootKey` only: DEK wraps per KEK generation before rotation, 1 to 2^31 (the default, half of crypto/cipher's 2^32 random-nonce bound). Out of range, or with `ModePerOperation`: `ErrInvalidRotationLimit`. |
 | `WithProviderHealth(fn func() error) SealerOption` | Non-blocking report of the provider's **in-process** sealing state: `nil` or `ErrSealerWiped`. Believed and terminal. Ignored in `ModeRootKey`. |
 | `SetSealer(s *Sealer) error` | Installs the process sealer. One-shot. |
 | `(*Sealer).Seal(ctx, data) (*SealedEnclave, error)` / `Mode() Mode` | `NewSealed` for an explicit sealer. |
@@ -88,8 +89,16 @@
    the hierarchy dead, and an unpublished generation is owned by the `WipeAll`
    ledger, which retries every refused release. Recovery
    is constructing a new `Sealer` (and re-sealing from source).
-6. **KEK rotation.** A KEK generation wraps at most 2^31 DEKs, then a new
-   generation is minted under the root (no provider call). The retired KEK's
+6. **Wrapping key and KEK rotation.** The sealer never encrypts under the
+   provider's root: inside the unseal's own borrow it replaces the root with
+   a wrapping key derived from it, HKDF-SHA256 under a 256-bit salt drawn for
+   this sealer alone. Sealers sharing a provider — or one sealer per boot of
+   a hardware root that unseals the same key every time — therefore never
+   share a wrapping key, and the per-sealer bound below bounds a real key.
+   A KEK generation wraps at most 2^31 DEKs — or the smaller
+   crypto-period `WithKEKRotationLimit` set — then a new generation is minted
+   under the wrapping key (no provider call); at most 2^31 generations, then
+   seals fail with `ErrSealerExhausted`. The retired KEK's
    enclave is destroyed; its root-wrapped blob is kept so older values still
    open (one transient locked page per retired-generation open).
 7. **`SoftwareProvider` message bound.** In `ModePerOperation` its single root
@@ -129,6 +138,8 @@
 | `ErrNilAllocator` / `ErrBudgetExhausted` | `OpenWith` | Nil allocator (never falls back) / over budget. Decided before any provider call. |
 | `ErrEmptyEnclave`, `ErrMaterialTooLarge` | seal | Empty input; input above AES-GCM's single-message limit, (2^32−2)·16 bytes. |
 | `ErrProviderMode`, `ErrInvalidMode` | `NewSealer` | Provider lacks the mode's interface (incl. nil/typed nil); unknown mode. |
+| `ErrSealerExhausted` | `Seal` (`ModeRootKey`), joined with `ErrSealFailed` | A rotation would need a KEK generation past 2^31, the bound on the sealer's own wrapping key. Nothing is minted; existing values keep opening; new seals need a new `Sealer`. |
+| `ErrInvalidRotationLimit` | `NewSealer` | `WithKEKRotationLimit` of zero, above 2^31, or given for `ModePerOperation`. |
 | `ErrSealerInstalled`, `ErrNilSealer` | `SetSealer`, nil `(*Sealer).Seal` | One-shot install; nil sealer. |
 | `ErrProviderMessageLimit` | `SoftwareProvider.Protect` | Per-key message bound reached. |
 | `ErrPlaintextEscaped` | open | Defensive; unreachable while destination capacity is exact. |
@@ -247,7 +258,8 @@ heap. Per key class, and when its schedule reaches the heap:
 |---|---|---|
 | DEK | Every seal and every open of that value, in every mode | That value (its ciphertext is on the heap too) |
 | KEK (`ModeRootKey`) | Every DEK wrap (seal) and unwrap (open) under it | Every value of its generation |
-| Root (`ModeRootKey`) | Every KEK mint — the first seal and each rotation (`newGeneration`) — and every open of a value under a retired generation | Everything |
+| Root (`ModeRootKey`) | Once, at initialization: the HMAC state of the wrapping-key derivation (`deriveWrappingKey`) | Everything this provider's root keys, in any sealer |
+| Wrapping key (`ModeRootKey`) | Every KEK mint — the first seal and each rotation (`newGeneration`) — and every open of a value under a retired generation | Everything this sealer sealed |
 | `SoftwareProvider` root (`ModePerOperation`) | Every `Protect` and `Unprotect` | Everything |
 
 In `ModePerOperation` with a hardware provider, the long-lived key never enters
@@ -260,9 +272,11 @@ stops appearing (so the audit is re-measured when it changes).
 
 Three different claims, and this package makes only the first two:
 
-1. **Approved algorithms.** All cryptography is AES-256-GCM through
-   `cipher.NewGCMWithRandomNonce`, an approved algorithm in Go's FIPS 140-3
-   module; there is no `NewGCM` fallback.
+1. **Approved algorithms.** Every encryption is AES-256-GCM through
+   `cipher.NewGCMWithRandomNonce`, and a `ModeRootKey` sealer derives its
+   wrapping key with HKDF-SHA256 (`crypto/hkdf`, a 32-byte key and salt);
+   both are approved algorithms in Go's FIPS 140-3 module. There is no
+   `NewGCM` fallback.
 2. **Strict-mode compatibility, tested.** `make test-fips` (run nightly and on
    release) builds and runs the tests under
    `GOFIPS140=latest GODEBUG=fips140=only`. That is compatibility EVIDENCE,

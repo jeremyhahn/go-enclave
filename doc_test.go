@@ -280,6 +280,7 @@ var docIssueRefLedger = []docIssueRef{
 	{"sealer.go", 102, classHistorical, "16b2d64244df", "WHO OWNS A REFUSED RELEASE (#102)."},
 	{"sealer.go", 102, classHistorical, "cc715bfb038c", "— never silently dropped as destroyTransient would (#102)."},
 	{"sealer.go", 102, classHistorical, "df5e3c794397", "hierarchy's cleanup is retried (#102): whatever path inside"},
+	{"sealer.go", 99, classHistorical, "b5d25e5f0904", "whose material is complete (#99): a stray write through a"},
 
 	// providertest — the conformance suite added by #64, in its own package.
 	// Scanned because the file walk is recursive; a root-only scan would have

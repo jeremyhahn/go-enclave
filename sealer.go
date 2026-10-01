@@ -10,7 +10,9 @@ package enclave
 
 import (
 	"context"
+	"crypto/hkdf"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/binary"
 	"errors"
 	"reflect"
@@ -90,6 +92,27 @@ var (
 	// read; this error existing is the reason the seam is two interfaces
 	// instead of one.
 	ErrProviderMode = errors.New("enclave: provider does not implement the interface the selected sealing mode requires")
+
+	// ErrSealerExhausted is returned, joined with [ErrSealFailed], by a seal
+	// on a [ModeRootKey] sealer that would need a KEK generation past
+	// maxKEKGenerations. The sealer's wrapping key — derived from the
+	// provider's root under a salt of this sealer's own, so no other sealer
+	// shares it — wraps one blob per generation, so the ceiling is that key's
+	// GCM usage bound (the same half-of-2^32 margin kekMessageLimit keeps),
+	// and it also keeps the generation identifier from wrapping onto a
+	// retired one. The refusal is fail-closed and leaves the hierarchy intact:
+	// every value already sealed keeps opening. Only a sealer with a very
+	// small [WithKEKRotationLimit] can reach it in practice; the remedy is a
+	// new Sealer, which derives a new wrapping key even over the same root.
+	ErrSealerExhausted = errors.New("enclave: this sealer has used every KEK generation its wrapping key may wrap; existing values still open, but new seals require constructing a new Sealer")
+
+	// ErrInvalidRotationLimit is returned by [NewSealer] for a
+	// [WithKEKRotationLimit] that cannot be honored: zero, above the safe
+	// bound this package enforces (2^31 wraps per KEK generation, half of the
+	// 2^32 crypto/cipher allows a random-nonce GCM key), or given for
+	// [ModePerOperation], which has no KEK to rotate. Like the other
+	// construction errors it reports a configuration mistake, at boot.
+	ErrInvalidRotationLimit = errors.New("enclave: KEK rotation limit must be between 1 and 2^31 and applies only to ModeRootKey")
 
 	// ErrInvalidMode is returned by [NewSealer] for a [Mode] value that names
 	// no mode. It reports a programming mistake, not a runtime condition —
@@ -209,6 +232,56 @@ const kekBytes = 32
 // hundred bytes) is retained so values sealed under it keep opening.
 const kekMessageLimit = 1 << 31
 
+// wrappingSaltBytes is the length of the salt a [ModeRootKey] sealer draws
+// for its wrapping-key derivation: as long as the root, so sealers over the
+// same root share a wrapping key only by drawing the same 256-bit salt — a
+// birthday collision needs on the order of 2^128 of them.
+const wrappingSaltBytes = 32
+
+// wrappingKeyInfo is the HKDF info that binds a derived wrapping key to its
+// one use, so the same root can never yield it for any other purpose.
+const wrappingKeyInfo = "go-enclave v1 ModeRootKey KEK-wrapping key"
+
+// deriveWrappingKey replaces root with the key a [ModeRootKey] sealer wraps its
+// KEK generations under: HKDF-SHA256 of the provider's root with a salt drawn
+// for this sealer alone.
+//
+// It exists because the root is NOT unique to a sealer. Every sealer built
+// over the same provider gets the same root, and a hardware RootUnsealer
+// returns the same root on every boot. Wrapping under the root directly would
+// make every per-sealer bound on root encryptions — maxKEKGenerations — a
+// bound on nothing: each new sealer, and each restart, would bring a fresh
+// allowance of random-nonce GCM messages under one key. Under a fresh salt
+// each sealer's wrapping key is its own, so the bound holds for the key it
+// actually counts. Nothing persists across sealers that would need the salt
+// again: a sealed value opens only through the sealer that sealed it.
+//
+// HKDF (crypto/hkdf, SP 800-56C) is in Go's FIPS 140-3 module. Its output is a
+// heap slice, copied into dst and wiped at once; the HMAC state it builds from
+// the root is heap memory too, the same class of exposure as an AES key
+// schedule (see withAEAD).
+//
+// It derives IN PLACE: root holds the provider's root on entry and the
+// wrapping key on a nil return, so the provider's root exists in locked
+// memory only for the length of the derivation.
+func deriveWrappingKey(root, salt []byte) error {
+	k, err := hkdf.Key(sha256.New, root, salt, wrappingKeyInfo, len(root))
+	if err != nil {
+		return errors.Join(ErrSealFailed, err)
+	}
+	copy(root, k)
+	wipe(k)
+	return nil
+}
+
+// maxKEKGenerations is how many KEK generations one sealer's wrapping key
+// (deriveWrappingKey) may wrap. Each generation is one wrap under a random
+// nonce, so that key is held to the same bound kekMessageLimit holds a KEK
+// to; generation identifiers are a
+// uint32 counted from 1, so the ceiling also keeps them from ever wrapping
+// onto a retired generation whose blob is still retained.
+const maxKEKGenerations = 1 << 31
+
 // Blob framing. Every wrapped-key blob this package produces itself starts
 // with a fixed header that is also the AAD of the wrapping, so a blob cannot
 // be re-purposed across kinds or generations even in constructions where the
@@ -326,12 +399,23 @@ type Sealer struct {
 	// and never cleared: a wiped hierarchy keeps its dead enclaves precisely so
 	// the wiped state is DETECTABLE, which is what [ErrSealerWiped]'s
 	// fail-closed contract rests on.
-	mu       sync.RWMutex
-	root     *MemoryEnclave
-	kek      *MemoryEnclave
-	kekGen   uint32
-	kekUsed  atomic.Uint64
+	mu sync.RWMutex
+	// root holds this sealer's WRAPPING KEY: the provider's root, replaced
+	// in place by the key derived from it (deriveWrappingKey) before it is
+	// ever used. "Under the root" in this file means under that key.
+	root    *MemoryEnclave
+	kek     *MemoryEnclave
+	kekGen  uint32
+	kekUsed atomic.Uint64
+	// kekLimit is the wraps one KEK generation may perform before rotation:
+	// kekMessageLimit unless WithKEKRotationLimit set a smaller crypto-period.
+	// Fixed at construction.
+	kekLimit uint64
 	kekBlobs map[uint32][]byte
+	// wrapSalt is the HKDF salt root was derived under (deriveWrappingKey).
+	// Not secret; kept so the derivation can be checked against the
+	// provider's root.
+	wrapSalt []byte
 
 	// initSlot is the init lock: a one-slot semaphore, held by sending into
 	// it and released by receiving. Holding it is the right to run
@@ -393,6 +477,10 @@ type sealerConfig struct {
 	providerSet bool
 	mode        Mode
 	health      func() error
+	// kekLimit is WithKEKRotationLimit's value; zero means "not set" (the
+	// option itself refuses zero).
+	kekLimit    uint64
+	kekLimitSet bool
 }
 
 // SealerOption configures [NewSealer].
@@ -477,6 +565,23 @@ func WithMode(m Mode) SealerOption {
 	return func(c *sealerConfig) { c.mode = m }
 }
 
+// WithKEKRotationLimit sets how many DEKs one KEK generation wraps before the
+// sealer rotates to a fresh generation — the crypto-period of a KEK, which an
+// operator may want shorter than the default for their own policy. It applies
+// to [ModeRootKey] only.
+//
+// n must be between 1 and 2^31. The upper bound is not negotiable: a KEK wraps
+// with AES-GCM under a random 96-bit nonce, crypto/cipher states that such a
+// key "MUST NOT be used to encrypt more than 2^32 messages", and this package
+// keeps a factor-of-two margin below that (the default). Anything outside the
+// range, or the option given for [ModePerOperation], is refused by
+// [NewSealer] with [ErrInvalidRotationLimit]. Rotation retains every retired
+// generation's root-wrapped blob, so values sealed under any generation keep
+// opening; a short crypto-period costs bytes per generation, not locked pages.
+func WithKEKRotationLimit(n uint64) SealerOption {
+	return func(c *sealerConfig) { c.kekLimit, c.kekLimitSet = n, true }
+}
+
 // modeBindings maps each mode to the constructor step that checks the
 // provider's capability and binds the mode's protect/unprotect paths. A mode
 // absent from this map is invalid by definition, which makes the map the
@@ -518,7 +623,15 @@ func NewSealer(opts ...SealerOption) (*Sealer, error) {
 		return nil, ErrProviderMode
 	}
 
-	s := &Sealer{mode: cfg.mode, health: cfg.health, initSlot: make(chan struct{}, 1)}
+	kekLimit := uint64(kekMessageLimit)
+	if cfg.kekLimitSet {
+		if cfg.mode != ModeRootKey || cfg.kekLimit == 0 || cfg.kekLimit > kekMessageLimit {
+			return nil, ErrInvalidRotationLimit
+		}
+		kekLimit = cfg.kekLimit
+	}
+
+	s := &Sealer{mode: cfg.mode, health: cfg.health, initSlot: make(chan struct{}, 1), kekLimit: kekLimit}
 	if err := bind(s, cfg.provider); err != nil {
 		return nil, err
 	}
@@ -712,6 +825,19 @@ func (s *Sealer) open(ctx context.Context, a *Allocator, blob, sealed []byte, si
 		return openWithKeyInto(dek, sealed, blob, pt)
 	}); err != nil {
 		destroyTransient(out)
+		return nil, err
+	}
+
+	// The plaintext is final, so it is returned READ-ONLY, like every other
+	// constructor whose material is complete (#99): a stray write through a
+	// retained slice faults instead of silently corrupting what the caller
+	// opened. A refused freeze fails the open — closed, not writable — and the
+	// destination is destroyed (wiped before any unmap); a refused release of
+	// it is reported too and owned by the WipeAll ledger.
+	if err := out.Freeze(); err != nil {
+		if derr := out.Destroy(); derr != nil {
+			return nil, errors.Join(err, derr)
+		}
 		return nil, err
 	}
 	return out, nil
@@ -1032,7 +1158,7 @@ func (s *Sealer) protectRootKeyInner(ctx context.Context, dek *MemoryEnclave) ([
 		// early, which is the safe direction to be wrong in. Crossing the
 		// limit means this generation is spent: release the read lock, rotate
 		// under the write lock, and retry against the fresh generation.
-		if s.kekUsed.Add(1) > kekMessageLimit {
+		if s.kekUsed.Add(1) > s.kekLimit {
 			s.mu.RUnlock()
 			if err := s.rotateKEK(); err != nil {
 				return nil, err
@@ -1280,24 +1406,51 @@ func (s *Sealer) initHierarchyHeld(ctx context.Context) error {
 		// already running as an odd one.
 		gen := sweepGeneration()
 
+		// The salt is drawn BEFORE the unseal, so that once UnsealRoot has
+		// succeeded — and may not be called again — nothing can fail for
+		// want of it.
+		salt := make([]byte, wrappingSaltBytes)
+		if _, err := rand.Read(salt); err != nil {
+			return errors.Join(ErrSealFailed, err)
+		}
 		var err error
 		root, err = NewMemoryEnclaveSized(RootKeyBytes)
 		if err != nil {
 			return err
 		}
-		// The provider writes the root DIRECTLY into locked pages; it never
-		// exists on the ordinary heap on this path. (What the provider does on
-		// its side is its contract; see [RootUnsealer].)
+		// The provider writes the root DIRECTLY into locked pages, never into
+		// an ordinary buffer this package hands it. (What the provider does on
+		// its side is its contract; see [RootUnsealer].) Within the same
+		// borrow — so no sweep can interleave — it is replaced by the
+		// wrapping key derived from it: the sealer never encrypts under the
+		// provider's root itself. The derivation is the ONE place the root
+		// reaches the heap — HMAC-SHA256's keyed state, the same class of
+		// exposure as an AES key schedule — once per sealer (see
+		// deriveWrappingKey).
+		unsealed := false
 		if err := root.WithBytes(func(b []byte) error {
 			uerr := s.ru.UnsealRoot(ctx, b)
 			if uerr == nil {
-				return nil
+				unsealed = true
+				return deriveWrappingKey(b, salt)
 			}
 			if cerr := contextFailure(ctx, ErrSealFailed, uerr); cerr != nil {
 				return cerr
 			}
 			return uerr
 		}); err != nil {
+			if unsealed {
+				// The unseal succeeded and may not be repeated, but the key
+				// was not derived, so root must never be published: destroy
+				// it and retain it dead, and this sealer reports itself wiped
+				// from here on. (HKDF-SHA256 at this length cannot fail; this
+				// is the fail-closed answer should that ever change.)
+				s.pendingRoot, s.pendingGen = root, gen
+				if derr := root.Destroy(); derr != nil {
+					return errors.Join(ErrSealerWiped, err, derr)
+				}
+				return errors.Join(ErrSealerWiped, err)
+			}
 			// The unseal itself failed — a context that ended included — so
 			// the contract permits asking again and nothing is retained.
 			destroyTransient(root)
@@ -1310,6 +1463,7 @@ func (s *Sealer) initHierarchyHeld(ctx context.Context) error {
 		// context — by initFailure if the mint fails, by protectRootKey's next
 		// pass if it succeeds.
 		s.pendingRoot, s.pendingGen = root, gen
+		s.wrapSalt = salt
 	}
 
 	// A retained root a sweep destroyed between attempts, or one a sweep
@@ -1459,10 +1613,15 @@ func (s *Sealer) rotateKEK() error {
 		}
 		return ErrSealerWiped
 	}
-	if s.kekUsed.Load() <= kekMessageLimit {
+	if s.kekUsed.Load() <= s.kekLimit {
 		// Another goroutine rotated while this one waited for the lock; its
 		// fresh generation has budget.
 		return nil
+	}
+	if s.kekGen >= maxKEKGenerations {
+		// Refused before anything is minted: the current generation stays
+		// published and every retained blob stays, so existing values open.
+		return errors.Join(ErrSealFailed, ErrSealerExhausted)
 	}
 
 	// A sweep that overlaps the rotation must leave the sealer wiped, exactly
