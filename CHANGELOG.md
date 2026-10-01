@@ -6,6 +6,166 @@ All notable changes to go-enclave are documented here. The format follows
 
 ## [Unreleased]
 
+## [v0.6.2-alpha] - 2026-10-01
+
+### Fixed
+
+- **`BudgetError.InUse` can no longer be negative** (#83). A refusal reads
+  the headroom counter and then the budget without a lock, and the guard
+  against an impossible pair caught only one of the two skews: a raise
+  racing an over-subscribed allocator, which wraps. A lowering between the
+  two reads (an idle allocator refusing a three-page request at two pages
+  free, quiesced by `SetLimit(0)` in that window) paired a budget of 0 with
+  two pages of headroom and reported `InUse` as -8192 on a 4 KiB-page host.
+  Any negative result now takes the read-locked fallback, as a wrap already
+  did. Admission is unchanged and still lock-free.
+
+- **`make ci` builds its lint tools with this module's toolchain** (#83).
+  `go install tool@version` runs outside the module, so under
+  `GOTOOLCHAIN=auto` it built golangci-lint and staticcheck with the tools'
+  own go1.26 floor, and both then refused this go 1.27.0 module: `make ci`
+  failed at lint on a tree CI passes. Every tool install now runs under
+  `GOTOOLCHAIN=$(go env GOVERSION)` resolved inside the module.
+- **`make coverage` enforces the 90% floor** that previously existed only in
+  `ci.yml`, so the gate reproduces locally (project-scaffold §6).
+- **`make release-alpha`'s remote-tag guard fails closed.** `! git ls-remote`
+  passed on every failure, including a clone with no `dev` remote; only
+  exit 2 (no such ref) now counts as free, and a missing `dev` remote is named.
+- **nightly.yml runs Go 1.27.0**, matching `ci.yml` and `go.mod` (it was
+  1.26.7).
+
+- **`scripts/changelog-assemble.sh` refuses to release over entries still in
+  `[Unreleased]`** (#83). When `CHANGELOG.md` already had a hand-written
+  section for the version and no fragment was waiting, the script took its
+  no-op exit without looking at `[Unreleased]`, so `make release-alpha`
+  could tag a CHANGELOG whose release section left out every entry still
+  sitting there. It now fails, changing nothing, and quotes the first such
+  entry. A bare `### ` heading with nothing under it is not an entry and
+  does not block, matching how the fold already drops empty subsections.
+
+- **A failed `Allocator.New` or `Allocator.NewSized` no longer refunds
+  budget for pages it could not release** (#83). When construction failed
+  after the pages were mapped and locked, and the rollback was refused too,
+  the allocator still refunded the full charge. The budget then offered
+  locked memory the process still held. The charge is now kept only while
+  the pages are still mlock'd, and is returned once `WipeAll` reclaims them
+  (see the failed-construction entry). A cleanup that unlocked the pages
+  and was then refused the `munmap` costs address space, not locked memory,
+  and is refunded at once. That is a different policy from `DestroyErr`,
+  which keeps an enclave's reservation until its pages are unmapped,
+  because there the enclave is the handle a retry goes through.
+  The rollback of a partly built mapping also falls back to a bare `munmap`
+  when `memcall.Free` is refused, as release already did, and now reports
+  pages left mapped but unlocked as held. It previously reported them as
+  released when both unmaps were refused after a successful `munlock`.
+
+- **`Destroy` no longer panics when the kernel refuses a release** (#83).
+  `DestroyErr` panicked on every error except `ErrReleasedWithoutWipe`. That
+  included a plain refused `munlock` or `munmap` (`ENOMEM` at
+  `vm.max_map_count`, for example), although the documentation says only a
+  failed canary panics. Detected corruption is now the only panic. A refused
+  release is returned by `DestroyErr` as `ErrLockedMemoryUnavailable`, and
+  `Destroy` discards it. In both cases the enclave keeps its mapping for a
+  retry, stays on the `WipeAll` ledger and keeps its `Allocator`
+  reservation, as before. It reports itself destroyed once its material is
+  wiped.
+
+- **`WipeAll` reclaims the pages of a construction whose cleanup was
+  refused** (#83). When a constructor failed after mapping its pages, and
+  the rollback was refused too (a freeze refused by `mprotect`, then a
+  release refused by `mprotect` and the bare `munmap`), it returned an error
+  and dropped the only handle to pages the kernel still held. No sweep could
+  reach them, even after the refusal lifted, and an `Allocator` charge kept
+  for still-locked pages stayed charged for the process lifetime. Such
+  mappings are now kept on an internal ledger that every `WipeAll` pass
+  retries. They are included in its count while they are still mapped. The
+  sweep that releases them returns any charge kept for them, exactly once.
+  A mapping abandoned before any material was copied in also retries the
+  bare `munmap` on every sweep when `memcall.Free` is refused, as its
+  rollback did, so a bare unmap refused only transiently does not strand it.
+  Likewise a refused `munlock` no longer stops its retry before the unmap,
+  which takes the lock with it, so a locked orphan is reclaimed — and its
+  kept charge refunded once — as soon as unmapping is possible again.
+  `WipeAll`'s documentation now also states that its error reports
+  `ErrReleasedWithoutWipe` alongside `ErrEnclaveCorrupted`, which it already
+  did.
+
+- **`providertest` builds on 32-bit Linux again** (#83). The residue sweep's
+  signed-offset guard compared a `uintptr` against `math.MaxInt64`, which does
+  not compile where `uintptr` is 32 bits, so `GOARCH=386` and `GOARCH=arm`
+  could not build the package at all. The guard now widens to `uint64` first.
+  `/proc/self/maps` bounds are also parsed at the width of a `uintptr` rather
+  than a fixed 64 bits, so a bound that does not fit the platform is rejected
+  as unparsable instead of being narrowed into a different range, and the
+  header parser's table test now compiles and runs on 32-bit targets.
+
+- **A retried release no longer unlocks pages it already unlocked** (#83).
+  When a release's `munlock` succeeded and its `munmap` was refused, every
+  retry through `DestroyErr` or `WipeAll` called the unlock again. Linux
+  accepts that, but Windows' `VirtualUnlock` refuses pages that are not
+  locked, so each retry failed at the unlock without reaching the `munmap`.
+  The mapping, and any `Allocator` reservation behind it, was then held for
+  the process lifetime. A mapping now records a successful unlock, a retry
+  goes straight to the `munmap`, and a held release reports whether the
+  pages are still locked from that same record.
+
+- **A `ModeRootKey` sealer no longer calls `UnsealRoot` again after it
+  succeeded** (#83). If minting the first KEK failed after a successful
+  unseal (locked memory exhausted, for example), the root was destroyed and
+  the next seal unsealed it again. That breaks the `RootUnsealer` contract
+  ("at most once, retrying only if that call failed") and any one-shot root
+  provider. The unsealed root is now kept and the retry re-attempts only the
+  KEK mint. The kept root is an ordinary registered enclave, so `WipeAll`
+  still destroys it. If a sweep does, the sealer reports `ErrSealerWiped`
+  instead of unsealing a replacement.
+
+- **A detected canary corruption is no longer lost when the release after it
+  is refused** (#83). Verification wipes the guard pages and the canary.
+  When the `munlock` or `munmap` after it failed, the release returned only
+  that failure and kept the mapping. The retry then compared zeroes with
+  zeroes and reported a clean release. The corruption flag is now sticky and
+  verification runs once per mapping. An attempt that both detects
+  corruption and is refused returns both, joined, so `Destroy` still panics
+  with `ErrEnclaveCorrupted`, and the retry that releases the pages reports
+  it again. The joined error is never counted as released: the handle,
+  ledger entry and `Allocator` reservation are all kept until the pages
+  actually go back.
+
+- **`WipeAll` reports canary corruption even when the corrupt enclave's pages
+  could not be released** (#83). The sweep tallied corruption only on the
+  attempt that reclaimed the pages, so a corrupt enclave whose munlock or
+  munmap was refused for the whole sweep was reported as still held and the
+  error came back nil. Corruption is now recorded per enclave on any attempt
+  that detects it, counted once however many passes retry it; such an enclave
+  appears in both the count and the error.
+
+### Added
+
+- **`make cross-build`**, in `make ci` and the CI Build job: builds and vets
+  every package for linux amd64/arm64/386/arm, darwin, freebsd, openbsd,
+  netbsd and windows. DragonFly is unsupported: the pinned memcall v0.5.0 does
+  not compile there.
+
+- **`providertest` errors are typed: `ErrInvalidConfig`, `ConfigError` and
+  `PropertyError`** (#83). A harness mistake and a provider defect used to be
+  distinguishable only by parsing the message. A `Config` that cannot be run
+  now returns a `*ConfigError` naming the field, matching `ErrInvalidConfig`
+  under `errors.Is`; a provider that ran and failed returns one
+  `*PropertyError` per failed property, joined, so each can be walked and
+  inspected. The messages are unchanged, and the package no longer uses
+  `fmt.Errorf`.
+
+### Changed
+
+- **FreeBSD enclaves are now verifiably excluded from core dumps with
+  `MADV_NOCORE`** (#83). The per-mapping exclusion was wired only on Linux,
+  and the documentation said no other platform had one; FreeBSD does.
+  memcall already issued the same `madvise` inside its `Lock` but discarded
+  the result. go-enclave now issues it itself and checks it, so on FreeBSD,
+  as on Linux, a refused exclusion fails the allocation with
+  `ErrLockedMemoryUnavailable` instead of returning an enclave whose pages
+  could reach a core file. Other non-Linux platforms are unchanged.
+
 ## [v0.6.1-alpha] - 2026-09-28
 
 ### Tests
