@@ -12,8 +12,11 @@ package enclave
 
 // discoverLockedMemoryLimit reports that no locked-memory ceiling exists to
 // discover, on the platforms that genuinely have none — Windows, which bounds
-// a working-set size rather than a locked-memory rlimit, and the remaining
-// GOOS values that define no RLIMIT_MEMLOCK at all.
+// a working-set size rather than a locked-memory rlimit, and AIX, Solaris and
+// illumos, for which golang.org/x/sys v0.48.0 defines no RLIMIT_MEMLOCK at all
+// (checked in its generated constants). Those four are the whole list: every
+// other GOOS either has a file of its own or does not compile this package
+// (osmem_unsupported.go).
 //
 // The platforms that DO expose one are handled and not excused: Linux in
 // memlock_linux.go, the five BSDs in memlock_bsd.go. Reporting "unsupported"

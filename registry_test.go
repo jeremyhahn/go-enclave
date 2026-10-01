@@ -943,15 +943,15 @@ func TestWipeAll_ReportsCorruptionWhoseReleaseWasRefused(t *testing.T) {
 	}
 	e.m.canary[0] ^= 0xFF
 
-	prev := freeMemory
+	prev := unmapMemory
 	t.Cleanup(func() {
-		freeMemory = prev
+		unmapMemory = prev
 		_, _ = WipeAll()
 	})
 	// VirtualUnlock semantics, so every pass after the first must skip the
 	// unlock its predecessor already did (#83).
 	installStrictUnlock(t)
-	freeMemory = func([]byte) error { return errors.New("munmap: cannot allocate memory") }
+	unmapMemory = func([]byte) error { return errors.New("munmap: cannot allocate memory") }
 
 	remaining, err := WipeAll()
 	if remaining != 1 {
@@ -965,7 +965,7 @@ func TestWipeAll_ReportsCorruptionWhoseReleaseWasRefused(t *testing.T) {
 		t.Errorf("WipeAll error = %q, want it to count the one corrupt enclave once, not once per pass", got)
 	}
 
-	freeMemory = prev
+	unmapMemory = prev
 	remaining, err = WipeAll()
 	if remaining != 0 {
 		t.Errorf("WipeAll = %d once munmap is allowed again, want 0", remaining)
@@ -1015,12 +1015,11 @@ func TestWipeAll_ReportsNoErrorWhenNothingIsCorrupt(t *testing.T) {
 //     while the material is still mapped and locked, which is a fail-open on the
 //     single guarantee the function makes.
 //
-// The failure is induced the way the release-path tests already do it: point the
-// whole-region handle at an unaligned slice, which mprotect must refuse, leaving
-// the real pages mapped.
+// The failure is induced the way the release-path tests do it: the mprotect and
+// the unmap are refused through their seams, leaving the real pages mapped.
 func TestWipeAll_AFailedReleaseKeepsBothTheChargeAndTheLedgerEntry(t *testing.T) {
 	if remaining, err := WipeAll(); remaining != 0 || err != nil {
-		t.Skipf("this test needs a clean ledger; WipeAll = %d, %v", remaining, err)
+		t.Fatalf("this test needs a clean ledger; WipeAll = %d, %v", remaining, err)
 	}
 
 	a, err := NewAllocator(16 * pageSize)
@@ -1029,17 +1028,14 @@ func TestWipeAll_AFailedReleaseKeepsBothTheChargeAndTheLedgerEntry(t *testing.T)
 	}
 	e, err := a.NewSized(64)
 	if err != nil {
-		t.Skipf("could not allocate: %v", err)
+		t.Fatalf("could not allocate: %v", err)
 	}
 	reserved := a.InUse()
 	if reserved == 0 {
 		t.Fatal("nothing was reserved; the test would be vacuous")
 	}
 
-	real := e.m.memory
-	bad, free := unmappableSlice(t)
-	defer free()
-	e.m.memory = bad
+	lift := denyProtectAndUnmap(t)
 
 	remaining, serr := WipeAll()
 
@@ -1069,8 +1065,8 @@ func TestWipeAll_AFailedReleaseKeepsBothTheChargeAndTheLedgerEntry(t *testing.T)
 			"already wiped by the early wipe")
 	}
 
-	// With the region restored, the retry the count was asking for settles both.
-	e.m.memory = real
+	// With the refusals lifted, the retry the count was asking for settles both.
+	lift()
 	remaining, serr = WipeAll()
 	if serr != nil && !errors.Is(serr, ErrEnclaveCorrupted) {
 		t.Errorf("retry WipeAll err = %v", serr)

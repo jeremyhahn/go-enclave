@@ -18,8 +18,6 @@ import (
 	"strings"
 	"testing"
 	"unsafe"
-
-	"github.com/awnumar/memcall"
 )
 
 // mappedAt reports whether addr still falls inside any mapping of this process.
@@ -102,7 +100,7 @@ func TestFrozenReleaseUnmapsWhenMprotectIsDenied(t *testing.T) {
 	denied := errors.New("mprotect denied by policy")
 	previous := protectMemory
 	t.Cleanup(func() { protectMemory = previous })
-	protectMemory = func([]byte, memcall.MemoryProtectionFlag) error { return denied }
+	protectMemory = func([]byte, protection) error { return denied }
 
 	rerr := e.m.release()
 
@@ -147,10 +145,10 @@ func TestFrozenReleaseKeepsTheMappingWhenTheBypassAlsoFails(t *testing.T) {
 
 	denied := errors.New("mprotect denied by policy")
 	prevProtect := protectMemory
-	prevUnmap := unmapDirectFn
-	t.Cleanup(func() { protectMemory, unmapDirectFn = prevProtect, prevUnmap })
-	protectMemory = func([]byte, memcall.MemoryProtectionFlag) error { return denied }
-	unmapDirectFn = func([]byte) error { return errors.New("munmap denied too") }
+	prevUnmap := unmapMemory
+	t.Cleanup(func() { protectMemory, unmapMemory = prevProtect, prevUnmap })
+	protectMemory = func([]byte, protection) error { return denied }
+	unmapMemory = func([]byte) error { return errors.New("munmap denied too") }
 
 	rerr := e.m.release()
 
@@ -191,7 +189,7 @@ func TestWipeAllAccountsAnUnwipedRelease(t *testing.T) {
 	denied := errors.New("mprotect denied by policy")
 	prev := protectMemory
 	t.Cleanup(func() { protectMemory = prev })
-	protectMemory = func([]byte, memcall.MemoryProtectionFlag) error { return denied }
+	protectMemory = func([]byte, protection) error { return denied }
 
 	remaining, werr := WipeAll()
 
@@ -227,7 +225,7 @@ func TestDestroyErrReportsTheDeniedMprotect(t *testing.T) {
 	denied := errors.New("mprotect denied by policy")
 	prev := protectMemory
 	t.Cleanup(func() { protectMemory = prev })
-	protectMemory = func([]byte, memcall.MemoryProtectionFlag) error { return denied }
+	protectMemory = func([]byte, protection) error { return denied }
 
 	if derr := e.DestroyErr(); !errors.Is(derr, ErrReleasedWithoutWipe) {
 		t.Fatalf("DestroyErr = %v, want ErrReleasedWithoutWipe", derr)
@@ -320,13 +318,17 @@ func TestKeptMappingReadsAsDestroyedOnceWiped(t *testing.T) {
 
 // TestReleaseNeverUnmapsMaterialItCouldNotWipe kills mutant M12 from #14.
 //
-// release()'s wipe guard is what stops it unlocking and unmapping a region that
-// was never wiped. Deleting that guard left the whole suite green, so the
-// property was unpinned: nothing established that a refused wipe prevents the
-// unmap rather than merely being reported alongside it.
+// release()'s wipe guard is what stops it carrying on to the ordinary unlock and
+// unmap of a region that was never wiped, as if the wipe had happened. Deleting
+// that guard left the whole suite green, so the property was unpinned: nothing
+// established that a refused wipe diverts the release rather than merely being
+// reported alongside it.
 //
-// The assertion is on the SYSCALLS, not on the returned error, because the error
-// is the same either way -- which is exactly why the mutant survived.
+// The assertions are on the SYSCALLS as well as the error. Since #86 the
+// fallback and the ordinary teardown share one unmap seam, so counting unmaps
+// alone no longer separates them; what does is that the fallback never
+// unlocks -- munmap drops the lock with the mapping -- and that its error
+// carries the mprotect denial that diverted it.
 func TestReleaseNeverUnmapsMaterialItCouldNotWipe(t *testing.T) {
 	e, err := newMemoryEnclave([]byte("material that must not be handed back unwiped"))
 	if err != nil {
@@ -339,18 +341,36 @@ func TestReleaseNeverUnmapsMaterialItCouldNotWipe(t *testing.T) {
 	})
 
 	denied := errors.New("mprotect denied by policy")
-	prevProtect, prevUnmap := protectMemory, unmapDirectFn
-	t.Cleanup(func() { protectMemory, unmapDirectFn = prevProtect, prevUnmap })
+	prevProtect, prevUnmap := protectMemory, unmapMemory
+	t.Cleanup(func() { protectMemory, unmapMemory = prevProtect, prevUnmap })
 
-	unmaps := 0
-	protectMemory = func([]byte, memcall.MemoryProtectionFlag) error { return denied }
-	unmapDirectFn = func([]byte) error {
+	prevUnlock := unlockMemory
+	t.Cleanup(func() { unlockMemory = prevUnlock })
+
+	unmaps, unlocks := 0, 0
+	protectMemory = func([]byte, protection) error { return denied }
+	unlockMemory = func(b []byte) error {
+		unlocks++
+		return prevUnlock(b)
+	}
+	unmapMemory = func([]byte) error {
 		unmaps++
 		// Refuse, so the mapping is kept and the test can inspect it.
 		return errors.New("munmap denied too")
 	}
 
-	_ = e.m.release()
+	rerr := e.m.release()
+
+	if !errors.Is(rerr, denied) {
+		t.Errorf("release = %v, want the mprotect denial that diverted it to the fallback", rerr)
+	}
+	if !pagesHeld(rerr) {
+		t.Errorf("pagesHeld(%v) = false, want true: the fallback unmap was refused", rerr)
+	}
+	if unlocks != 0 {
+		t.Errorf("release unlocked %d times on a region it could not wipe: it carried on to the "+
+			"ordinary teardown as though the wipe had happened", unlocks)
+	}
 
 	if e.m.wiped {
 		t.Fatal("the mapping reports itself wiped although the wipe was refused")
@@ -359,8 +379,8 @@ func TestReleaseNeverUnmapsMaterialItCouldNotWipe(t *testing.T) {
 		t.Fatal("release dropped a mapping it could not wipe: the pages may " +
 			"still hold material and there is no handle left to retry through")
 	}
-	if unmaps > 1 {
-		t.Errorf("the fallback ran %d times for one release", unmaps)
+	if unmaps != 1 {
+		t.Errorf("the fallback unmap ran %d times for one release, want 1", unmaps)
 	}
 }
 
@@ -397,10 +417,10 @@ func TestKeptMutableMappingReadsAsDestroyedOnceWiped(t *testing.T) {
 	}
 
 	denied := errors.New("mprotect denied by policy")
-	prevProtect, prevUnmap := protectMemory, unmapDirectFn
-	t.Cleanup(func() { protectMemory, unmapDirectFn = prevProtect, prevUnmap })
-	protectMemory = func([]byte, memcall.MemoryProtectionFlag) error { return denied }
-	unmapDirectFn = func([]byte) error { return errors.New("munmap denied too") }
+	prevProtect, prevUnmap := protectMemory, unmapMemory
+	t.Cleanup(func() { protectMemory, unmapMemory = prevProtect, prevUnmap })
+	protectMemory = func([]byte, protection) error { return denied }
+	unmapMemory = func([]byte) error { return errors.New("munmap denied too") }
 
 	_ = e.m.release()
 

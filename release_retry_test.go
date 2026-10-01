@@ -65,22 +65,22 @@ func TestMapping_RetryAfterARefusedUnmapDoesNotUnlockAgain(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newMapping: %v", err)
 	}
-	prevFree := freeMemory
+	prevUnmap := unmapMemory
 	t.Cleanup(func() {
-		freeMemory = prevFree
+		unmapMemory = prevUnmap
 		if m.memory != nil {
 			_ = m.release()
 		}
 	})
 	installStrictUnlock(t)
 
-	frees := 0
-	freeMemory = func(b []byte) error {
-		frees++
-		if frees == 1 {
+	unmaps := 0
+	unmapMemory = func(b []byte) error {
+		unmaps++
+		if unmaps == 1 {
 			return errors.New("munmap: cannot allocate memory")
 		}
-		return prevFree(b)
+		return prevUnmap(b)
 	}
 
 	err = m.release()
@@ -99,8 +99,8 @@ func TestMapping_RetryAfterARefusedUnmapDoesNotUnlockAgain(t *testing.T) {
 	if err != nil {
 		t.Fatalf("retry = %v, want nil once the munmap is allowed", err)
 	}
-	if frees != 2 {
-		t.Errorf("munmap attempted %d times, want 2: the retry never reached it", frees)
+	if unmaps != 2 {
+		t.Errorf("munmap attempted %d times, want 2: the retry never reached it", unmaps)
 	}
 	if m.memory != nil {
 		t.Error("the mapping is still held after the retry released the pages")
@@ -149,20 +149,20 @@ func TestRelease_RetryReturnsTheReservationUnderStrictUnlock(t *testing.T) {
 				t.Fatalf("Allocator.NewSized: %v", err)
 			}
 
-			prevFree := freeMemory
+			prevUnmap := unmapMemory
 			t.Cleanup(func() {
-				freeMemory = prevFree
+				unmapMemory = prevUnmap
 				_, _ = WipeAll()
 			})
 			installStrictUnlock(t)
-			freeMemory = func([]byte) error { return errors.New("munmap: cannot allocate memory") }
+			unmapMemory = func([]byte) error { return errors.New("munmap: cannot allocate memory") }
 
 			tc.retry(t, e, true)
 			if used := a.InUse(); used != pageSize {
 				t.Errorf("InUse = %d with the pages still mapped, want %d", used, pageSize)
 			}
 
-			freeMemory = prevFree
+			unmapMemory = prevUnmap
 			tc.retry(t, e, false)
 			if used := a.InUse(); used != 0 {
 				t.Errorf("InUse = %d after the retry, want 0: the reservation is stranded behind a "+

@@ -151,9 +151,12 @@ purge. That lock was itself the problem — allocating inside a live borrow
 deadlocked against it, which blocked real consumers outright — and a `recover`
 cannot undo a purge that already ran.
 
-Since v0.3.0-alpha go-enclave maps its own memory through `memcall`, the layer
-memguard itself uses. There is no global registry, so nothing can purge these
-pages:
+Since v0.3.0-alpha go-enclave maps its own memory, and since #86 it does so
+directly over `golang.org/x/sys` — `mmap`, `mlock`, `mprotect`, `munlock`,
+`munmap` (and their `Virtual*` counterparts on Windows), one system call per
+primitive, so every step of a release is a step in this package's code and
+none is hidden inside a dependency. There is no global registry, so nothing can
+purge these pages:
 
 1. **Error, not abort.** Every mapping, lock and protect failure returns a typed
    `LockedMemoryError` (matched via `ErrLockedMemoryUnavailable`) having released
@@ -175,6 +178,22 @@ pages:
    lowered or moved between allocators while allocation is in flight, because a
    budget change and an admission are the same compare-and-swap on the same
    counter and cannot both take the last page.
+
+**Platforms.** Linux (and Android), macOS (and iOS), FreeBSD, OpenBSD, NetBSD,
+DragonFly, illumos, Solaris, AIX and Windows — every GOOS where
+`golang.org/x/sys` provides the calls above. On any other GOOS (js, wasip1,
+plan9) the package deliberately fails to compile with
+`undefined: go_enclave_does_not_support_this_GOOS`, rather than building
+something that cannot lock memory. Per-mapping core-dump exclusion is applied
+and verified where the kernel offers one — `MADV_DONTDUMP` on Linux,
+`MAP_NOCORE` + `MADV_NOCORE` on FreeBSD and DragonFly, `MAP_CONCEAL` on OpenBSD;
+the other platforms have none that x/sys exposes. Windows has
+`WerRegisterExcludedMemoryBlock`, which is deliberately not used: it covers WER
+reports only, and it draws on a per-process pool of 512 registered entries
+shared with every other WER user in the process, so it would cap live enclaves
+and starve other libraries (rationale in `dontdump_windows.go`). On AIX, Solaris and illumos
+`mlock` needs a privilege an ordinary process lacks, so there an unprivileged
+process gets `ErrLockedMemoryUnavailable` from every allocation.
 
 ## API surface
 
@@ -205,11 +224,12 @@ pages:
 | `providertest.TestProvider(cfg)` | **Conformance suite for the provider seam** — `providertest` is a subpackage go-enclave ships and any implementer runs against its own provider, in the shape of `fstest.TestFS`. It enforces the half the signatures cannot: that a provider RETAINS nothing. See [Implementing a provider](#implementing-a-provider). |
 | `NewSoftwareProvider()` | The pure-software provider (both interfaces); the process default. Its root lives in this process — read its docs for what that trades away. |
 | `Wipe(b []byte)` | Zero a transient plain slice. |
-| `CoreDumpsDisabled()` | Whether lowering `RLIMIT_CORE` at import succeeded. Best effort by nature — a sandbox can deny it and anything in the process can raise it again — so it is reported rather than promised. Each enclave's pages are separately marked `MADV_DONTDUMP` (`MADV_NOCORE` on FreeBSD), which **is** verified and fails the allocation if refused. |
+| `CoreDumpsDisabled()` | Whether lowering `RLIMIT_CORE` (soft and hard) to zero at import succeeded. That stops core **files** only: a Linux `core_pattern` that pipes dumps to a collector (systemd-coredump, apport) ignores `RLIMIT_CORE` (core(5)), so on such a host the per-mapping exclusion below is what protects enclave pages. Best effort by nature — a sandbox can deny it and a privileged process can raise it again — so it is reported rather than promised. On Windows, which has no such limit, it returns `ErrCoreDumpLimitUnsupported` instead of claiming a success. Each enclave's pages are separately excluded per mapping where the kernel offers it (`MADV_DONTDUMP` on Linux, `MAP_NOCORE`/`MADV_NOCORE` on FreeBSD and DragonFly, `MAP_CONCEAL` on OpenBSD), which **is** verified and fails the allocation if refused. |
 
 Errors: `ErrEmptyEnclave`, `ErrInvalidSize`, `ErrEnclaveDestroyed`, `ErrLockedMemoryUnavailable`
 (+ `LockedMemoryError`), `ErrBudgetExhausted` (+ `BudgetError`), `ErrInvalidBudget`, `ErrNilAllocator`, `ErrAllocatorInstalled`,
-`ErrBudgetExceedsRLimit` (+ `RLimitError`), `ErrLimitDiscoveryFailed` (+ `LimitDiscoveryError`);
+`ErrBudgetExceedsRLimit` (+ `RLimitError`), `ErrLimitDiscoveryFailed` (+ `LimitDiscoveryError`),
+`ErrReleasedWithoutWipe` (+ `UnwipedReleaseError`), `ErrCoreDumpLimitUnsupported`;
 sealing: `ErrSealFailed`, `ErrSealedAuthentication`, `ErrSealerWiped`, `ErrProviderMode`,
 `ErrInvalidMode`, `ErrSealerInstalled`, `ErrNilSealer`, `ErrProviderMessageLimit`,
 `ErrMaterialTooLarge`, `ErrPlaintextEscaped`.
@@ -275,7 +295,8 @@ Between one raise and the next, nothing is watching the ceiling: this is a check
 on the settings a process chooses, not a monitor of the host.
 
 The ceiling is read on Linux and on the BSDs. On a platform that exposes none —
-Windows bounds a working-set size rather than a locked-memory rlimit — the
+Windows bounds a working-set size rather than a locked-memory rlimit, and x/sys
+defines no `RLIMIT_MEMLOCK` for AIX, Solaris or illumos — the
 constructor accepts every positive budget and reports `LimitUnsupported`, which
 says *this was not checked* rather than *this host has no limit*. Reporting that
 where a ceiling **was** readable would be a fail-open guard, so it is reported

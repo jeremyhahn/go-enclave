@@ -10,7 +10,11 @@
 
 package enclave
 
-import "golang.org/x/sys/unix"
+import (
+	"math"
+
+	"golang.org/x/sys/unix"
+)
 
 // rlimInfinity is RLIM_INFINITY on the BSDs, which is NOT the Linux value: they
 // use the largest positive value of a signed 64-bit quantity rather than
@@ -44,12 +48,6 @@ const rlimInfinity = uint64(unix.RLIM_INFINITY)
 // mistake here is a REFUSAL at startup, which is loud and names its figures,
 // rather than something that goes wrong quietly later.
 //
-// DragonFly is in the build tag for completeness, but the package as a whole
-// does not build there today: memcall's unix path references MADV_DONTDUMP,
-// which DragonFly does not define (measured with `GOOS=dragonfly go vet ./...`,
-// which fails inside the dependency and never reaches this file). The
-// classification would be right if that changes.
-//
 // The rlimit is reported as ENFORCED. The BSDs have no CAP_IPC_LOCK, so there
 // is no capability to consult, and no bypass is claimed on their behalf; the
 // soft limit is what mlock is checked against. Darwin in practice reports
@@ -59,10 +57,22 @@ func discoverLockedMemoryLimit() (LockedMemoryLimit, error) {
 	if err := unix.Getrlimit(unix.RLIMIT_MEMLOCK, &rl); err != nil {
 		return LockedMemoryLimit{}, &LimitDiscoveryError{Cause: err}
 	}
-	// The conversion is explicit because the field is signed on FreeBSD and
-	// DragonFly and unsigned on Darwin, NetBSD and OpenBSD. classifyRlimit
-	// takes the widest form and handles everything at or beyond int64 as
-	// unbounded, so a value that arrives out of range is refused nothing rather
-	// than truncated into a small ceiling.
-	return classifyRlimit(uint64(rl.Cur), rlimInfinity, true), nil
+	// The field is signed on FreeBSD and DragonFly and unsigned on Darwin,
+	// NetBSD and OpenBSD, so it is widened through rlimitUint64 rather than a
+	// bare conversion. classifyRlimit takes the widest form and handles
+	// everything at or beyond int64 as unbounded, so a value that arrives out of
+	// range is refused nothing rather than truncated into a small ceiling.
+	return classifyRlimit(rlimitUint64(rl.Cur), rlimInfinity, true), nil
+}
+
+// rlimitUint64 widens an rlimit field to uint64 whichever signedness the
+// platform gives it. A NEGATIVE signed value has no meaning as a byte count —
+// no kernel reports one — so it is mapped deliberately to the top of the range,
+// which classifyRlimit reads as unbounded: the same answer a wrapped
+// conversion would have produced by accident, now stated rather than implied.
+func rlimitUint64[T int64 | uint64](v T) uint64 {
+	if v < 0 {
+		return math.MaxUint64
+	}
+	return uint64(v)
 }

@@ -13,8 +13,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
-
-	"github.com/awnumar/memcall"
 )
 
 // orphanCount reports how many failed constructions' mappings are on the
@@ -34,21 +32,40 @@ func requireCleanLedger(t *testing.T) {
 	}
 }
 
-// denyCopyCleanup makes a copy constructor's freeze fail AND its cleanup fail
-// to return the pages: every mprotect through the seam is refused, so the
-// freeze fails and the release cannot make the region writable, and the bare
-// unmap fallback is refused too. The pages stay mapped AND locked. The
-// returned func lifts the refusals; t.Cleanup lifts them as well.
-func denyCopyCleanup(t *testing.T) (restore func()) {
+// denyProtect refuses every mprotect made through the protectMemory seam until
+// the returned func lifts it; t.Cleanup lifts it as well. The mapping keeps its
+// real slices throughout, so nothing but the refusal differs from production.
+//
+// Failures are injected ONLY through the seams. An earlier helper handed the
+// kernel a malformed range instead — the mapping's handle re-pointed at an
+// unaligned probe slice — on the assumption that mprotect must refuse it. That
+// holds for POSIX mprotect and not for VirtualProtect, which accepts a range
+// crossing page boundaries: on Windows the probe was made writable and the
+// release then touched the real mapping's still-inaccessible guard pages.
+func denyProtect(t *testing.T) (lift func()) {
 	t.Helper()
-	prevProtect, prevDirect := protectMemory, unmapDirectFn
-	restore = func() { protectMemory, unmapDirectFn = prevProtect, prevDirect }
-	t.Cleanup(restore)
-	protectMemory = func([]byte, memcall.MemoryProtectionFlag) error {
+	prev := protectMemory
+	lift = func() { protectMemory = prev }
+	t.Cleanup(lift)
+	protectMemory = func([]byte, protection) error {
 		return errors.New("mprotect denied by policy")
 	}
-	unmapDirectFn = func([]byte) error { return errors.New("munmap denied too") }
-	return restore
+	return lift
+}
+
+// denyProtectAndUnmap is denyProtect with the unmap refused too, which is
+// every way release has of returning the pages: it cannot make the region
+// writable, so it was not wiped by the mprotect path, and the unmap it falls
+// back to is refused. The pages stay mapped AND locked. A copy constructor's
+// freeze fails under it and so does its cleanup.
+func denyProtectAndUnmap(t *testing.T) (lift func()) {
+	t.Helper()
+	liftProtect := denyProtect(t)
+	prev := unmapMemory
+	liftUnmap := func() { unmapMemory = prev }
+	t.Cleanup(liftUnmap)
+	unmapMemory = func([]byte) error { return errors.New("munmap denied too") }
+	return func() { liftProtect(); liftUnmap() }
 }
 
 // TestAllocator_New_FailedConstructionIsReclaimedByWipeAll is the regression
@@ -71,7 +88,7 @@ func TestAllocator_New_FailedConstructionIsReclaimedByWipeAll(t *testing.T) {
 		t.Fatalf("NewAllocator: %v", err)
 	}
 	t.Cleanup(func() { _, _ = WipeAll() })
-	restore := denyCopyCleanup(t)
+	restore := denyProtectAndUnmap(t)
 
 	e, err := a.New(material())
 	if err == nil {
@@ -124,7 +141,7 @@ func TestAllocator_New_FailedConstructionIsReclaimedByWipeAll(t *testing.T) {
 
 // TestAllocator_NewSized_UnlockedOrphanIsReclaimedWithoutASecondRefund is the
 // other refund arm. An mlock refused at the ceiling leaves nothing locked, so
-// the constructor refunds at once — but when both unmaps are refused the pages
+// the constructor refunds at once — but when the unmap is refused the pages
 // are still MAPPED, and they must reach the orphan ledger with NO refund of
 // their own: a record carrying the charge as well would hand it back twice
 // and take the budget past its limit.
@@ -136,12 +153,11 @@ func TestAllocator_NewSized_UnlockedOrphanIsReclaimedWithoutASecondRefund(t *tes
 	}
 	t.Cleanup(func() { _, _ = WipeAll() })
 
-	prevLock, prevFree, prevDirect := lockMemory, freeMemory, unmapDirectFn
-	restore := func() { lockMemory, freeMemory, unmapDirectFn = prevLock, prevFree, prevDirect }
+	prevLock, prevUnmap := lockMemory, unmapMemory
+	restore := func() { lockMemory, unmapMemory = prevLock, prevUnmap }
 	t.Cleanup(restore)
 	lockMemory = func([]byte) error { return errors.New("mlock: cannot allocate memory") }
-	freeMemory = func([]byte) error { return errors.New("munmap refused") }
-	unmapDirectFn = func([]byte) error { return errors.New("munmap refused") }
+	unmapMemory = func([]byte) error { return errors.New("munmap refused") }
 
 	if _, err := a.NewSized(32); !pagesHeld(err) || lockedPagesHeld(err) {
 		t.Fatalf("NewSized = %v, want pages held but not locked", err)
@@ -175,7 +191,7 @@ func TestAllocator_NewSized_UnlockedOrphanIsReclaimedWithoutASecondRefund(t *tes
 func TestNewMemoryEnclaveCopy_FailedConstructionIsReclaimedByWipeAll(t *testing.T) {
 	requireCleanLedger(t)
 	t.Cleanup(func() { _, _ = WipeAll() })
-	restore := denyCopyCleanup(t)
+	restore := denyProtectAndUnmap(t)
 
 	if _, err := NewMemoryEnclaveCopy(material()); !lockedPagesHeld(err) {
 		t.Fatalf("NewMemoryEnclaveCopy = %v, want locked pages held", err)
@@ -196,72 +212,15 @@ func TestNewMemoryEnclaveCopy_FailedConstructionIsReclaimedByWipeAll(t *testing.
 	}
 }
 
-// TestWipeAll_RetriesTheBareUnmapForAnAbandonedOrphan is the regression for
-// the round-2 finding on #83: an abandoned mapping reached the orphan ledger
-// marked verified, so every later release skipped straight to memcall.Free —
-// and when that kept failing (its own mprotect denied, say) the bare unmap that
-// abandon itself had fallen back to was never tried again. A transient refusal
-// of the bare unmap at construction therefore stranded the pages for good,
-// however available the unmap became afterwards.
-//
-// Only the bare unmap is restored before the reclaiming sweep; memcall.Free
-// stays refused throughout. The charge was refunded at construction (nothing
-// was locked), so the sweep must reclaim the pages WITHOUT refunding again.
-func TestWipeAll_RetriesTheBareUnmapForAnAbandonedOrphan(t *testing.T) {
-	requireCleanLedger(t)
-	a, err := NewAllocator(4 * pageSize)
-	if err != nil {
-		t.Fatalf("NewAllocator: %v", err)
-	}
-	t.Cleanup(func() { _, _ = WipeAll() })
-
-	prevLock, prevFree, prevDirect := lockMemory, freeMemory, unmapDirectFn
-	t.Cleanup(func() { lockMemory, freeMemory, unmapDirectFn = prevLock, prevFree, prevDirect })
-	lockMemory = func([]byte) error { return errors.New("mlock: cannot allocate memory") }
-	freeMemory = func([]byte) error { return errors.New("mprotect denied by policy") }
-	unmapDirectFn = func([]byte) error { return errors.New("munmap: cannot allocate memory") }
-
-	if _, err := a.NewSized(32); !pagesHeld(err) || lockedPagesHeld(err) {
-		t.Fatalf("NewSized = %v, want pages held but not locked", err)
-	}
-	if got := orphanCount(); got != 1 {
-		t.Fatalf("orphan ledger holds %d, want 1", got)
-	}
-
-	// The bare unmap becomes available; memcall.Free does not. Stands in for
-	// the raw munmap on every platform, as the other bare-unmap tests do —
-	// prevFree is the real memcall.Free, not the refused seam.
-	directRan := false
-	unmapDirectFn = func(b []byte) error {
-		directRan = true
-		return prevFree(b)
-	}
-	if remaining := sweep(t); remaining != 0 {
-		t.Errorf("WipeAll = %d once the bare unmap is available, want 0: the orphan's release "+
-			"retried only memcall.Free and never fell back", remaining)
-	}
-	if !directRan {
-		t.Error("the sweep never tried the bare unmap")
-	}
-	if got := orphanCount(); got != 0 {
-		t.Errorf("orphan ledger holds %d after the reclaiming sweep, want 0", got)
-	}
-	if used := a.InUse(); used != 0 {
-		t.Errorf("InUse = %d after the orphan was reclaimed, want 0", used)
-	}
-	if avail := a.Available(); avail != 4*pageSize {
-		t.Errorf("Available = %d, want the budget of %d exactly: the charge was refunded twice", avail, 4*pageSize)
-	}
-}
-
 // TestWipeAll_ReclaimsALockedOrphanWhoseUnlockStaysRefused pins the retry for
 // an orphan that is still LOCKED (#83). A construction that locked its pages
 // and then failed is rolled back by abandon, which carries on to the unmap when
 // munlock is refused — munmap takes the lock with it. The sweep's retries must
 // do the same. Until they did, a release that met the refused munlock returned
-// before either unmap, so the orphan and the charge kept for it stayed held for
-// as long as munlock stayed refused, however available the unmap became. The
-// bare-unmap regression above cannot see this: its orphan never locked.
+// before the unmap, so the orphan and the charge kept for it stayed held for
+// as long as munlock stayed refused, however available the unmap became.
+// TestAllocator_NewSized_UnlockedOrphanIsReclaimedWithoutASecondRefund cannot
+// see this: its orphan never locked.
 func TestWipeAll_ReclaimsALockedOrphanWhoseUnlockStaysRefused(t *testing.T) {
 	requireCleanLedger(t)
 	t.Cleanup(func() { _, _ = WipeAll() })
@@ -271,10 +230,10 @@ func TestWipeAll_ReclaimsALockedOrphanWhoseUnlockStaysRefused(t *testing.T) {
 		t.Fatalf("newMapping: %v", err)
 	}
 
-	prevUnlock, prevFree, prevDirect := unlockMemory, freeMemory, unmapDirectFn
-	t.Cleanup(func() { unlockMemory, freeMemory, unmapDirectFn = prevUnlock, prevFree, prevDirect })
+	prevUnlock, prevUnmap := unlockMemory, unmapMemory
+	t.Cleanup(func() { unlockMemory, unmapMemory = prevUnlock, prevUnmap })
 	refused := func([]byte) error { return errors.New("refused") }
-	unlockMemory, freeMemory, unmapDirectFn = refused, refused, refused
+	unlockMemory, unmapMemory = refused, refused
 
 	herr := m.abandon(errors.New("the step that failed"), true)
 	if !lockedPagesHeld(herr) {
@@ -286,9 +245,8 @@ func TestWipeAll_ReclaimsALockedOrphanWhoseUnlockStaysRefused(t *testing.T) {
 		t.Fatalf("orphan ledger holds %d, want 1", got)
 	}
 
-	// The unmap becomes available; munlock stays refused. prevFree is the
-	// real memcall.Free, standing in for both unmaps.
-	freeMemory = prevFree
+	// The unmap becomes available; munlock stays refused.
+	unmapMemory = prevUnmap
 	if remaining := sweep(t); remaining != 0 {
 		t.Errorf("WipeAll = %d with the unmap available again, want 0: the release stopped at the "+
 			"refused munlock and never tried the unmap that would have taken the lock with it", remaining)
@@ -341,12 +299,12 @@ func TestWipeAll_ReclaimsOrphansAddedConcurrently(t *testing.T) {
 	firstReclaim := make(chan struct{})
 	var firstReclaimOnce sync.Once
 
-	prevProtect, prevDirect := protectMemory, unmapDirectFn
-	t.Cleanup(func() { protectMemory, unmapDirectFn = prevProtect, prevDirect })
+	prevProtect, prevUnmap := protectMemory, unmapMemory
+	t.Cleanup(func() { protectMemory, unmapMemory = prevProtect, prevUnmap })
 	var mu sync.Mutex
 	refusedOnce := make(map[*byte]struct{})
-	protectMemory = func(b []byte, f memcall.MemoryProtectionFlag) error {
-		if f == memcall.ReadOnly() {
+	protectMemory = func(b []byte, p protection) error {
+		if p == protReadOnly {
 			return errors.New("mprotect denied by policy") // every freeze fails
 		}
 		mu.Lock()
@@ -362,9 +320,20 @@ func TestWipeAll_ReclaimsOrphansAddedConcurrently(t *testing.T) {
 		}
 		reclaimed.Add(1)
 		firstReclaimOnce.Do(func() { close(firstReclaim) })
-		return prevProtect(b, f)
+		return prevProtect(b, p)
 	}
-	unmapDirectFn = func([]byte) error { return errors.New("munmap denied too") }
+	// The unmap is refused exactly while a region's wipe-enabling mprotect is:
+	// the construction's fallback unmap fails, so the pages are stranded, and
+	// the retry that was allowed its mprotect is allowed its unmap too.
+	unmapMemory = func(b []byte) error {
+		mu.Lock()
+		_, pending := refusedOnce[&b[0]]
+		mu.Unlock()
+		if pending {
+			return errors.New("munmap denied too")
+		}
+		return prevUnmap(b)
+	}
 
 	var adopted atomic.Int64
 	var waitedOnce atomic.Bool

@@ -16,12 +16,11 @@ import (
 	"go/token"
 	"io"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/awnumar/memcall"
 )
 
 // TestMemoryEnclave_AllocateInsideBorrow covers the deadlock that owning the
@@ -211,11 +210,11 @@ func TestMapping_WipesBeforeRelease(t *testing.T) {
 		}
 	}
 
-	if err := memcall.Unlock(inner); err != nil {
-		t.Errorf("Unlock: %v", err)
+	if err := sysUnlock(inner); err != nil {
+		t.Errorf("munlock: %v", err)
 	}
-	if err := memcall.Free(memory); err != nil {
-		t.Errorf("Free: %v", err)
+	if err := sysUnmap(memory); err != nil {
+		t.Errorf("munmap: %v", err)
 	}
 }
 
@@ -463,11 +462,11 @@ func TestMapping_FrozenRegionIsStillWiped(t *testing.T) {
 		}
 	}
 
-	if err := memcall.Unlock(inner); err != nil {
-		t.Errorf("Unlock: %v", err)
+	if err := sysUnlock(inner); err != nil {
+		t.Errorf("munlock: %v", err)
 	}
-	if err := memcall.Free(memory); err != nil {
-		t.Errorf("Free: %v", err)
+	if err := sysUnmap(memory); err != nil {
+		t.Errorf("munmap: %v", err)
 	}
 }
 
@@ -489,27 +488,6 @@ func TestMapping_RejectsUnmappableSizes(t *testing.T) {
 	}
 }
 
-// unmappableCopy returns a mapping whose memory slice the kernel will refuse to
-// mprotect, so the release path can be driven through its failure branch
-// without a production seam.
-//
-// The address is a real mmap'd page offset by one byte: mmap guarantees a
-// page-aligned base, so base+1 is guaranteed NOT page-aligned, and mprotect on
-// an unaligned address is EINVAL by definition. Nothing else in the process is
-// touched, and the real region is returned so the test can free it.
-func unmappableSlice(t *testing.T) (bad []byte, free func()) {
-	t.Helper()
-	region, err := memcall.Alloc(int(pageSize) * 2)
-	if err != nil {
-		t.Skipf("could not allocate the probe region: %v", err)
-	}
-	return region[1:], func() {
-		if err := memcall.Free(region); err != nil {
-			t.Errorf("freeing the probe region: %v", err)
-		}
-	}
-}
-
 // TestMapping_ReleaseKeepsStateWhenUnmapFails is the regression test for the
 // second finding of Codex round 2 on PR #9.
 //
@@ -526,15 +504,14 @@ func TestMapping_ReleaseKeepsStateWhenUnmapFails(t *testing.T) {
 		t.Fatalf("newMapping: %v", err)
 	}
 
-	real := m.memory
-	bad, freeProbe := unmappableSlice(t)
-	defer freeProbe()
-
-	m.memory = bad
+	lift := denyProtectAndUnmap(t)
 	err = m.release()
 
 	if err == nil {
 		t.Fatal("release reported success on a region it could not protect")
+	}
+	if !pagesHeld(err) {
+		t.Errorf("pagesHeld(%v) = false, want true: nothing could return the pages", err)
 	}
 	if errors.Is(err, ErrEnclaveCorrupted) {
 		t.Errorf("err = %v, want a mapping failure rather than a canary report", err)
@@ -549,8 +526,8 @@ func TestMapping_ReleaseKeepsStateWhenUnmapFails(t *testing.T) {
 		t.Fatal("release discarded the mapping it could not unmap; the pages are now unreachable")
 	}
 
-	// Put the real region back and confirm the retry completes.
-	m.memory = real
+	// Lift the refusals and confirm the retry completes.
+	lift()
 	if err := m.release(); err != nil {
 		t.Errorf("retrying release after the failure: %v", err)
 	}
@@ -582,10 +559,7 @@ func TestMemoryEnclave_FailedReleaseKeepsTheReservation(t *testing.T) {
 		t.Fatal("nothing was reserved; the test would be vacuous")
 	}
 
-	real := e.m.memory
-	bad, freeProbe := unmappableSlice(t)
-	defer freeProbe()
-	e.m.memory = bad
+	lift := denyProtectAndUnmap(t)
 
 	var derr error
 	if r := panicValue(func() { derr = e.DestroyErr() }); r != nil {
@@ -615,8 +589,8 @@ func TestMemoryEnclave_FailedReleaseKeepsTheReservation(t *testing.T) {
 			"material; the caller would read zeroes and not be told")
 	}
 
-	// The retry: same enclave, real region restored.
-	e.m.memory = real
+	// The retry: same enclave, refusals lifted.
+	lift()
 	e.Destroy()
 
 	if got := a.InUse(); got != 0 {
@@ -673,13 +647,9 @@ func TestMapping_WipesMaterialBeforeAnySyscallThatCanFail(t *testing.T) {
 		t.Fatal("the material was not written; the test would be vacuous")
 	}
 
-	// Point the whole-region handle at something mprotect must refuse, leaving
-	// data and inner aliasing the real, still-writable pages. That is exactly
-	// the shape of a denied mprotect during cleanup.
-	real := m.memory
-	bad, freeProbe := unmappableSlice(t)
-	defer freeProbe()
-	m.memory = bad
+	// A denied mprotect during cleanup, with every slice still aliasing the
+	// real pages.
+	lift := denyProtect(t)
 
 	err = m.wipeAndVerify()
 	if err == nil {
@@ -694,9 +664,9 @@ func TestMapping_WipesMaterialBeforeAnySyscallThatCanFail(t *testing.T) {
 		}
 	}
 
-	m.memory = real
+	lift()
 	if err := m.release(); err != nil {
-		t.Errorf("release after restoring the region: %v", err)
+		t.Errorf("release after the refusal lifted: %v", err)
 	}
 }
 
@@ -824,9 +794,9 @@ func TestMapping_RetryDoesNotReverify(t *testing.T) {
 
 	unlockMemory = prevUnlock
 	protects := 0
-	protectMemory = func(b []byte, f memcall.MemoryProtectionFlag) error {
+	protectMemory = func(b []byte, p protection) error {
 		protects++
-		return prevProtect(b, f)
+		return prevProtect(b, p)
 	}
 	if err := m.release(); err != nil {
 		t.Fatalf("retry = %v, want nil for a clean mapping", err)
@@ -853,14 +823,13 @@ func TestMapping_AbandonReportsWhetherLockedPagesWereLeft(t *testing.T) {
 
 	for _, tc := range []struct {
 		name                 string
-		unlock, free, direct bool // whether each step is refused
+		unlock, unmap        bool // whether each step is refused
 		wantHeld, wantLocked bool
 	}{
-		{"clean rollback", false, false, false, false, false},
-		{"munlock refused, munmap took the lock with it", true, false, false, false, false},
-		{"munmap refused, the bare unmap took the pages", false, true, false, false, false},
-		{"munlock and both unmaps refused", true, true, true, true, true},
-		{"unlocked, but nothing could unmap it", false, true, true, true, false},
+		{"clean rollback", false, false, false, false},
+		{"munlock refused, munmap took the lock with it", true, false, false, false},
+		{"unlocked, but the munmap was refused", false, true, true, false},
+		{"munlock and munmap refused", true, true, true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m, err := newMapping(64)
@@ -869,24 +838,19 @@ func TestMapping_AbandonReportsWhetherLockedPagesWereLeft(t *testing.T) {
 			}
 			memory := m.memory
 
-			prevUnlock, prevFree, prevDirect := unlockMemory, freeMemory, unmapDirectFn
-			restore := func() { unlockMemory, freeMemory, unmapDirectFn = prevUnlock, prevFree, prevDirect }
+			prevUnlock, prevUnmap := unlockMemory, unmapMemory
+			restore := func() { unlockMemory, unmapMemory = prevUnlock, prevUnmap }
 			t.Cleanup(restore)
 			if tc.unlock {
 				unlockMemory = refused
 			}
-			if tc.free {
-				freeMemory = refused
-			}
-			// The bare unmap is stubbed in EVERY row, refused or recorded, so
-			// the rows behave the same on platforms that have none.
-			directRan := false
-			unmapDirectFn = func(b []byte) error {
-				directRan = true
-				if tc.direct {
+			unmaps := 0
+			unmapMemory = func(b []byte) error {
+				unmaps++
+				if tc.unmap {
 					return errors.New("refused")
 				}
-				return prevFree(b)
+				return prevUnmap(b)
 			}
 
 			err = m.abandon(cause, true)
@@ -905,19 +869,117 @@ func TestMapping_AbandonReportsWhetherLockedPagesWereLeft(t *testing.T) {
 			if errors.As(err, &held) && held.orphan != m {
 				t.Errorf("abandon left pages held without handing over the mapping that holds them")
 			}
-			if tc.free && !directRan {
-				t.Error("memcall.Free was refused and abandon did not fall back to the bare unmap")
-			}
-			if !tc.free && directRan {
-				t.Error("abandon took the bare unmap although memcall.Free succeeded")
+			// Exactly one unmap in every row: a refused munlock must not stop
+			// the rollback short of it, and nothing may retry it behind the
+			// caller's back.
+			if unmaps != 1 {
+				t.Errorf("abandon unmapped %d times, want exactly 1", unmaps)
 			}
 
 			// Whatever the row left mapped is handed back here, so a refused
 			// cleanup does not leak a locked page into every later test.
-			if tc.free && tc.direct {
-				if err := memcall.Free(memory); err != nil {
-					t.Errorf("cleanup Free: %v", err)
+			if tc.unmap {
+				if err := sysUnmap(memory); err != nil {
+					t.Errorf("cleanup munmap: %v", err)
 				}
+			}
+		})
+	}
+}
+
+// TestMapping_ReleaseIsExactlyItsExplicitSteps pins #86's requirement on the
+// release path: it is the steps written in release and nothing else — make the
+// mapping writable, wipe and verify, munlock, munmap — with no step hidden
+// inside a primitive. It records every call through the seams, in order, and
+// reads the whole mapping at the unlock and at the unmap, so a wipe that moved
+// after either, or a primitive that started re-protecting or unmapping on its
+// own, shows up as a different sequence or as live bytes.
+//
+// The denied row is the one path allowed to unmap without the wipe, and it
+// must get there without an unlock: munmap drops the lock with the mapping,
+// and an unlock on that path is the ordinary teardown running as though the
+// wipe had happened.
+func TestMapping_ReleaseIsExactlyItsExplicitSteps(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		freeze    bool
+		deny      bool
+		wantSteps []string
+		wantErr   error
+	}{
+		{"writable", false, false, []string{"protect rw memory", "unlock inner", "unmap memory"}, nil},
+		{"frozen", true, false, []string{"protect rw memory", "unlock inner", "unmap memory"}, nil},
+		{"frozen, mprotect denied", true, true, []string{"protect rw memory", "unmap memory"}, ErrReleasedWithoutWipe},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, err := newMapping(64)
+			if err != nil {
+				t.Fatalf("newMapping: %v", err)
+			}
+			copy(m.data, bytes.Repeat([]byte{0xE7}, 64))
+			if tc.freeze {
+				if err := m.freeze(); err != nil {
+					t.Fatalf("freeze: %v", err)
+				}
+			}
+			memory, inner := m.memory, m.inner
+
+			region := func(b []byte) string {
+				switch {
+				case &b[0] == &memory[0] && len(b) == len(memory):
+					return "memory"
+				case &b[0] == &inner[0] && len(b) == len(inner):
+					return "inner"
+				default:
+					return "other"
+				}
+			}
+			names := map[protection]string{protNoAccess: "none", protReadOnly: "ro", protReadWrite: "rw"}
+			wipedAt := map[string]bool{}
+
+			var steps []string
+			prevProtect, prevUnlock, prevUnmap := protectMemory, unlockMemory, unmapMemory
+			t.Cleanup(func() { protectMemory, unlockMemory, unmapMemory = prevProtect, prevUnlock, prevUnmap })
+			protectMemory = func(b []byte, p protection) error {
+				steps = append(steps, "protect "+names[p]+" "+region(b))
+				if tc.deny {
+					return errors.New("mprotect denied by policy")
+				}
+				return prevProtect(b, p)
+			}
+			unlockMemory = func(b []byte) error {
+				steps = append(steps, "unlock "+region(b))
+				wipedAt["unlock"] = bytes.Equal(memory, make([]byte, len(memory)))
+				return prevUnlock(b)
+			}
+			unmapMemory = func(b []byte) error {
+				steps = append(steps, "unmap "+region(b))
+				// Readable in every row: the region was made writable, or it is
+				// frozen read-only — only the guards are inaccessible, and they
+				// are left alone when the mprotect is denied.
+				if !tc.deny {
+					wipedAt["unmap"] = bytes.Equal(memory, make([]byte, len(memory)))
+				}
+				return prevUnmap(b)
+			}
+
+			err = m.release()
+			if tc.wantErr == nil && err != nil {
+				t.Fatalf("release = %v, want nil", err)
+			}
+			if tc.wantErr != nil && !errors.Is(err, tc.wantErr) {
+				t.Fatalf("release = %v, want %v", err, tc.wantErr)
+			}
+			if !slices.Equal(steps, tc.wantSteps) {
+				t.Errorf("release made %q, want exactly %q", steps, tc.wantSteps)
+			}
+			for step, wiped := range wipedAt {
+				if !wiped {
+					t.Errorf("the mapping still held non-zero bytes at the %s: the wipe did not precede it", step)
+				}
+			}
+			if m.memory != nil {
+				t.Error("the mapping kept its handle after the pages went back")
 			}
 		})
 	}

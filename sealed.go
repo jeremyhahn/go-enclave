@@ -161,7 +161,9 @@ const sealedOverhead = 12 + 16
 // locked memory: mlock and MADV_DONTDUMP cover enclave pages and not the
 // heap, so the protections this package applies to the key's home do not
 // reach this copy. And core-dump suppression is best-effort: this package
-// lowers RLIMIT_CORE to zero on import, but if that was denied, a dump
+// lowers RLIMIT_CORE to zero on import, but if that was denied, or on
+// Windows, which has no such limit, or on a Linux host whose core_pattern
+// pipes dumps to a collector, which RLIMIT_CORE does not bind, a dump
 // carries the heap and therefore carries this copy.
 //
 // # WHY THIS IS DOCUMENTED RATHER THAN FIXED

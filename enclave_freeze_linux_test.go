@@ -19,8 +19,6 @@ import (
 	"strings"
 	"testing"
 	"unsafe"
-
-	"github.com/awnumar/memcall"
 )
 
 const (
@@ -183,7 +181,7 @@ func TestMemoryEnclave_FrozenDestroyFallsBackToUnmap(t *testing.T) {
 	denied := errors.New("mprotect denied by policy")
 	prev := protectMemory
 	t.Cleanup(func() { protectMemory = prev })
-	protectMemory = func([]byte, memcall.MemoryProtectionFlag) error { return denied }
+	protectMemory = func([]byte, protection) error { return denied }
 
 	derr := e.DestroyErr()
 
@@ -269,12 +267,12 @@ func TestMemoryEnclave_FreezeIsWhatPutsMaterialOnTheFallbackPath(t *testing.T) {
 			// this read is safe in both arms.
 			view := e.m.data
 			var atUnmap []byte
-			prevProtect, prevUnmap := protectMemory, unmapDirectFn
-			t.Cleanup(func() { protectMemory, unmapDirectFn = prevProtect, prevUnmap })
-			protectMemory = func([]byte, memcall.MemoryProtectionFlag) error {
+			prevProtect, prevUnmap := protectMemory, unmapMemory
+			t.Cleanup(func() { protectMemory, unmapMemory = prevProtect, prevUnmap })
+			protectMemory = func([]byte, protection) error {
 				return errors.New("mprotect denied by policy")
 			}
-			unmapDirectFn = func(b []byte) error {
+			unmapMemory = func(b []byte) error {
 				atUnmap = append([]byte(nil), view...)
 				return prevUnmap(b)
 			}

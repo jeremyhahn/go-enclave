@@ -55,11 +55,10 @@ COVERAGE_THRESHOLD ?= 90
 # here because a 32-bit target is where a uintptr comparison against
 # math.MaxInt64 stops compiling (security-review.md §5), and that is exactly how
 # providertest shipped unbuildable on 32-bit Linux through v0.6.1-alpha: nothing
-# built it. dragonfly is ABSENT on purpose — the pinned memcall v0.5.0 does not
-# compile there (it references unix.MADV_DONTDUMP, which x/sys does not define
-# for dragonfly), so it is unsupported until that dependency is.
+# built it.
 CROSS_TARGETS := linux/amd64 linux/arm64 linux/386 linux/arm \
-	darwin/amd64 darwin/arm64 freebsd/amd64 openbsd/amd64 netbsd/amd64 windows/amd64
+	darwin/amd64 darwin/arm64 freebsd/amd64 openbsd/amd64 netbsd/amd64 dragonfly/amd64 \
+	illumos/amd64 solaris/amd64 aix/ppc64 windows/amd64 windows/386
 
 .PHONY: all
 all: ci

@@ -19,7 +19,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/awnumar/memcall"
 	"golang.org/x/sys/unix"
 )
 
@@ -484,9 +483,9 @@ func destroyCorruptChild(t *testing.T) {
 // production seam at all, the same lever the release-path tests use for mprotect.
 //
 // It matters because this is the only core-dump control here that is verified at
-// all: memcall's Lock attempts the same madvise and discards the result
-// (memcall_unix.go:14), and the process-wide RLIMIT_CORE hardening is best
-// effort. A silent no-op here would leave enclave pages eligible for a core file
+// all: the process-wide RLIMIT_CORE hardening is best effort. (Before #86 the
+// mapping layer, memcall, also issued this madvise inside its Lock and
+// discarded the result; nothing issues it unchecked now.) A silent no-op here would leave enclave pages eligible for a core file
 // while the documentation said otherwise.
 //
 // Scope, stated precisely: this kills a mutant that makes excludeFromCoreDump
@@ -495,12 +494,12 @@ func destroyCorruptChild(t *testing.T) {
 // region, which cannot be made to fail. That call-site branch remains
 // guaranteed by construction, and doc.go says so.
 func TestExcludeFromCoreDump_ReportsRefusal(t *testing.T) {
-	region, err := memcall.Alloc(2 * int(pageSize))
+	region, err := sysMap(2 * int(pageSize))
 	if err != nil {
-		t.Skipf("could not allocate the probe region: %v", err)
+		t.Fatalf("could not allocate the probe region: %v", err)
 	}
 	defer func() {
-		if err := memcall.Free(region); err != nil {
+		if err := sysUnmap(region); err != nil {
 			t.Errorf("freeing the probe region: %v", err)
 		}
 	}()

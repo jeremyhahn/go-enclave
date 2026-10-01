@@ -215,7 +215,7 @@ var docIssueRefLedger = []docIssueRef{
 	{"enclave.go", 40, classHistorical, "3e861305c5dc", "refused and the mapping is kept so Destroy can be retried (#40)."},
 	{"mapping.go", 3, classHistorical, "29046fdb9cc5", "admission fail-open fixed in PR #3, and it would reach mmap with"},
 	{"mapping.go", 9, classHistorical, "6dff7778c0c8", "memory (Codex round 3 on PR #9); doing it here means the"},
-	{"mapping.go", 12, classHistorical, "a0ff9d2f3b7e", "under it is exactly what #12 is about: without the"},
+	{"mapping.go", 12, classHistorical, "1106633cdd0d", "The mprotect seam is what #12 is about: without the unmap"},
 	{"mapping.go", 33325, classExternal, "a73a92c526c7", "store to memory nothing reads afterwards — golang/go#33325."},
 	{"memlock.go", 46, classHistorical, "5fa7bc53792b", "disagreed about whether the kernel ceiling applied (issue #46)."},
 	{"provider.go", 50, classHistorical, "b2ac93fb6c24", "composition, and that is settled rather than pending (issue #50)."},
@@ -243,7 +243,7 @@ var docIssueRefLedger = []docIssueRef{
 	{"mapping.go", 83, classHistorical, "5b7d3eb07943", "Before #83 that retry re-verified and reported a clean release;"},
 	{"mapping.go", 83, classHistorical, "070f60205562", "[pagesHeldError] whenever nothing could unmap the region (#83)."},
 	{"mapping.go", 83, classHistorical, "e911311e30e0", "A retried release must not unlock again (#83)."},
-	{"mapping.go", 83, classHistorical, "5dcada135818", "release reads it to keep that fallback on every RETRY (#83)."},
+	{"mapping.go", 83, classHistorical, "47c6509f858a", "as abandon's own rollback does (#83): munmap drops the lock"},
 	{"admission.go", 83, classHistorical, "f675c1026c13", "Before #83 the mapping was dropped instead, and the charge was"},
 	{"enclave.go", 83, classHistorical, "fe9f3986f6ad", "And the mark carries the MAPPING (#83)."},
 	{"registry.go", 83, classHistorical, "6132c9fe7336", "ledger, of orphans, that WipeAll retries the same way (#83)."},
@@ -253,6 +253,14 @@ var docIssueRefLedger = []docIssueRef{
 	{"mapping.go", 83, classHistorical, "f63c87effc61", "as leaving the pages held (#83): dropping the refusal would"},
 	{"sealer.go", 83, classHistorical, "81b218859bb5", "root (a consumed unseal handle) cannot be asked again (#83)."},
 	{"sealer.go", 83, classHistorical, "b4d203577ea8", "again — what this did until #83 — called UnsealRoot a"},
+
+	// #86 — go-enclave's own OS memory layer over golang.org/x/sys, replacing
+	// memcall: one system call per primitive, one unmap, and an honest
+	// CoreDumpsDisabled on Windows.
+	{"README.md", 86, classHistorical, "7243c4763bdb", "maps its own memory, and since #86 it does so directly over"},
+	{"mapping.go", 86, classHistorical, "880801b2fa85", "told, as memcall told it before #86, that the hardening had"},
+	{"osmem.go", 86, classHistorical, "85a2203e82db", "That is the reason this layer exists (#86)."},
+	{"osmem_unix.go", 86, classHistorical, "e1a3017ced32", "hardening a consumer had before #86 is the hardening it has now."},
 
 	// providertest — the conformance suite added by #64, in its own package.
 	// Scanned because the file walk is recursive; a root-only scan would have

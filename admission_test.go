@@ -15,8 +15,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
-
-	"github.com/awnumar/memcall"
 )
 
 func TestNewAllocator_InvalidBudget(t *testing.T) {
@@ -295,7 +293,7 @@ func TestAllocator_Concurrent(t *testing.T) {
 //
 // Allocator.New maps and locks, then freezes; when the freeze is refused it
 // releases the mapping, and when THAT is refused too — the wipe-enabling
-// mprotect and the bare-unmap fallback both denied — the locked pages stay
+// mprotect and the unmap fallback both denied — the locked pages stay
 // behind with no handle. New refunded the whole charge anyway, so the budget
 // advertised locked memory the process could not use: the stance DestroyErr
 // refuses to take for exactly the same pages.
@@ -319,22 +317,19 @@ func TestAllocator_New_KeepsTheChargeForPagesACleanupCouldNotRelease(t *testing.
 			}
 
 			denied := errors.New("mprotect denied by policy")
-			prevProtect, prevDirect := protectMemory, unmapDirectFn
+			prevProtect, prevUnmap := protectMemory, unmapMemory
 			// Stranded pages are on the orphan ledger, so they are reclaimed the
 			// way production reclaims them — by a sweep once the refusal lifts —
 			// and never freed behind the ledger's back, which would leave it a
 			// record of an unmapped region.
 			t.Cleanup(func() {
-				protectMemory, unmapDirectFn = prevProtect, prevDirect
+				protectMemory, unmapMemory = prevProtect, prevUnmap
 				_, _ = WipeAll()
 			})
-			protectMemory = func([]byte, memcall.MemoryProtectionFlag) error { return denied }
-			unmapDirectFn = func(b []byte) error {
+			protectMemory = func([]byte, protection) error { return denied }
+			unmapMemory = func(b []byte) error {
 				if tc.bypassOK {
-					// Stands in for the bare munmap on every platform.
-					// memcall.Free makes its own mprotect, not through the
-					// denied seam.
-					return freeMemory(b)
+					return prevUnmap(b)
 				}
 				return errors.New("munmap denied too")
 			}
@@ -371,23 +366,23 @@ func TestAllocator_New_RefundsWhenTheCleanupUnlockedButCouldNotUnmap(t *testing.
 		t.Fatalf("NewAllocator: %v", err)
 	}
 
-	prevProtect, prevFree := protectMemory, freeMemory
+	prevProtect, prevUnmap := protectMemory, unmapMemory
 	var stranded bool
 	// Reclaimed through the orphan ledger, never freed behind its back; see
 	// TestAllocator_New_KeepsTheChargeForPagesACleanupCouldNotRelease.
 	t.Cleanup(func() {
-		protectMemory, freeMemory = prevProtect, prevFree
+		protectMemory, unmapMemory = prevProtect, prevUnmap
 		_, _ = WipeAll()
 	})
 	// Only the freeze (read-only) is refused, so construction fails and the
 	// cleanup wipes, unlocks, and is refused the unmap.
-	protectMemory = func(b []byte, f memcall.MemoryProtectionFlag) error {
-		if f == memcall.ReadOnly() {
+	protectMemory = func(b []byte, p protection) error {
+		if p == protReadOnly {
 			return errors.New("mprotect denied by policy")
 		}
-		return prevProtect(b, f)
+		return prevProtect(b, p)
 	}
-	freeMemory = func([]byte) error {
+	unmapMemory = func([]byte) error {
 		stranded = true
 		return errors.New("munmap: cannot allocate memory")
 	}
@@ -413,23 +408,34 @@ func TestAllocator_New_RefundsWhenTheCleanupUnlockedButCouldNotUnmap(t *testing.
 
 // TestAllocator_NewSized_RefundsWhenALockFailureLeavesNothingLocked is the
 // control for the predicate on the NewSized path: an mlock refused at the
-// ceiling leaves nothing locked whatever the unmap does, so the charge goes
-// back even when the rollback's munmap is refused and only the bare-unmap
-// fallback returns the mapping.
+// ceiling leaves nothing locked and the rollback's munmap returns the mapping,
+// so the charge goes back and the failure is not marked as holding pages. The
+// arm where that munmap is refused as well is
+// TestAllocator_NewSized_UnlockedOrphanIsReclaimedWithoutASecondRefund.
 func TestAllocator_NewSized_RefundsWhenALockFailureLeavesNothingLocked(t *testing.T) {
 	a, err := NewAllocator(4 * pageSize)
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
 
-	prevLock, prevFree, prevDirect := lockMemory, freeMemory, unmapDirectFn
-	t.Cleanup(func() { lockMemory, freeMemory, unmapDirectFn = prevLock, prevFree, prevDirect })
+	prevLock, prevUnmap := lockMemory, unmapMemory
+	t.Cleanup(func() { lockMemory, unmapMemory = prevLock, prevUnmap })
 	lockMemory = func([]byte) error { return errors.New("mlock: cannot allocate memory") }
-	freeMemory = func([]byte) error { return errors.New("munmap refused") }
-	unmapDirectFn = func(b []byte) error { return prevFree(b) }
+	unmaps := 0
+	unmapMemory = func(b []byte) error {
+		unmaps++
+		return prevUnmap(b)
+	}
 
-	if _, err := a.NewSized(32); !errors.Is(err, ErrLockedMemoryUnavailable) {
+	_, err = a.NewSized(32)
+	if !errors.Is(err, ErrLockedMemoryUnavailable) {
 		t.Fatalf("NewSized = %v, want ErrLockedMemoryUnavailable", err)
+	}
+	if unmaps != 1 {
+		t.Errorf("the rollback unmapped %d times, want 1: the mapping it gave up was not returned", unmaps)
+	}
+	if pagesHeld(err) {
+		t.Errorf("pagesHeld(%v) = true, want false: the rollback unmapped the region", err)
 	}
 	if used := a.InUse(); used != 0 {
 		t.Errorf("InUse = %d after a construction that left nothing locked, want 0", used)

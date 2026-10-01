@@ -341,8 +341,9 @@ func TestMemoryEnclave_FreezeWaitsForBorrows(t *testing.T) {
 // material.
 //
 // So the enclave has to come back exactly as it went in — alive, writable,
-// readable — with the failure reported as a typed error. The refusal is real,
-// not simulated: mprotect on an unaligned address is EINVAL by definition.
+// readable — with the failure reported as a typed error. The refusal is
+// injected through the protectMemory seam, so the enclave's own slices are
+// never touched.
 func TestMemoryEnclave_FreezeFailureLeavesTheEnclaveUsable(t *testing.T) {
 	e, err := NewMemoryEnclaveSized(32)
 	if err != nil {
@@ -358,13 +359,9 @@ func TestMemoryEnclave_FreezeFailureLeavesTheEnclaveUsable(t *testing.T) {
 		t.Fatalf("filling the enclave: %v", err)
 	}
 
-	real := e.m.inner
-	bad, freeProbe := unmappableSlice(t)
-	defer freeProbe()
-
-	e.m.inner = bad
+	lift := denyProtect(t)
 	err = e.Freeze()
-	e.m.inner = real
+	lift()
 
 	if err == nil {
 		t.Fatal("Freeze reported success on a region the kernel cannot protect")

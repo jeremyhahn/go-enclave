@@ -16,15 +16,19 @@
 // canary, so an underflow is detected on release; and wiped before the pages go
 // back to the kernel.
 //
-// A core file would write those pages to disk in plaintext, so they are kept out
-// of one at two levels: RLIMIT_CORE is lowered process-wide on import, which is
-// best effort and reported by [CoreDumpsDisabled] rather than assumed, and every
-// enclave's pages are additionally marked MADV_DONTDUMP (MADV_NOCORE on FreeBSD)
-// as they are locked. The second one is checked rather than
-// attempted-and-forgotten: its error fails the allocation. That the refusal is REPORTED at all is covered by a test; that the
-// report is acted on at the call site is guaranteed by construction, being one
-// branch in [newMapping] that no test can reach — the region it passes is always
-// page-aligned, and an aligned madvise does not fail.
+// A core dump would write those pages to disk in plaintext, so they are kept out
+// of one at two levels. RLIMIT_CORE is lowered, soft and hard, to zero on
+// import, which is best effort and reported by [CoreDumpsDisabled] rather than
+// assumed (Windows has no such limit, and says so) — and which stops core FILES
+// only: a Linux core_pattern that pipes dumps to a collector ignores RLIMIT_CORE
+// (core(5)). Every enclave's pages are therefore also excluded per mapping where
+// the kernel offers it — MADV_DONTDUMP on Linux, MAP_NOCORE and MADV_NOCORE on
+// FreeBSD and DragonFly, MAP_CONCEAL on OpenBSD — which the kernel's dump writer
+// applies whatever the destination. The second one is checked rather than
+// attempted-and-forgotten: its error fails the allocation. That the refusal is REPORTED at all is covered by a test; that
+// the report is acted on at the call site is guaranteed by construction, being
+// one branch in [newMapping] that no test can reach — the region it passes is
+// always page-aligned, and an aligned madvise does not fail.
 //
 // Every failure is a returned error. The mapping, the lock and the guard
 // protections can all be refused by the kernel — most often at the process's

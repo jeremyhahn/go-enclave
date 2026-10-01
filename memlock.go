@@ -124,10 +124,11 @@ const (
 	LimitNotEnforced
 
 	// LimitUnsupported means the platform exposes no per-process locked-memory
-	// limit to read — Windows, which bounds a working-set size instead, and the
-	// GOOS values that define no RLIMIT_MEMLOCK. It is NOT reported for a
-	// platform that has one: Linux and the five BSDs are all read. See
-	// memlock_other.go for what that path promises.
+	// limit to read — Windows, which bounds a working-set size instead, and
+	// AIX, Solaris and illumos, for which golang.org/x/sys defines no
+	// RLIMIT_MEMLOCK. It is NOT reported for a platform that has one: Linux and
+	// the five BSDs are all read. See memlock_other.go for what that path
+	// promises.
 	LimitUnsupported
 )
 

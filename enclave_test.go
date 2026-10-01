@@ -745,9 +745,9 @@ func TestDestroy_CorruptionSurvivesAFailedRelease(t *testing.T) {
 	e.m.canary[len(e.m.canary)-1] ^= 0xFF
 
 	denied := errors.New("munmap: cannot allocate memory")
-	prev := freeMemory
+	prev := unmapMemory
 	t.Cleanup(func() {
-		freeMemory = prev
+		unmapMemory = prev
 		if e.m != nil {
 			_ = panicValue(func() { _ = e.DestroyErr() })
 		}
@@ -755,7 +755,7 @@ func TestDestroy_CorruptionSurvivesAFailedRelease(t *testing.T) {
 	// VirtualUnlock semantics: the first attempt's munlock succeeds, so a retry
 	// that unlocks again is refused on Windows before it reaches the munmap.
 	installStrictUnlock(t)
-	freeMemory = func([]byte) error { return denied }
+	unmapMemory = func([]byte) error { return denied }
 
 	r := panicValue(e.Destroy)
 	if rerr, ok := r.(error); !ok || !errors.Is(rerr, ErrEnclaveCorrupted) {
@@ -771,7 +771,7 @@ func TestDestroy_CorruptionSurvivesAFailedRelease(t *testing.T) {
 		t.Error("the enclave left the ledger with its pages still mapped")
 	}
 
-	freeMemory = prev
+	unmapMemory = prev
 	r = panicValue(e.Destroy)
 	if rerr, ok := r.(error); !ok || !errors.Is(rerr, ErrEnclaveCorrupted) {
 		t.Fatalf("the retry that released the pages panicked with %v, want ErrEnclaveCorrupted: "+
