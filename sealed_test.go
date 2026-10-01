@@ -48,7 +48,7 @@ func TestSealedEnclave_RoundTrip(t *testing.T) {
 	freshProcessSealer(t)
 	src := append([]byte(nil), sealedMaterial...)
 
-	s, err := NewSealed(src)
+	s, err := NewSealed(t.Context(), src)
 	if err != nil {
 		t.Fatalf("NewSealed: %v", err)
 	}
@@ -66,7 +66,7 @@ func TestSealedEnclave_RoundTrip(t *testing.T) {
 		t.Errorf("String = %q", got)
 	}
 
-	e, err := s.Open()
+	e, err := s.Open(t.Context())
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -92,7 +92,7 @@ func TestSealedEnclave_RoundTrip(t *testing.T) {
 func TestSealedEnclave_NoPlaintextAtRest(t *testing.T) {
 	freshProcessSealer(t)
 	src := append([]byte(nil), sealedMaterial...)
-	s, err := NewSealed(src)
+	s, err := NewSealed(t.Context(), src)
 	if err != nil {
 		t.Fatalf("NewSealed: %v", err)
 	}
@@ -128,13 +128,13 @@ func TestSealedEnclave_NoPlaintextAtRest(t *testing.T) {
 // file.
 func TestSealedEnclave_SealIsNonDeterministic(t *testing.T) {
 	freshProcessSealer(t)
-	first, err := NewSealed(append([]byte(nil), sealedMaterial...))
+	first, err := NewSealed(t.Context(), append([]byte(nil), sealedMaterial...))
 	if err != nil {
 		t.Fatalf("NewSealed: %v", err)
 	}
 	defer first.Destroy()
 
-	second, err := NewSealed(append([]byte(nil), sealedMaterial...))
+	second, err := NewSealed(t.Context(), append([]byte(nil), sealedMaterial...))
 	if err != nil {
 		t.Fatalf("NewSealed: %v", err)
 	}
@@ -151,7 +151,7 @@ func TestSealedEnclave_SealIsNonDeterministic(t *testing.T) {
 
 	// Both must still open to the same material — different bytes, same value.
 	for _, s := range []*SealedEnclave{first, second} {
-		e, err := s.Open()
+		e, err := s.Open(t.Context())
 		if err != nil {
 			t.Fatalf("Open: %v", err)
 		}
@@ -190,7 +190,7 @@ func TestSealedEnclave_DetectsTampering(t *testing.T) {
 		{"blob last byte", false, func(n int) int { return n - 1 }},
 	} {
 		t.Run(pos.name, func(t *testing.T) {
-			s, err := NewSealed(append([]byte(nil), sealedMaterial...))
+			s, err := NewSealed(t.Context(), append([]byte(nil), sealedMaterial...))
 			if err != nil {
 				t.Fatalf("NewSealed: %v", err)
 			}
@@ -200,7 +200,7 @@ func TestSealedEnclave_DetectsTampering(t *testing.T) {
 			i := pos.index(len(target))
 			target[i] ^= 0xFF
 
-			e, err := s.Open()
+			e, err := s.Open(t.Context())
 			if !errors.Is(err, ErrSealedAuthentication) {
 				t.Errorf("Open after flipping byte %d = %v, want ErrSealedAuthentication", i, err)
 			}
@@ -213,7 +213,7 @@ func TestSealedEnclave_DetectsTampering(t *testing.T) {
 			// refusal above was the tamper's doing and not a value that never
 			// worked.
 			target[i] ^= 0xFF
-			e, err = s.Open()
+			e, err = s.Open(t.Context())
 			if err != nil {
 				t.Fatalf("Open after restoring the byte: %v", err)
 			}
@@ -231,7 +231,7 @@ func TestSealedEnclave_DetectsTampering(t *testing.T) {
 // frame cannot even be parsed. All must be refused rather than indexed into.
 func TestSealedEnclave_TruncationIsRejected(t *testing.T) {
 	freshProcessSealer(t)
-	s, err := NewSealed(append([]byte(nil), sealedMaterial...))
+	s, err := NewSealed(t.Context(), append([]byte(nil), sealedMaterial...))
 	if err != nil {
 		t.Fatalf("NewSealed: %v", err)
 	}
@@ -244,7 +244,7 @@ func TestSealedEnclave_TruncationIsRejected(t *testing.T) {
 		// than as a short value, and the test would then be asserting the
 		// wrong contract at n = 0.
 		s.sealed = fullSealed[:n:n]
-		e, err := s.Open()
+		e, err := s.Open(t.Context())
 		if !errors.Is(err, ErrSealedAuthentication) {
 			t.Errorf("Open on a %d-byte sealed value = %v, want ErrSealedAuthentication", n, err)
 		}
@@ -258,7 +258,7 @@ func TestSealedEnclave_TruncationIsRejected(t *testing.T) {
 	fullBlob := append([]byte(nil), s.blob...)
 	for _, n := range []int{0, 1, blobHeaderLen - 1, blobHeaderLen, len(fullBlob) - 1} {
 		s.blob = fullBlob[:n:n]
-		e, err := s.Open()
+		e, err := s.Open(t.Context())
 		if !errors.Is(err, ErrSealedAuthentication) {
 			t.Errorf("Open on a %d-byte blob = %v, want ErrSealedAuthentication", n, err)
 		}
@@ -270,7 +270,7 @@ func TestSealedEnclave_TruncationIsRejected(t *testing.T) {
 	s.blob = fullBlob
 
 	// Control: with both halves restored the value still opens.
-	e, err := s.Open()
+	e, err := s.Open(t.Context())
 	if err != nil {
 		t.Fatalf("Open after restoring both halves: %v", err)
 	}
@@ -282,17 +282,17 @@ func TestSealedEnclave_TruncationIsRejected(t *testing.T) {
 // one affects neither the other nor the sealed value it came from.
 func TestSealedEnclave_OpensAreIndependent(t *testing.T) {
 	freshProcessSealer(t)
-	s, err := NewSealed(append([]byte(nil), sealedMaterial...))
+	s, err := NewSealed(t.Context(), append([]byte(nil), sealedMaterial...))
 	if err != nil {
 		t.Fatalf("NewSealed: %v", err)
 	}
 	defer s.Destroy()
 
-	first, err := s.Open()
+	first, err := s.Open(t.Context())
 	if err != nil {
 		t.Fatalf("first Open: %v", err)
 	}
-	second, err := s.Open()
+	second, err := s.Open(t.Context())
 	if err != nil {
 		t.Fatalf("second Open: %v", err)
 	}
@@ -314,7 +314,7 @@ func TestSealedEnclave_OpensAreIndependent(t *testing.T) {
 	}
 
 	// And the sealed value still opens afterwards.
-	third, err := s.Open()
+	third, err := s.Open(t.Context())
 	if err != nil {
 		t.Fatalf("Open after destroying an earlier result: %v", err)
 	}
@@ -330,7 +330,7 @@ func TestSealedEnclave_OpensAreIndependent(t *testing.T) {
 // `defer s.Destroy()` without thinking about it.
 func TestSealedEnclave_Lifecycle(t *testing.T) {
 	freshProcessSealer(t)
-	s, err := NewSealed(append([]byte(nil), sealedMaterial...))
+	s, err := NewSealed(t.Context(), append([]byte(nil), sealedMaterial...))
 	if err != nil {
 		t.Fatalf("NewSealed: %v", err)
 	}
@@ -352,7 +352,7 @@ func TestSealedEnclave_Lifecycle(t *testing.T) {
 	if s.IsAlive() {
 		t.Error("IsAlive = true after Destroy")
 	}
-	if e, err := s.Open(); !errors.Is(err, ErrEnclaveDestroyed) {
+	if e, err := s.Open(t.Context()); !errors.Is(err, ErrEnclaveDestroyed) {
 		t.Errorf("Open after Destroy = %v, want ErrEnclaveDestroyed", err)
 		if e != nil {
 			e.Destroy()
@@ -367,7 +367,7 @@ func TestSealedEnclave_Lifecycle(t *testing.T) {
 	if nilSealed.IsAlive() {
 		t.Error("IsAlive = true on a nil sealed enclave")
 	}
-	if _, err := nilSealed.Open(); !errors.Is(err, ErrEnclaveDestroyed) {
+	if _, err := nilSealed.Open(t.Context()); !errors.Is(err, ErrEnclaveDestroyed) {
 		t.Errorf("Open on nil = %v, want ErrEnclaveDestroyed", err)
 	}
 	// Asserted as a substring rather than the whole literal so the string
@@ -381,12 +381,12 @@ func TestSealedEnclave_Lifecycle(t *testing.T) {
 func TestSealedEnclave_Empty(t *testing.T) {
 	for name, in := range map[string][]byte{"nil": nil, "empty": {}} {
 		t.Run(name, func(t *testing.T) {
-			s, err := NewSealed(in)
+			s, err := NewSealed(t.Context(), in)
 			if !errors.Is(err, ErrEmptyEnclave) {
-				t.Errorf("NewSealed(%s) = %v, want ErrEmptyEnclave", name, err)
+				t.Errorf("NewSealed(t.Context(), %s) = %v, want ErrEmptyEnclave", name, err)
 			}
 			if s != nil {
-				t.Errorf("NewSealed(%s) returned a non-nil enclave", name)
+				t.Errorf("NewSealed(t.Context(), %s) returned a non-nil enclave", name)
 			}
 		})
 	}
@@ -403,13 +403,13 @@ func TestSealedEnclave_Sizes(t *testing.T) {
 		t.Run(fmt.Sprintf("%d", n), func(t *testing.T) {
 			want := bytes.Repeat([]byte{byte(n % 251)}, n)
 
-			s, err := NewSealed(append([]byte(nil), want...))
+			s, err := NewSealed(t.Context(), append([]byte(nil), want...))
 			if err != nil {
-				t.Fatalf("NewSealed(%d): %v", n, err)
+				t.Fatalf("NewSealed(t.Context(), %d): %v", n, err)
 			}
 			defer s.Destroy()
 
-			e, err := s.Open()
+			e, err := s.Open(t.Context())
 			if err != nil {
 				t.Fatalf("Open(%d): %v", n, err)
 			}
@@ -447,7 +447,7 @@ func TestSealedEnclave_Concurrent(t *testing.T) {
 	freshProcessSealer(t)
 	const goroutines, iterations = 16, 50
 
-	s, err := NewSealed(append([]byte(nil), sealedMaterial...))
+	s, err := NewSealed(t.Context(), append([]byte(nil), sealedMaterial...))
 	if err != nil {
 		t.Fatalf("NewSealed: %v", err)
 	}
@@ -458,7 +458,7 @@ func TestSealedEnclave_Concurrent(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for i := 0; i < iterations; i++ {
-				e, err := s.Open()
+				e, err := s.Open(t.Context())
 				if err != nil {
 					// Only the destroyer's outcome is acceptable.
 					if !errors.Is(err, ErrEnclaveDestroyed) {
@@ -503,14 +503,14 @@ func TestSealedEnclave_Concurrent(t *testing.T) {
 func TestSealedEnclave_SizeMismatchIsRejected(t *testing.T) {
 	freshProcessSealer(t)
 	for _, delta := range []int{+1, +64, -1} {
-		s, err := NewSealed(append([]byte(nil), sealedMaterial...))
+		s, err := NewSealed(t.Context(), append([]byte(nil), sealedMaterial...))
 		if err != nil {
 			t.Fatalf("NewSealed: %v", err)
 		}
 
 		s.size += delta
 
-		e, err := s.Open()
+		e, err := s.Open(t.Context())
 		if !errors.Is(err, ErrSealedAuthentication) {
 			t.Errorf("Open with size off by %+d = %v, want ErrSealedAuthentication", delta, err)
 		}
@@ -705,7 +705,7 @@ func TestSealedEnclave_KeyScheduleReachesTheHeapAsDocumented(t *testing.T) {
 func TestSealedEnclave_WipeAllFailsClosed(t *testing.T) {
 	freshProcessSealer(t)
 
-	s, err := NewSealed(append([]byte(nil), sealedMaterial...))
+	s, err := NewSealed(t.Context(), append([]byte(nil), sealedMaterial...))
 	if err != nil {
 		t.Fatalf("NewSealed: %v", err)
 	}
@@ -713,7 +713,7 @@ func TestSealedEnclave_WipeAllFailsClosed(t *testing.T) {
 
 	// Non-vacuity: it opens BEFORE the sweep, so the refusal afterwards is
 	// the sweep's doing and not a value that never worked.
-	e, err := s.Open()
+	e, err := s.Open(t.Context())
 	if err != nil {
 		t.Fatalf("Open before the sweep: %v", err)
 	}
@@ -743,13 +743,13 @@ func TestSealedEnclave_WipeAllFailsClosed(t *testing.T) {
 	// Open fails with the DISTINCT error — not ErrSealedAuthentication,
 	// which would read as tampering, and not ErrEnclaveDestroyed, which
 	// would point at a handle the caller never destroyed.
-	if _, err := s.Open(); !errors.Is(err, ErrSealerWiped) {
+	if _, err := s.Open(t.Context()); !errors.Is(err, ErrSealerWiped) {
 		t.Errorf("Open after the sweep = %v, want ErrSealerWiped", err)
 	}
 
 	// And sealing does NOT resume: no silent regeneration, ever. This is the
 	// assertion the regeneration mutant fails.
-	if fresh, err := NewSealed(append([]byte(nil), sealedMaterial...)); !errors.Is(err, ErrSealerWiped) {
+	if fresh, err := NewSealed(t.Context(), append([]byte(nil), sealedMaterial...)); !errors.Is(err, ErrSealerWiped) {
 		t.Errorf("NewSealed after the sweep = %v, want ErrSealerWiped: the sealer must fail closed, never re-key", err)
 		if fresh != nil {
 			fresh.Destroy()
@@ -768,12 +768,12 @@ func TestSealedEnclave_WipeAllFailsClosed(t *testing.T) {
 
 	// Explicit re-initialization is a NEW Sealer, and it works: the sweep
 	// retired this process's keys, not the machinery.
-	v, err := replacement.Seal(append([]byte(nil), sealedMaterial...))
+	v, err := replacement.Seal(t.Context(), append([]byte(nil), sealedMaterial...))
 	if err != nil {
 		t.Fatalf("Seal on a fresh explicit Sealer after the sweep: %v", err)
 	}
 	defer v.Destroy()
-	e, err = v.Open()
+	e, err = v.Open(t.Context())
 	if err != nil {
 		t.Fatalf("Open on the fresh Sealer's value: %v", err)
 	}

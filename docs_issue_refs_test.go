@@ -274,6 +274,17 @@ var docIssueRefLedger = []docIssueRef{
 	{"osmem.go", 86, classHistorical, "85a2203e82db", "That is the reason this layer exists (#86)."},
 	{"osmem_unix.go", 86, classHistorical, "e1a3017ced32", "hardening a consumer had before #86 is the hardening it has now."},
 
+	// #87 — context on every provider-reaching call, and no Sealer or
+	// SealedEnclave lock held across a provider: the init slot, the
+	// sweep-overlap check, and Destroy no longer waiting on an Open.
+	{"doc.go", 87, classHistorical, "05a27d6c4f2c", "holds up no other caller beyond that caller's own context (#87)."},
+	{"provider.go", 87, classHistorical, "509dfca3c542", "or any other, waits behind it beyond its own context (#87)."},
+	{"sealed.go", 87, classHistorical, "6ba7f5dff856", "and no mutex of this package's may be held across one (#87)."},
+	{"sealed.go", 87, classHistorical, "28fabaeb7549", "it there, as this did until #87, made Destroy — a call"},
+	{"sealed.go", 87, classHistorical, "70b1c0bb2895", "It does NOT wait for an Open in flight, and that changed in #87."},
+	{"sealer.go", 87, classHistorical, "3a66b10d87a6", "guarantee callers can rely on (#87): a provider stalled inside"},
+	{"sealer.go", 87, classHistorical, "5f877366db29", "Until #87 this whole function ran under mu held exclusively, so a"},
+
 	// providertest — the conformance suite added by #64, in its own package.
 	// Scanned because the file walk is recursive; a root-only scan would have
 	// missed a whole package's docs, silently.

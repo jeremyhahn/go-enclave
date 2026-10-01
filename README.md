@@ -72,12 +72,12 @@ inside the process: plaintext exists only for the duration of an `Open`,
 inside the `MemoryEnclave` that `Open` returns.
 
 ```go
-s, err := enclave.NewSealed(credential) // credential is wiped
+s, err := enclave.NewSealed(ctx, credential) // credential is wiped
 if err != nil {
     return err
 }
 // ... later, per use:
-e, err := s.Open() // plaintext decrypted straight into locked pages
+e, err := s.Open(ctx) // plaintext decrypted straight into locked pages
 if err != nil {
     return err
 }
@@ -215,13 +215,13 @@ process gets `ErrLockedMemoryUnavailable` from every allocation.
 | `NewAllocatorWithinRLimit(maxBytes)` | `NewAllocator` plus a **sticky ceiling check**: discovers `RLIMIT_MEMLOCK` and refuses a budget above it with `ErrBudgetExceedsRLimit`, naming both figures — a budget that was never satisfiable fails at construction rather than at the first allocation under load. It refuses nothing when the ceiling is unlimited, unenforceable (`CAP_IPC_LOCK`), or absent because the platform exposes none: there is no ceiling to be above. A ceiling that could not be **read** is a different case and is not silent — a failing `getrlimit` returns `ErrLimitDiscoveryFailed`, since nothing was compared. Never exits, logs or panics; every one of those is a return value and the decision is the application's. The check **outlives construction**: `SetLimit` re-reads the ceiling (fresh — it moves) and refuses to raise this allocator's budget above it, and `TransferTo` applies the same to the allocator it credits, since a transfer is a raise on the receiving side. Raises only, so an over-ceiling allocator can always move back towards compliance; `ForceLimit` overrides it, as it overrides every other refusal here. A plain `NewAllocator` allocator is never checked, on any path. Nothing was added to the admission path. |
 | `SetAllocator(a)` / `ProcessAllocator()` | **One budget per process.** `RLIMIT_MEMLOCK` is process-wide, so admission bounds anything only when every library admits against the same allocator. The **binary** sizes it once at startup and installs it with `SetAllocator`; that is one-shot and fails closed with `ErrAllocatorInstalled`, the same contract as `SetSealer`. A **library** never builds or installs one. It calls `ProcessAllocator()` and allocates through the result. With nothing installed, the first call installs a default whose budget is the discovered ceiling (sticky, like `NewAllocatorWithinRLimit`), a zero budget for a zero ceiling, or unbounded where no ceiling binds. It leaves no headroom, because sizing is the binary's call. A ceiling that could not be read returns `ErrLimitDiscoveryFailed` and installs nothing. |
 | `DiscoverLockedMemoryLimit()` | Read the ceiling yourself, to **derive** a budget from the host instead of guessing one. Reports the figure, whether it is a ceiling to rely on, and where it came from (`LimitSource`), so the derivation can be logged next to the number. An unbounded or absent ceiling is not an error — it comes back with `Bounded` false and a source saying which; only a failed read is an error, and it is `ErrLimitDiscoveryFailed`. |
-| `NewSealed(data []byte)` | Seal `data` under the process sealer (software default installed lazily); wipes `data`. Returns a `*SealedEnclave` — heap ciphertext, no locked pages held at rest. |
-| `(*SealedEnclave) Open()` | Decrypt into a **new** locked `MemoryEnclave` the caller owns and must `Destroy`. Fails with `ErrSealedAuthentication` for anything tampered, truncated, re-paired or foreign, and `ErrSealerWiped` after a shutdown sweep. |
+| `NewSealed(ctx, data []byte)` | Seal `data` under the process sealer (software default installed lazily); wipes `data`, on every path. Returns a `*SealedEnclave` — heap ciphertext, no locked pages held at rest. `ctx` bounds the provider calls a seal can make; an ended context fails with an error matching both `ErrSealFailed` and the context's error. |
+| `(*SealedEnclave) Open(ctx)` / `OpenWith(ctx, a)` | Decrypt into a **new** locked `MemoryEnclave` the caller owns and must `Destroy`; `OpenWith` charges it to `a`. Fails with `ErrSealedAuthentication` for anything tampered, truncated, re-paired or foreign, `ErrSealerWiped` after a shutdown sweep, and — for an ended context or a provider's infrastructure failure — `ErrOpenFailed`, which is not a forgery verdict: the value is intact. (If the provider returns an error of its own — an authentication failure, `ErrSealerWiped`, `ErrLockedMemoryUnavailable` — as the context ends, both are reported, joined: neither overwrites the other, and a forgery verdict in particular is a security signal.) |
 | `(*SealedEnclave) IsAlive / Destroy / String` | Ciphertext-presence probe (see the trap above), idempotent destroy that wipes both envelope halves, masked printing. |
 | `NewSealer(WithProvider(p), WithMode(m))` | An explicitly configured sealer. Refuses a provider that does not implement the selected mode's interface (`ErrProviderMode`, including nil and typed-nil providers) and unknown modes (`ErrInvalidMode`) **at construction**. |
 | `SetSealer(s)` | Install the process sealer `NewSealed` uses — **one-shot**, before anything seals; fails closed with `ErrSealerInstalled` afterwards. |
-| `KeyProtector` / `RootUnsealer` | The provider seam: per-operation key protection and one-shot root unseal. Implementations must supply confidentiality **and** authenticity; both recover into caller-supplied (locked) memory. |
-| `providertest.TestProvider(cfg)` | **Conformance suite for the provider seam** — `providertest` is a subpackage go-enclave ships and any implementer runs against its own provider, in the shape of `fstest.TestFS`. It enforces the half the signatures cannot: that a provider RETAINS nothing. See [Implementing a provider](#implementing-a-provider). |
+| `KeyProtector` / `RootUnsealer` | The provider seam: per-operation key protection and one-shot root unseal. Implementations must supply confidentiality **and** authenticity; both recover into caller-supplied (locked) memory; every operation takes the caller's `context.Context` and must honor it. No mutex of the sealer's is held across a provider call; the one lock that is, the semaphore serializing the first root unseal, is left by a queued caller when its context ends — so a stalled provider holds up only its own caller. |
+| `providertest.TestProvider(ctx, cfg)` | **Conformance suite for the provider seam** — `providertest` is a subpackage go-enclave ships and any implementer runs against its own provider, in the shape of `fstest.TestFS`. It enforces the half the signatures cannot: that a provider RETAINS nothing. See [Implementing a provider](#implementing-a-provider). |
 | `NewSoftwareProvider()` | The pure-software provider (both interfaces); the process default. Its root lives in this process — read its docs for what that trades away. |
 | `Wipe(b []byte)` | Zero a transient plain slice. |
 | `CoreDumpsDisabled()` | Whether lowering `RLIMIT_CORE` (soft and hard) to zero at import succeeded. That stops core **files** only: a Linux `core_pattern` that pipes dumps to a collector (systemd-coredump, apport) ignores `RLIMIT_CORE` (core(5)), so on such a host the per-mapping exclusion below is what protects enclave pages. Best effort by nature — a sandbox can deny it and a privileged process can raise it again — so it is reported rather than promised. On Windows, which has no such limit, it returns `ErrCoreDumpLimitUnsupported` instead of claiming a success. Each enclave's pages are separately excluded per mapping where the kernel offers it (`MADV_DONTDUMP` on Linux, `MAP_NOCORE`/`MADV_NOCORE` on FreeBSD and DragonFly, `MAP_CONCEAL` on OpenBSD), which **is** verified and fails the allocation if refused. |
@@ -230,7 +230,7 @@ Errors: `ErrEmptyEnclave`, `ErrInvalidSize`, `ErrEnclaveDestroyed`, `ErrLockedMe
 (+ `LockedMemoryError`), `ErrBudgetExhausted` (+ `BudgetError`), `ErrInvalidBudget`, `ErrNilAllocator`, `ErrAllocatorInstalled`,
 `ErrBudgetExceedsRLimit` (+ `RLimitError`), `ErrLimitDiscoveryFailed` (+ `LimitDiscoveryError`),
 `ErrReleasedWithoutWipe` (+ `UnwipedReleaseError`), `ErrCoreDumpLimitUnsupported`;
-sealing: `ErrSealFailed`, `ErrSealedAuthentication`, `ErrSealerWiped`, `ErrProviderMode`,
+sealing: `ErrSealFailed`, `ErrOpenFailed`, `ErrSealedAuthentication`, `ErrSealerWiped`, `ErrProviderMode`,
 `ErrInvalidMode`, `ErrSealerInstalled`, `ErrNilSealer`, `ErrProviderMessageLimit`,
 `ErrMaterialTooLarge`, `ErrPlaintextEscaped`; shutdown: `SweepError` (matches
 `ErrEnclaveCorrupted` / `ErrReleasedWithoutWipe`), `ErrSweepInProgress`.
@@ -354,7 +354,7 @@ takes no dependency in either direction:
 
 ```go
 func TestConformance(t *testing.T) {
-    err := providertest.TestProvider(providertest.Config{
+    err := providertest.TestProvider(t.Context(), providertest.Config{
         New:   func() (any, error) { return NewTPMProvider(dev) },
         Modes: []enclave.Mode{enclave.ModePerOperation},
         Logf:  t.Logf,
@@ -367,7 +367,7 @@ func TestConformance(t *testing.T) {
 
 ### The property it enforces is retention, not destination
 
-`Unprotect(blob, key []byte)` and `UnsealRoot(dst []byte)` constrain where the
+`Unprotect(ctx, blob, key []byte)` and `UnsealRoot(ctx, dst []byte)` constrain where the
 plaintext is **written**. They constrain nothing about what a provider **keeps**.
 A provider may write into the caller's locked slice and hold its own copy
 indefinitely, and from this package's side a conforming signature and a
@@ -382,6 +382,20 @@ directly into an arbitrary caller page, so a conforming provider materializes th
 plaintext in its own memory and copies into the destination. What it must then
 do is **wipe that transient**, which is what the interface requires in words and
 what the suite measures.
+
+### Honor the context
+
+Every operation takes the caller's `context.Context`, because a device can
+block and a deadline is only real if it reaches the thing that blocks. A
+provider must refuse a context that has already ended before doing device
+work, return promptly with an error matching `ctx.Err()` if it ends mid-call,
+write nothing into the destination of a call it refuses, and — for
+`UnsealRoot` — consume nothing on a refused call: a `Sealer` retries an unseal
+that failed, a canceled one included. The suite checks the refusal half with
+an already-canceled and an already-expired context; cancellation arriving
+mid-call can only be forced from inside a provider and is not measured.
+`TestProvider` itself takes a context and passes it to every call, and a run
+whose context ends early returns `ErrAborted` — never `nil`.
 
 ### Name only the modes you serve
 

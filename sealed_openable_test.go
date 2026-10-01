@@ -48,7 +48,7 @@ func TestSealedEnclave_OpenableReportsTheSweep(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
-	v, err := s.Seal(append([]byte(nil), sealedMaterial...))
+	v, err := s.Seal(t.Context(), append([]byte(nil), sealedMaterial...))
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
@@ -59,7 +59,7 @@ func TestSealedEnclave_OpenableReportsTheSweep(t *testing.T) {
 	if err := v.Openable(); err != nil {
 		t.Fatalf("Openable before the sweep = %v, want nil", err)
 	}
-	e, err := v.Open()
+	e, err := v.Open(t.Context())
 	if err != nil {
 		t.Fatalf("Open before the sweep: %v", err)
 	}
@@ -84,7 +84,7 @@ func TestSealedEnclave_OpenableReportsTheSweep(t *testing.T) {
 
 	// It agrees with what an actual Open does, which is the property that
 	// makes it worth calling at all.
-	if _, err := v.Open(); !errors.Is(err, ErrSealerWiped) {
+	if _, err := v.Open(t.Context()); !errors.Is(err, ErrSealerWiped) {
 		t.Errorf("Open after the sweep = %v, want ErrSealerWiped", err)
 	}
 }
@@ -101,13 +101,13 @@ func TestSealedEnclave_OpenableSeparatesASweepFromADestroy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
-	swept, err := s.Seal(append([]byte(nil), sealedMaterial...))
+	swept, err := s.Seal(t.Context(), append([]byte(nil), sealedMaterial...))
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
 	defer swept.Destroy()
 
-	destroyed, err := s.Seal(append([]byte(nil), sealedMaterial...))
+	destroyed, err := s.Seal(t.Context(), append([]byte(nil), sealedMaterial...))
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
@@ -134,7 +134,7 @@ func TestSealedEnclave_OpenableOnDestroyedAndNilValues(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
-	v, err := s.Seal(append([]byte(nil), sealedMaterial...))
+	v, err := s.Seal(t.Context(), append([]byte(nil), sealedMaterial...))
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
@@ -187,7 +187,7 @@ func TestSealedEnclave_OpenableSplitsByMode(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewSealer: %v", err)
 		}
-		v, err := s.Seal(append([]byte(nil), sealedMaterial...))
+		v, err := s.Seal(t.Context(), append([]byte(nil), sealedMaterial...))
 		if err != nil {
 			t.Fatalf("Seal: %v", err)
 		}
@@ -201,7 +201,7 @@ func TestSealedEnclave_OpenableSplitsByMode(t *testing.T) {
 				"not be second-guessed by the generation fallback", err)
 		}
 		// Openable's answer has to match reality, so open it and see.
-		e, err := v.Open()
+		e, err := v.Open(t.Context())
 		if err != nil {
 			t.Fatalf("Open after a sweep with a device-held key = %v; Openable said nil, so one "+
 				"of the two is wrong", err)
@@ -217,7 +217,7 @@ func TestSealedEnclave_OpenableSplitsByMode(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewSealer: %v", err)
 		}
-		v, err := s.Seal(append([]byte(nil), sealedMaterial...))
+		v, err := s.Seal(t.Context(), append([]byte(nil), sealedMaterial...))
 		if err != nil {
 			t.Fatalf("Seal: %v", err)
 		}
@@ -237,7 +237,7 @@ func TestSealedEnclave_OpenableSplitsByMode(t *testing.T) {
 			t.Errorf("Openable after the sweep = %v, want ErrSealerWiped: the software provider's "+
 				"root is an in-process enclave and the sweep destroyed it", err)
 		}
-		if _, err := v.Open(); !errors.Is(err, ErrSealerWiped) {
+		if _, err := v.Open(t.Context()); !errors.Is(err, ErrSealerWiped) {
 			t.Errorf("Open after the sweep = %v, want ErrSealerWiped", err)
 		}
 	})
@@ -281,7 +281,7 @@ func TestWipeAll_DoesNotSweepSealedEnclaves(t *testing.T) {
 	const n = 5
 	values := make([]*SealedEnclave, 0, n)
 	for i := 0; i < n; i++ {
-		v, err := s.Seal(append([]byte(nil), sealedMaterial...))
+		v, err := s.Seal(t.Context(), append([]byte(nil), sealedMaterial...))
 		if err != nil {
 			t.Fatalf("Seal %d: %v", i, err)
 		}

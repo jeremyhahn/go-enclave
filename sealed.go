@@ -9,6 +9,7 @@
 package enclave
 
 import (
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"errors"
@@ -20,6 +21,32 @@ var (
 	// AEAD, the CSPRNG or the provider failed, not that the caller did anything
 	// wrong; the cause is joined and reachable with errors.Is and errors.As.
 	ErrSealFailed = errors.New("enclave: could not seal material")
+
+	// ErrOpenFailed reports that sealed material could not be recovered for a
+	// reason that says NOTHING about the material itself: the caller's context
+	// ended before or during the open, or a [ModePerOperation] provider failed
+	// with its own infrastructure error — a device unreachable, a session
+	// limit. The cause is joined and reachable with errors.Is and errors.As,
+	// so a canceled open matches context.Canceled or
+	// context.DeadlineExceeded as well.
+	//
+	// It is the open-side counterpart of [ErrSealFailed], and it exists so
+	// that those failures have a sentinel of their own that is NOT
+	// [ErrSealedAuthentication]: a value that failed to open because a
+	// deadline passed is intact and can be opened again, and reporting it as
+	// a forgery would send an operator hunting an attacker who does not
+	// exist. [ErrSealedAuthentication], [ErrSealerWiped],
+	// [ErrLockedMemoryUnavailable] and the budget refusals keep their own
+	// sentinels and are not joined under this one — with ONE qualification,
+	// for a provider error and a cancellation landing together. If the
+	// provider returns any of the first three and the caller's context has
+	// ended by the time it returns, the error is the cancellation (this
+	// sentinel and ctx.Err()) JOINED with what the provider returned, and
+	// matches all of them: neither fact overwrites the other, and for
+	// ErrSealedAuthentication that matters most, since a forgery verdict is a
+	// security signal. The budget refusals are decided before the provider is
+	// called, so they are never joined. See contextFailure in sealer.go.
+	ErrOpenFailed = errors.New("enclave: could not open sealed material")
 
 	// ErrSealedAuthentication reports that sealed material did not
 	// authenticate: the ciphertext or the wrapped-key blob was altered,
@@ -454,6 +481,15 @@ type SealedEnclave struct {
 	// putting the plaintext on the heap.
 	size int
 
+	// opens counts Opens IN FLIGHT: each has copied the envelope references
+	// above under mu and is using them with mu released, because the open may
+	// spend an unbounded time inside a provider and no mutex of this
+	// package's may be held across one (#87). Destroy therefore cannot wipe sealed and
+	// blob while this is non-zero — an open would read the wipe — and leaves
+	// the wipe to the last open out instead; see [SealedEnclave.Destroy].
+	// Guarded by mu.
+	opens int
+
 	// sealedAtGen is the sweep generation current when this value was sealed.
 	// WRITTEN ONCE, at construction, and never again — which is what lets
 	// Openable compare it with a single atomic load and no lock. If a later
@@ -466,7 +502,9 @@ type SealedEnclave struct {
 }
 
 // NewSealed encrypts data under the PROCESS Sealer and returns the sealed
-// enclave holding it.
+// enclave holding it. ctx bounds every step that can block — in practice the
+// provider: the root unseal on the first seal of a [ModeRootKey] sealer, and
+// every Protect in [ModePerOperation].
 //
 // The process Sealer is whatever [SetSealer] installed, or — if nothing did
 // before the first seal — the pure-software default: a [SoftwareProvider] in
@@ -486,17 +524,40 @@ type SealedEnclave struct {
 // lock the pages the seal transiently needs, and ErrSealerWiped after a
 // shutdown sweep has destroyed the process Sealer's keys.
 //
+// A context that has ended — before the call, while it waits for another
+// caller's first-time root unseal, or during a provider call — fails the seal
+// with an error matching BOTH ErrSealFailed and ctx.Err(), so callers matching
+// either catch it, with any underlying failure (a refused KEK mint, a sweep)
+// joined rather than hidden. The ownership contract holds on that path too:
+// data is wiped. A context that has already ended is refused before the
+// process Sealer is looked up, so it never installs the software default:
+// installation is one-shot, and a refused call must not lock the
+// configuration a later [SetSealer] is meant to make. The context is checked again after each provider call returns, so a
+// seal whose caller has stopped waiting is reported as abandoned rather than
+// completed. A root unsealed for a caller that then gave up is NOT discarded:
+// the unseal succeeded, the [RootUnsealer] contract forbids asking again, and
+// the next seal uses it.
+//
 // ON A GOEXPERIMENT=boringcrypto BUILD IT ALWAYS RETURNS ErrSealFailed
 // (wrapping "cipher: NewGCMWithRandomNonce requires aes.Block"). That is a
 // refusal, not a defect, and there is deliberately no fallback — see the
 // package documentation.
-func NewSealed(data []byte) (*SealedEnclave, error) {
+func NewSealed(ctx context.Context, data []byte) (*SealedEnclave, error) {
+	// Refused BEFORE the process sealer is looked up, because the lookup is
+	// not read-only: with nothing installed it installs the software default,
+	// one-shot. An abandoned call doing that would lock the configuration and
+	// make the deployment's own SetSealer fail with ErrSealerInstalled.
+	if err := contextFailure(ctx, ErrSealFailed, nil); err != nil {
+		Wipe(data)
+		return nil, err
+	}
+
 	s, err := processSealer()
 	if err != nil {
 		Wipe(data)
 		return nil, err
 	}
-	return s.Seal(data)
+	return s.Seal(ctx, data)
 }
 
 // Open decrypts the material into a NEW [MemoryEnclave] and returns it.
@@ -528,11 +589,23 @@ func NewSealed(data []byte) (*SealedEnclave, error) {
 // intact, so a transient ceiling is retryable rather than a lost credential —
 // and ErrSealerWiped when a shutdown sweep has destroyed the sealing Sealer's
 // keys. In [ModePerOperation] a provider's own infrastructure failures (a
-// device unreachable, say) surface unchanged, per the [KeyProtector]
-// contract.
-func (s *SealedEnclave) Open() (*MemoryEnclave, error) {
+// device unreachable, say) surface joined under ErrOpenFailed with the
+// provider's error reachable, per the [KeyProtector] contract.
+//
+// ctx bounds the open. In [ModePerOperation] it is handed to the provider's
+// Unprotect, which must honor it; in [ModeRootKey] the open makes no provider
+// call — it is in-process crypto — and the context is checked on entry only.
+// A context that has ended on entry, or in [ModePerOperation] while the
+// provider works, fails the open with an error matching BOTH ErrOpenFailed
+// and ctx.Err() — and not ErrSealedAuthentication, unless the provider itself
+// reported an authentication failure before the context was seen to end, in
+// which case that verdict stays visible alongside the cancellation (see
+// [ErrOpenFailed]). A canceled open leaves the value intact, and opening it
+// again with a live context succeeds. A destination recovered for a
+// caller that has stopped waiting is destroyed, not returned.
+func (s *SealedEnclave) Open(ctx context.Context) (*MemoryEnclave, error) {
 	// nil is how the open path spells "unadmitted"; see allocSized.
-	return s.openWith(nil)
+	return s.openWith(ctx, nil)
 }
 
 // OpenWith is [SealedEnclave.Open] with the recovered material ADMITTED
@@ -590,42 +663,80 @@ func (s *SealedEnclave) Open() (*MemoryEnclave, error) {
 // single atomic decision, so contention refuses only the excess and the
 // callers that were admitted make progress.
 //
-// It returns everything Open returns, plus ErrNilAllocator for a nil
-// Allocator and ErrBudgetExhausted (as a [BudgetError]) when the open would
-// exceed a's budget. A budget refusal leaves the sealed value untouched and
-// is retryable, exactly as ErrLockedMemoryUnavailable is.
+// It returns everything Open returns — the context contract included — plus
+// ErrNilAllocator for a nil Allocator and ErrBudgetExhausted (as a
+// [BudgetError]) when the open would exceed a's budget. A budget refusal
+// leaves the sealed value untouched and is retryable, exactly as
+// ErrLockedMemoryUnavailable is. A context that has ended is refused before
+// the reservation is taken, so an abandoned open charges nothing.
 //
 // The SEAL path is not budgeted at all: there is no SealWith, so [NewSealed],
 // [Sealer.Seal] and the one-time hierarchy setup take their locked pages
 // unadmitted. That is a real gap and a deliberate boundary for this change —
 // sealing allocates once per value rather than once per use, so it does not
 // scale with request rate the way opening does.
-func (s *SealedEnclave) OpenWith(a *Allocator) (*MemoryEnclave, error) {
+func (s *SealedEnclave) OpenWith(ctx context.Context, a *Allocator) (*MemoryEnclave, error) {
 	if s == nil {
 		return nil, ErrEnclaveDestroyed
 	}
 	if a == nil {
 		return nil, ErrNilAllocator
 	}
-	return s.openWith(a)
+	return s.openWith(ctx, a)
 }
 
 // openWith is the shared body of Open and OpenWith. a is nil for an
 // unadmitted open and non-nil for a budgeted one; nothing below branches on
 // it, which is what keeps the two entry points from drifting apart.
-func (s *SealedEnclave) openWith(a *Allocator) (*MemoryEnclave, error) {
+//
+// The value's lock is held only to PIN the envelope — copy its references and
+// count this open in flight — and to unpin it afterwards; it is NOT held
+// across [Sealer.open], which may sit in a provider call for as long as the
+// device takes. Holding it there, as this did until #87, made Destroy — a
+// call with no context — wait out that provider, so a caller could not bound
+// it at all. The pin keeps what the lock used to: the envelope this open
+// reads is never wiped underneath it.
+func (s *SealedEnclave) openWith(ctx context.Context, a *Allocator) (*MemoryEnclave, error) {
 	if s == nil {
 		return nil, ErrEnclaveDestroyed
 	}
 
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	if s.sealed == nil {
+	sealer, blob, sealed, size, ok := s.pin()
+	if !ok {
 		return nil, ErrEnclaveDestroyed
 	}
+	defer s.unpin(blob, sealed)
 
-	return s.sealer.open(a, s.blob, s.sealed, s.size)
+	return sealer.open(ctx, a, blob, sealed, size)
+}
+
+// pin registers an open in flight and returns the envelope it may read with
+// the lock released, or ok false if the value is destroyed.
+func (s *SealedEnclave) pin() (sealer *Sealer, blob, sealed []byte, size int, ok bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.sealed == nil {
+		return nil, nil, nil, 0, false
+	}
+	s.opens++
+	return s.sealer, s.blob, s.sealed, s.size, true
+}
+
+// unpin ends an open in flight. If a Destroy ran while it was in flight and
+// this is the last open out, the envelope halves it pinned are wiped here:
+// Destroy left them for exactly this, since wiping them under a running open
+// would have corrupted its read. No other reference to them remains — Destroy
+// cleared the value's own, and nothing can pin a destroyed value.
+func (s *SealedEnclave) unpin(blob, sealed []byte) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.opens--
+	if s.opens == 0 && s.sealed == nil {
+		wipe(sealed)
+		wipe(blob)
+	}
 }
 
 // IsAlive reports whether this value still HOLDS ITS CIPHERTEXT — that
@@ -710,32 +821,56 @@ func (s *SealedEnclave) IsAlive() bool {
 // A sweep is deliberately NOT reported as ErrEnclaveDestroyed. The two say
 // different things to whoever reads the log — "you destroyed this" against "a
 // sweep did" — and conflating them sends an operator to the wrong code.
+//
+// It takes no context, and the reason is the question it asks: whether a
+// sweep of THIS PROCESS's memory took something. Nothing in answering that
+// touches a device — the hierarchy is inspected in place, and a
+// [WithProviderHealth] callback is required to answer the same in-process
+// question without blocking. The value's lock is released before the sealer
+// is consulted all the same, so not even a misbehaving callback can hold up
+// this value's Open or Destroy.
 func (s *SealedEnclave) Openable() error {
 	if s == nil {
 		return ErrEnclaveDestroyed
 	}
 
+	sealer, sealedAtGen, ok := s.openableSnapshot()
+	if !ok {
+		return ErrEnclaveDestroyed
+	}
+	return sealer.openable(sealedAtGen)
+}
+
+// openableSnapshot reads what Openable needs under the lock, reporting ok
+// false for the destroyed state.
+func (s *SealedEnclave) openableSnapshot() (*Sealer, uint64, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	// Both conditions are the destroyed state: Destroy clears them together
 	// under this same lock. Testing the sealer too is what keeps the
-	// documented return set exact — a nil sealer can never reach openable
-	// below, so ErrNilSealer is not among the errors this can return.
+	// documented return set exact — a nil sealer can never reach openable,
+	// so ErrNilSealer is not among the errors Openable can return.
 	if s.sealed == nil || s.sealer == nil {
-		return ErrEnclaveDestroyed
+		return nil, 0, false
 	}
-
-	return s.sealer.openable(s.sealedAtGen)
+	return s.sealer, s.sealedAtGen, true
 }
 
 // Destroy wipes the sealed material and releases it. It is idempotent and
 // safe on a nil enclave, so it can always be deferred.
 //
 // It does NOT affect enclaves already handed out by [SealedEnclave.Open];
-// those are the caller's and outlive this. It takes the write lock, so it
-// waits out any Open in flight rather than clearing the envelope underneath
-// one.
+// those are the caller's and outlive this.
+//
+// It does NOT wait for an Open in flight, and that changed in #87. An open
+// can spend as long as a provider takes, and Destroy takes no context, so
+// waiting would hand a caller an unbounded block it had no way to bound. An
+// open already in flight instead completes against the envelope it pinned —
+// it is ordered before this Destroy, exactly as it would have been when
+// Destroy waited — and every Open that starts after this returns
+// [ErrEnclaveDestroyed]. The ciphertext is wiped here when no open is in
+// flight, and otherwise by the last one to finish.
 //
 // Wiping ciphertext is belt and braces — without its keys it reveals nothing
 // — but it costs one pass over two heap slices and removes the question.
@@ -751,8 +886,12 @@ func (s *SealedEnclave) Destroy() {
 		return
 	}
 
-	wipe(s.sealed)
-	wipe(s.blob)
+	// With an open in flight the halves are still being read; unpin wipes
+	// them when the last one finishes.
+	if s.opens == 0 {
+		wipe(s.sealed)
+		wipe(s.blob)
+	}
 	s.sealed = nil
 	s.blob = nil
 	s.size = 0

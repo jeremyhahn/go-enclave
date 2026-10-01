@@ -37,7 +37,7 @@ func newMapKeyProtector() *mapKeyProtector {
 	return &mapKeyProtector{keys: make(map[string][]byte)}
 }
 
-func (m *mapKeyProtector) Protect(key []byte) ([]byte, error) {
+func (m *mapKeyProtector) Protect(ctx context.Context, key []byte) ([]byte, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.n++
@@ -47,7 +47,7 @@ func (m *mapKeyProtector) Protect(key []byte) ([]byte, error) {
 	return blob, nil
 }
 
-func (m *mapKeyProtector) Unprotect(blob, key []byte) error {
+func (m *mapKeyProtector) Unprotect(ctx context.Context, blob, key []byte) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.unprotects++
@@ -96,7 +96,7 @@ func (m *mapKeyProtector) alias(existing, alias []byte) bool {
 // provider-supplied root actually reaches the hierarchy.
 type fixedRootUnsealer struct{ fill byte }
 
-func (f *fixedRootUnsealer) UnsealRoot(dst []byte) error {
+func (f *fixedRootUnsealer) UnsealRoot(ctx context.Context, dst []byte) error {
 	for i := range dst {
 		dst[i] = f.fill
 	}
@@ -107,17 +107,19 @@ func (f *fixedRootUnsealer) UnsealRoot(dst []byte) error {
 // a device that is present but unhealthy.
 type erroringProvider struct{ err error }
 
-func (e *erroringProvider) Protect([]byte) ([]byte, error) { return nil, e.err }
-func (e *erroringProvider) Unprotect(_, _ []byte) error    { return e.err }
-func (e *erroringProvider) UnsealRoot([]byte) error        { return e.err }
+func (e *erroringProvider) Protect(context.Context, []byte) ([]byte, error) { return nil, e.err }
+func (e *erroringProvider) Unprotect(context.Context, []byte, []byte) error { return e.err }
+func (e *erroringProvider) UnsealRoot(context.Context, []byte) error        { return e.err }
 
 // emptyBlobProtector violates the Protect contract by returning an empty
 // blob, so the sealer's guard against sealing an unrecoverable value is
 // reachable.
 type emptyBlobProtector struct{}
 
-func (emptyBlobProtector) Protect([]byte) ([]byte, error) { return []byte{}, nil }
-func (emptyBlobProtector) Unprotect(_, _ []byte) error    { return ErrSealedAuthentication }
+func (emptyBlobProtector) Protect(context.Context, []byte) ([]byte, error) { return []byte{}, nil }
+func (emptyBlobProtector) Unprotect(context.Context, []byte, []byte) error {
+	return ErrSealedAuthentication
+}
 
 // TestSealer_ModeProviderMismatchIsRefusedAtConstruction pins the reason the
 // seam is two interfaces: a provider that cannot serve the selected mode is
@@ -173,12 +175,12 @@ func TestSealer_DefaultIsSoftwareRootKey(t *testing.T) {
 	}
 
 	want := []byte("default-sealer-round-trip-material")
-	v, err := s.Seal(append([]byte(nil), want...))
+	v, err := s.Seal(t.Context(), append([]byte(nil), want...))
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
 	defer v.Destroy()
-	e, err := v.Open()
+	e, err := v.Open(t.Context())
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -187,7 +189,7 @@ func TestSealer_DefaultIsSoftwareRootKey(t *testing.T) {
 		t.Error("default sealer round trip returned the wrong material")
 	}
 
-	p, err := NewSealed(append([]byte(nil), want...))
+	p, err := NewSealed(t.Context(), append([]byte(nil), want...))
 	if err != nil {
 		t.Fatalf("NewSealed: %v", err)
 	}
@@ -209,12 +211,12 @@ func TestSealer_PerOperationRoundTrip(t *testing.T) {
 				t.Fatalf("NewSealer: %v", err)
 			}
 			want := []byte("mode-parity-material-for-" + m.String())
-			v, err := s.Seal(append([]byte(nil), want...))
+			v, err := s.Seal(t.Context(), append([]byte(nil), want...))
 			if err != nil {
 				t.Fatalf("Seal: %v", err)
 			}
 			defer v.Destroy()
-			e, err := v.Open()
+			e, err := v.Open(t.Context())
 			if err != nil {
 				t.Fatalf("Open: %v", err)
 			}
@@ -250,7 +252,7 @@ func TestSealer_RefusesForeignProvider(t *testing.T) {
 			a, b := build(t, m)
 
 			want := []byte("cross-provider-material")
-			v, err := a.Seal(append([]byte(nil), want...))
+			v, err := a.Seal(t.Context(), append([]byte(nil), want...))
 			if err != nil {
 				t.Fatalf("Seal: %v", err)
 			}
@@ -259,14 +261,14 @@ func TestSealer_RefusesForeignProvider(t *testing.T) {
 			// Ensure B has a live hierarchy/root of its own, so the refusal
 			// below is a key mismatch and not merely "B never sealed
 			// anything" — the stricter of the two conditions.
-			warm, err := b.Seal([]byte("warm-up"))
+			warm, err := b.Seal(t.Context(), []byte("warm-up"))
 			if err != nil {
 				t.Fatalf("warm-up Seal: %v", err)
 			}
 			defer warm.Destroy()
 
 			foreign := &SealedEnclave{sealer: b, sealed: v.sealed, blob: v.blob, size: v.size}
-			if e, err := foreign.Open(); !errors.Is(err, ErrSealedAuthentication) {
+			if e, err := foreign.Open(t.Context()); !errors.Is(err, ErrSealedAuthentication) {
 				t.Errorf("Open under a foreign provider = %v, want ErrSealedAuthentication", err)
 				if e != nil {
 					e.Destroy()
@@ -274,7 +276,7 @@ func TestSealer_RefusesForeignProvider(t *testing.T) {
 			}
 
 			// Control: the same envelope opens under its own sealer.
-			e, err := v.Open()
+			e, err := v.Open(t.Context())
 			if err != nil {
 				t.Fatalf("Open under the sealing provider: %v", err)
 			}
@@ -308,7 +310,7 @@ func TestSealer_EnvelopeBindsBlobToCiphertext(t *testing.T) {
 	}
 
 	want := []byte("blob-binding-material")
-	v, err := s.Seal(append([]byte(nil), want...))
+	v, err := s.Seal(t.Context(), append([]byte(nil), want...))
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
@@ -324,10 +326,10 @@ func TestSealer_EnvelopeBindsBlobToCiphertext(t *testing.T) {
 	// mismatch and the test would pass with the AAD binding deleted.
 	dekA := make([]byte, dekBytes)
 	dekB := make([]byte, dekBytes)
-	if err := kp.Unprotect(v.blob, dekA); err != nil {
+	if err := kp.Unprotect(t.Context(), v.blob, dekA); err != nil {
 		t.Fatalf("Unprotect(original): %v", err)
 	}
-	if err := kp.Unprotect(aliasBlob, dekB); err != nil {
+	if err := kp.Unprotect(t.Context(), aliasBlob, dekB); err != nil {
 		t.Fatalf("Unprotect(alias): %v", err)
 	}
 	if !bytes.Equal(dekA, dekB) {
@@ -335,7 +337,7 @@ func TestSealer_EnvelopeBindsBlobToCiphertext(t *testing.T) {
 	}
 
 	repaired := &SealedEnclave{sealer: s, sealed: v.sealed, blob: aliasBlob, size: v.size}
-	if e, err := repaired.Open(); !errors.Is(err, ErrSealedAuthentication) {
+	if e, err := repaired.Open(t.Context()); !errors.Is(err, ErrSealedAuthentication) {
 		t.Errorf("Open with a re-paired (valid, same-DEK) blob = %v, want ErrSealedAuthentication: "+
 			"the ciphertext is not bound to the exact blob it was sealed with", err)
 		if e != nil {
@@ -344,7 +346,7 @@ func TestSealer_EnvelopeBindsBlobToCiphertext(t *testing.T) {
 	}
 
 	// Control: untouched, the value opens.
-	e, err := v.Open()
+	e, err := v.Open(t.Context())
 	if err != nil {
 		t.Fatalf("control Open: %v", err)
 	}
@@ -378,7 +380,7 @@ func TestSealer_KEKRotatesAtTheMessageLimit(t *testing.T) {
 	}
 
 	older := []byte("sealed-under-the-generation-about-to-be-retired")
-	before, err := s.Seal(append([]byte(nil), older...))
+	before, err := s.Seal(t.Context(), append([]byte(nil), older...))
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
@@ -395,7 +397,7 @@ func TestSealer_KEKRotatesAtTheMessageLimit(t *testing.T) {
 	// and the one after rotates.
 	s.kekUsed.Store(kekMessageLimit - 1)
 
-	atLimit, err := s.Seal(append([]byte(nil), older...))
+	atLimit, err := s.Seal(t.Context(), append([]byte(nil), older...))
 	if err != nil {
 		t.Fatalf("Seal at the limit: %v", err)
 	}
@@ -407,7 +409,7 @@ func TestSealer_KEKRotatesAtTheMessageLimit(t *testing.T) {
 		t.Error("the seal that reached the limit already used a new generation; it should be the last on the old one")
 	}
 
-	after, err := s.Seal(append([]byte(nil), older...))
+	after, err := s.Seal(t.Context(), append([]byte(nil), older...))
 	if err != nil {
 		t.Fatalf("Seal past the limit: %v", err)
 	}
@@ -433,7 +435,7 @@ func TestSealer_KEKRotatesAtTheMessageLimit(t *testing.T) {
 	// Rotation must not strand what came before it: the retired-generation
 	// values open through the root-unwrap path.
 	for name, v := range map[string]*SealedEnclave{"sealed before": before, "sealed at the limit": atLimit} {
-		e, err := v.Open()
+		e, err := v.Open(t.Context())
 		if err != nil {
 			t.Fatalf("%s: Open after rotation: %v", name, err)
 		}
@@ -444,7 +446,7 @@ func TestSealer_KEKRotatesAtTheMessageLimit(t *testing.T) {
 	}
 
 	// And the new generation round-trips too.
-	e, err := after.Open()
+	e, err := after.Open(t.Context())
 	if err != nil {
 		t.Fatalf("Open under the new generation: %v", err)
 	}
@@ -465,7 +467,7 @@ func TestSealer_ConcurrentSealsAcrossRotation(t *testing.T) {
 	}
 	// Initialize the hierarchy, then park the counter one short of the limit
 	// so the very first concurrent wave forces a rotation.
-	warm, err := s.Seal([]byte("warm-up"))
+	warm, err := s.Seal(t.Context(), []byte("warm-up"))
 	if err != nil {
 		t.Fatalf("warm-up Seal: %v", err)
 	}
@@ -480,7 +482,7 @@ func TestSealer_ConcurrentSealsAcrossRotation(t *testing.T) {
 		go func(g int) {
 			defer wg.Done()
 			for i := 0; i < seals; i++ {
-				v, err := s.Seal(fmt.Appendf(nil, "concurrent-rotation-%d-%d", g, i))
+				v, err := s.Seal(t.Context(), fmt.Appendf(nil, "concurrent-rotation-%d-%d", g, i))
 				if err != nil {
 					t.Errorf("Seal(%d,%d): %v", g, i, err)
 					return
@@ -493,7 +495,7 @@ func TestSealer_ConcurrentSealsAcrossRotation(t *testing.T) {
 
 	for g, vs := range values {
 		for i, v := range vs {
-			e, err := v.Open()
+			e, err := v.Open(t.Context())
 			if err != nil {
 				t.Fatalf("Open(%d,%d): %v", g, i, err)
 			}
@@ -518,7 +520,7 @@ func TestSealer_ProviderRootReachesTheHierarchy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
-	if _, err := s.Seal([]byte("initialize-the-hierarchy")); err != nil {
+	if _, err := s.Seal(t.Context(), []byte("initialize-the-hierarchy")); err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
 
@@ -591,7 +593,7 @@ func TestSealer_WipedFailsClosedPerMode(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewSealer: %v", err)
 		}
-		v, err := s.Seal(append([]byte(nil), material...))
+		v, err := s.Seal(t.Context(), append([]byte(nil), material...))
 		if err != nil {
 			t.Fatalf("Seal: %v", err)
 		}
@@ -599,10 +601,10 @@ func TestSealer_WipedFailsClosedPerMode(t *testing.T) {
 
 		sweep(t)
 
-		if _, err := v.Open(); !errors.Is(err, ErrSealerWiped) {
+		if _, err := v.Open(t.Context()); !errors.Is(err, ErrSealerWiped) {
 			t.Errorf("Open after sweep = %v, want ErrSealerWiped", err)
 		}
-		if _, err := s.Seal(append([]byte(nil), material...)); !errors.Is(err, ErrSealerWiped) {
+		if _, err := s.Seal(t.Context(), append([]byte(nil), material...)); !errors.Is(err, ErrSealerWiped) {
 			t.Errorf("Seal after sweep = %v, want ErrSealerWiped: the sealer must fail closed, never re-key", err)
 		}
 	})
@@ -612,7 +614,7 @@ func TestSealer_WipedFailsClosedPerMode(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewSealer: %v", err)
 		}
-		v, err := s.Seal(append([]byte(nil), material...))
+		v, err := s.Seal(t.Context(), append([]byte(nil), material...))
 		if err != nil {
 			t.Fatalf("Seal: %v", err)
 		}
@@ -620,10 +622,10 @@ func TestSealer_WipedFailsClosedPerMode(t *testing.T) {
 
 		sweep(t)
 
-		if _, err := v.Open(); !errors.Is(err, ErrSealerWiped) {
+		if _, err := v.Open(t.Context()); !errors.Is(err, ErrSealerWiped) {
 			t.Errorf("Open after sweep = %v, want ErrSealerWiped", err)
 		}
-		if _, err := s.Seal(append([]byte(nil), material...)); !errors.Is(err, ErrSealerWiped) {
+		if _, err := s.Seal(t.Context(), append([]byte(nil), material...)); !errors.Is(err, ErrSealerWiped) {
 			t.Errorf("Seal after sweep = %v, want ErrSealerWiped", err)
 		}
 	})
@@ -633,7 +635,7 @@ func TestSealer_WipedFailsClosedPerMode(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewSealer: %v", err)
 		}
-		v, err := s.Seal(append([]byte(nil), material...))
+		v, err := s.Seal(t.Context(), append([]byte(nil), material...))
 		if err != nil {
 			t.Fatalf("Seal: %v", err)
 		}
@@ -644,7 +646,7 @@ func TestSealer_WipedFailsClosedPerMode(t *testing.T) {
 		// The device still holds the keys: existing values open and new
 		// seals work. This is the asymmetry, and it is the correct behavior,
 		// not a hole — nothing in this process's memory protected the DEKs.
-		e, err := v.Open()
+		e, err := v.Open(t.Context())
 		if err != nil {
 			t.Fatalf("Open after sweep with a device-held key = %v; "+
 				"a sweep must not invalidate values whose keys the process never held", err)
@@ -654,7 +656,7 @@ func TestSealer_WipedFailsClosedPerMode(t *testing.T) {
 		}
 		e.Destroy()
 
-		fresh, err := s.Seal(append([]byte(nil), material...))
+		fresh, err := s.Seal(t.Context(), append([]byte(nil), material...))
 		if err != nil {
 			t.Fatalf("Seal after sweep with a device-held key: %v", err)
 		}
@@ -665,9 +667,9 @@ func TestSealer_WipedFailsClosedPerMode(t *testing.T) {
 // TestSealer_ProviderErrorsSurfaceHonestly pins the error-shaping contract on
 // both paths: a provider's own failure must NOT be dressed as an
 // authentication failure on open — the misattribution #22 §14 warns about,
-// aimed at providers this time — and must surface under ErrSealFailed on
-// seal, where "could not seal" is the honest summary, with the cause still
-// reachable.
+// aimed at providers this time — and surfaces under ErrSealFailed on seal and
+// ErrOpenFailed on open, where "could not" is the honest summary, with the
+// cause still reachable.
 func TestSealer_ProviderErrorsSurfaceHonestly(t *testing.T) {
 	deviceDown := errors.New("device unreachable: session pool exhausted")
 	s, err := NewSealer(WithProvider(&erroringProvider{err: deviceDown}), WithMode(ModePerOperation))
@@ -675,7 +677,7 @@ func TestSealer_ProviderErrorsSurfaceHonestly(t *testing.T) {
 		t.Fatalf("NewSealer: %v", err)
 	}
 
-	_, err = s.Seal([]byte("provider-error-material"))
+	_, err = s.Seal(t.Context(), []byte("provider-error-material"))
 	if !errors.Is(err, ErrSealFailed) {
 		t.Errorf("Seal with a failing provider = %v, want it to match ErrSealFailed", err)
 	}
@@ -687,22 +689,27 @@ func TestSealer_ProviderErrorsSurfaceHonestly(t *testing.T) {
 	}
 
 	// The open path: seal under a healthy provider, open under one that
-	// fails with its own error. The sealer must pass it through untouched.
+	// fails with its own error. The sealer must keep that error reachable and
+	// join it under ErrOpenFailed — the open-side "could not", never a
+	// forgery verdict.
 	kp := newMapKeyProtector()
 	healthy, err := NewSealer(WithProvider(kp), WithMode(ModePerOperation))
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
-	v, err := healthy.Seal([]byte("provider-error-material"))
+	v, err := healthy.Seal(t.Context(), []byte("provider-error-material"))
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
 	defer v.Destroy()
 
 	v.sealer = s // the erroring provider now answers this value's opens
-	_, err = v.Open()
+	_, err = v.Open(t.Context())
 	if !errors.Is(err, deviceDown) {
 		t.Errorf("Open with a failing provider = %v, want the provider's own error to surface", err)
+	}
+	if !errors.Is(err, ErrOpenFailed) {
+		t.Errorf("Open with a failing provider = %v, want it to match ErrOpenFailed", err)
 	}
 	if errors.Is(err, ErrSealedAuthentication) {
 		t.Errorf("Open error %v reads as an authentication failure; an operator would hunt an attacker who does not exist", err)
@@ -715,7 +722,7 @@ func TestSealer_ProviderErrorsSurfaceHonestly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
-	if _, err := eb.Seal([]byte("empty-blob-material")); !errors.Is(err, ErrSealFailed) {
+	if _, err := eb.Seal(t.Context(), []byte("empty-blob-material")); !errors.Is(err, ErrSealFailed) {
 		t.Errorf("Seal with an empty-blob provider = %v, want ErrSealFailed", err)
 	}
 }
@@ -753,7 +760,7 @@ func TestSealer_SetSealerIsOneShot(t *testing.T) {
 	// NewSealed routes through the installed sealer: the provider's Protect
 	// count moves.
 	before := kp.protectCount()
-	v, err := NewSealed([]byte("routed-material"))
+	v, err := NewSealed(t.Context(), []byte("routed-material"))
 	if err != nil {
 		t.Fatalf("NewSealed: %v", err)
 	}
@@ -765,7 +772,7 @@ func TestSealer_SetSealerIsOneShot(t *testing.T) {
 	// A stray early seal locks the configuration: after the lazy default is
 	// installed, SetSealer fails closed.
 	resetProcessSealerForTest()
-	if _, err := NewSealed([]byte("stray-early-seal")); err != nil {
+	if _, err := NewSealed(t.Context(), []byte("stray-early-seal")); err != nil {
 		t.Fatalf("NewSealed: %v", err)
 	}
 	if err := SetSealer(own); !errors.Is(err, ErrSealerInstalled) {
@@ -779,7 +786,7 @@ func TestSealer_SetSealerIsOneShot(t *testing.T) {
 func TestSealer_NilReceiver(t *testing.T) {
 	data := append([]byte(nil), sealedMaterial...)
 	var s *Sealer
-	if _, err := s.Seal(data); !errors.Is(err, ErrNilSealer) {
+	if _, err := s.Seal(t.Context(), data); !errors.Is(err, ErrNilSealer) {
 		t.Errorf("nil Sealer.Seal = %v, want ErrNilSealer", err)
 	}
 	for i, b := range data {
@@ -811,13 +818,13 @@ func TestSoftwareProvider_ProtectUnprotect(t *testing.T) {
 	p := NewSoftwareProvider()
 
 	key := bytes.Repeat([]byte{0x3C}, RootKeyBytes)
-	blob, err := p.Protect(append([]byte(nil), key...))
+	blob, err := p.Protect(t.Context(), append([]byte(nil), key...))
 	if err != nil {
 		t.Fatalf("Protect: %v", err)
 	}
 
 	got := make([]byte, len(key))
-	if err := p.Unprotect(blob, got); err != nil {
+	if err := p.Unprotect(t.Context(), blob, got); err != nil {
 		t.Fatalf("Unprotect: %v", err)
 	}
 	if !bytes.Equal(got, key) {
@@ -826,16 +833,16 @@ func TestSoftwareProvider_ProtectUnprotect(t *testing.T) {
 
 	// Foreign: a blob from a different provider instance must be refused.
 	other := NewSoftwareProvider()
-	otherBlob, err := other.Protect(append([]byte(nil), key...))
+	otherBlob, err := other.Protect(t.Context(), append([]byte(nil), key...))
 	if err != nil {
 		t.Fatalf("Protect (other): %v", err)
 	}
-	if err := p.Unprotect(otherBlob, got); !errors.Is(err, ErrSealedAuthentication) {
+	if err := p.Unprotect(t.Context(), otherBlob, got); !errors.Is(err, ErrSealedAuthentication) {
 		t.Errorf("Unprotect(foreign blob) = %v, want ErrSealedAuthentication", err)
 	}
 
 	// A provider that has protected nothing owns no blobs at all.
-	if err := NewSoftwareProvider().Unprotect(blob, got); !errors.Is(err, ErrSealedAuthentication) {
+	if err := NewSoftwareProvider().Unprotect(t.Context(), blob, got); !errors.Is(err, ErrSealedAuthentication) {
 		t.Errorf("Unprotect on a fresh provider = %v, want ErrSealedAuthentication", err)
 	}
 
@@ -851,19 +858,19 @@ func TestSoftwareProvider_ProtectUnprotect(t *testing.T) {
 		"wrong kind":        func(b []byte) []byte { c := append([]byte(nil), b...); c[1] = blobKindDEK; return c },
 		"nonzero gen":       func(b []byte) []byte { c := append([]byte(nil), b...); c[5] = 1; return c },
 	} {
-		if err := p.Unprotect(corrupt(blob), got); !errors.Is(err, ErrSealedAuthentication) {
+		if err := p.Unprotect(t.Context(), corrupt(blob), got); !errors.Is(err, ErrSealedAuthentication) {
 			t.Errorf("Unprotect(%s) = %v, want ErrSealedAuthentication", name, err)
 		}
 	}
 
 	// Wrong destination length is an authentication failure, decided before
 	// anything is decrypted — the same no-reallocation rule as everywhere.
-	if err := p.Unprotect(blob, make([]byte, 16)); !errors.Is(err, ErrSealedAuthentication) {
+	if err := p.Unprotect(t.Context(), blob, make([]byte, 16)); !errors.Is(err, ErrSealedAuthentication) {
 		t.Errorf("Unprotect into a short destination = %v, want ErrSealedAuthentication", err)
 	}
 
 	// Control after all the refusals: the original still unprotects.
-	if err := p.Unprotect(blob, got); err != nil {
+	if err := p.Unprotect(t.Context(), blob, got); err != nil {
 		t.Fatalf("control Unprotect: %v", err)
 	}
 }
@@ -877,7 +884,7 @@ func TestSoftwareProvider_MessageLimit(t *testing.T) {
 	p := NewSoftwareProvider()
 	key := make([]byte, RootKeyBytes)
 
-	blob, err := p.Protect(append([]byte(nil), key...))
+	blob, err := p.Protect(t.Context(), append([]byte(nil), key...))
 	if err != nil {
 		t.Fatalf("Protect: %v", err)
 	}
@@ -886,14 +893,14 @@ func TestSoftwareProvider_MessageLimit(t *testing.T) {
 	p.protects = softwareProtectLimit
 	p.mu.Unlock()
 
-	if _, err := p.Protect(append([]byte(nil), key...)); !errors.Is(err, ErrProviderMessageLimit) {
+	if _, err := p.Protect(t.Context(), append([]byte(nil), key...)); !errors.Is(err, ErrProviderMessageLimit) {
 		t.Errorf("Protect at the limit = %v, want ErrProviderMessageLimit", err)
 	}
 
 	// The refusal is on ENCRYPTION only: existing blobs still unprotect,
 	// because the bound protects nonce uniqueness, not decryption.
 	got := make([]byte, len(key))
-	if err := p.Unprotect(blob, got); err != nil {
+	if err := p.Unprotect(t.Context(), blob, got); err != nil {
 		t.Errorf("Unprotect past the Protect limit = %v; the bound must not strand existing blobs", err)
 	}
 }
@@ -905,19 +912,19 @@ func TestSoftwareProvider_MessageLimit(t *testing.T) {
 func TestSoftwareProvider_UnsealRoot(t *testing.T) {
 	p := NewSoftwareProvider()
 
-	if err := p.UnsealRoot(make([]byte, RootKeyBytes-1)); !errors.Is(err, ErrInvalidSize) {
+	if err := p.UnsealRoot(t.Context(), make([]byte, RootKeyBytes-1)); !errors.Is(err, ErrInvalidSize) {
 		t.Errorf("UnsealRoot(short dst) = %v, want ErrInvalidSize", err)
 	}
-	if err := p.UnsealRoot(make([]byte, RootKeyBytes+1)); !errors.Is(err, ErrInvalidSize) {
+	if err := p.UnsealRoot(t.Context(), make([]byte, RootKeyBytes+1)); !errors.Is(err, ErrInvalidSize) {
 		t.Errorf("UnsealRoot(long dst) = %v, want ErrInvalidSize", err)
 	}
 
 	a := make([]byte, RootKeyBytes)
 	b := make([]byte, RootKeyBytes)
-	if err := p.UnsealRoot(a); err != nil {
+	if err := p.UnsealRoot(t.Context(), a); err != nil {
 		t.Fatalf("UnsealRoot: %v", err)
 	}
-	if err := p.UnsealRoot(b); err != nil {
+	if err := p.UnsealRoot(t.Context(), b); err != nil {
 		t.Fatalf("UnsealRoot: %v", err)
 	}
 	if !bytes.Equal(a, b) {
@@ -938,12 +945,12 @@ type flakyRootUnsealer struct {
 	inner    fixedRootUnsealer
 }
 
-func (f *flakyRootUnsealer) UnsealRoot(dst []byte) error {
+func (f *flakyRootUnsealer) UnsealRoot(ctx context.Context, dst []byte) error {
 	f.calls++
 	if f.calls <= f.failures {
 		return errors.New("transient: device busy")
 	}
-	return f.inner.UnsealRoot(dst)
+	return f.inner.UnsealRoot(ctx, dst)
 }
 
 // TestSealer_RootUnsealFailureSurfacesAndRetries covers ModeRootKey against
@@ -959,7 +966,7 @@ func TestSealer_RootUnsealFailureSurfacesAndRetries(t *testing.T) {
 		t.Fatalf("NewSealer: %v", err)
 	}
 
-	_, err = s.Seal([]byte("first-attempt"))
+	_, err = s.Seal(t.Context(), []byte("first-attempt"))
 	if !errors.Is(err, ErrSealFailed) {
 		t.Fatalf("Seal with a failing UnsealRoot = %v, want ErrSealFailed", err)
 	}
@@ -970,12 +977,12 @@ func TestSealer_RootUnsealFailureSurfacesAndRetries(t *testing.T) {
 	// The retry: same sealer, provider now healthy, and the hierarchy
 	// initializes as if the failure never happened.
 	want := []byte("second-attempt-material")
-	v, err := s.Seal(append([]byte(nil), want...))
+	v, err := s.Seal(t.Context(), append([]byte(nil), want...))
 	if err != nil {
 		t.Fatalf("Seal after a transient unseal failure = %v; the failure was memoized", err)
 	}
 	defer v.Destroy()
-	e, err := v.Open()
+	e, err := v.Open(t.Context())
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -993,7 +1000,7 @@ func TestSealer_RootUnsealFailureSurfacesAndRetries(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
-	if _, err := dead.Seal([]byte("never")); !errors.Is(err, ErrSealFailed) {
+	if _, err := dead.Seal(t.Context(), []byte("never")); !errors.Is(err, ErrSealFailed) {
 		t.Errorf("Seal with a dead RootUnsealer = %v, want ErrSealFailed", err)
 	}
 }
@@ -1037,7 +1044,7 @@ func TestSealer_WipedDoesNotReconsultAWillingProvider(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
-	v, err := s.Seal(append([]byte(nil), sealedMaterial...))
+	v, err := s.Seal(t.Context(), append([]byte(nil), sealedMaterial...))
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
@@ -1048,10 +1055,10 @@ func TestSealer_WipedDoesNotReconsultAWillingProvider(t *testing.T) {
 
 	sweep(t)
 
-	if _, err := s.Seal(append([]byte(nil), sealedMaterial...)); !errors.Is(err, ErrSealerWiped) {
+	if _, err := s.Seal(t.Context(), append([]byte(nil), sealedMaterial...)); !errors.Is(err, ErrSealerWiped) {
 		t.Errorf("Seal after sweep = %v, want ErrSealerWiped", err)
 	}
-	if _, err := v.Open(); !errors.Is(err, ErrSealerWiped) {
+	if _, err := v.Open(t.Context()); !errors.Is(err, ErrSealerWiped) {
 		t.Errorf("Open after sweep = %v, want ErrSealerWiped", err)
 	}
 	// The sharpest assertion: the provider was never asked again. A sealer
@@ -1108,9 +1115,9 @@ type countingRootUnsealer struct {
 	inner fixedRootUnsealer
 }
 
-func (c *countingRootUnsealer) UnsealRoot(dst []byte) error {
+func (c *countingRootUnsealer) UnsealRoot(ctx context.Context, dst []byte) error {
 	c.calls++
-	if err := c.inner.UnsealRoot(dst); err != nil {
+	if err := c.inner.UnsealRoot(ctx, dst); err != nil {
 		return err
 	}
 	if c.after != nil {
@@ -1155,7 +1162,7 @@ func TestSealer_KEKFailureDoesNotReunsealTheRoot(t *testing.T) {
 		t.Fatalf("NewSealer: %v", err)
 	}
 
-	if _, err := s.Seal([]byte("first attempt")); !errors.Is(err, ErrLockedMemoryUnavailable) {
+	if _, err := s.Seal(t.Context(), []byte("first attempt")); !errors.Is(err, ErrLockedMemoryUnavailable) {
 		t.Fatalf("Seal with the KEK mint refused = %v, want ErrLockedMemoryUnavailable", err)
 	}
 	if ru.calls != 1 {
@@ -1166,7 +1173,7 @@ func TestSealer_KEKFailureDoesNotReunsealTheRoot(t *testing.T) {
 	}
 
 	want := []byte("second attempt")
-	v, err := s.Seal(append([]byte(nil), want...))
+	v, err := s.Seal(t.Context(), append([]byte(nil), want...))
 	if err != nil {
 		t.Fatalf("Seal after the mint failure = %v", err)
 	}
@@ -1176,7 +1183,7 @@ func TestSealer_KEKFailureDoesNotReunsealTheRoot(t *testing.T) {
 			"because the KEK mint after it failed", ru.calls)
 	}
 
-	e, err := v.Open()
+	e, err := v.Open(t.Context())
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -1203,7 +1210,7 @@ func TestSealer_SweptPendingRootIsWipedNotReunsealed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
-	if _, err := s.Seal([]byte("first attempt")); !errors.Is(err, ErrLockedMemoryUnavailable) {
+	if _, err := s.Seal(t.Context(), []byte("first attempt")); !errors.Is(err, ErrLockedMemoryUnavailable) {
 		t.Fatalf("Seal with the KEK mint refused = %v, want ErrLockedMemoryUnavailable", err)
 	}
 
@@ -1224,7 +1231,7 @@ func TestSealer_SweptPendingRootIsWipedNotReunsealed(t *testing.T) {
 		t.Fatal("WipeAll left the retained root alive")
 	}
 
-	if _, err := s.Seal([]byte("after the sweep")); !errors.Is(err, ErrSealerWiped) {
+	if _, err := s.Seal(t.Context(), []byte("after the sweep")); !errors.Is(err, ErrSealerWiped) {
 		t.Errorf("Seal after the sweep = %v, want ErrSealerWiped", err)
 	}
 	if ru.calls != 1 {

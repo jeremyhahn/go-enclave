@@ -15,8 +15,8 @@
 //
 // # The property this suite exists for is RETENTION, not destination
 //
-//	Unprotect(blob, key []byte) error
-//	UnsealRoot(dst []byte) error
+//	Unprotect(ctx context.Context, blob, key []byte) error
+//	UnsealRoot(ctx context.Context, dst []byte) error
 //
 // Those signatures constrain where the plaintext is WRITTEN. They constrain
 // nothing about what the provider KEEPS. A provider may write into the caller's
@@ -74,10 +74,35 @@
 // with a recorded reason for a provider whose transit genuinely cannot be
 // reached — an HTTP-backed KMS cannot wipe its client's read buffer.
 //
+// # Context: the suite honors one, and checks that the provider does
+//
+// [TestProvider] takes a context and passes it to every provider call it
+// makes, so a device-backed run can be bounded from the outside. A run whose
+// context ends before it finishes returns an error matching [ErrAborted]: an
+// incomplete run is not a verdict, and it never returns nil.
+//
+// The provider's half of the seam's context contract (see
+// [enclave.RootUnsealer]) is checked for every claimed mode: a call made with
+// a context that has ALREADY been canceled, or whose deadline has already
+// passed, must be refused with an error matching that context's error — not
+// accepted, and not reported as [enclave.ErrSealedAuthentication] — must
+// write no key material into its destination, and must consume nothing a
+// later call needs. What the suite cannot force is cancellation arriving
+// MID-call, since only the provider can hold a call open; that half of the
+// contract is unmeasured here. Calls made with an ended context run on their
+// own goroutine, so a provider that never returns from one cannot hold a run
+// whose own context is bounded: when the run's context ends first, the run
+// is reported ABORTED — not as a provider failure, because an unfinished call
+// proves only that the run stopped waiting, not that the provider did device
+// work (the goroutine may not even have been scheduled). Violations observed
+// before that point are still reported. With an unbounded run context such a
+// provider hangs the run, where go test's -timeout reports it with the
+// provider's stack.
+//
 // # Usage
 //
 //	func TestConformance(t *testing.T) {
-//		err := providertest.TestProvider(providertest.Config{
+//		err := providertest.TestProvider(t.Context(), providertest.Config{
 //			New:   func() (any, error) { return NewTPMProvider(dev) },
 //			Modes: []enclave.Mode{enclave.ModePerOperation},
 //			Logf:  t.Logf,
@@ -90,10 +115,12 @@ package providertest
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"errors"
 	"fmt"
 	"reflect"
+	"time"
 
 	enclave "github.com/jeremyhahn/go-enclave"
 )
@@ -184,12 +211,20 @@ type Config struct {
 // observed and what the seam requires — so a failure is actionable without
 // reading this package.
 //
+// ctx is handed to every provider call the suite makes and bounds the run. If
+// it ends before the run finishes, the suite stops at the next check and the
+// returned error matches [ErrAborted] (an [*AbortedError] carrying the
+// context's error), joined with whatever properties had already failed while
+// the context was live; a provider call that failed only because the run's
+// context ended is not reported against the provider.
+//
 // A returned error means the provider does not honor the seam, EXCEPT one
-// matching [ErrInvalidConfig] (a [*ConfigError]): that means cfg itself could
-// not be run, and no provider was tested at all. A nil return means every
-// property the suite could MEASURE held; which ones it could not measure, and
-// why, went to [Config.Logf].
-func TestProvider(cfg Config) error {
+// matching [ErrInvalidConfig] (a [*ConfigError]) — cfg itself could not be
+// run, and no provider was tested at all — or [ErrAborted], which means the
+// run is incomplete. A nil return means every property the suite could
+// MEASURE held; which ones it could not measure, and why, went to
+// [Config.Logf].
+func TestProvider(ctx context.Context, cfg Config) error {
 	if cfg.New == nil {
 		return &ConfigError{Field: "New", Reason: "is nil; the suite has no provider to test"}
 	}
@@ -208,13 +243,19 @@ func TestProvider(cfg Config) error {
 		}
 	}
 
-	r := &report{logf: cfg.Logf}
-	checkModePairing(r, cfg, claims)
+	r := &report{ctx: ctx, logf: cfg.Logf}
+	checks := []func(*report, Config){func(r *report, cfg Config) { checkModePairing(r, cfg, claims) }}
 	if claims[enclave.ModePerOperation] {
-		checkKeyProtector(r, cfg)
+		checks = append(checks, keyProtectorChecks...)
 	}
 	if claims[enclave.ModeRootKey] {
-		checkRootUnsealer(r, cfg)
+		checks = append(checks, rootUnsealerChecks...)
+	}
+	for _, check := range checks {
+		if ctx.Err() != nil {
+			break
+		}
+		check(r, cfg)
 	}
 	return r.err()
 }
@@ -224,12 +265,22 @@ func TestProvider(cfg Config) error {
 // that is wrong in a single pass, which is the difference between one fix and
 // five rounds.
 type report struct {
+	// ctx is the run's context: every provider call is made under it, or
+	// under a context derived from it.
+	ctx      context.Context
 	logf     func(format string, args ...any)
 	failures []error
 }
 
-// fail records a failed property.
+// fail records a failed property — unless the run's context has ended, in
+// which case the failure may be nothing but the provider honoring that
+// context, and charging it to the provider would be a false finding. The run
+// is then reported as aborted instead (see err), so dropping it cannot turn a
+// failing run into a passing one.
 func (r *report) fail(property, format string, args ...any) {
+	if r.ctx.Err() != nil {
+		return
+	}
 	r.failures = append(r.failures, &PropertyError{Property: property, Detail: fmt.Sprintf(format, args...)})
 }
 
@@ -241,9 +292,73 @@ func (r *report) note(format string, args ...any) {
 	}
 }
 
-// err joins the recorded failures, or returns nil.
+// err joins the recorded failures, or returns nil. A run whose context ended
+// is never nil: it carries an [*AbortedError], because a run that stopped
+// early has not measured what a nil return claims.
 func (r *report) err() error {
+	if cerr := r.ctx.Err(); cerr != nil {
+		return errors.Join(append(r.failures, &AbortedError{Err: cerr})...)
+	}
 	return errors.Join(r.failures...)
+}
+
+// endedContext is a context that has already ended, and the error a provider
+// handed it must report.
+type endedContext struct {
+	name string
+	ctx  context.Context
+	want error
+}
+
+// endedContexts derives from the run's context one that is already canceled
+// and one whose deadline has already passed — the two ways a context ends,
+// which a provider may well check separately. The returned func releases
+// them.
+func (r *report) endedContexts() ([]endedContext, func()) {
+	canceled, cancel := context.WithCancel(r.ctx)
+	cancel()
+	// A deadline in the past is expired at construction: no timer runs, and
+	// Err reports DeadlineExceeded from the first call.
+	expired, release := context.WithDeadline(r.ctx, time.Unix(0, 0))
+	return []endedContext{
+		{name: "canceled", ctx: canceled, want: context.Canceled},
+		{name: "deadline-expired", ctx: expired, want: context.DeadlineExceeded},
+	}, release
+}
+
+// bounded runs call on its own goroutine and waits for it to return or for
+// the run's context to end, whichever is first, reporting which. It is used
+// ONLY for calls made with an already-ended context, where a provider that
+// ignores the context could otherwise hold the suite for as long as its
+// device takes — or forever.
+//
+// returned false is INCOMPLETION, never a finding: an empty result channel
+// shows only that the run stopped waiting — the goroutine may not yet have
+// been scheduled, let alone reached the provider. The caller therefore records
+// nothing and stops the check, and the run is reported through err as
+// aborted, which a run whose context ended always is.
+//
+// If the run's context wins, the goroutine is left running: its only way out
+// is the provider returning, and nothing on this side can force that. Its
+// result channel is buffered, so it exits the moment the provider does, and
+// nothing it writes is read after this returns.
+func (r *report) bounded(call func() error) (err error, returned bool) {
+	done := make(chan error, 1)
+	go func() { done <- call() }()
+
+	select {
+	case err := <-done:
+		return err, true
+	case <-r.ctx.Done():
+		// select picks at random among ready cases; a call that finished at
+		// the same moment did return, and is not reported as hung.
+		select {
+		case err := <-done:
+			return err, true
+		default:
+			return nil, false
+		}
+	}
 }
 
 // modeInterface names the seam interface a mode requires, so a pairing failure
@@ -393,16 +508,17 @@ func checkModePairing(r *report, cfg Config, claims map[enclave.Mode]bool) {
 	r.note("providertest: mode/interface pairing checked for ModeRootKey and ModePerOperation against the claim %v", cfg.Modes)
 }
 
-// checkKeyProtector runs the ModePerOperation half of the suite. Each check
+// keyProtectorChecks are the ModePerOperation half of the suite. Each check
 // takes its own provider instance.
-func checkKeyProtector(r *report, cfg Config) {
-	checkRoundTrip(r, cfg)
-	checkProtectDoesNotRetainTheKey(r, cfg)
-	checkDestinationNotWrittenAfterTheCallerWipedIt(r, cfg)
-	checkDestinationNotDisturbedByALaterCall(r, cfg)
-	checkTamperedBlobRefused(r, cfg)
-	checkDestinationLengthIsAuthenticated(r, cfg)
-	checkNoResidueAfterUnprotect(r, cfg)
+var keyProtectorChecks = []func(*report, Config){
+	checkRoundTrip,
+	checkProtectDoesNotRetainTheKey,
+	checkDestinationNotWrittenAfterTheCallerWipedIt,
+	checkDestinationNotDisturbedByALaterCall,
+	checkTamperedBlobRefused,
+	checkDestinationLengthIsAuthenticated,
+	checkKeyProtectorRefusesAnEndedContext,
+	checkNoResidueAfterUnprotect,
 }
 
 // checkRoundTrip is the floor: Protect/Unprotect recover the key, Protect does
@@ -422,7 +538,7 @@ func checkRoundTrip(r *report, cfg Config) {
 	}
 	want := bytes.Clone(key)
 
-	blob, err := p.Protect(key)
+	blob, err := p.Protect(r.ctx, key)
 	if err != nil {
 		r.fail(property, "Protect: %v", err)
 		return
@@ -441,7 +557,7 @@ func checkRoundTrip(r *report, cfg Config) {
 	}
 
 	dst := make([]byte, keyBytes)
-	if err := p.Unprotect(blob, dst); err != nil {
+	if err := p.Unprotect(r.ctx, blob, dst); err != nil {
 		r.fail(property, "Unprotect of a blob this provider's own Protect produced: %v", err)
 		return
 	}
@@ -477,7 +593,7 @@ func checkProtectDoesNotRetainTheKey(r *report, cfg Config) {
 	}
 	want := bytes.Clone(key)
 
-	blob, err := p.Protect(key)
+	blob, err := p.Protect(r.ctx, key)
 	if err != nil {
 		r.fail(property, "Protect: %v", err)
 		return
@@ -486,7 +602,7 @@ func checkProtectDoesNotRetainTheKey(r *report, cfg Config) {
 	// Control FIRST: this provider round-trips while the caller's key is still
 	// intact.
 	control := make([]byte, keyBytes)
-	if err := p.Unprotect(blob, control); err != nil || !bytes.Equal(control, want) {
+	if err := p.Unprotect(r.ctx, blob, control); err != nil || !bytes.Equal(control, want) {
 		r.fail(property, "the control did not hold — Unprotect before any wipe returned %v and recovered "+
 			"the key correctly: %t. The retention result would be unattributable, so it was not taken",
 			err, bytes.Equal(control, want))
@@ -498,7 +614,7 @@ func checkProtectDoesNotRetainTheKey(r *report, cfg Config) {
 	enclave.Wipe(key)
 
 	dst := make([]byte, keyBytes)
-	switch err := p.Unprotect(blob, dst); {
+	switch err := p.Unprotect(r.ctx, blob, dst); {
 	case err != nil:
 		r.fail(property, "after the caller wiped the key slice Protect was handed, Unprotect of that blob "+
 			"failed with %v — Protect kept the caller's SLICE rather than copying out of it, so wiping the "+
@@ -545,12 +661,12 @@ func checkDestinationNotWrittenAfterTheCallerWipedIt(r *report, cfg Config) {
 		return
 	}
 
-	firstBlob, err := p.Protect(first)
+	firstBlob, err := p.Protect(r.ctx, first)
 	if err != nil {
 		r.fail(property, "Protect: %v", err)
 		return
 	}
-	secondBlob, err := p.Protect(second)
+	secondBlob, err := p.Protect(r.ctx, second)
 	if err != nil {
 		r.fail(property, "Protect: %v", err)
 		return
@@ -558,7 +674,7 @@ func checkDestinationNotWrittenAfterTheCallerWipedIt(r *report, cfg Config) {
 
 	// spy is the exact slice handed out, held for the rest of the check.
 	spy := make([]byte, keyBytes)
-	if err := p.Unprotect(firstBlob, spy); err != nil {
+	if err := p.Unprotect(r.ctx, firstBlob, spy); err != nil {
 		r.fail(property, "Unprotect: %v", err)
 		return
 	}
@@ -576,11 +692,11 @@ func checkDestinationNotWrittenAfterTheCallerWipedIt(r *report, cfg Config) {
 	enclave.Wipe(spy)
 
 	later := make([]byte, keyBytes)
-	if err := p.Unprotect(secondBlob, later); err != nil {
+	if err := p.Unprotect(r.ctx, secondBlob, later); err != nil {
 		r.fail(property, "a second Unprotect failed: %v", err)
 		return
 	}
-	if _, err := p.Protect(first); err != nil {
+	if _, err := p.Protect(r.ctx, first); err != nil {
 		r.fail(property, "a later Protect failed: %v", err)
 		return
 	}
@@ -626,19 +742,19 @@ func checkDestinationNotDisturbedByALaterCall(r *report, cfg Config) {
 		return
 	}
 
-	firstBlob, err := p.Protect(first)
+	firstBlob, err := p.Protect(r.ctx, first)
 	if err != nil {
 		r.fail(property, "Protect: %v", err)
 		return
 	}
-	secondBlob, err := p.Protect(second)
+	secondBlob, err := p.Protect(r.ctx, second)
 	if err != nil {
 		r.fail(property, "Protect: %v", err)
 		return
 	}
 
 	spy := make([]byte, keyBytes)
-	if err := p.Unprotect(firstBlob, spy); err != nil {
+	if err := p.Unprotect(r.ctx, firstBlob, spy); err != nil {
 		r.fail(property, "Unprotect: %v", err)
 		return
 	}
@@ -650,11 +766,11 @@ func checkDestinationNotDisturbedByALaterCall(r *report, cfg Config) {
 	}
 
 	later := make([]byte, keyBytes)
-	if err := p.Unprotect(secondBlob, later); err != nil {
+	if err := p.Unprotect(r.ctx, secondBlob, later); err != nil {
 		r.fail(property, "a second Unprotect failed: %v", err)
 		return
 	}
-	if _, err := p.Protect(first); err != nil {
+	if _, err := p.Protect(r.ctx, first); err != nil {
 		r.fail(property, "a later Protect failed: %v", err)
 		return
 	}
@@ -701,7 +817,7 @@ func checkTamperedBlobRefused(r *report, cfg Config) {
 		r.fail(property, "%v", err)
 		return
 	}
-	blob, err := p.Protect(key)
+	blob, err := p.Protect(r.ctx, key)
 	if err != nil {
 		r.fail(property, "Protect: %v", err)
 		return
@@ -742,7 +858,7 @@ func checkTamperedBlobRefused(r *report, cfg Config) {
 	const canary = 0x5A
 	for _, tc := range cases {
 		dst := bytes.Repeat([]byte{canary}, keyBytes)
-		err := p.Unprotect(tc.blob, dst)
+		err := p.Unprotect(r.ctx, tc.blob, dst)
 		switch {
 		case err == nil:
 			r.fail(property, "Unprotect ACCEPTED %s blob; a provider that authenticates nothing lets an "+
@@ -796,7 +912,7 @@ func checkDestinationLengthIsAuthenticated(r *report, cfg Config) {
 		r.fail(property, "%v", err)
 		return
 	}
-	blob, err := p.Protect(key)
+	blob, err := p.Protect(r.ctx, key)
 	if err != nil {
 		r.fail(property, "Protect: %v", err)
 		return
@@ -804,7 +920,7 @@ func checkDestinationLengthIsAuthenticated(r *report, cfg Config) {
 
 	for _, n := range []int{0, keyBytes - 1, keyBytes + 1} {
 		dst := make([]byte, n)
-		switch err := p.Unprotect(blob, dst); {
+		switch err := p.Unprotect(r.ctx, blob, dst); {
 		case err == nil:
 			r.fail(property, "Unprotect accepted a %d-byte destination for a %d-byte key", n, keyBytes)
 		case !errors.Is(err, enclave.ErrSealedAuthentication):
@@ -818,7 +934,7 @@ func checkDestinationLengthIsAuthenticated(r *report, cfg Config) {
 	}
 }
 
-// checkRootUnsealer runs the ModeRootKey half.
+// rootUnsealerChecks are the ModeRootKey half.
 //
 // # There is no residue sweep here, and the asymmetry is the point
 //
@@ -829,11 +945,14 @@ func checkDestinationLengthIsAuthenticated(r *report, cfg Config) {
 // enclaves"). Sweeping for it would fail every conforming implementation. The
 // retention property belongs to KeyProtector, whose device key is its own and
 // whose protected key is the caller's.
-func checkRootUnsealer(r *report, cfg Config) {
-	checkUnsealRootFillsTheDestination(r, cfg)
-	checkRootDestinationNotDisturbedByALaterCall(r, cfg)
-	r.note("providertest: the residue sweep does not apply to RootUnsealer — a root unsealer legitimately " +
-		"retains the root, which is the whole of what it does")
+var rootUnsealerChecks = []func(*report, Config){
+	checkUnsealRootFillsTheDestination,
+	checkRootDestinationNotDisturbedByALaterCall,
+	checkRootUnsealerRefusesAnEndedContext,
+	func(r *report, _ Config) {
+		r.note("providertest: the residue sweep does not apply to RootUnsealer — a root unsealer legitimately " +
+			"retains the root, which is the whole of what it does")
+	},
 }
 
 // checkUnsealRootFillsTheDestination proves the provider writes a real root
@@ -868,7 +987,7 @@ func checkUnsealRootFillsTheDestination(r *report, cfg Config) {
 
 	const canary = 0xAA
 	first := bytes.Repeat([]byte{canary}, enclave.RootKeyBytes)
-	if err := p.UnsealRoot(first); err != nil {
+	if err := p.UnsealRoot(r.ctx, first); err != nil {
 		r.fail(property, "UnsealRoot: %v", err)
 		return
 	}
@@ -891,7 +1010,7 @@ func checkUnsealRootFillsTheDestination(r *report, cfg Config) {
 	}
 
 	second := bytes.Repeat([]byte{0x55}, enclave.RootKeyBytes)
-	if err := p.UnsealRoot(second); err != nil {
+	if err := p.UnsealRoot(r.ctx, second); err != nil {
 		r.fail(property, "a second UnsealRoot on the same provider: %v. If this provider consumes a "+
 			"one-shot handle on a successful unseal, set Config.SingleUseRoot with the reason; the seam "+
 			"guarantees only that a Sealer calls UnsealRoot at most once", err)
@@ -959,7 +1078,7 @@ func checkRootDestinationNotDisturbedByALaterCall(r *report, cfg Config) {
 	}
 
 	spy := make([]byte, enclave.RootKeyBytes)
-	if err := p.UnsealRoot(spy); err != nil {
+	if err := p.UnsealRoot(r.ctx, spy); err != nil {
 		r.fail(property, "UnsealRoot: %v", err)
 		return
 	}
@@ -973,7 +1092,7 @@ func checkRootDestinationNotDisturbedByALaterCall(r *report, cfg Config) {
 	want := bytes.Clone(spy)
 
 	later := make([]byte, enclave.RootKeyBytes)
-	if err := p.UnsealRoot(later); err != nil {
+	if err := p.UnsealRoot(r.ctx, later); err != nil {
 		r.fail(property, "a second UnsealRoot failed: %v", err)
 		return
 	}
@@ -989,12 +1108,172 @@ func checkRootDestinationNotDisturbedByALaterCall(r *report, cfg Config) {
 	// And the caller-wiped direction: once wiped, nothing may put bytes back.
 	enclave.Wipe(spy)
 	third := make([]byte, enclave.RootKeyBytes)
-	if err := p.UnsealRoot(third); err != nil {
+	if err := p.UnsealRoot(r.ctx, third); err != nil {
 		r.fail(property, "a third UnsealRoot failed: %v", err)
 		return
 	}
 	if !allZero(spy) {
 		r.fail(property, "the destination of an earlier UnsealRoot was written again after the caller wiped "+
 			"it: the provider writes root material into pages the caller has released")
+	}
+}
+
+// checkKeyProtectorRefusesAnEndedContext checks the provider's half of the
+// seam's context contract for Protect and Unprotect: a call made with a
+// context that has already ended is refused, with an error matching that
+// context's error, writes no key material, and consumes nothing.
+//
+// Why each clause is a property rather than politeness:
+//
+//   - REFUSED, because a Sealer's caller set that deadline, and a provider that
+//     completes the call anyway makes the deadline decoration — the "bound is
+//     only real at the outermost call" defect, one layer down.
+//   - MATCHING ctx.Err(), because that is how every layer above tells "the
+//     caller gave up" from "the device failed"; and NOT
+//     [enclave.ErrSealedAuthentication], because a canceled open reported as
+//     a forgery sends an operator hunting an attacker who does not exist.
+//   - NOTHING WRITTEN, because the caller has been told the call failed and
+//     will not treat its destination as holding key material it must wipe.
+//
+// The controls bracket the refusals: the provider round-trips with the run's
+// live context before them, and still recovers the same blob after them, so a
+// refusal cannot be a provider that refuses everything and the refusals cannot
+// have broken the provider.
+func checkKeyProtectorRefusesAnEndedContext(r *report, cfg Config) {
+	const property = "Protect and Unprotect refuse a context that has already ended"
+
+	p, err := newProtector(cfg)
+	if err != nil {
+		r.fail(property, "%v", err)
+		return
+	}
+	key, err := randKey()
+	if err != nil {
+		r.fail(property, "%v", err)
+		return
+	}
+	want := bytes.Clone(key)
+
+	// CONTROL: with a live context this provider round-trips.
+	blob, err := p.Protect(r.ctx, key)
+	if err != nil {
+		r.fail(property, "the control did not hold — Protect with a live context: %v", err)
+		return
+	}
+	control := make([]byte, keyBytes)
+	if err := p.Unprotect(r.ctx, blob, control); err != nil || !bytes.Equal(control, want) {
+		r.fail(property, "the control did not hold — Unprotect with a live context returned %v and recovered "+
+			"the key correctly: %t, so a refusal below could not be told from a provider that refuses everything",
+			err, bytes.Equal(control, want))
+		return
+	}
+
+	ended, release := r.endedContexts()
+	defer release()
+
+	for _, ec := range ended {
+		perr, returned := r.bounded(func() error {
+			_, err := p.Protect(ec.ctx, key)
+			return err
+		})
+		if !returned {
+			return // incomplete, not misconduct; see bounded
+		}
+		checkRefusal(r, property, "Protect", ec, perr)
+		if !bytes.Equal(key, want) {
+			r.fail(property, "Protect called with an already-%s context MUTATED the caller's key slice", ec.name)
+		}
+
+		const canary = 0x5A
+		dst := bytes.Repeat([]byte{canary}, keyBytes)
+		uerr, returned := r.bounded(func() error { return p.Unprotect(ec.ctx, blob, dst) })
+		if !returned {
+			return // incomplete, not misconduct; see bounded
+		}
+		checkRefusal(r, property, "Unprotect", ec, uerr)
+		if uerr != nil && containsRun(dst, want) {
+			r.fail(property, "Unprotect refused an already-%s context and still wrote plaintext key material "+
+				"into the destination; its caller has been told the call failed and will not wipe it", ec.name)
+		}
+	}
+
+	// CONTROL, after: the refusals consumed nothing — the same blob still
+	// recovers the same key.
+	after := make([]byte, keyBytes)
+	if err := p.Unprotect(r.ctx, blob, after); err != nil || !bytes.Equal(after, want) {
+		r.fail(property, "after refusing ended contexts, Unprotect of the same blob with a live context returned "+
+			"%v and recovered the key correctly: %t — a refused call must leave the provider as it found it",
+			err, bytes.Equal(after, want))
+	}
+	r.note("providertest: ended-context refusal checked for Protect and Unprotect (canceled and " +
+		"deadline-expired); cancellation arriving MID-call cannot be forced from outside a provider and is unmeasured")
+}
+
+// checkRootUnsealerRefusesAnEndedContext is the same contract for UnsealRoot,
+// plus the clause that matters most there: a refused call CONSUMES NOTHING.
+// A Sealer retries an unseal that failed — a canceled one included — so a
+// one-shot provider that spends its handle on a call it then refuses has made
+// the Sealer's root permanently unobtainable. The live unseal after the
+// refusals, on the SAME instance, is that check, and it is why this runs for
+// a [Config.SingleUseRoot] provider too: the refusals are not uses.
+func checkRootUnsealerRefusesAnEndedContext(r *report, cfg Config) {
+	const property = "UnsealRoot refuses a context that has already ended, and consumes nothing"
+
+	p, err := newUnsealer(cfg)
+	if err != nil {
+		r.fail(property, "%v", err)
+		return
+	}
+
+	ended, release := r.endedContexts()
+	defer release()
+
+	const canary = 0xC3
+	refused := make([][]byte, 0, len(ended))
+	for _, ec := range ended {
+		dst := bytes.Repeat([]byte{canary}, enclave.RootKeyBytes)
+		uerr, returned := r.bounded(func() error { return p.UnsealRoot(ec.ctx, dst) })
+		if !returned {
+			return // incomplete, not misconduct; see bounded
+		}
+		checkRefusal(r, property, "UnsealRoot", ec, uerr)
+		if uerr != nil {
+			refused = append(refused, dst)
+		}
+	}
+
+	root := make([]byte, enclave.RootKeyBytes)
+	if err := p.UnsealRoot(r.ctx, root); err != nil {
+		r.fail(property, "after refusing ended contexts, UnsealRoot on the same provider with a live context "+
+			"failed: %v. A refused call must consume nothing a later call needs — a Sealer retries an unseal "+
+			"that failed, and a one-shot handle spent on a refusal leaves it no root at all", err)
+		return
+	}
+	if allZero(root) {
+		// Without a real root the residue comparison below proves nothing.
+		r.fail(property, "the control did not hold — the live UnsealRoot returned nil and an all-zero root")
+		return
+	}
+	for _, dst := range refused {
+		if containsRun(dst, root) {
+			r.fail(property, "UnsealRoot refused an ended context and still wrote root material into the "+
+				"destination; its caller has been told the call failed and will not wipe it")
+		}
+	}
+}
+
+// checkRefusal applies the verdict every ended-context call shares: it must
+// fail, with an error matching the context's, and not as a forgery.
+func checkRefusal(r *report, property, op string, ec endedContext, err error) {
+	switch {
+	case err == nil:
+		r.fail(property, "%s ACCEPTED an already-%s context and completed: a caller's deadline that a "+
+			"provider ignores bounds nothing", op, ec.name)
+	case errors.Is(err, enclave.ErrSealedAuthentication):
+		r.fail(property, "%s refused an already-%s context with %v, which matches ErrSealedAuthentication: "+
+			"a caller that gave up would be reported as a forgery", op, ec.name, err)
+	case !errors.Is(err, ec.want):
+		r.fail(property, "%s refused an already-%s context with %v, want an error matching %v so every "+
+			"layer above can tell a caller that gave up from a device that failed", op, ec.name, err, ec.want)
 	}
 }

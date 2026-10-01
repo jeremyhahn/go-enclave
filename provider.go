@@ -8,6 +8,8 @@
 
 package enclave
 
+import "context"
+
 // This file is the sealing seam: the two interfaces a crypto provider
 // implements so that sealing can be rooted in hardware WITHOUT this package
 // importing any. go-enclave ships exactly one implementation — the pure
@@ -68,11 +70,13 @@ const RootKeyBytes = 32
 //
 // A blob that fails authentication is reported with an error matching
 // [ErrSealedAuthentication], so a forgery reads as what it is at every layer
-// above. Any OTHER failure — a device unreachable, a session limit — is
-// reported as the provider's own error and surfaces from
-// [SealedEnclave.Open] unchanged, because an infrastructure fault dressed as
-// an authentication failure sends an operator hunting an attacker who does
-// not exist.
+// above. Any OTHER failure — a device unreachable, a session limit, a
+// context that ended — is reported as the provider's own error and surfaces
+// from [SealedEnclave.Open] joined under [ErrOpenFailed], never under
+// ErrSealedAuthentication, with the provider's error still reachable through
+// errors.Is and errors.As: an infrastructure fault dressed as an
+// authentication failure sends an operator hunting an attacker who does not
+// exist.
 //
 // # The contract, operation by operation
 //
@@ -92,9 +96,14 @@ const RootKeyBytes = 32
 // whose underlying API returns a fresh slice (crypto.Decrypter does) must
 // copy into key and wipe its transient, accepting the in-call heap window
 // that interface shape imposes.
+//
+// # Both operations take a context, and MUST honor it
+//
+// The provider context contract is stated once, on [RootUnsealer], and
+// applies to Protect and Unprotect exactly as it does to UnsealRoot.
 type KeyProtector interface {
-	Protect(key []byte) (blob []byte, err error)
-	Unprotect(blob []byte, key []byte) error
+	Protect(ctx context.Context, key []byte) (blob []byte, err error)
+	Unprotect(ctx context.Context, blob []byte, key []byte) error
 }
 
 // RootUnsealer yields the process root key for [ModeRootKey]: the device is
@@ -112,7 +121,44 @@ type KeyProtector interface {
 // A [Sealer] calls UnsealRoot at most once, retrying only if that call
 // failed. The value returned on that one call is the root for the Sealer's
 // whole lifetime, so a provider gating the root on device state (a TPM PCR
-// policy, say) is enforcing that state at unseal time, not continuously.
+// policy, say) is enforcing that state at unseal time, not continuously. A
+// call refused because its context ended is a FAILED call: the Sealer will
+// ask again, so a provider holding a one-shot handle must not consume it on a
+// call it did not complete.
+//
+// # The provider context contract (all three operations)
+//
+// Every provider operation can block — on a device round trip, a session
+// limit, a network hop to a KMS — so every one takes the caller's context, and
+// a provider MUST honor it:
+//
+//   - a context that has already ended at entry is refused before any device
+//     work, with an error matching ctx.Err() under [errors.Is];
+//   - a context that ends DURING the operation makes it return promptly, with
+//     an error matching ctx.Err(), as far as the underlying API allows — a
+//     device library that takes no context is the provider author's to bound;
+//   - a refused call writes no key material into the destination and, for
+//     UnsealRoot, consumes nothing a later call needs.
+//
+// The reason this is a MUST and not a courtesy is where the bound lives. A
+// caller's deadline is real only if every layer between it and the blocking
+// operation honors it; [Sealer.Seal] and [SealedEnclave.Open] check the
+// context before and after every provider call and hold no mutex across one —
+// the one lock that does span a provider call is the init semaphore
+// serializing a Sealer's FIRST root unseal, and a caller queued on it leaves
+// when its own context ends. They cannot interrupt a provider that ignores
+// its context: that caller waits as long as the provider does. What the Sealer
+// does guarantee is that such a provider stalls ONLY its own caller: no other
+// Seal or Open, on this Sealer or any other, waits behind it beyond its own
+// context (#87). The conformance suite in providertest checks the refusal
+// half of this contract.
+//
+// A canceled or expired call surfaces from Seal under [ErrSealFailed] and
+// from Open under [ErrOpenFailed], in both cases matching the context's error
+// as well. It does not match [ErrSealedAuthentication] unless the provider
+// itself reported an authentication failure before the context was seen to
+// end: that is a verdict on the blob — a security signal — and is kept
+// visible alongside the cancellation rather than overwritten by it.
 type RootUnsealer interface {
-	UnsealRoot(dst []byte) error
+	UnsealRoot(ctx context.Context, dst []byte) error
 }

@@ -36,6 +36,32 @@ func (e *ConfigError) Error() string { return "providertest: Config." + e.Field 
 // Is reports whether target is [ErrInvalidConfig].
 func (e *ConfigError) Is(target error) bool { return target == ErrInvalidConfig }
 
+// ErrAborted matches the error [TestProvider] returns when its context ended
+// before the run finished. The run is INCOMPLETE: it is neither a pass nor,
+// by itself, a finding against the provider — properties that had already
+// failed while the context was live are joined alongside it and are real.
+var ErrAborted = errors.New("providertest: run aborted because its context ended")
+
+// AbortedError is the concrete error behind [ErrAborted]. It matches
+// ErrAborted under errors.Is and unwraps to the context's error, so a caller
+// can also match context.Canceled or context.DeadlineExceeded.
+type AbortedError struct {
+	// Err is the run context's error.
+	Err error
+}
+
+// Error renders as "providertest: run aborted before every property was
+// checked: <Err>".
+func (e *AbortedError) Error() string {
+	return "providertest: run aborted before every property was checked: " + e.Err.Error()
+}
+
+// Is reports whether target is [ErrAborted].
+func (e *AbortedError) Is(target error) bool { return target == ErrAborted }
+
+// Unwrap returns the run context's error.
+func (e *AbortedError) Unwrap() error { return e.Err }
+
 // PropertyError is one property of the seam that the provider under test did
 // not honor. [TestProvider] returns every one it found joined with
 // errors.Join, so a caller can walk them — via the joined error's

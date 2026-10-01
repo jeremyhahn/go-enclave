@@ -30,7 +30,7 @@ func sealForBudgetTest(t *testing.T) *SealedEnclave {
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
-	v, err := s.Seal(append([]byte(nil), sealedMaterial...))
+	v, err := s.Seal(t.Context(), append([]byte(nil), sealedMaterial...))
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
@@ -58,7 +58,7 @@ func TestSealedEnclave_OpenWithAdmitsTheDestination(t *testing.T) {
 		t.Fatalf("a fresh Allocator reports %d bytes in use; this test attributes everything below to the open", before)
 	}
 
-	e, err := v.OpenWith(a)
+	e, err := v.OpenWith(t.Context(), a)
 	if err != nil {
 		t.Fatalf("OpenWith: %v", err)
 	}
@@ -97,7 +97,7 @@ func TestSealedEnclave_OpenWithReturnsTheReservationOnDestroy(t *testing.T) {
 	// reservation per open would be exhausted well before the last of these.
 	const rounds = 6
 	for i := 0; i < rounds; i++ {
-		e, err := v.OpenWith(a)
+		e, err := v.OpenWith(t.Context(), a)
 		if err != nil {
 			t.Fatalf("OpenWith on round %d of %d: %v (a budget sized for one open cannot "+
 				"serve the next unless Destroy returns the reservation)", i+1, rounds, err)
@@ -123,7 +123,7 @@ func TestSealedEnclave_OpenWithReturnsTheReservationOnDestroy(t *testing.T) {
 func TestSealedEnclave_OpenWithRefusesANilAllocator(t *testing.T) {
 	v := sealForBudgetTest(t)
 
-	e, err := v.OpenWith(nil)
+	e, err := v.OpenWith(t.Context(), nil)
 	if !errors.Is(err, ErrNilAllocator) {
 		t.Errorf("OpenWith(nil) = %v, want ErrNilAllocator: a nil Allocator must not silently "+
 			"fall back to an unadmitted allocation", err)
@@ -138,19 +138,19 @@ func TestSealedEnclave_OpenWithRefusesANilAllocator(t *testing.T) {
 	// a caller sees for a lost allocator would depend on lifecycle timing.
 	d := sealForBudgetTest(t)
 	d.Destroy()
-	if _, err := d.OpenWith(nil); !errors.Is(err, ErrNilAllocator) {
+	if _, err := d.OpenWith(t.Context(), nil); !errors.Is(err, ErrNilAllocator) {
 		t.Errorf("OpenWith(nil) on a destroyed value = %v, want ErrNilAllocator", err)
 	}
 
 	// A nil RECEIVER is a different mistake and keeps its own answer.
 	var nilValue *SealedEnclave
-	if _, err := nilValue.OpenWith(nil); !errors.Is(err, ErrEnclaveDestroyed) {
-		t.Errorf("(*SealedEnclave)(nil).OpenWith(nil) = %v, want ErrEnclaveDestroyed", err)
+	if _, err := nilValue.OpenWith(t.Context(), nil); !errors.Is(err, ErrEnclaveDestroyed) {
+		t.Errorf("(*SealedEnclave)(nil).OpenWith(t.Context(), nil) = %v, want ErrEnclaveDestroyed", err)
 	}
 
 	// And Open — the unbudgeted path — is unaffected: it has nothing to
 	// refuse, so it never reports this error.
-	o, err := v.Open()
+	o, err := v.Open(t.Context())
 	if err != nil {
 		t.Fatalf("Open after a refused OpenWith: %v", err)
 	}
@@ -172,7 +172,7 @@ func TestSealedEnclave_OpenAllocatesOutsideAnyBudget(t *testing.T) {
 		t.Fatalf("NewAllocator: %v", err)
 	}
 
-	e, err := v.Open()
+	e, err := v.Open(t.Context())
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -199,7 +199,7 @@ func TestSealedEnclave_OpenWithRefusesWhatTheBudgetCannotCover(t *testing.T) {
 		t.Fatalf("NewAllocator: %v", err)
 	}
 
-	e, err := v.OpenWith(a)
+	e, err := v.OpenWith(t.Context(), a)
 	if !errors.Is(err, ErrBudgetExhausted) {
 		t.Fatalf("OpenWith under a sub-page budget = %v, want ErrBudgetExhausted", err)
 	}
@@ -228,7 +228,7 @@ func TestSealedEnclave_OpenWithRefusesWhatTheBudgetCannotCover(t *testing.T) {
 	}
 
 	// The value is untouched: the refusal was about the budget, not about it.
-	o, err := v.Open()
+	o, err := v.Open(t.Context())
 	if err != nil {
 		t.Fatalf("Open after a budget refusal: %v (a refusal must not consume the value)", err)
 	}
@@ -243,7 +243,7 @@ func TestSealedEnclave_OpenWithRefusesWhatTheBudgetCannotCover(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
-	e2, err := v.OpenWith(roomy)
+	e2, err := v.OpenWith(t.Context(), roomy)
 	if err != nil {
 		t.Fatalf("OpenWith under a four-page budget: %v", err)
 	}
@@ -274,7 +274,7 @@ func TestSealedEnclave_OpenWithGatesOnTheDestination(t *testing.T) {
 	// destination and the refusal is unambiguous.
 	page := LockedSize(1)
 	material := bytes.Repeat([]byte{0x5B}, int(3*page))
-	v, err := s.Seal(append([]byte(nil), material...))
+	v, err := s.Seal(t.Context(), append([]byte(nil), material...))
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
@@ -287,7 +287,7 @@ func TestSealedEnclave_OpenWithGatesOnTheDestination(t *testing.T) {
 
 	beforeUnprotects, beforeLedger := kp.unprotectCount(), liveCount()
 
-	e, err := v.OpenWith(tooSmall)
+	e, err := v.OpenWith(t.Context(), tooSmall)
 	var be *BudgetError
 	if !errors.As(err, &be) {
 		t.Fatalf("OpenWith under a one-page budget = %v, want a *BudgetError", err)
@@ -321,7 +321,7 @@ func TestSealedEnclave_OpenWithGatesOnTheDestination(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
-	admitted, err := v.OpenWith(exact)
+	admitted, err := v.OpenWith(t.Context(), exact)
 	if err != nil {
 		t.Fatalf("OpenWith under a budget of exactly one destination = %v, want success: an open "+
 			"takes ONE reservation, so this is the smallest budget that serves it", err)
@@ -371,7 +371,7 @@ func TestSealedEnclave_OpenWithConcurrentCallersDoNotStarveEachOther(t *testing.
 			go func() {
 				defer wg.Done()
 				<-start
-				e, err := v.OpenWith(a)
+				e, err := v.OpenWith(t.Context(), a)
 				if err != nil {
 					refused <- err
 					return
@@ -423,7 +423,7 @@ func TestSealedEnclave_OpenWithOnARetiredGeneration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
-	v, err := s.Seal(append([]byte(nil), short...))
+	v, err := s.Seal(t.Context(), append([]byte(nil), short...))
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
@@ -436,7 +436,7 @@ func TestSealedEnclave_OpenWithOnARetiredGeneration(t *testing.T) {
 	// Force the rotation, exactly as TestSealer_KEKRotatesAtTheMessageLimit
 	// does: park the counter at the bound and seal past it.
 	s.kekUsed.Store(kekMessageLimit)
-	throwaway, err := s.Seal(append([]byte(nil), short...))
+	throwaway, err := s.Seal(t.Context(), append([]byte(nil), short...))
 	if err != nil {
 		t.Fatalf("Seal past the message limit: %v", err)
 	}
@@ -456,7 +456,7 @@ func TestSealedEnclave_OpenWithOnARetiredGeneration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
-	e, err := v.OpenWith(a)
+	e, err := v.OpenWith(t.Context(), a)
 	if err != nil {
 		t.Fatalf("OpenWith on a retired-generation value under a one-destination budget: %v", err)
 	}
@@ -492,7 +492,7 @@ func TestSealedEnclave_OpenWithIsConcurrencySafe(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			e, err := v.OpenWith(a)
+			e, err := v.OpenWith(t.Context(), a)
 			if err != nil {
 				errs <- err
 				return
@@ -525,7 +525,7 @@ func TestSealedEnclave_OpenWithOnADestroyedValue(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
-	if _, err := v.OpenWith(a); !errors.Is(err, ErrEnclaveDestroyed) {
+	if _, err := v.OpenWith(t.Context(), a); !errors.Is(err, ErrEnclaveDestroyed) {
 		t.Errorf("OpenWith on a destroyed value = %v, want ErrEnclaveDestroyed", err)
 	}
 	if got := a.InUse(); got != 0 {
@@ -533,7 +533,7 @@ func TestSealedEnclave_OpenWithOnADestroyedValue(t *testing.T) {
 	}
 
 	var nilValue *SealedEnclave
-	if _, err := nilValue.OpenWith(a); !errors.Is(err, ErrEnclaveDestroyed) {
+	if _, err := nilValue.OpenWith(t.Context(), a); !errors.Is(err, ErrEnclaveDestroyed) {
 		t.Errorf("(*SealedEnclave)(nil).OpenWith = %v, want ErrEnclaveDestroyed", err)
 	}
 }
@@ -547,7 +547,7 @@ func TestSealedEnclave_OpenWithPerOperationMode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
-	v, err := s.Seal(append([]byte(nil), sealedMaterial...))
+	v, err := s.Seal(t.Context(), append([]byte(nil), sealedMaterial...))
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
@@ -557,7 +557,7 @@ func TestSealedEnclave_OpenWithPerOperationMode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
-	e, err := v.OpenWith(a)
+	e, err := v.OpenWith(t.Context(), a)
 	if err != nil {
 		t.Fatalf("OpenWith in ModePerOperation: %v", err)
 	}

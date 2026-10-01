@@ -105,7 +105,7 @@ func checkNoResidueAfterUnprotect(r *report, cfg Config) {
 	var blob []byte
 	if err := needle.WithBytes(func(b []byte) error {
 		var perr error
-		blob, perr = p.Protect(b)
+		blob, perr = p.Protect(r.ctx, b)
 		return perr
 	}); err != nil {
 		r.fail(property, "Protect: %v", err)
@@ -128,7 +128,7 @@ func checkNoResidueAfterUnprotect(r *report, cfg Config) {
 	}()
 
 	if err := dst.WithBytes(func(d []byte) error {
-		return p.Unprotect(blob, d)
+		return p.Unprotect(r.ctx, blob, d)
 	}); err != nil {
 		r.fail(property, "Unprotect into a locked destination: %v", err)
 		return

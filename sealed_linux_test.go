@@ -100,7 +100,7 @@ func sealLimitChild(t *testing.T) {
 		t.Skipf("cannot lower RLIMIT_MEMLOCK: %v", err)
 	}
 
-	s, err := NewSealed(append([]byte(nil), material...))
+	s, err := NewSealed(t.Context(), append([]byte(nil), material...))
 	if err == nil {
 		s.Destroy()
 		t.Skip("NewSealed unexpectedly succeeded under a zero ceiling; no fault was injected")
@@ -116,7 +116,7 @@ func sealLimitChild(t *testing.T) {
 	if err := lower(original.Cur); err != nil {
 		t.Skipf("cannot restore RLIMIT_MEMLOCK: %v", err)
 	}
-	s, err = NewSealed(append([]byte(nil), material...))
+	s, err = NewSealed(t.Context(), append([]byte(nil), material...))
 	if err != nil {
 		t.Skipf("could not seal with the ceiling restored: %v", err)
 	}
@@ -131,7 +131,7 @@ func sealLimitChild(t *testing.T) {
 
 	var openErr error
 	for i := 0; i < 64; i++ {
-		e, oerr := s.Open()
+		e, oerr := s.Open(t.Context())
 		if oerr != nil {
 			openErr = oerr
 			break
@@ -157,7 +157,7 @@ func sealLimitChild(t *testing.T) {
 	if err := lower(original.Cur); err != nil {
 		t.Skipf("cannot restore RLIMIT_MEMLOCK: %v", err)
 	}
-	e, err := s.Open()
+	e, err := s.Open(t.Context())
 	if err != nil {
 		t.Fatalf("Open after the ceiling lifted: %v", err)
 	}
@@ -187,7 +187,7 @@ func TestSealedEnclave_OpenedPlaintextIsLocked(t *testing.T) {
 		t.Skipf("cannot read VmLck: %v", err)
 	}
 
-	s, err := NewSealed(append([]byte(nil), sealedMaterial...))
+	s, err := NewSealed(t.Context(), append([]byte(nil), sealedMaterial...))
 	if err != nil {
 		t.Fatalf("NewSealed: %v", err)
 	}
@@ -198,7 +198,7 @@ func TestSealedEnclave_OpenedPlaintextIsLocked(t *testing.T) {
 		t.Fatalf("VmLck: %v", err)
 	}
 
-	e, err := s.Open()
+	e, err := s.Open(t.Context())
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -283,7 +283,7 @@ func TestSealedEnclave_NoPlaintextInProcessMemory(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("copying the needle: %v", err)
 	}
-	s, err := NewSealed(tmp)
+	s, err := NewSealed(t.Context(), tmp)
 	if err != nil {
 		t.Fatalf("NewSealed: %v", err)
 	}
@@ -304,7 +304,7 @@ func TestSealedEnclave_NoPlaintextInProcessMemory(t *testing.T) {
 	// match OUTSIDE the needle's own mapping — the opened plaintext. That
 	// proves the sweep can see a second place, which is exactly what the old
 	// version never established.
-	open, err := s.Open()
+	open, err := s.Open(t.Context())
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -368,7 +368,7 @@ func TestSealedEnclave_FailedOpenLeaksNoLockedMemory(t *testing.T) {
 		t.Skipf("cannot read VmLck: %v", err)
 	}
 
-	s, err := NewSealed(append([]byte(nil), sealedMaterial...))
+	s, err := NewSealed(t.Context(), append([]byte(nil), sealedMaterial...))
 	if err != nil {
 		t.Fatalf("NewSealed: %v", err)
 	}
@@ -381,7 +381,7 @@ func TestSealedEnclave_FailedOpenLeaksNoLockedMemory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("VmLck: %v", err)
 	}
-	e, err := s.Open()
+	e, err := s.Open(t.Context())
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -405,7 +405,7 @@ func TestSealedEnclave_FailedOpenLeaksNoLockedMemory(t *testing.T) {
 
 	const attempts = 32
 	for i := 0; i < attempts; i++ {
-		out, oerr := s.Open()
+		out, oerr := s.Open(t.Context())
 		if oerr == nil {
 			out.Destroy()
 			t.Fatal("Open succeeded on tampered material")
@@ -467,7 +467,7 @@ func TestSealedEnclave_SizeMismatchDoesNotDecryptOntoTheHeap(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("copying the needle: %v", err)
 	}
-	s, err := NewSealed(tmp)
+	s, err := NewSealed(t.Context(), tmp)
 	if err != nil {
 		t.Fatalf("NewSealed: %v", err)
 	}
@@ -485,7 +485,7 @@ func TestSealedEnclave_SizeMismatchDoesNotDecryptOntoTheHeap(t *testing.T) {
 	// Control first: with an enclave open the sweep must find a match
 	// outside the needle's own mapping. Without this, a negative result
 	// below would prove only that the sweep cannot see anything.
-	open, err := s.Open()
+	open, err := s.Open(t.Context())
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -509,7 +509,7 @@ func TestSealedEnclave_SizeMismatchDoesNotDecryptOntoTheHeap(t *testing.T) {
 	s.size--
 	s.mu.Unlock()
 
-	e, oerr := s.Open()
+	e, oerr := s.Open(t.Context())
 	if !errors.Is(oerr, ErrSealedAuthentication) {
 		t.Errorf("Open with a short recorded size = %v, want ErrSealedAuthentication", oerr)
 	}

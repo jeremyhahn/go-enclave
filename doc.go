@@ -384,6 +384,20 @@
 // on Mode. Out of the box — no provider, no configuration — NewSealed is
 // plain software sealing.
 //
+// Every call that can reach a provider takes a context.Context first —
+// NewSealed, Sealer.Seal, SealedEnclave.Open and SealedEnclave.OpenWith — and
+// hands it to the provider, whose operations all take one too, because a
+// device can block for as long as it likes and a deadline is only real if it
+// reaches the thing that blocks. A context that has ended fails a seal with
+// ErrSealFailed and an open with ErrOpenFailed, each matching the context's
+// own error as well — and not ErrSealedAuthentication, unless the provider
+// itself reported an authentication failure before the context was seen to
+// end, a verdict that is kept visible. No mutex of a Sealer's or a
+// SealedEnclave's is held across a provider call; the one lock that is — the
+// semaphore serializing a Sealer's first root unseal — is left by any caller
+// queued on it when that caller's context ends, so a provider stalled for one
+// caller holds up no other caller beyond that caller's own context (#87).
+//
 // Two things are worth knowing before a service is built on this. Open
 // allocates OUTSIDE any Allocator budget, and it allocates on EVERY call — so
 // a service opening a credential per connection takes a locked page per

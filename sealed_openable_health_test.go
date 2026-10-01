@@ -33,11 +33,11 @@ func newEnclaveBackedProtector(t *testing.T) *enclaveBackedProtector {
 	return &enclaveBackedProtector{key: k}
 }
 
-func (p *enclaveBackedProtector) Protect(key []byte) ([]byte, error) {
+func (p *enclaveBackedProtector) Protect(ctx context.Context, key []byte) ([]byte, error) {
 	return sealWithKey(p.key, key, nil)
 }
 
-func (p *enclaveBackedProtector) Unprotect(blob []byte, key []byte) error {
+func (p *enclaveBackedProtector) Unprotect(ctx context.Context, blob []byte, key []byte) error {
 	return openWithKeyInto(p.key, blob, nil, key)
 }
 
@@ -71,7 +71,7 @@ func TestSealedEnclave_OpenableClosesTheExternalProviderFailOpen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
-	v, err := s.Seal(append([]byte(nil), sealedMaterial...))
+	v, err := s.Seal(t.Context(), append([]byte(nil), sealedMaterial...))
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
@@ -88,7 +88,7 @@ func TestSealedEnclave_OpenableClosesTheExternalProviderFailOpen(t *testing.T) {
 	// The value genuinely cannot be opened now — the provider's key was on the
 	// ledger and the sweep took it. Established first so the Openable
 	// assertion is about a real condition.
-	if _, err := v.Open(); err == nil {
+	if _, err := v.Open(t.Context()); err == nil {
 		t.Fatal("Open succeeded after the sweep; this provider's key was supposed to be swept, " +
 			"so the fail-open this test guards cannot arise and the test proves nothing")
 	}
@@ -122,7 +122,7 @@ func TestSealedEnclave_OpenableBelievesAProviderThatReports(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewSealer: %v", err)
 		}
-		v, err := s.Seal(append([]byte(nil), sealedMaterial...))
+		v, err := s.Seal(t.Context(), append([]byte(nil), sealedMaterial...))
 		if err != nil {
 			t.Fatalf("Seal: %v", err)
 		}
@@ -136,7 +136,7 @@ func TestSealedEnclave_OpenableBelievesAProviderThatReports(t *testing.T) {
 		}
 		// And the report agrees with reality, which is what makes believing it
 		// defensible rather than merely convenient.
-		e, err := v.Open()
+		e, err := v.Open(t.Context())
 		if err != nil {
 			t.Fatalf("Open = %v, but the provider reported healthy; one of the two is wrong", err)
 		}
@@ -152,7 +152,7 @@ func TestSealedEnclave_OpenableBelievesAProviderThatReports(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewSealer: %v", err)
 		}
-		v, err := s.Seal(append([]byte(nil), sealedMaterial...))
+		v, err := s.Seal(t.Context(), append([]byte(nil), sealedMaterial...))
 		if err != nil {
 			t.Fatalf("Seal: %v", err)
 		}
@@ -189,7 +189,7 @@ func TestSealedEnclave_OpenableUnknownOnlyAfterASweep(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
-	v, err := s.Seal(append([]byte(nil), sealedMaterial...))
+	v, err := s.Seal(t.Context(), append([]byte(nil), sealedMaterial...))
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
@@ -201,7 +201,7 @@ func TestSealedEnclave_OpenableUnknownOnlyAfterASweep(t *testing.T) {
 		t.Errorf("Openable with no sweep = %v, want nil: this value opens right now, and an "+
 			"answer that never says so is not honesty", err)
 	}
-	e, err := v.Open()
+	e, err := v.Open(t.Context())
 	if err != nil {
 		t.Fatalf("control: Open failed, so nil above was not the true answer: %v", err)
 	}
@@ -230,7 +230,7 @@ func TestSealedEnclave_OpenableGenerationDoesNotAffectModeRootKey(t *testing.T) 
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
-	v, err := s.Seal(append([]byte(nil), sealedMaterial...))
+	v, err := s.Seal(t.Context(), append([]byte(nil), sealedMaterial...))
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
@@ -369,7 +369,7 @@ func TestSealedEnclave_OpenableSuspectsASealThatOverlappedASweep(t *testing.T) {
 		defer mu.Unlock()
 		parked = true
 		genAtSeal = sweepGeneration()
-		v, sealErr = s.Seal(append([]byte(nil), sealedMaterial...))
+		v, sealErr = s.Seal(t.Context(), append([]byte(nil), sealedMaterial...))
 
 		// Asked INSIDE the window, which is the only place the parity is
 		// load-bearing. Out here the count still reads equal to what the seal
@@ -441,7 +441,7 @@ func TestSealer_ProviderHealthIsIgnoredInRootKeyMode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
-	v, err := s.Seal(append([]byte(nil), sealedMaterial...))
+	v, err := s.Seal(t.Context(), append([]byte(nil), sealedMaterial...))
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
@@ -457,7 +457,7 @@ func TestSealer_ProviderHealthIsIgnoredInRootKeyMode(t *testing.T) {
 	}
 
 	// The control that makes the nil above meaningful: the value really opens.
-	e, err := v.Open()
+	e, err := v.Open(t.Context())
 	if err != nil {
 		t.Fatalf("Open = %v; Openable said nil, so one of the two is wrong", err)
 	}
@@ -539,7 +539,7 @@ func newDeviceBackedInPackageProtector() *deviceBackedInPackageProtector {
 	return &deviceBackedInPackageProtector{m: make(map[string][]byte)}
 }
 
-func (p *deviceBackedInPackageProtector) Protect(key []byte) ([]byte, error) {
+func (p *deviceBackedInPackageProtector) Protect(ctx context.Context, key []byte) ([]byte, error) {
 	blob := make([]byte, 16)
 	if _, err := rand.Read(blob); err != nil {
 		return nil, err
@@ -548,7 +548,7 @@ func (p *deviceBackedInPackageProtector) Protect(key []byte) ([]byte, error) {
 	return blob, nil
 }
 
-func (p *deviceBackedInPackageProtector) Unprotect(blob []byte, key []byte) error {
+func (p *deviceBackedInPackageProtector) Unprotect(ctx context.Context, blob []byte, key []byte) error {
 	stored, ok := p.m[string(blob)]
 	if !ok || len(stored) != len(key) {
 		return ErrSealedAuthentication
@@ -582,7 +582,7 @@ func TestSealedEnclave_OpenableBelievesTheInPackageHealthSeam(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
-	v, err := s.Seal(append([]byte(nil), sealedMaterial...))
+	v, err := s.Seal(t.Context(), append([]byte(nil), sealedMaterial...))
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
@@ -596,7 +596,7 @@ func TestSealedEnclave_OpenableBelievesTheInPackageHealthSeam(t *testing.T) {
 			"fallback must not be applied on top of it", err)
 	}
 	// The control that makes the nil meaningful: the value really does open.
-	e, err := v.Open()
+	e, err := v.Open(t.Context())
 	if err != nil {
 		t.Fatalf("Open after the sweep = %v; Openable said nil, so one of the two is wrong", err)
 	}

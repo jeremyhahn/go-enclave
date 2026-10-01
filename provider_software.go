@@ -9,6 +9,7 @@
 package enclave
 
 import (
+	"context"
 	"errors"
 	"sync"
 )
@@ -65,6 +66,13 @@ const softwareProtectLimit = 1 << 31
 //
 // After a shutdown sweep destroys the root, every method fails closed with
 // [ErrSealerWiped] — never a silent fresh root; see that error for why.
+//
+// Every method honors its context the way the seam requires (see
+// [RootUnsealer]): one that has ended at entry is refused with ctx.Err()
+// before the root is touched — and before one is generated, so a canceled
+// first call costs no locked memory. Nothing in this provider blocks beyond
+// its own short critical section, so there is no mid-call cancellation to
+// observe; the entry check is the whole of what honoring it means here.
 //
 // The zero value is NOT usable; construct with [NewSoftwareProvider]. A
 // SoftwareProvider is safe for concurrent use.
@@ -150,10 +158,15 @@ func swept(err error) error {
 // Protect implements [KeyProtector]: key is wrapped with AES-GCM under the
 // provider root, with the blob's frame bound as AAD.
 //
-// It returns [ErrProviderMessageLimit] once the root's encryption budget is
-// spent, [ErrSealerWiped] after a shutdown sweep, and
-// [ErrLockedMemoryUnavailable] if the root cannot be created on first use.
-func (p *SoftwareProvider) Protect(key []byte) ([]byte, error) {
+// It returns ctx.Err() if ctx has already ended, [ErrProviderMessageLimit]
+// once the root's encryption budget is spent, [ErrSealerWiped] after a
+// shutdown sweep, and [ErrLockedMemoryUnavailable] if the root cannot be
+// created on first use. A refused call charges nothing to the budget.
+func (p *SoftwareProvider) Protect(ctx context.Context, key []byte) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -180,8 +193,14 @@ func (p *SoftwareProvider) Protect(key []byte) ([]byte, error) {
 // Unprotect implements [KeyProtector]: it recovers a Protect-produced blob
 // into key, refusing — with [ErrSealedAuthentication], per the contract —
 // anything its own Protect did not produce: tampered, truncated, misframed,
-// or wrapped by a different provider instance.
-func (p *SoftwareProvider) Unprotect(blob, key []byte) error {
+// or wrapped by a different provider instance. A context that has already
+// ended is refused with ctx.Err() before the blob is examined, so a canceled
+// call writes nothing into key.
+func (p *SoftwareProvider) Unprotect(ctx context.Context, blob, key []byte) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -204,16 +223,20 @@ func (p *SoftwareProvider) Unprotect(blob, key []byte) error {
 // UnsealRoot implements [RootUnsealer]: it copies the provider root —
 // generated at first use — into dst, which must be exactly [RootKeyBytes]
 // long; any other length is [ErrInvalidSize], a programming mistake rather
-// than a runtime condition.
+// than a runtime condition. A context that has already ended is refused with
+// ctx.Err() before the root is generated or copied.
 //
 // The copy means the root then exists in TWO locked enclaves: the provider's
 // and the Sealer's. That is the seam working as designed — the Sealer treats
 // every provider identically and owns the copy it uses — and both copies are
 // registered, so a shutdown sweep destroys both and the fail-closed contract
 // holds from either side.
-func (p *SoftwareProvider) UnsealRoot(dst []byte) error {
+func (p *SoftwareProvider) UnsealRoot(ctx context.Context, dst []byte) error {
 	if len(dst) != RootKeyBytes {
 		return ErrInvalidSize
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 
 	p.mu.Lock()

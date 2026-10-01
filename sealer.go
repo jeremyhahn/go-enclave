@@ -9,6 +9,7 @@
 package enclave
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
@@ -275,6 +276,29 @@ func fillRandom(b []byte) error {
 // and a sealer is a process-lifetime object — the provider is selected once
 // per process, not per value. After a sweep it fails closed; see
 // [ErrSealerWiped].
+//
+// # No mutex of a Sealer's is ever held across its provider
+//
+// Every call that can reach the provider takes a context, and the provider
+// may block for as long as a device does. So the Sealer has TWO locks with
+// disjoint jobs, taken in one order — init slot, then mu — and never the
+// other way:
+//
+//   - the INIT SLOT serializes first-time [ModeRootKey] initialization, and is
+//     the only lock of the Sealer's held across [RootUnsealer.UnsealRoot]. It
+//     is a one-slot channel rather than a mutex so that a caller waiting for
+//     it can give up when its context ends; a mutex wait cannot be abandoned.
+//   - mu guards the published hierarchy. It is held only to read that state
+//     and to publish or rotate it — in-process work with no provider call
+//     anywhere beneath it.
+//
+// The consequence is the guarantee callers can rely on (#87): a provider
+// stalled inside UnsealRoot stalls only the callers that need the hierarchy
+// it is producing, each for no longer than its own context allows. Seals and
+// opens on an initialized Sealer, and every other Sealer, proceed. Beyond the
+// init slot, the only lock that spans a provider call is the read borrow of
+// the enclave the provider reads from or writes into — a private, per-call
+// enclave no other caller can reach.
 type Sealer struct {
 	mode Mode
 
@@ -290,22 +314,35 @@ type Sealer struct {
 	// Set once at construction and never written again, so it is read without
 	// the lock like kp and ru.
 	health    func() error
-	protect   func(dek *MemoryEnclave) ([]byte, error)
-	unprotect func(blob []byte, dek *MemoryEnclave) error
+	protect   func(ctx context.Context, dek *MemoryEnclave) ([]byte, error)
+	unprotect func(ctx context.Context, blob []byte, dek *MemoryEnclave) error
 
 	// ModeRootKey hierarchy state. mu is read-locked for the per-value work —
-	// wrapping and unwrapping DEKs — and write-locked only to initialize and
-	// to rotate, so seals and opens run concurrently and a rotation waits out
-	// in-flight users of the outgoing KEK instead of destroying it under
-	// them. root is set once and never cleared: a wiped hierarchy keeps its
-	// dead enclaves precisely so the wiped state is DETECTABLE, which is what
-	// [ErrSealerWiped]'s fail-closed contract rests on.
+	// wrapping and unwrapping DEKs — and write-locked only to PUBLISH the
+	// initialized hierarchy and to rotate, so seals and opens run concurrently
+	// and a rotation waits out in-flight users of the outgoing KEK instead of
+	// destroying it under them. It is never held across a provider call; the
+	// root unseal runs under initSlot instead (see [Sealer]). root is set once
+	// and never cleared: a wiped hierarchy keeps its dead enclaves precisely so
+	// the wiped state is DETECTABLE, which is what [ErrSealerWiped]'s
+	// fail-closed contract rests on.
 	mu       sync.RWMutex
 	root     *MemoryEnclave
 	kek      *MemoryEnclave
 	kekGen   uint32
 	kekUsed  atomic.Uint64
 	kekBlobs map[uint32][]byte
+
+	// initSlot is the init lock: a one-slot semaphore, held by sending into
+	// it and released by receiving. Holding it is the right to run
+	// initHierarchy's unseal-and-mint, and to read or write pendingRoot and
+	// pendingGen. A channel rather than a sync.Mutex for exactly one reason:
+	// acquiring it is a select against the caller's ctx.Done(), so a caller
+	// queued behind a provider that is slow to unseal gives up when its own
+	// context ends instead of inheriting the provider's stall. Made by
+	// [NewSealer]; a Sealer not built there has no protect path and is not
+	// usable anyway.
+	initSlot chan struct{}
 
 	// pendingRoot is a root that UnsealRoot DELIVERED but that has not been
 	// published as root, because minting the first KEK under it failed —
@@ -320,9 +357,31 @@ type Sealer struct {
 	// a root with no KEK beside it would read as wiped, since a nil kek is not
 	// alive. It is an ordinary registered enclave, so [WipeAll] destroys it
 	// like any other; initHierarchy then reports [ErrSealerWiped] rather than
-	// unsealing a replacement. It is written only under mu held exclusively,
-	// and cleared when it is promoted to root.
+	// unsealing a replacement. A DEAD pendingRoot is therefore the wiped state
+	// of a sealer whose hierarchy was never published, and initHierarchy also
+	// leaves one deliberately when a sweep overlapped the initialization.
+	//
+	// Guarded by initSlot, not mu: only the slot holder reads or writes it,
+	// and no reader of the published hierarchy ever needs it.
 	pendingRoot *MemoryEnclave
+
+	// pendingKEK is the first KEK, minted under pendingRoot, between the mint
+	// and publication — and AFTER a discard, any such KEK whose release the
+	// kernel refused. It exists for that second case: a KEK minted while a
+	// sweep overlapped the initialization is destroyed instead of published,
+	// and if its unmap is refused the mapping is still held, so the sealer must
+	// keep a reference and retry the release on every later attempt, exactly
+	// as it does for the root. Dropping the reference would leave the release
+	// to a future sweep alone and let later attempts report a clean
+	// ErrSealerWiped over a KEK this sealer still holds. Cleared once the KEK is
+	// published or its release succeeds. Guarded by initSlot.
+	pendingKEK *MemoryEnclave
+
+	// pendingGen is the sweep sequence read BEFORE the unseal that produced
+	// pendingRoot — the same read-first discipline [Sealer.Seal] applies to a
+	// value's sealedAtGen, for the same reason. Publication compares it with
+	// the current sequence; see initHierarchy. Guarded by initSlot.
+	pendingGen uint64
 }
 
 // sealerConfig collects what the options set; see [NewSealer].
@@ -376,6 +435,12 @@ func WithProvider(p any) SealerOption {
 // different things depending on which provider is installed, and a caller
 // could no longer read its result without knowing the deployment. A liveness
 // probe for a device is a different API, and should be designed as one.
+//
+// That is also why the callback takes no context and MUST NOT block: the
+// question is answered from this process's own state, so there is nothing to
+// wait for, and [SealedEnclave.Openable] — which calls it — is a diagnostic
+// with no context to bound a wait by. It is called with no lock of this
+// package's held.
 //
 // # Why a callback rather than an interface
 //
@@ -453,7 +518,7 @@ func NewSealer(opts ...SealerOption) (*Sealer, error) {
 		return nil, ErrProviderMode
 	}
 
-	s := &Sealer{mode: cfg.mode, health: cfg.health}
+	s := &Sealer{mode: cfg.mode, health: cfg.health, initSlot: make(chan struct{}, 1)}
 	if err := bind(s, cfg.provider); err != nil {
 		return nil, err
 	}
@@ -521,9 +586,9 @@ func (s *Sealer) Mode() Mode {
 
 // Seal encrypts data and returns the sealed enclave holding it. It is
 // [NewSealed] for an explicitly constructed Sealer; the ownership contract,
-// the envelope and the failure surface are documented there and on
-// [SealedEnclave].
-func (s *Sealer) Seal(data []byte) (*SealedEnclave, error) {
+// the envelope, the context contract and the failure surface are documented
+// there and on [SealedEnclave].
+func (s *Sealer) Seal(ctx context.Context, data []byte) (*SealedEnclave, error) {
 	if s == nil {
 		// The caller's material is not left behind even when the caller lost
 		// its sealer: the ownership contract holds on every path.
@@ -548,6 +613,13 @@ func (s *Sealer) Seal(data []byte) (*SealedEnclave, error) {
 		return nil, err
 	}
 
+	// An abandoned call costs nothing either: no locked page, no provider
+	// call. After the argument checks, so a malformed call is reported as
+	// malformed whatever the caller's deadline.
+	if err := contextFailure(ctx, ErrSealFailed, nil); err != nil {
+		return nil, err
+	}
+
 	// Taken BEFORE any key is touched, and deliberately not after. A sweep
 	// that runs to completion during this call would leave the after-reading
 	// equal to the current sequence, so the value would compare clean against
@@ -562,7 +634,7 @@ func (s *Sealer) Seal(data []byte) (*SealedEnclave, error) {
 	}
 	defer destroyTransient(dek)
 
-	blob, err := s.protect(dek)
+	blob, err := s.protect(ctx, dek)
 	if err != nil {
 		return nil, err
 	}
@@ -582,7 +654,12 @@ func (s *Sealer) Seal(data []byte) (*SealedEnclave, error) {
 
 // open recovers a sealed envelope produced by this sealer. It is called by
 // [SealedEnclave.Open] (a is nil) and [SealedEnclave.OpenWith] (a is the
-// caller's Allocator) under that value's read lock.
+// caller's Allocator) with NO lock held: the envelope halves are the value's,
+// pinned by its in-flight count rather than by its lock, so a Destroy of the
+// value never waits behind a provider call here (see [SealedEnclave.Destroy]).
+//
+// A context that has already ended is refused before the gate below, so an
+// abandoned open costs nothing at all.
 //
 // THE DESTINATION IS ALLOCATED FIRST, and that order is load-bearing rather
 // than incidental. It is the one admitted allocation on this path, so taking
@@ -597,7 +674,11 @@ func (s *Sealer) Seal(data []byte) (*SealedEnclave, error) {
 // has had a destination mapped and locked for nothing. That is affordable
 // here and would not be everywhere: this package accepts no foreign sealed
 // bytes, so an envelope reaching this function was produced by this process.
-func (s *Sealer) open(a *Allocator, blob, sealed []byte, size int) (*MemoryEnclave, error) {
+func (s *Sealer) open(ctx context.Context, a *Allocator, blob, sealed []byte, size int) (*MemoryEnclave, error) {
+	if err := contextFailure(ctx, ErrOpenFailed, nil); err != nil {
+		return nil, err
+	}
+
 	// The gate. allocSized admits it against a, or allocates it unadmitted
 	// when a is nil, which is how [SealedEnclave.Open] keeps its contract.
 	out, err := allocSized(a, size)
@@ -619,7 +700,7 @@ func (s *Sealer) open(a *Allocator, blob, sealed []byte, size int) (*MemoryEncla
 	}
 	defer destroyTransient(dek)
 
-	if err := s.unprotect(blob, dek); err != nil {
+	if err := s.unprotect(ctx, blob, dek); err != nil {
 		destroyTransient(out)
 		return nil, err
 	}
@@ -759,11 +840,21 @@ func (s *Sealer) hierarchyOpenable() error {
 }
 
 // protectPerOperation wraps the DEK by calling the provider, inside the DEK's
-// borrow so the provider reads the key straight out of locked pages.
-func (s *Sealer) protectPerOperation(dek *MemoryEnclave) ([]byte, error) {
+// borrow so the provider reads the key straight out of locked pages. That
+// borrow is the only lock held across the call, and it is on an enclave
+// private to this seal.
+//
+// The context is checked again AFTER the provider returns: a caller whose
+// context ended while the device worked has abandoned the seal, and a blob it
+// will never store is discarded rather than reported as a success the caller
+// stopped waiting for.
+func (s *Sealer) protectPerOperation(ctx context.Context, dek *MemoryEnclave) ([]byte, error) {
 	var blob []byte
 	if err := dek.WithBytes(func(k []byte) error {
-		b, perr := s.kp.Protect(k)
+		b, perr := s.kp.Protect(ctx, k)
+		if cerr := contextFailure(ctx, ErrSealFailed, perr); cerr != nil {
+			return cerr
+		}
 		if perr != nil {
 			return perr
 		}
@@ -782,14 +873,65 @@ func (s *Sealer) protectPerOperation(dek *MemoryEnclave) ([]byte, error) {
 }
 
 // unprotectPerOperation recovers the DEK by calling the provider, handing it
-// the locked destination. Provider errors surface unchanged, per the
-// [KeyProtector] contract: an authentication refusal already matches
-// [ErrSealedAuthentication], and an infrastructure failure must not be
-// dressed as one.
-func (s *Sealer) unprotectPerOperation(blob []byte, dek *MemoryEnclave) error {
-	return dek.WithBytes(func(k []byte) error {
-		return s.kp.Unprotect(blob, k)
-	})
+// the locked destination. Provider errors are shaped by providerOpenFailure,
+// per the [KeyProtector] contract: an authentication refusal already matches
+// [ErrSealedAuthentication] and passes through, and an infrastructure failure
+// is joined under [ErrOpenFailed] — never dressed as a forgery.
+//
+// As on the seal side, the context is checked after the provider returns: a
+// DEK recovered for a caller that has stopped waiting is not used, and the
+// deferred Destroy in open wipes it.
+//
+// PRECEDENCE when both happen: if the provider returned an error — ANY error,
+// including a sentinel providerOpenFailure would otherwise pass through
+// untouched — and the context has also ended, the error carries BOTH: it
+// matches ErrOpenFailed, the context's error and the provider's error.
+// contextFailure keeps the provider's error rather than replacing it. That
+// matters most for an authentication failure, a forgery verdict and so a
+// security signal that a cancellation landing in the same window must not
+// erase; it matters for ErrSealerWiped and ErrLockedMemoryUnavailable too,
+// since each still tells the caller something true.
+func (s *Sealer) unprotectPerOperation(ctx context.Context, blob []byte, dek *MemoryEnclave) error {
+	return providerOpenFailure(dek.WithBytes(func(k []byte) error {
+		perr := s.kp.Unprotect(ctx, blob, k)
+		if cerr := contextFailure(ctx, ErrOpenFailed, perr); cerr != nil {
+			return cerr
+		}
+		return perr
+	}))
+}
+
+// contextFailure is how every provider-reaching path in this package reports
+// a context that has ended: nil while ctx is live; otherwise op — the
+// operation's own sentinel, [ErrSealFailed] or [ErrOpenFailed] — joined with
+// the context's error, so a caller matching either the operation's sentinel
+// or context.Canceled / context.DeadlineExceeded catches it.
+//
+// cause is what the provider returned, if a provider call preceded the check,
+// and is kept reachable: when it already matches ctx.Err() it REPLACES the bare
+// context error, so a provider's wrapping ("tpm: session aborted: context
+// canceled") is what the caller reads; otherwise it is joined alongside. A
+// distinct [context.Cause] supplied by the canceler is joined too, since it
+// is the one piece of this error that says WHY.
+func contextFailure(ctx context.Context, op, cause error) error {
+	ended := ctx.Err()
+	if ended == nil {
+		return nil
+	}
+
+	errs := []error{op}
+	switch {
+	case cause == nil:
+		errs = append(errs, ended)
+	case errors.Is(cause, ended):
+		errs = append(errs, cause)
+	default:
+		errs = append(errs, ended, cause)
+	}
+	if why := context.Cause(ctx); why != nil && !errors.Is(why, ended) {
+		errs = append(errs, why)
+	}
+	return errors.Join(errs...)
 }
 
 // providerSealFailure shapes a seal-path failure: this package's own
@@ -797,23 +939,52 @@ func (s *Sealer) unprotectPerOperation(blob []byte, dek *MemoryEnclave) error {
 // distinct, that being its entire point — and anything else is joined under
 // [ErrSealFailed] so a caller matching the documented sentinel catches
 // provider-specific failures too, with the cause reachable through errors.As.
+//
+// "Untouched" holds while the caller's context is live. A provider error
+// that arrives as the context ends has already been shaped by contextFailure
+// — ErrSealFailed and ctx.Err() joined with it, so it still matches its own
+// sentinel too — and passes through here in that joined form.
 func providerSealFailure(err error) error {
-	for _, sentinel := range []error{
-		ErrSealerWiped, ErrSealFailed, ErrLockedMemoryUnavailable, ErrProviderMessageLimit, ErrEnclaveDestroyed,
-	} {
+	return shapeProviderFailure(ErrSealFailed, err,
+		ErrSealerWiped, ErrSealFailed, ErrLockedMemoryUnavailable, ErrProviderMessageLimit, ErrEnclaveDestroyed)
+}
+
+// providerOpenFailure is providerSealFailure's mirror on the open path. The
+// pass-through set differs in the one way that matters: an authentication
+// refusal is the provider's verdict on the blob and must reach the caller as
+// [ErrSealedAuthentication] alone, while everything that is NOT a verdict —
+// a device unreachable, a context that ended — is joined under
+// [ErrOpenFailed] and so can never be mistaken for one.
+//
+// As on the seal side, "untouched" holds while the caller's context is live;
+// a provider error that arrives as it ends reaches here already joined with
+// the cancellation by contextFailure, and is passed through in that form.
+func providerOpenFailure(err error) error {
+	return shapeProviderFailure(ErrOpenFailed, err,
+		ErrSealedAuthentication, ErrSealerWiped, ErrOpenFailed, ErrLockedMemoryUnavailable, ErrEnclaveDestroyed)
+}
+
+// shapeProviderFailure returns err untouched if it is nil or matches one of
+// passThrough, and joins it under op otherwise.
+func shapeProviderFailure(op, err error, passThrough ...error) error {
+	if err == nil {
+		return nil
+	}
+	for _, sentinel := range passThrough {
 		if errors.Is(err, sentinel) {
 			return err
 		}
 	}
-	return errors.Join(ErrSealFailed, err)
+	return errors.Join(op, err)
 }
 
 // hierarchyFailure translates a hierarchy-key failure. Root and KEK enclaves
-// are used only under s.mu, and nothing holding s.mu destroys them — so an
-// [ErrEnclaveDestroyed] from one of them means exactly one thing: a shutdown
-// sweep ran, and the honest report is [ErrSealerWiped], not a generic
-// destroyed-enclave error pointing at an enclave the caller never knew
-// existed.
+// are used only under s.mu once published, and before publication only by
+// the holder of initSlot; nothing in either position destroys one it is
+// using — so an [ErrEnclaveDestroyed] from one of them means exactly one
+// thing: a shutdown sweep ran, and the honest report is [ErrSealerWiped], not
+// a generic destroyed-enclave error pointing at an enclave the caller never
+// knew existed.
 func hierarchyFailure(err error) error {
 	if errors.Is(err, ErrEnclaveDestroyed) {
 		return ErrSealerWiped
@@ -829,13 +1000,24 @@ func hierarchyFailure(err error) error {
 // however the race with a concurrent initializer or rotator falls out, the
 // wrap below always uses a generation observed consistent under the lock it
 // runs under.
-func (s *Sealer) protectRootKey(dek *MemoryEnclave) ([]byte, error) {
+//
+// Each pass checks the context first. That is the "after" half of honoring
+// it around the one provider call this mode makes: an initialization that
+// returned after this caller's context ended has still published its root —
+// the unseal succeeded and must not be repeated — but the caller that asked
+// for it is told it was abandoned rather than handed a seal it stopped
+// waiting for.
+func (s *Sealer) protectRootKey(ctx context.Context, dek *MemoryEnclave) ([]byte, error) {
 	for {
+		if err := contextFailure(ctx, ErrSealFailed, nil); err != nil {
+			return nil, err
+		}
+
 		s.mu.RLock()
 
 		if s.root == nil {
 			s.mu.RUnlock()
-			if err := s.initHierarchy(); err != nil {
+			if err := s.initHierarchy(ctx); err != nil {
 				return nil, err
 			}
 			continue
@@ -880,7 +1062,12 @@ func (s *Sealer) protectRootKey(dek *MemoryEnclave) ([]byte, error) {
 // unprotectRootKey recovers a DEK wrapped by protectRootKey: current
 // generation under the live KEK, retired generations by unwrapping the
 // retained KEK blob under the root first.
-func (s *Sealer) unprotectRootKey(blob []byte, dek *MemoryEnclave) error {
+//
+// It takes the context only to fit the mode-independent unprotect seam: this
+// path makes no provider call — the root was unsealed once, at the first seal
+// — and is in-process crypto under the read lock, so there is nothing for a
+// context to bound that open's entry check has not already covered.
+func (s *Sealer) unprotectRootKey(_ context.Context, blob []byte, dek *MemoryEnclave) error {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -959,22 +1146,99 @@ func (s *Sealer) unwrapRetiredKEKLocked(kekBlob []byte) (*MemoryEnclave, error) 
 // again — what this did until #83 — called UnsealRoot a second time after it
 // had succeeded, which the contract forbids and a one-shot root provider
 // cannot survive.
-func (s *Sealer) initHierarchy() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+//
+// # Locking: the slot spans the provider, mu spans only the publication
+//
+// Until #87 this whole function ran under mu held exclusively, so a provider
+// stalled in UnsealRoot stalled every caller that touched the sealer's state
+// — every Seal, every Open, every Openable — and none of them could give up,
+// because a mutex wait has no context. Now:
+//
+//   - initSlot is acquired in a select against ctx.Done(), so only callers
+//     that actually need the first initialization queue for it, and each
+//     queues for no longer than its own context allows;
+//   - the unseal and the mint run holding the slot and NOTHING ELSE, so mu is
+//     free for every reader throughout;
+//   - mu is write-locked only to publish root, KEK and generation map as one
+//     state, exactly as before.
+//
+// At-most-once survives the split because every write to pendingRoot, and
+// every decision to call UnsealRoot, is made by the one slot holder after it
+// has re-read the published state; a caller that queued behind a successful
+// initializer finds root published and returns without calling the provider.
+//
+// # A sweep that overlaps the initialization leaves the sealer wiped
+//
+// The root is unsealed into a registered enclave, so [WipeAll] can reach it —
+// but not while UnsealRoot is writing into it: the borrow holds the enclave's
+// lock, and a sweep never unmaps memory a reader is using. It waits for the
+// borrow for as long as ITS context allows. If that ends first — a shutdown
+// deadline passing while a provider is stalled — the sweep returns without
+// the root, and a provider returning afterwards hands back a root the sweep
+// failed to take; publishing it would leave the key that opens everything
+// mapped and in use after the sweep that exists to remove it. If the sweep
+// instead waits the borrow out, it destroys the root the moment UnsealRoot
+// lets go, and publishing would install a dead root. So the sweep sequence is read BEFORE the unseal and checked
+// again on every exit once a root exists — before the mint, after a failed
+// mint, and at publication under mu; a sequence that moved, or was odd to
+// begin with, means a sweep overlapped this initialization, and the root (and
+// KEK, if minted) are destroyed rather than published or retained. The dead root stays in pendingRoot,
+// which every later attempt reads as wiped: this sealer then reports
+// [ErrSealerWiped] exactly as one whose published hierarchy was swept does,
+// and never asks the provider again.
+func (s *Sealer) initHierarchy(ctx context.Context) error {
+	select {
+	case s.initSlot <- struct{}{}:
+	case <-ctx.Done():
+		return contextFailure(ctx, ErrSealFailed, nil)
+	}
+	defer func() { <-s.initSlot }()
 
-	if s.root != nil {
-		// Lost the initialization race — or found a sealer a sweep already
-		// wiped, which must NOT be quietly rebuilt here: that is exactly the
-		// silent re-keying [ErrSealerWiped] exists to prevent.
-		if !s.root.IsAlive() || !s.kek.IsAlive() {
-			return ErrSealerWiped
-		}
-		return nil
+	// select chooses at random among ready cases, so a context that had
+	// already ended can still win the slot; it is refused here, before the
+	// provider, rather than spending an unseal on a caller that has gone.
+	if err := contextFailure(ctx, ErrSealFailed, nil); err != nil {
+		return err
+	}
+
+	return initFailure(ctx, s.initHierarchyHeld(ctx))
+}
+
+// initFailure shapes every error initHierarchy returns once it holds the
+// slot. If the caller's context has ended by then, the failure is reported as
+// that cancellation — ErrSealFailed and ctx.Err(), with the cause — AND as
+// itself, joined, so neither the abandonment nor what actually went wrong
+// (a refused mint, a sweep) is lost. An error that already carries both, as
+// the unseal's own refusal does, is returned as it is.
+func initFailure(ctx context.Context, err error) error {
+	ended := ctx.Err()
+	if err == nil || ended == nil || (errors.Is(err, ErrSealFailed) && errors.Is(err, ended)) {
+		return err
+	}
+	return contextFailure(ctx, ErrSealFailed, err)
+}
+
+// initHierarchyHeld is initHierarchy's body; the caller holds initSlot.
+//
+// The sweep-overlap check runs on EVERY exit after a root exists — before the
+// mint, after a failed mint, and at publication — not only at publication.
+// A failed mint never reaches publication, and checking only there would let
+// a root that survived a sweep (borrowed by UnsealRoot when the sweep ran)
+// stay resident in pendingRoot for as long as allocation kept failing, with
+// each attempt reporting the allocation error instead of the sweep.
+func (s *Sealer) initHierarchyHeld(ctx context.Context) error {
+	if done, err := s.publishedHierarchy(); done {
+		return err
 	}
 
 	root := s.pendingRoot
 	if root == nil {
+		// Read BEFORE the root exists, for the same reason Seal reads a
+		// value's sequence before touching a key: a sweep that runs to
+		// completion in between must show up as a changed sequence, and one
+		// already running as an odd one.
+		gen := sweepGeneration()
+
 		var err error
 		root, err = NewMemoryEnclaveSized(RootKeyBytes)
 		if err != nil {
@@ -984,31 +1248,63 @@ func (s *Sealer) initHierarchy() error {
 		// exists on the ordinary heap on this path. (What the provider does on
 		// its side is its contract; see [RootUnsealer].)
 		if err := root.WithBytes(func(b []byte) error {
-			return s.ru.UnsealRoot(b)
+			uerr := s.ru.UnsealRoot(ctx, b)
+			if uerr == nil {
+				return nil
+			}
+			if cerr := contextFailure(ctx, ErrSealFailed, uerr); cerr != nil {
+				return cerr
+			}
+			return uerr
 		}); err != nil {
-			// The unseal itself failed, so the contract permits asking again
-			// and nothing is retained.
+			// The unseal itself failed — a context that ended included — so
+			// the contract permits asking again and nothing is retained.
 			destroyTransient(root)
 			return providerSealFailure(err)
 		}
 		// From here the unseal has SUCCEEDED and must not be repeated; the
-		// root is retained across a failed mint below.
-		s.pendingRoot = root
-	} else if !root.IsAlive() {
-		// A sweep destroyed the retained root between attempts. UnsealRoot
-		// already succeeded once and may not be called again, so this sealer
-		// is wiped exactly as one whose published root was swept is — and
-		// rebuilding it here would be the silent re-keying [ErrSealerWiped]
-		// exists to prevent.
+		// root is retained across a failed mint below. A context that ended
+		// during a SUCCESSFUL unseal does not undo that: the root is kept and
+		// published like any other, and the abandoned caller is told of its
+		// context — by initFailure if the mint fails, by protectRootKey's next
+		// pass if it succeeds.
+		s.pendingRoot, s.pendingGen = root, gen
+	}
+
+	// A retained root a sweep destroyed between attempts, or one a sweep
+	// overlapped — this attempt's unseal or an earlier one. UnsealRoot already
+	// succeeded and may not be called again, so this sealer is wiped exactly
+	// as one whose published root was swept is; rebuilding it would be the
+	// silent re-keying [ErrSealerWiped] exists to prevent. The overlap check
+	// runs FIRST so that a root whose release was refused on an earlier
+	// attempt is retried here rather than only reported dead.
+	if err := s.discardIfSwept(); err != nil {
+		return err
+	}
+	if !root.IsAlive() {
 		return ErrSealerWiped
 	}
 
 	kek, blob, err := newGeneration(root, 1)
 	if err != nil {
+		if derr := s.discardIfSwept(); derr != nil {
+			return derr
+		}
 		// root stays in pendingRoot: the next attempt mints again under it.
 		// A sweep that destroyed it during the mint surfaces here as
 		// ErrSealerWiped through hierarchyFailure, and on the next attempt
-		// through the IsAlive check above.
+		// through the checks above.
+		return err
+	}
+
+	// Held as pendingKEK from here until it is published, so that a discard
+	// below whose release is refused leaves a reference to retry.
+	s.pendingKEK = kek
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if err := s.discardIfSwept(); err != nil {
 		return err
 	}
 
@@ -1016,11 +1312,68 @@ func (s *Sealer) initHierarchy() error {
 	// observe a root without its KEK; the ready checks treat the pair as one
 	// state.
 	s.root = root
-	s.pendingRoot = nil
+	s.pendingRoot, s.pendingKEK = nil, nil
 	s.kek, s.kekGen = kek, 1
 	s.kekBlobs = map[uint32][]byte{1: blob}
 	s.kekUsed.Store(0)
 	return nil
+}
+
+// discardIfSwept returns nil unless a sweep has overlapped the
+// initialization that produced pendingRoot — the sequence moved since
+// pendingGen was read, or was odd then. If one has, it destroys pendingKEK
+// (when non-nil) and pendingRoot here, by the slot holder, so no sweep's luck
+// with a borrowed enclave decides whether they survive, and returns
+// [ErrSealerWiped]. pendingRoot keeps the root, which every later attempt
+// reads as the wiped state. The caller holds initSlot.
+//
+// A REFUSED release is reported, not swallowed, and RETRIED: Destroy keeps a
+// mapping the kernel would not take back — and keeps it on the [WipeAll]
+// ledger, so a shutdown sweep still retries and counts it — its error is
+// joined with ErrSealerWiped here so the caller learns the key is still
+// resident, and the reference stays where the next attempt will find it:
+// pendingRoot always, pendingKEK until its release succeeds. The state stays
+// wiped all the same, and because the sweep sequence never returns to
+// pendingGen, every later attempt reaches this function again and retries
+// BOTH releases.
+func (s *Sealer) discardIfSwept() error {
+	if !sweepInFlight(s.pendingGen) && sweepGeneration() == s.pendingGen {
+		return nil
+	}
+	errs := []error{ErrSealerWiped}
+	if s.pendingKEK != nil {
+		if err := s.pendingKEK.Destroy(); err != nil {
+			errs = append(errs, err)
+		} else {
+			s.pendingKEK = nil
+		}
+	}
+	if err := s.pendingRoot.Destroy(); err != nil {
+		errs = append(errs, err)
+	}
+	if len(errs) == 1 {
+		return ErrSealerWiped
+	}
+	return errors.Join(errs...)
+}
+
+// publishedHierarchy reads the published hierarchy under the read lock and
+// reports whether initialization is already decided: done with a nil error
+// when another caller published a live hierarchy first, done with
+// [ErrSealerWiped] when a sweep destroyed the published one — which must NOT
+// be quietly rebuilt, that being exactly the silent re-keying ErrSealerWiped
+// exists to prevent — and not done when nothing has been published yet.
+func (s *Sealer) publishedHierarchy() (done bool, err error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if s.root == nil {
+		return false, nil
+	}
+	if !s.root.IsAlive() || !s.kek.IsAlive() {
+		return true, ErrSealerWiped
+	}
+	return true, nil
 }
 
 // rotateKEK retires the current KEK generation and mints the next. The
@@ -1030,6 +1383,12 @@ func (s *Sealer) initHierarchy() error {
 // point of the hierarchy: rotation must never strand a sealed value, and a
 // retired generation costs under a hundred heap bytes rather than a locked
 // page.
+//
+// It holds mu exclusively across the mint, which is in-process work — a
+// locked allocation and one AES-GCM wrap under the root — and never a
+// provider call: the root was unsealed once, at initialization, and rotation
+// does not consult the provider. That is what makes holding the write lock
+// here compatible with the rule initHierarchy was restructured to keep.
 func (s *Sealer) rotateKEK() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
