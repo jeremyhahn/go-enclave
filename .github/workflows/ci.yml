@@ -1,35 +1,46 @@
 # CI for go-enclave.
 #
+# EVERY STEP IS A MAKE TARGET (#89, handbook devops §4: "the Makefile is the
+# contract"). This file decides WHERE and IN WHAT ORDER checks run; the
+# Makefile decides WHAT they are — commands, flags, pinned tool versions and
+# the coverage floor. A red step here reproduces locally with the same `make`
+# line, and a check cannot pass in one place and fail in the other because
+# the two were spelled differently.
+#
 # The pipeline is STAGED and fails fast by ordering rather than by
 # cancellation: a fast tier (lint + build) gates the expensive tier (security
 # and tests). A broken push reports in minutes and burns nothing downstream; a
 # green push pays one fast tier of extra latency. The final gate distinguishes
 # a SKIPPED stage (an upstream stage failed) from a FAILED one, and fails
-# closed on either.
+# closed on either. Gitea has no cancel API and does not honour `concurrency:`
+# (devops §9b), so ordering is the only fail-fast there is.
 #
-# Long-horizon checks — FIPS-strict test runs and vulnerability scanning — live
-# in nightly.yml rather than on the push path, so that a slow or known-red job
-# cannot burn an hour of runner time per push to tell us something we already
-# know.
+# Long-horizon checks — FIPS-strict test runs and `trivy fs` — live in
+# nightly.yml rather than on the push path (devops §8a: alpha phase), so a slow
+# job cannot burn runner time per push to tell us something a nightly run
+# already does. release.yml runs everything, trivy included, on a tag.
 #
-# Three things here are the result of being burned, and are worth understanding
+# Things here that are the result of being burned, and are worth understanding
 # before editing:
 #
-#   * gosec and govulncheck TRIAGE THEIR OWN EXIT CODES. A shell reports a
-#     signal death as 128+N, so a process killed by the OOM killer exits 137 —
-#     indistinguishable, in a job summary, from a real security finding. Both
-#     steps still exit non-zero either way; they only say WHICH it was. Without
-#     it, an OOM-killed scanner reads as "reachable vulnerabilities" and sends
-#     someone hunting a CVE that does not exist.
+#   * TOOLS ARE NEVER NETWORK-INSTALLED ON OUR RUNNERS. TOOL_INSTALL=0 makes
+#     every lint and security target require its tool on PATH at exactly the
+#     Makefile's pin and fail closed otherwise. The runner image bakes the
+#     tools at those versions; a workflow that `go install`ed over them once
+#     replaced the baked golangci-lint v2.13.2 with a v2.12.2 that cannot lint
+#     Go 1.27 (9 of 12 sampled repos were in that state), `@latest` installs
+#     produced unattributable "Version: dev" scans (go-luks2 #21), and the
+#     installs themselves failed whenever sum.golang.org was unreachable. A
+#     mismatch is fixed by raising the pin and the image together, never by
+#     installing. On github.com there is no baked image, so the same targets
+#     install the same pins into the workspace (TOOL_INSTALL=1).
 #
-#   * gosec runs with BOUNDED CONCURRENCY. It sizes its worker pool from
-#     runtime.NumCPU(), which reports the host's cores regardless of GOMAXPROCS
-#     or of any cgroup limit the container is under — so on a large host in a
-#     small container it grows live analysis state past the memory cap. Live
-#     heap cannot be collected away; only lowering analysis concurrency shrinks
-#     it.
+#   * gosec and govulncheck TRIAGE THEIR OWN EXIT CODES (in the Makefile). A
+#     shell reports a signal death as 128+N, so a scanner killed by the OOM
+#     killer exits 137 — indistinguishable, in a job summary, from a real
+#     finding. The targets still fail either way; they only say WHICH.
 #
-#   * NEVER add `GOPROXY: direct` or `GOSUMDB: off` to the env block. The
+#   * NEVER add `GOPROXY: direct` or `GOSUMDB: off` to an env block. The
 #     blanket override disables checksum-database verification for every
 #     third-party dependency, and breaks the build the moment an upstream
 #     re-points a tag.
@@ -48,9 +59,10 @@ on:
                                       # the only retry when a run was
                                       # never created in the first place
 
+# Read-only by default. Only the job that uploads SARIF (Security, on
+# github.com) is granted security-events: write, at job level.
 permissions:
   contents: read
-  security-events: write
 
 env:
   GO_VERSION: "1.27.0"        # portfolio standard (owner ruling 2026-09-01). The
@@ -58,7 +70,10 @@ env:
                               # the review image runs it with GOTOOLCHAIN=local, so
                               # both halves of the bump are in place -- raising the
                               # go directive alone would break the hosted review.
-  COVERAGE_THRESHOLD: 90      # minimum total statement coverage
+                              # nightly.yml and release.yml MUST carry the same value.
+  # 0 on our runners: require the image's baked tools at the Makefile's pins,
+  # install nothing. 1 on github.com, which has no baked image.
+  TOOL_INSTALL: ${{ github.server_url == 'https://github.com' && '1' || '0' }}
 
 jobs:
   lint:
@@ -71,15 +86,18 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
 
-      - name: Check formatting
-        run: |
-          UNFORMATTED=$(gofmt -l .)
-          if [ -n "${UNFORMATTED}" ]; then
-            echo "Files not formatted:"; echo "${UNFORMATTED}"; exit 1
-          fi
+      - name: go.mod and go.sum are tidy
+        run: make tidy-check
 
-      - name: Vet
-        run: go vet ./...
+      # gofmt, go vet, golangci-lint, actionlint (with shellcheck over every
+      # run: block) and shellcheck over scripts/. .golangci.yml must enable
+      # staticcheck, errcheck, unused, ineffassign, misspell, gocritic — the
+      # umbrella with the security linters off does not satisfy the gate.
+      - name: Lint
+        run: make lint
+
+      - name: staticcheck
+        run: make staticcheck
 
       # THE PIN GATE (#70). Every `uses:` in every workflow must name a 40-hex
       # commit, not a tag and never a branch.
@@ -112,54 +130,14 @@ jobs:
       - name: CHANGELOG fragments assemble into the release
         run: make check-changelog-assembly
 
-      # USE THE BAKED TOOL; DO NOT INSTALL OVER THE NETWORK.
-      #
-      # This step used to `go install golangci-lint@v2.12.2` unconditionally,
-      # which OVERWROTE the v2.13.2 the runner image bakes -- and v2.12.2 cannot
-      # lint Go 1.27, so the workflow actively undid the fix that was already
-      # sitting in the image. A sample of 12 repos found 9 in that state.
-      #
-      # It fails CLOSED on absence or a version mismatch rather than falling
-      # back to a network install. A fallback reintroduces the substitution at
-      # exactly the moment the image is wrong, which is the moment the guard
-      # exists for -- and a linter silently downgraded is a gate that reports
-      # green while checking less.
-      - name: Require the pinned golangci-lint
-        env:
-          WANT: v2.13.2
-        run: |
-          set -eu
-          if ! command -v golangci-lint >/dev/null 2>&1; then
-            echo "::error::golangci-lint is not present in the image. It is baked" \
-                 "at $WANT; this job does not install it over the network." >&2
-            exit 1
-          fi
-          # Parse by this tool's OWN marker, not "the first version on the
-          # line". The real output is
-          #   golangci-lint has version 2.13.2 built with go1.26.7 from ...
-          # which carries TWO versions, and the Go one is a different fact. A
-          # positional parse happens to work today and breaks silently the day
-          # the wording changes -- which is how the first draft of this step
-          # shipped a check that read the Go version instead of the scanner's.
-          got=$(golangci-lint --version 2>&1 | sed -n 's/.*has version \([0-9][^ ]*\).*/\1/p' | head -1)
-          case "$got" in
-            v*) ;;
-            "") ;;
-            *) got="v$got" ;;
-          esac
-          echo "golangci-lint present: $got (pinned $WANT)"
-          if [ "$got" != "$WANT" ]; then
-            echo "::error::golangci-lint $got does not match the pin $WANT." \
-                 "Raise the pin here and in the runner image together, or the" \
-                 "linter and the toolchain drift apart." >&2
-            exit 1
-          fi
-
-      # .golangci.yml must enable staticcheck, errcheck, unused, ineffassign,
-      # misspell, gocritic — the umbrella with the security
-      # linters off does not satisfy the gate.
-      - name: golangci-lint
-        run: golangci-lint run --timeout=5m ./...
+      # The scripts release.yml runs on a tag — with a token that can write to
+      # the forge — and the tool resolver every gate above trusts (#89). They
+      # are driven offline on scratch inputs here, because the tag is too late
+      # to find out one is broken. Includes building and running the
+      # throwaway consumer against this tree, so an API change that breaks it
+      # fails in the PR that made it.
+      - name: Release and tooling scripts
+        run: make check-scripts
 
   security:
     name: Security
@@ -186,12 +164,21 @@ jobs:
     # would have changed nothing.
     #
     # GOMEMLIMIT makes the GC treat the container's budget as real and collect
-    # instead of growing. GOMAXPROCS cuts gosec's worker count, which is the
-    # other multiplier. Keep GOMEMLIMIT comfortably BELOW the container cap —
-    # it is a soft limit and non-heap memory lives outside it.
+    # instead of growing. GOMAXPROCS bounds the Go runtime's parallelism; it
+    # does NOT shrink gosec's worker pool (sized from NumCPU), which is why
+    # `make gosec` passes -concurrency=4 — that flag is the part of the memory
+    # bound that actually works, verified on three concurrent scans all
+    # carrying GOMEMLIMIT=10GiB at 16/16 GiB. Keep GOMEMLIMIT comfortably BELOW
+    # the container cap — it is a soft limit and non-heap memory lives outside
+    # it, and it cannot collect LIVE memory, which is why govulncheck (whole
+    # package graph and SSA live) can still be killed when siblings crowd the
+    # host; its exit is triaged for exactly that.
     env:
       GOMEMLIMIT: 10GiB
       GOMAXPROCS: 8
+    permissions:
+      contents: read
+      security-events: write  # the gosec SARIF upload on github.com; unused on Gitea
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
@@ -199,61 +186,10 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
 
-      # USE THE BAKED TOOL; DO NOT INSTALL OVER THE NETWORK. This was
-      # `go install ...@latest`, which is worse than a wrong pin: it is
-      # unreproducible, it changes underneath the repo without a commit, and it
-      # once made scans report "Version: dev" (go-luks2 #21). The image bakes a
-      # pinned build and verifies it at build time.
-      - name: Require the pinned gosec
-        env:
-          WANT: v2.29.0
-        run: |
-          set -eu
-          if ! command -v gosec >/dev/null 2>&1; then
-            echo "::error::gosec is not present in the image. It is baked at $WANT;" \
-                 "this job does not install it over the network." >&2
-            exit 1
-          fi
-          # "Version: v2.29.0" in the image. A gosec built by `go install`
-          # reports "Version: dev" instead, because the version is injected with
-          # -ldflags at image build time -- and "dev" is precisely what this pin
-          # must reject, since an unversioned scanner is an unreproducible one.
-          got=$(gosec --version 2>&1 | sed -n 's/^Version: //p' | head -1)
-          case "$got" in v*) ;; "") ;; *) got="v$got" ;; esac
-          echo "gosec present: $got (pinned $WANT)"
-          if [ "$got" != "$WANT" ]; then
-            echo "::error::gosec $got does not match the pin $WANT. Raise the pin" \
-                 "here and in the runner image together." >&2
-            exit 1
-          fi
-
-      - name: Run gosec
-        # -stdout keeps the findings readable in the job log: the SARIF upload
-        # below only runs on github.com, so without it a Gitea failure exits 1
-        # with the findings buried in an artifact nobody can see.
-        # -concurrency 4 is the part of the memory bound that actually works
-        #. GOMAXPROCS does NOT shrink gosec's footprint:
-        # gosec sizes its worker pool from runtime.NumCPU(), which reports the
-        # HOST's physical cores (24) regardless of GOMAXPROCS, so it analyzed
-        # 24 packages' SSA simultaneously and the LIVE heap alone exceeded the
-        # 16 GB container cap — GOMEMLIMIT cannot collect live memory, verified
-        # on three concurrent scans all carrying GOMEMLIMIT=10GiB at 16/16 GiB.
-        # Memory scales with concurrent package analysis; 4 bounds it.
-        #
-        # Exit code triaged as in the govulncheck step below: -concurrency
-        # bounds gosec's footprint but does not make a kill impossible when
-        # siblings crowd the host, and a bare 137 reads as "findings" when the
-        # log holds none. Fail-closed either way.
-        run: |
-          set +e
-          gosec -concurrency 4 -fmt=sarif -out=gosec.sarif -stdout -verbose=text -exclude-dir=test -exclude-dir=examples -severity=medium -confidence=medium ./...
-          rc=$?
-          set -e
-          if [ "$rc" -gt 128 ]; then
-            echo "::error::gosec was KILLED by signal $((rc - 128)) — this is NOT a security finding."
-            echo "Memory pressure in the job container. Re-run when the host is quieter."
-          fi
-          exit "$rc"
+      # Writes gosec.sarif and prints the same findings as text, so a Gitea
+      # failure (no code-scanning API) shows them in the log.
+      - name: gosec
+        run: make gosec
 
       - name: Upload gosec SARIF
         # Gitea has no code-scanning API; the upload 404s and fails the job.
@@ -263,60 +199,11 @@ jobs:
           sarif_file: gosec.sarif
           category: gosec
 
-      # USE THE BAKED TOOL; DO NOT INSTALL OVER THE NETWORK. This was
-      # `go install ...@latest`, which is worse than a wrong pin: it is
-      # unreproducible, it changes underneath the repo without a commit, and it
-      # once made scans report "Version: dev" (go-luks2 #21). The image bakes a
-      # pinned build and verifies it at build time.
-      - name: Require the pinned govulncheck
-        env:
-          WANT: v1.7.0
-        run: |
-          set -eu
-          if ! command -v govulncheck >/dev/null 2>&1; then
-            echo "::error::govulncheck is not present in the image. It is baked at $WANT;" \
-                 "this job does not install it over the network." >&2
-            exit 1
-          fi
-          # `govulncheck -version` prints a "Go: go1.27.0" line as well as
-          # "Scanner: govulncheck@v1.7.0", and WHICH COMES FIRST depends on how
-          # the binary was built -- Scanner first in the runner image, Go first
-          # from a `go run`. Taking the first version on the output read the Go
-          # toolchain and compared it to the scanner pin.
-          got=$(govulncheck -version 2>&1 | sed -n 's/^Scanner: govulncheck@//p' | head -1)
-          case "$got" in v*) ;; "") ;; *) got="v$got" ;; esac
-          echo "govulncheck present: $got (pinned $WANT)"
-          if [ "$got" != "$WANT" ]; then
-            echo "::error::govulncheck $got does not match the pin $WANT. Raise the pin" \
-                 "here and in the runner image together." >&2
-            exit 1
-          fi
-
-      # `govulncheck ./...` renders that as an ordinary red with no findings in
-      # the log, which reads exactly like "vulnerabilities found" and sends
-      # someone hunting a CVE that does not exist. Observed in practice: gosec
-      # reported `Issues : 0`, govulncheck was SIGKILLed in a memory-capped
-      # container while heavy jobs ran alongside it on the same host, and
-      # the Makefile called it "reachable vulnerabilities". govulncheck holds
-      # the whole package graph and its SSA live, so the GOMEMLIMIT remedy
-      # cannot help — GOMEMLIMIT does not collect LIVE memory.
-      # Fail-closed either way: this still exits non-zero. It only says which.
-      - name: Run govulncheck
-        run: |
-          set +e
-          govulncheck ./...
-          rc=$?
-          set -e
-          if [ "$rc" -gt 128 ]; then
-            echo "::error::govulncheck was KILLED by signal $((rc - 128)) — this is NOT a vulnerability finding."
-            echo "Memory pressure in the job container, not a CVE. Re-run when the host is quieter."
-            echo "Confirm locally with an uncapped 'govulncheck ./...' before treating it as a finding."
-          fi
-          exit "$rc"
+      - name: govulncheck
+        run: make govulncheck
 
       - name: Verify module integrity
-        run: go mod verify
-
+        run: make modverify
 
   build:
     name: Build
@@ -329,7 +216,7 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
 
       - name: Build all packages
-        run: go build ./...
+        run: make build
 
       # Every supported GOOS/GOARCH, 32-bit included. providertest did not
       # compile on linux/386 or linux/arm through v0.6.1-alpha and nothing here
@@ -338,16 +225,9 @@ jobs:
       - name: Cross-build all packages
         run: make cross-build
 
-      # a repo with nested modules builds each.
-
-  # FIPS gate (owner mandate 2026-08-17, security-review.md §6): every
-  # project must build and pass unit tests with Go's native FIPS 140-3
-  # mode enabled. GOFIPS140=latest selects the newest validated Go Crypto
-  # Module snapshot at build time; the fips140=only GODEBUG rejects non-approved
-  # algorithms at runtime, so non-approved primitives on exercised paths
-  # fail HERE instead of in a customer's regulated environment. A primitive
-  # that cannot pass is an owner-visible decision issue, never a silent
-  # substitution.
+  # FIPS (owner mandate 2026-08-17, security-review.md §6) runs nightly
+  # (nightly.yml -> `make test-fips`), not here; moving it onto the push path
+  # is a deliberate decision, not a drive-by.
 
   test:
     name: Test
@@ -375,6 +255,9 @@ jobs:
       # tune the runner HOST for settings that matter; with host networking
       # the host's values apply.
 
+      # `make coverage` runs the suite with TESTFLAGS (-race -count=1
+      # -cpu=1,2,8) and FAILS below the Makefile's COVERAGE_THRESHOLD.
+      #
       # -race IS NOT OPTIONAL. It is the sole detector for the
       # publication-ordering defect class in the shutdown registry: measured
       # 10/10 against the restored defect with the detector on, 0/10 with it
@@ -393,8 +276,7 @@ jobs:
       # happen even on a single-core or heavily-pinned runner.
       #
       # Measured on an 8-core host against `reserve` regressed to
-      # read-then-subtract, 10 runs of the whole package at each setting, this
-      # command's exact flags:
+      # read-then-subtract, 10 runs of the whole package at each setting:
       #     -cpu=1  ->  0/10 killed the mutant   (single core CANNOT see it)
       #     -cpu=2  ->  6/10
       #     -cpu=8  -> 10/10
@@ -406,15 +288,8 @@ jobs:
       # Cost, measured on the same host: 74s -> 195s for this step (2.6x, not 3x
       # — the coverage-instrumented build dominates). That is ~3.3 min against
       # this job's 30-minute timeout.
-      - name: Run tests with coverage
-        run: |
-          go test -race -count=1 -cpu=1,2,8 -timeout=900s -coverprofile=coverage.out ./...
-          COVERAGE=$(go tool cover -func=coverage.out | grep total | awk '{print $3}' | sed 's/%//')
-          echo "Total coverage: ${COVERAGE}%"
-          if [ $(echo "${COVERAGE} < ${{ env.COVERAGE_THRESHOLD }}" | bc -l) -eq 1 ]; then
-            echo "FAIL: coverage ${COVERAGE}% is below minimum ${{ env.COVERAGE_THRESHOLD }}%"
-            exit 1
-          fi
+      - name: Tests with coverage (race, CPU matrix, threshold)
+        run: make coverage
 
   # a repo that builds container images adds an `image` job here that
   # builds each image and gates it with `trivy image --severity CRITICAL,HIGH

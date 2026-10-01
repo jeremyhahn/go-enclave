@@ -1,0 +1,290 @@
+# Release for go-enclave, on every pushed `v*` tag (#89, release-versioning §5).
+#
+# `make release-alpha` assembles the CHANGELOG, writes VERSION, commits, tags
+# and pushes the tag. Everything after that is here, and nothing is created by
+# hand on the forge:
+#
+#   1. Verify   — the tag agrees with its own tree (VERSION, the CHANGELOG
+#                 section, no unassembled fragment) and names a commit on main.
+#   2. Gate     — the full gate on the TAGGED commit, through the same make
+#                 targets as ci.yml, plus `make trivy` as a blocking gate.
+#                 Trivy is nightly-only for merges in the alpha phase (devops
+#                 §8a), but a release is a publication, and §8a allows keeping
+#                 it blocking where it is green.
+#   3. Consumer — a throwaway module OUTSIDE the repository, with GOWORK=off,
+#                 `go get`s the module at this tag, then builds and runs a
+#                 program that allocates and destroys an enclave
+#                 (release-versioning §2: in-repo builds resolve through the
+#                 working tree and never exercise what a consumer gets).
+#   4. Publish  — the forge release, with the version's CHANGELOG section as
+#                 its body, a prerelease when the tag is `-alpha`. Gitea only.
+#
+# Every check is a make target (release-verify, the gate targets,
+# consumer-check, release-publish), so each stage reproduces from a shell with
+# the same `make` line. What stays inline here is orchestration only: reading
+# the tag from the event, asserting the runner injected forge resolution, and
+# refusing to publish unless every stage succeeded.
+#
+# PUBLICATION ON GITHUB IS NEVER AUTOMATIC. This file is byte-identical on the
+# public mirror, where a tag arrives only when the owner pushes one; there the
+# verify, gate and consumer jobs still run, and the publish job is skipped.
+# Publishing a GitHub release is a publication needing the owner's explicit,
+# per-instance approval (release-versioning §5, devops §3) — the publish
+# script also refuses api.github.com on its own.
+#
+# Every job checks out the tag ref, so every job runs on the tagged commit;
+# Publish additionally confirms the forge's tag still names the commit Verify
+# saw before attaching anything to it. Tags are immutable by policy
+# (release-versioning §3); this makes it a checked property too.
+#
+# NEVER add `GOPROXY: direct` or `GOSUMDB: off` here either (see ci.yml). The
+# consumer resolves exactly as dependency-resolution §1/§6 says: on our runners
+# act_runner injects GOPRIVATE and a read-token insteadOf rewrite into every
+# job, so this file sets neither.
+
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: "1.27.0"   # MUST equal ci.yml's GO_VERSION
+  # As in ci.yml: 0 on our runners (baked tools, pinned, never installed),
+  # 1 on github.com.
+  TOOL_INSTALL: ${{ github.server_url == 'https://github.com' && '1' || '0' }}
+
+jobs:
+  verify:
+    name: Verify tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      sha: ${{ steps.tag.outputs.sha }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0      # main's history, for the ancestry check below
+
+      - name: Identify the tag
+        id: tag
+        run: |
+          set -eu
+          case "$GITHUB_REF" in
+            refs/tags/v*) tag=${GITHUB_REF#refs/tags/} ;;
+            *) echo "::error::release.yml ran for a ref that is not a v* tag"; exit 1 ;;
+          esac
+          # Git accepts tag names such as v`id` and v$(id), and `v*` matches
+          # them. The tag is DATA from here on — every later step receives it
+          # through `env:` and every make target reads it as a quoted shell
+          # variable — but it is refused here too, before it is echoed or
+          # becomes an output, unless it is a plain version string.
+          case $tag in
+            *[!0-9A-Za-z.-]*) echo "::error::the tag name holds characters no release version does; refusing it"; exit 1 ;;
+          esac
+          sha=$(git rev-parse HEAD)
+          printf 'Releasing %s from %s\n' "$tag" "$sha"
+          {
+            echo "tag=$tag"
+            echo "sha=$sha"
+          } >> "$GITHUB_OUTPUT"
+
+      # VERSION equals the tag unprefixed, CHANGELOG.md has exactly one
+      # non-empty section for it, no fragment is waiting in changelog.d/,
+      # [Unreleased] is empty — the check `make release-alpha` runs before it
+      # commits — and the tagged commit is on main: both release kinds are
+      # tags on main (release-versioning §1a), and a tag on a branch commit
+      # would release code main never received.
+      #
+      # Values reach make ONLY through the environment, never as make
+      # command-line assignments: make expands a command-line value when it
+      # exports it, and the Makefile reads these as data (see EXTERNAL_VARS).
+      - name: Tag agrees with VERSION and CHANGELOG.md, and is on main
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+          MAIN_REF: FETCH_HEAD
+        run: |
+          set -eu
+          git fetch --no-tags --quiet origin main
+          make release-verify
+
+  lint:
+    name: Lint
+    needs: [verify]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - run: make tidy-check
+      - run: make lint
+      - run: make staticcheck
+      - run: make check-action-pins
+      - run: make check-releasability
+      - run: make check-changelog-assembly
+      - run: make check-scripts
+
+  build:
+    name: Build
+    needs: [verify]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - run: make build
+      - run: make cross-build
+
+  security:
+    name: Security
+    needs: [lint, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # The memory bound ci.yml's Security job documents; same reasons.
+    env:
+      GOMEMLIMIT: 10GiB
+      GOMAXPROCS: 8
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - run: make gosec
+      - run: make govulncheck
+      - run: make modverify
+
+      # Not baked into the runner image, so installed on both hosts from the
+      # pinned release tarball, verified against the Makefile's SHA-256.
+      - name: trivy fs (CRITICAL/HIGH)
+        env:
+          TOOL_INSTALL: "1"
+        run: make trivy
+
+  test:
+    name: Test
+    needs: [lint, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Tests with coverage (race, CPU matrix, threshold)
+        run: make coverage
+
+      - name: Tests under FIPS 140-3 strict mode
+        run: make test-fips
+
+  consumer:
+    name: Consumer
+    needs: [verify]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      # dependency-resolution §6: on our runners the module resolves from the
+      # forge only through GOPRIVATE plus a git insteadOf rewrite carrying a
+      # read token, both injected by act_runner. Without them `go get` asks the
+      # public proxy, which has never seen an internal tag, and fails with an
+      # unrelated-looking "unknown revision". Checked by SHAPE only: the
+      # rewrite's KEY contains the token, so nothing here is printed.
+      - name: Forge resolution is configured (Gitea)
+        if: github.server_url != 'https://github.com'
+        run: |
+          set -eu
+          if [ -z "$(go env GOPRIVATE)" ]; then
+            echo "::error::GOPRIVATE is not set in this job; the runner must inject it (dependency-resolution §6)"
+            exit 1
+          fi
+          n=${GIT_CONFIG_COUNT:-0}
+          case $n in ''|*[!0-9]*) n=0 ;; esac
+          found=0
+          i=0
+          while [ "$i" -lt "$n" ]; do
+            key=$(printenv "GIT_CONFIG_KEY_$i" || true)
+            case $key in url.*.insteadOf|url.*.insteadof) found=1 ;; esac
+            i=$((i + 1))
+          done
+          if [ "$found" -ne 1 ]; then
+            echo "::error::no git insteadOf rewrite is configured in this job; the runner must inject GIT_CONFIG_* (dependency-resolution §6)"
+            exit 1
+          fi
+          echo "GOPRIVATE and a git insteadOf rewrite are present"
+
+      - name: Build and run a throwaway consumer of the tag
+        env:
+          TAG: ${{ needs.verify.outputs.tag }}
+        run: make consumer-check
+
+  publish:
+    name: Publish release
+    needs: [verify, lint, build, security, test, consumer]
+    # always(): so a failed or skipped stage produces a red, named publish job
+    # below rather than a silently skipped one. The server guard keeps the
+    # public mirror from ever publishing on its own.
+    if: always() && github.server_url != 'https://github.com'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write   # create/update the release; nothing else
+    steps:
+      # Gitea combines a skipped job as success and does not implement
+      # join(needs.*.result) (devops §1), so every stage is checked by name and
+      # anything but success refuses to publish.
+      - name: Every stage passed
+        run: |
+          check() { case "$2" in
+            success) echo "OK   $1";;
+            skipped) echo "SKIP $1 (upstream stage failed — see its job)"; BAD=1;;
+            *)       echo "FAIL $1 ($2)"; BAD=1;;
+          esac; }
+          BAD=0
+          check verify   "${{ needs.verify.result }}"
+          check lint     "${{ needs.lint.result }}"
+          check build    "${{ needs.build.result }}"
+          check security "${{ needs.security.result }}"
+          check test     "${{ needs.test.result }}"
+          check consumer "${{ needs.consumer.result }}"
+          if [ "$BAD" -ne 0 ]; then
+            echo "::error::not publishing: a release stage did not pass"
+          fi
+          exit $BAD
+
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Publish the release with its CHANGELOG section
+        env:
+          TAG: ${{ needs.verify.outputs.tag }}
+          SHA: ${{ needs.verify.outputs.sha }}
+          FORGE_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          head=$(git rev-parse HEAD)
+          if [ "$head" != "$SHA" ]; then
+            echo "::error::this job checked out $head, but the gate ran on $SHA"
+            exit 1
+          fi
+          FORGE_API_URL=$GITHUB_API_URL FORGE_REPOSITORY=$GITHUB_REPOSITORY \
+            make release-publish

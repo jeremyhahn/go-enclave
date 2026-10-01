@@ -7,9 +7,13 @@
 # (changelog.d/<issue>-<slug>.md) instead of editing CHANGELOG.md, and the
 # release step concatenates the fragments into the new version's section and
 # deletes each one it folds in. Assembly is a COMMITTED step performed before
-# tagging — release.yml only overwrites the runner-workspace copy, so a
-# fragment this script does not fold in never reaches a CHANGELOG. `make
-# release-alpha` runs it and commits the result with VERSION.
+# tagging, because release.yml never edits or regenerates CHANGELOG.md: it
+# reads the COMMITTED file at the tag. It refuses the tag when a fragment or an
+# [Unreleased] entry was left out, or the version has no section
+# (scripts/release-check-tag.sh), and publishes that section verbatim as the
+# release body (scripts/release-notes.sh). So a fragment this script does not
+# fold in never reaches a release; it stops the release instead. `make
+# release-alpha` runs this script and commits the result with VERSION.
 #
 # What it does, run from the repository root:
 #   - the body of `## [Unreleased]` (entries written before fragments were
@@ -32,11 +36,20 @@ export LC_ALL=C
 
 die() { echo "changelog-assemble: $*" >&2; exit 1; }
 
+NL='
+'
+# matches VALUE ERE: the WHOLE value matches. `grep` alone is line-oriented,
+# so a value with an embedded newline would pass on any one matching line.
+matches() {
+  case $1 in *"$NL"*) return 1 ;; esac
+  printf '%s\n' "$1" | grep -Eq "$2"
+}
+
 [ $# -eq 2 ] || die "usage: $0 <vX.Y.Z[-pre]> <YYYY-MM-DD>"
 version=$1
 date=$2
-echo "$version" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$' || die "'$version' is not vX.Y.Z[-pre]"
-echo "$date" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' || die "'$date' is not YYYY-MM-DD"
+matches "$version" '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$' || die "'$version' is not vX.Y.Z[-pre]"
+matches "$date" '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' || die "'$date' is not YYYY-MM-DD"
 
 changelog=CHANGELOG.md
 fragdir=changelog.d

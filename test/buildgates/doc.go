@@ -14,10 +14,12 @@
 //
 // So this directory carries its OWN go.mod. The root module is untouched and
 // still requires exactly one thing. The cost is that `go test ./...` at the
-// root does not reach these tests. `make check-action-pins` runs the pin gate
-// and `make check-releasability` runs the public-releasability gate
-// (releasability_test.go); `make ci` depends on both targets, and the Lint job
-// in ci.yml runs both too.
+// root does not reach these tests. `make check-action-pins` runs the pin gate,
+// `make check-releasability` the public-releasability gate
+// (releasability_test.go), `make check-changelog-assembly` the fragment
+// assembly (changelog_assemble_test.go) and `make check-scripts` the release
+// and tooling scripts (scripts_test.go); `make ci` depends on all four, and
+// the Lint jobs in ci.yml and release.yml run them too.
 //
 // The releasability gate needs nothing beyond the standard library and could
 // have lived at the root. It lives here because it is the same kind of check —
@@ -25,8 +27,9 @@
 // test would ship in the module zip and run inside every consumer's
 // `go test all`, where there is no git index to read.
 //
-// The directory is `test/` for a second reason: gosec and trivy are already
-// configured repo-wide with `-exclude-dir=test` and `skip-dirs: test`, so
-// non-shipping code placed here is scanned as non-shipping code without any
-// new configuration.
+// The directory is `test/` for a second reason: gosec is configured with
+// `-exclude-dir=test` (the Makefile's GOSEC_FLAGS), so non-shipping code
+// placed here is not reported as shipping code. trivy does scan test/: these
+// gates' dependencies run in CI jobs that hold a token, so a vulnerable one
+// matters even though it never reaches a consumer.
 package buildgates

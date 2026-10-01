@@ -1,0 +1,76 @@
+// Command consumer is the throwaway program scripts/consumer-check.sh builds
+// against a published go-enclave version, in a scratch module outside this
+// repository with GOWORK=off (handbook release-versioning §2: post-tag
+// verification builds a consumer, because every in-repo build resolves through
+// the working tree and never exercises what `go get` hands a consumer).
+//
+// It lives under testdata/ so the root module's `./...` — build, vet, lint,
+// coverage — never sees it: it is not part of the library, and as a package
+// main it would only dilute the coverage figure. gofmt still checks it, and
+// test/buildgates compiles and runs it against the working tree on every
+// change, so an API change that breaks it is found in that change's PR rather
+// than at the next tag.
+//
+// It exercises the lifecycle every consumer depends on: construction takes
+// ownership of the caller's buffer and wipes it, the material is readable
+// inside the borrow window, Destroy releases it, and a destroyed enclave
+// refuses access with the documented sentinel. The value is a fixed,
+// non-secret marker; nothing is copied out of the enclave to be compared.
+package main
+
+import (
+	"bytes"
+	"errors"
+	"fmt"
+	"os"
+
+	enclave "github.com/jeremyhahn/go-enclave"
+)
+
+func main() {
+	if err := run(); err != nil {
+		fmt.Fprintln(os.Stderr, "consumer-check: FAIL:", err)
+		os.Exit(1)
+	}
+	fmt.Println("consumer-check: ok")
+}
+
+func run() error {
+	marker := []byte("go-enclave consumer check")
+	material := bytes.Clone(marker)
+
+	e, err := enclave.NewMemoryEnclave(material)
+	if err != nil {
+		return fmt.Errorf("NewMemoryEnclave: %w", err)
+	}
+	defer func() { _ = e.Destroy() }() // second call after the explicit one: nil, idempotent
+
+	if !bytes.Equal(material, make([]byte, len(marker))) {
+		return errors.New("NewMemoryEnclave left the caller's buffer unwiped")
+	}
+	if !e.IsAlive() {
+		return errors.New("a new enclave reports itself not alive")
+	}
+	if got := e.Size(); got != len(marker) {
+		return fmt.Errorf("Size() = %d, want %d", got, len(marker))
+	}
+	if err := e.WithBytes(func(b []byte) error {
+		if !bytes.Equal(b, marker) {
+			return errors.New("the borrowed view does not hold the material")
+		}
+		return nil
+	}); err != nil {
+		return fmt.Errorf("WithBytes: %w", err)
+	}
+
+	if err := e.Destroy(); err != nil {
+		return fmt.Errorf("Destroy: %w", err)
+	}
+	if e.IsAlive() {
+		return errors.New("a destroyed enclave reports itself alive")
+	}
+	if err := e.WithBytes(func([]byte) error { return nil }); !errors.Is(err, enclave.ErrEnclaveDestroyed) {
+		return fmt.Errorf("WithBytes after Destroy returned %v, want ErrEnclaveDestroyed", err)
+	}
+	return nil
+}

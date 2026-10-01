@@ -1,8 +1,8 @@
 # Changelog
 
 All notable changes to go-enclave are documented here. The format follows
-[Keep a Changelog](https://keepachangelog.com/), and the project adheres to
-[Semantic Versioning](https://semver.org/).
+[Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and the
+project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
