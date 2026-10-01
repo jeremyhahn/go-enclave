@@ -331,6 +331,13 @@ jobs:
       - name: Build all packages
         run: go build ./...
 
+      # Every supported GOOS/GOARCH, 32-bit included. providertest did not
+      # compile on linux/386 or linux/arm through v0.6.1-alpha and nothing here
+      # noticed, because nothing built it there. The target list lives in the
+      # Makefile so a local `make ci` and this job cannot disagree.
+      - name: Cross-build all packages
+        run: make cross-build
+
       # a repo with nested modules builds each.
 
   # FIPS gate (owner mandate 2026-08-17, security-review.md §6): every

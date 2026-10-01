@@ -15,6 +15,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+
+	"github.com/awnumar/memcall"
 )
 
 func TestNewAllocator_InvalidBudget(t *testing.T) {
@@ -285,5 +287,151 @@ func TestAllocator_Concurrent(t *testing.T) {
 	}
 	if a.Available() != limit {
 		t.Errorf("Available = %d, want the full %d", a.Available(), limit)
+	}
+}
+
+// TestAllocator_New_KeepsTheChargeForPagesACleanupCouldNotRelease is the
+// regression for the constructor-refund finding in #83.
+//
+// Allocator.New maps and locks, then freezes; when the freeze is refused it
+// releases the mapping, and when THAT is refused too — the wipe-enabling
+// mprotect and the bare-unmap fallback both denied — the locked pages stay
+// behind with no handle. New refunded the whole charge anyway, so the budget
+// advertised locked memory the process could not use: the stance DestroyErr
+// refuses to take for exactly the same pages.
+//
+// The control is the same refusal with the fallback ALLOWED: the pages go back
+// and the charge must too, so a fix that simply stopped refunding fails here.
+func TestAllocator_New_KeepsTheChargeForPagesACleanupCouldNotRelease(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		bypassOK   bool
+		wantInUse  int64
+		wantHeldOK bool
+	}{
+		{"the bypass returned the pages", true, 0, false},
+		{"nothing could return the pages", false, pageSize, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, err := NewAllocator(4 * pageSize)
+			if err != nil {
+				t.Fatalf("NewAllocator: %v", err)
+			}
+
+			denied := errors.New("mprotect denied by policy")
+			prevProtect, prevDirect := protectMemory, unmapDirectFn
+			// Stranded pages are on the orphan ledger, so they are reclaimed the
+			// way production reclaims them — by a sweep once the refusal lifts —
+			// and never freed behind the ledger's back, which would leave it a
+			// record of an unmapped region.
+			t.Cleanup(func() {
+				protectMemory, unmapDirectFn = prevProtect, prevDirect
+				_, _ = WipeAll()
+			})
+			protectMemory = func([]byte, memcall.MemoryProtectionFlag) error { return denied }
+			unmapDirectFn = func(b []byte) error {
+				if tc.bypassOK {
+					// Stands in for the bare munmap on every platform.
+					// memcall.Free makes its own mprotect, not through the
+					// denied seam.
+					return freeMemory(b)
+				}
+				return errors.New("munmap denied too")
+			}
+
+			e, err := a.New(material())
+			if err == nil {
+				e.Destroy()
+				t.Fatal("Allocator.New succeeded although its freeze was refused")
+			}
+			if !errors.Is(err, ErrLockedMemoryUnavailable) {
+				t.Errorf("Allocator.New = %v, want ErrLockedMemoryUnavailable", err)
+			}
+			if got := pagesHeld(err); got != tc.wantHeldOK {
+				t.Errorf("pagesHeld(%v) = %v, want %v", err, got, tc.wantHeldOK)
+			}
+			if used := a.InUse(); used != tc.wantInUse {
+				t.Errorf("InUse = %d after the failed construction, want %d", used, tc.wantInUse)
+			}
+		})
+	}
+}
+
+// TestAllocator_New_RefundsWhenTheCleanupUnlockedButCouldNotUnmap pins the
+// other half of the refund predicate (#83): a failed construction whose cleanup
+// UNLOCKED the pages and was then refused the munmap leaves them mapped but no
+// longer locked. That costs address space and no locked memory, and the failed
+// constructor hands back no enclave to retry through, so keeping the charge
+// would shrink the budget for the process lifetime with nothing locked behind
+// it. A first cut of the fix keyed the refund on "pages held" alone and did
+// exactly that (caught by Codex reviewing the #83 branch).
+func TestAllocator_New_RefundsWhenTheCleanupUnlockedButCouldNotUnmap(t *testing.T) {
+	a, err := NewAllocator(4 * pageSize)
+	if err != nil {
+		t.Fatalf("NewAllocator: %v", err)
+	}
+
+	prevProtect, prevFree := protectMemory, freeMemory
+	var stranded bool
+	// Reclaimed through the orphan ledger, never freed behind its back; see
+	// TestAllocator_New_KeepsTheChargeForPagesACleanupCouldNotRelease.
+	t.Cleanup(func() {
+		protectMemory, freeMemory = prevProtect, prevFree
+		_, _ = WipeAll()
+	})
+	// Only the freeze (read-only) is refused, so construction fails and the
+	// cleanup wipes, unlocks, and is refused the unmap.
+	protectMemory = func(b []byte, f memcall.MemoryProtectionFlag) error {
+		if f == memcall.ReadOnly() {
+			return errors.New("mprotect denied by policy")
+		}
+		return prevProtect(b, f)
+	}
+	freeMemory = func([]byte) error {
+		stranded = true
+		return errors.New("munmap: cannot allocate memory")
+	}
+
+	e, err := a.New(material())
+	if err == nil {
+		e.Destroy()
+		t.Fatal("Allocator.New succeeded although its freeze was refused")
+	}
+	if !stranded {
+		t.Fatal("the cleanup never reached the munmap; this test would be vacuous")
+	}
+	if !pagesHeld(err) {
+		t.Errorf("pagesHeld(%v) = false, want true: the pages are still mapped", err)
+	}
+	if lockedPagesHeld(err) {
+		t.Errorf("lockedPagesHeld(%v) = true, want false: the munlock succeeded", err)
+	}
+	if used := a.InUse(); used != 0 {
+		t.Errorf("InUse = %d after a failed construction left nothing locked, want 0", used)
+	}
+}
+
+// TestAllocator_NewSized_RefundsWhenALockFailureLeavesNothingLocked is the
+// control for the predicate on the NewSized path: an mlock refused at the
+// ceiling leaves nothing locked whatever the unmap does, so the charge goes
+// back even when the rollback's munmap is refused and only the bare-unmap
+// fallback returns the mapping.
+func TestAllocator_NewSized_RefundsWhenALockFailureLeavesNothingLocked(t *testing.T) {
+	a, err := NewAllocator(4 * pageSize)
+	if err != nil {
+		t.Fatalf("NewAllocator: %v", err)
+	}
+
+	prevLock, prevFree, prevDirect := lockMemory, freeMemory, unmapDirectFn
+	t.Cleanup(func() { lockMemory, freeMemory, unmapDirectFn = prevLock, prevFree, prevDirect })
+	lockMemory = func([]byte) error { return errors.New("mlock: cannot allocate memory") }
+	freeMemory = func([]byte) error { return errors.New("munmap refused") }
+	unmapDirectFn = func(b []byte) error { return prevFree(b) }
+
+	if _, err := a.NewSized(32); !errors.Is(err, ErrLockedMemoryUnavailable) {
+		t.Fatalf("NewSized = %v, want ErrLockedMemoryUnavailable", err)
+	}
+	if used := a.InUse(); used != 0 {
+		t.Errorf("InUse = %d after a construction that left nothing locked, want 0", used)
 	}
 }

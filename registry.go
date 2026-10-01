@@ -57,6 +57,12 @@ import (
 // dropping the only reference to memory the kernel still has mapped, which
 // strands it with no way to retry and no way to find it again. A leak that is
 // still reachable and still reported is the better of the two.
+//
+// The same reasoning covers a construction that FAILS and whose cleanup is
+// refused too. It returns no enclave, but its pages are still mapped, so the
+// mapping goes onto a second ledger, of orphans, that WipeAll retries the same
+// way (#83). Before that, those pages were the one allocation in the package
+// with no handle anywhere.
 
 // maxSweepPasses bounds how many times [WipeAll] re-reads the ledger.
 //
@@ -123,6 +129,11 @@ var (
 	// far more frequent than the single sweep, so it is the operation to keep
 	// cheap.
 	live = make(map[*MemoryEnclave]struct{})
+	// orphans holds the mappings failed constructions could not give back; see
+	// orphanRecord. Guarded by registryMu like live, for the same reason: it is
+	// written by constructors running concurrently with a sweep, and a second
+	// lock would be a second lock order to get right.
+	orphans = make(map[*orphanRecord]struct{})
 
 	// sweepGen is the sweep sequence behind [SealedEnclave.Openable]'s
 	// fallback for providers that can report nothing about their own sealing
@@ -175,6 +186,68 @@ var (
 	sweepMu sync.Mutex
 )
 
+// orphanRecord is a mapping a failed construction could not hand back to the
+// kernel, kept so [WipeAll] can retry it (#83).
+//
+// A constructor that fails after mapping rolls the mapping back, and the
+// rollback can be refused — the kernel that just refused one thing is the one
+// most likely to refuse the next. The constructor then returns nil and an error,
+// and before this ledger that dropped the only handle to the pages: no sweep
+// could reclaim them even after the refusal lifted, and an [Allocator] charge
+// kept for still-locked pages was kept for the process lifetime.
+//
+// refund returns that charge, and is nil when there is nothing to return: an
+// unadmitted constructor took none, and an admitted one refunds at once when
+// the pages were no longer locked (see [Allocator.refundFailed]). It runs
+// exactly once, from the sweep that releases the pages: only WipeAll touches a
+// record after adoption, sweepMu serializes WipeAll, and the record leaves the
+// ledger in the same step that runs the refund.
+type orphanRecord struct {
+	m      *mapping
+	refund func()
+}
+
+// adoptOrphan puts the mapping a failed construction's err carries onto the
+// orphan ledger, with refund to run when a sweep releases it. It is a no-op
+// for every failure that left nothing mapped, so every public constructor can
+// call it on every failure without inspecting the error first.
+//
+// It is called from the PUBLIC constructors, after the refund decision is made
+// and never before, for the same publication-last reason as [register]: a
+// record a sweep could reach before its refund was attached could be released
+// with the charge never returned.
+func adoptOrphan(err error, refund func()) {
+	var held *pagesHeldError
+	if !errors.As(err, &held) || held.orphan == nil {
+		return
+	}
+	o := &orphanRecord{m: held.orphan, refund: refund}
+	// One adoption per mapping: the error stays with the caller, and nothing
+	// else may use it to put the same pages on the ledger twice.
+	held.orphan = nil
+
+	registryMu.Lock()
+	orphans[o] = struct{}{}
+	registryMu.Unlock()
+}
+
+// releaseOrphan retries o's release. On success — the pages went back, by the
+// same [releasedPages] predicate Destroy and the enclave sweep use — it runs the
+// refund and drops the record, and reports true. The caller holds sweepMu.
+func releaseOrphan(o *orphanRecord) (released bool, err error) {
+	err = o.m.release()
+	if !releasedPages(err) {
+		return false, err
+	}
+	if o.refund != nil {
+		o.refund()
+	}
+	registryMu.Lock()
+	delete(orphans, o)
+	registryMu.Unlock()
+	return true, err
+}
+
 // sweepGeneration reports the current sweep sequence. A sealed value records
 // it BEFORE it seals and [SealedEnclave.Openable] compares against it; an odd
 // value means a sweep was in flight at that moment. See [sweepGen].
@@ -222,8 +295,9 @@ func deregister(e *MemoryEnclave) {
 }
 
 // WipeAll destroys every enclave holding LOCKED MEMORY that this package has
-// handed out and not yet reclaimed. It reports how many it could not, and
-// whether any of them turned out to be corrupt.
+// handed out and not yet reclaimed, and retries the release of every mapping a
+// failed construction could not give back. It reports how many it could not
+// reclaim, and anything it found that a caller must hear about.
 //
 // It is for ORDERLY SHUTDOWN — a signal handler, a defer in main — where the
 // process is about to exit and any locked memory still held is material that
@@ -269,8 +343,8 @@ func deregister(e *MemoryEnclave) {
 //
 // The sweep will NOT be extended to cover them (#33, decided), for three
 // reasons worth stating where the count is defined. The COUNT means "still
-// holding locked memory" and that invariant is this function's whole value; a
-// SealedEnclave holds none, so including it would either corrupt the number
+// holding this package's pages" and that invariant is this function's whole
+// value; a SealedEnclave holds none, so including it would either corrupt the number
 // or require a second one. Sweeping would also be WRONG rather than merely
 // costly: in [ModePerOperation] the device still holds the key, so destroying
 // sealed values would destroy recoverable application data that this
@@ -316,10 +390,12 @@ func deregister(e *MemoryEnclave) {
 // "momentary" here means milliseconds, not any duration — a long-running
 // operation holding an enclave across a shutdown will be counted, correctly.
 //
-// A non-zero count therefore means SOMETHING WAS STILL BEING READ. That is
-// often a shutdown-ordering problem in the caller, and it is not necessarily
-// one: a read that simply took longer than the budget produces the same
-// number. Treat it as "these were still in use," not as a diagnosis.
+// A non-zero count therefore most often means SOMETHING WAS STILL BEING READ.
+// That is often a shutdown-ordering problem in the caller, and it is not
+// necessarily one: a read that simply took longer than the budget produces the
+// same number, and so does a release — an enclave's, or a failed
+// construction's — that the kernel is still refusing. Treat it as "these were
+// still held," not as a diagnosis.
 //
 // It never unmaps underneath a reader, which is the other half of the same
 // decision: [MemoryEnclave.Open] hands back a slice that outlives the enclave's
@@ -328,35 +404,44 @@ func deregister(e *MemoryEnclave) {
 //
 // # The return values
 //
-// They are ORTHOGONAL, and neither implies the other.
+// They answer DIFFERENT QUESTIONS, and neither can be derived from the other.
 //
-// The COUNT is the number of enclaves still holding locked memory when the sweep
-// finished: those still being read after every pass, plus those whose release
-// failed, plus anything that registered mid-sweep and could not be reached. It is
-// read from the ledger itself under the lock rather than tallied while sweeping,
-// so zero means the ledger was empty at that instant — everything this package
-// had allocated was wiped and unmapped — rather than merely that this call was
-// happy with the enclaves it happened to see.
+// The COUNT is what is still HELD when the sweep finished: enclaves still being
+// read after every pass, enclaves whose release failed, anything that
+// registered mid-sweep and could not be reached, and the mappings of failed
+// constructions whose release is still being refused (#83). It is read from the
+// ledgers themselves under the lock rather than tallied while sweeping, so zero
+// means both were empty at that instant — everything this package had allocated
+// was unmapped — rather than merely that this call was happy with the entries
+// it happened to see.
 //
-// The ERROR reports DETECTED CORRUPTION and nothing else. It matches
-// [ErrEnclaveCorrupted] through errors.Is, exactly as Destroy's panic value does,
-// and it names how many enclaves failed their canary. A corrupt enclave is NOT
-// part of the count: its pages were wiped and unmapped like any other, so it is
-// not still held — which is precisely why it needs the second return value.
-// Without one, the single fact that something wrote into memory it did not own
-// would vanish at exit, reported by a zero that looks like success.
+// The ERROR reports what the sweep FOUND, and it has two causes, joined when
+// both hold. [ErrEnclaveCorrupted], exactly as Destroy's panic value matches it,
+// naming how many enclaves failed their canary. And [ErrReleasedWithoutWipe],
+// naming how many had to be unmapped without an in-process wipe because the
+// wipe-enabling mprotect was denied — a denial that reaches every other enclave
+// in the process. Neither is a held page, so the count cannot carry them: a
+// corrupt enclave is ordinarily wiped and unmapped like any other, and an
+// unwiped one was unmapped too. Without the error, the fact that something wrote
+// into memory it did not own would vanish at exit behind a zero that looks like
+// success.
 //
-// So a still-held enclave is reported by the count and never by the error, and
-// corruption is reported by the error and never by the count. The corruption
-// tally is kept while sweeping rather than read from the ledger — the opposite of
-// how the count is derived, and correct for the opposite reason: the ledger can
-// express what is still held, but it cannot express what was corrupt and is now
-// gone. This call is the only place that fact exists.
+// The two OVERLAP in one case, and only for corruption: a corrupt enclave whose
+// pages the kernel then refused to give back. It was wiped but is still mapped,
+// so it is in the count AND in the error, each reporting the fact it exists
+// for. An unwiped release never overlaps — that report exists only once the
+// pages are gone. The corruption tally is kept while sweeping rather than read
+// from the ledger — the opposite of how the count is derived, and correct for
+// the opposite reason: the ledger can express what is still held, but it cannot
+// express what was corrupt and is now gone. This call is the only place that
+// fact exists.
 //
-// Both are worth acting on and they are different actions. A non-zero count is a
-// shutdown-ordering bug in the caller. A non-nil error is a memory-safety event
-// that has already happened somewhere in the process, and it deserves a log line
-// at minimum whatever the count says.
+// Both are worth acting on and they are different actions. A non-zero count is
+// most often a shutdown-ordering bug in the caller, and otherwise a kernel still
+// refusing to take pages back. A non-nil error is a memory-safety event that has
+// already happened somewhere in the process, or a sandbox removing a teardown
+// step from every enclave in it, and it deserves a log line at minimum whatever
+// the count says.
 //
 // A constructor CAN register while the sweep is running. The sweep re-reads the
 // ledger for anything new, up to [maxSweepPasses] times, so an enclave created
@@ -375,9 +460,14 @@ func deregister(e *MemoryEnclave) {
 // will skip it again. Callers that must be certain should stop their workers
 // first, which is the ordering the count is telling them they got wrong.
 //
-// It is idempotent and safe to call when nothing is registered. A second call
-// reports no corruption: the corrupt enclaves are gone, and the error describes
-// what THIS sweep detected rather than a standing condition.
+// It is safe to call again, and safe to call when nothing is registered. The
+// error describes what THIS sweep found, so a corruption stops being reported
+// only once its pages have been RECLAIMED: a corrupt enclave whose release the
+// kernel kept refusing stays on the ledger, the next sweep retries it, and that
+// sweep reports the corruption again — including the one that finally releases
+// it — because the detection is sticky for as long as the mapping is held
+// (see mapping.corrupted). After that the enclave is gone and no later sweep
+// mentions it.
 func WipeAll() (int, error) {
 	// Held for the whole sweep, so the sequence's odd/even meaning is true for
 	// a sweep's entire lifetime rather than only when one runs at a time by
@@ -415,7 +505,19 @@ func WipeAll() (int, error) {
 	// Tallied, not read from the ledger, for the reason given above: a corrupt
 	// enclave is deregistered like any other, so by the time the count is taken
 	// this fact exists nowhere else.
-	corrupt := 0
+	//
+	// Corruption is keyed by enclave rather than counted per release attempt.
+	// Detection and reclamation can be separate attempts: a release that finds a
+	// failed canary and is then refused the munlock or munmap keeps the mapping
+	// (its error carries ErrEnclaveCorrupted AND marks the pages held), and the
+	// retry that finally reclaims it reports the corruption again. Counting
+	// attempts would report one enclave twice; counting only the reclaiming
+	// attempt would drop the corruption entirely whenever reclamation never
+	// succeeds — the memory-safety event this error exists to surface (#83).
+	//
+	// Keyed by any, because two kinds of entry can be corrupt: an enclave, and
+	// an orphan whose construction copied material in before failing.
+	corrupted := make(map[any]struct{})
 	unwiped := 0
 
 	for pass := 0; pass < maxSweepPasses; pass++ {
@@ -443,9 +545,13 @@ func WipeAll() (int, error) {
 		for e := range live {
 			batch = append(batch, e)
 		}
+		strays := make([]*orphanRecord, 0, len(orphans))
+		for o := range orphans {
+			strays = append(strays, o)
+		}
 		registryMu.Unlock()
 
-		if len(batch) == 0 {
+		if len(batch) == 0 && len(strays) == 0 {
 			break
 		}
 
@@ -479,6 +585,13 @@ func WipeAll() (int, error) {
 				e.releaseOnce.Do(e.release)
 			}
 
+			if errors.Is(err, ErrEnclaveCorrupted) {
+				// Recorded whether or not the pages went back: a corrupt
+				// enclave whose release was refused stays on the ledger and in
+				// the count, and is ALSO corrupt — the count cannot say so.
+				corrupted[e] = struct{}{}
+			}
+
 			if !releasedPages(err) {
 				// The pages are still mapped, so it stays on the ledger.
 				continue
@@ -486,21 +599,28 @@ func WipeAll() (int, error) {
 
 			if errors.Is(err, ErrReleasedWithoutWipe) {
 				// Wiped-by-unmapping because mprotect was denied. The pages ARE
-				// gone, so like corruption this never appears in the count --
+				// gone, so like reclaimed corruption it never appears in the count --
 				// which is exactly why it needs reporting of its own. A sweep
 				// that retried and then saw nil would swallow it entirely, and
 				// the denial reaches every other enclave in the process.
 				unwiped++
 			}
 
-			if errors.Is(err, ErrEnclaveCorrupted) {
-				// Wiped and unmapped like any other, and about to be
-				// deregistered — so it will not appear in the count. Recorded
-				// here or nowhere.
-				corrupt++
-			}
-
 			deregister(e)
+		}
+
+		// Orphans have no lock and no reader: nothing but this sweep touches a
+		// record once it is adopted, and sweepMu makes this sweep the only one.
+		// Each is retried on every pass, exactly like an enclave whose release
+		// was refused, and reported on the same terms.
+		for _, o := range strays {
+			released, err := releaseOrphan(o)
+			if errors.Is(err, ErrEnclaveCorrupted) {
+				corrupted[o] = struct{}{}
+			}
+			if released && errors.Is(err, ErrReleasedWithoutWipe) {
+				unwiped++
+			}
 		}
 	}
 
@@ -510,15 +630,21 @@ func WipeAll() (int, error) {
 	// differ exactly when something registered mid-sweep, and reporting zero
 	// while such an enclave is alive is a fail-open on the one guarantee this
 	// function makes (Codex, PR #20).
+	//
+	// Orphans are counted on the same terms: still on their ledger means still
+	// mapped, and leaving them out would report zero over pages the kernel has
+	// not taken back.
 	registryMu.Lock()
-	remaining := len(live)
+	remaining := len(live) + len(orphans)
 	registryMu.Unlock()
 
-	// Both conditions are reported, and both can hold at once. Neither appears
-	// in the count -- the pages went back in either case -- which is the whole
-	// reason each needs a return value rather than being inferred from a number.
+	// Both conditions are reported, and both can hold at once. An unwiped
+	// release never appears in the count -- its pages went back -- and a
+	// corrupt one does only when its release was also refused, which is the
+	// whole reason each needs a return value rather than being inferred from a
+	// number.
 	var errs []error
-	if corrupt > 0 {
+	if corrupt := len(corrupted); corrupt > 0 {
 		// One error however many were corrupt, carrying the count. Joining N
 		// copies of a sentinel that has no per-enclave identity would repeat the
 		// same sentence N times and say less than the number does.

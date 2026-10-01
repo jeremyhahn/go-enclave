@@ -564,8 +564,9 @@ func TestMapping_ReleaseKeepsStateWhenUnmapFails(t *testing.T) {
 // would report bytes as available while the kernel still held the pages, so the
 // allocator would go on admitting allocations the process could not satisfy.
 //
-// It also pins the retry: a caller that recovers from the panic can call Destroy
-// again, and the reservation comes back exactly once.
+// It also pins the retry: the failure is RETURNED, not panicked (#83 — it
+// panicked until then, and this test asserted that it did), the caller can call
+// Destroy again, and the reservation comes back exactly once.
 func TestMemoryEnclave_FailedReleaseKeepsTheReservation(t *testing.T) {
 	a, err := NewAllocator(4 * pageSize)
 	if err != nil {
@@ -586,14 +587,13 @@ func TestMemoryEnclave_FailedReleaseKeepsTheReservation(t *testing.T) {
 	defer freeProbe()
 	e.m.memory = bad
 
-	func() {
-		defer func() {
-			if recover() == nil {
-				t.Error("Destroy returned quietly after failing to release the pages")
-			}
-		}()
-		e.Destroy()
-	}()
+	var derr error
+	if r := panicValue(func() { derr = e.DestroyErr() }); r != nil {
+		t.Fatalf("DestroyErr panicked with %v; only detected corruption panics", r)
+	}
+	if !errors.Is(derr, ErrLockedMemoryUnavailable) {
+		t.Errorf("DestroyErr = %v after failing to release the pages, want ErrLockedMemoryUnavailable", derr)
+	}
 
 	if got := a.InUse(); got != reserved {
 		t.Errorf("InUse = %d after a FAILED release, want the unchanged %d: the budget "+
@@ -607,8 +607,8 @@ func TestMemoryEnclave_FailedReleaseKeepsTheReservation(t *testing.T) {
 	// a MUTABLE mapping, so wipeAndVerify's early wipe destroyed the material
 	// before the syscall that failed. The pages being held is the truth about
 	// the mapping; it was never the truth about the enclave, and reporting
-	// alive here is what let a caller that recovers from the panic read zeroes
-	// and take them for the secret (#13). The retry below is unaffected --
+	// alive here is what let a caller whose Destroy failed read zeroes and take
+	// them for the secret (#13). The retry below is unaffected --
 	// Destroy consults the mapping, not the wiped flag.
 	if e.IsAlive() {
 		t.Error("IsAlive = true although the early wipe already destroyed the " +
@@ -726,5 +726,199 @@ func TestMapping_AbandonReleasesAPartialMapping(t *testing.T) {
 	// Releasing again must fail rather than double-free: the region is gone.
 	if second := m.abandon(cause, true); second == nil {
 		t.Error("abandon reported success unmapping an already-released region")
+	}
+}
+
+// TestMapping_CorruptionIsStickyAcrossAFailedRelease is the regression for the
+// lost-corruption finding in #83, at the layer that lost it.
+//
+// wipeAndVerify detects the bad canary and then wipes the guards AND the canary.
+// If the munlock or munmap after it is refused, release kept the mapping and
+// returned only the LockedMemoryError — and the retry re-verified, compared an
+// all-zero guard with an all-zero canary, found them equal, and reported a clean
+// release. The detection existed for one failed attempt and then nowhere.
+//
+// Each attempt is asserted: the first reports BOTH facts, an intermediate one
+// still does, the final one that actually releases reports the corruption — and
+// the predicate the callers share classifies the held attempts as NOT released,
+// so joining the corruption in cannot make Destroy drop the handle or an
+// Allocator refund pages the kernel still holds.
+func TestMapping_CorruptionIsStickyAcrossAFailedRelease(t *testing.T) {
+	m, err := newMapping(32)
+	if err != nil {
+		t.Fatalf("newMapping: %v", err)
+	}
+	if len(m.canary) == 0 {
+		t.Fatal("a 32-byte mapping has no canary slack; the layout changed and this test is vacuous")
+	}
+	m.canary[len(m.canary)-1] ^= 0xFF
+
+	denied := errors.New("munlock: cannot allocate memory")
+	prev := unlockMemory
+	t.Cleanup(func() {
+		unlockMemory = prev
+		if m.memory != nil {
+			_ = m.release()
+		}
+	})
+	unlockMemory = func([]byte) error { return denied }
+
+	for attempt := 1; attempt <= 2; attempt++ {
+		err = m.release()
+		if !errors.Is(err, ErrEnclaveCorrupted) {
+			t.Fatalf("held attempt %d = %v, want ErrEnclaveCorrupted: the detection must not be lost "+
+				"because the release after it was refused", attempt, err)
+		}
+		if !errors.Is(err, denied) || !errors.Is(err, ErrLockedMemoryUnavailable) {
+			t.Errorf("held attempt %d = %v, want the refused munlock reported alongside the corruption", attempt, err)
+		}
+		if releasedPages(err) {
+			t.Fatalf("releasedPages(%v) = true on held attempt %d; the pages are still mapped", err, attempt)
+		}
+		if m.memory == nil {
+			t.Fatalf("held attempt %d dropped the mapping; there is no handle left to retry through", attempt)
+		}
+	}
+
+	unlockMemory = prev
+	err = m.release()
+	if !errors.Is(err, ErrEnclaveCorrupted) {
+		t.Fatalf("the release that returned the pages = %v, want ErrEnclaveCorrupted: the retry "+
+			"re-verified a canary its own first attempt had wiped", err)
+	}
+	if errors.Is(err, ErrLockedMemoryUnavailable) {
+		t.Errorf("the release that returned the pages = %v still reports a refusal", err)
+	}
+	if !releasedPages(err) {
+		t.Errorf("releasedPages(%v) = false although the pages went back", err)
+	}
+	if m.memory != nil {
+		t.Error("the mapping was not released by the successful retry")
+	}
+}
+
+// TestMapping_RetryDoesNotReverify pins the other half of the stickiness: a
+// CLEAN mapping whose first release was refused after the wipe must not be
+// re-verified on the retry either. The guards and canary are zero by then, so a
+// second verification compares zeroes with zeroes; it happens to pass for a
+// clean mapping, which is exactly why a re-verify would be invisible here — the
+// assertion is therefore on the protection syscall the re-verify needs.
+func TestMapping_RetryDoesNotReverify(t *testing.T) {
+	m, err := newMapping(32)
+	if err != nil {
+		t.Fatalf("newMapping: %v", err)
+	}
+
+	prevUnlock, prevProtect := unlockMemory, protectMemory
+	t.Cleanup(func() {
+		unlockMemory, protectMemory = prevUnlock, prevProtect
+		if m.memory != nil {
+			_ = m.release()
+		}
+	})
+	unlockMemory = func([]byte) error { return errors.New("munlock refused") }
+
+	if err := m.release(); err == nil || releasedPages(err) {
+		t.Fatalf("release with a refused munlock = %v, want a held failure", err)
+	}
+
+	unlockMemory = prevUnlock
+	protects := 0
+	protectMemory = func(b []byte, f memcall.MemoryProtectionFlag) error {
+		protects++
+		return prevProtect(b, f)
+	}
+	if err := m.release(); err != nil {
+		t.Fatalf("retry = %v, want nil for a clean mapping", err)
+	}
+	if protects != 0 {
+		t.Errorf("the retry re-opened the region %d times to verify a canary it had already wiped", protects)
+	}
+}
+
+// TestMapping_AbandonReportsWhetherLockedPagesWereLeft pins the predicate a
+// failed constructor's refund rests on (#83). Admission refunds a charge only
+// when the failure left no LOCKED pages behind; abandon is the only place that
+// knows, so its error has to say.
+//
+// It has to say two things, not one. Pages left MAPPED but unlocked cost no
+// locked memory, so the charge goes back — but they are still mapped, so the
+// error must still be marked held and still hand the mapping over for the
+// orphan ledger to retry. An earlier revision marked only the locked case,
+// and a cleanup that unlocked and then could unmap nothing reported the pages
+// as gone.
+func TestMapping_AbandonReportsWhetherLockedPagesWereLeft(t *testing.T) {
+	cause := errors.New("the step that failed")
+	refused := func([]byte) error { return errors.New("refused") }
+
+	for _, tc := range []struct {
+		name                 string
+		unlock, free, direct bool // whether each step is refused
+		wantHeld, wantLocked bool
+	}{
+		{"clean rollback", false, false, false, false, false},
+		{"munlock refused, munmap took the lock with it", true, false, false, false, false},
+		{"munmap refused, the bare unmap took the pages", false, true, false, false, false},
+		{"munlock and both unmaps refused", true, true, true, true, true},
+		{"unlocked, but nothing could unmap it", false, true, true, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, err := newMapping(64)
+			if err != nil {
+				t.Fatalf("newMapping: %v", err)
+			}
+			memory := m.memory
+
+			prevUnlock, prevFree, prevDirect := unlockMemory, freeMemory, unmapDirectFn
+			restore := func() { unlockMemory, freeMemory, unmapDirectFn = prevUnlock, prevFree, prevDirect }
+			t.Cleanup(restore)
+			if tc.unlock {
+				unlockMemory = refused
+			}
+			if tc.free {
+				freeMemory = refused
+			}
+			// The bare unmap is stubbed in EVERY row, refused or recorded, so
+			// the rows behave the same on platforms that have none.
+			directRan := false
+			unmapDirectFn = func(b []byte) error {
+				directRan = true
+				if tc.direct {
+					return errors.New("refused")
+				}
+				return prevFree(b)
+			}
+
+			err = m.abandon(cause, true)
+			restore()
+
+			if !errors.Is(err, cause) || !errors.Is(err, ErrLockedMemoryUnavailable) {
+				t.Errorf("abandon = %v, want the original cause as ErrLockedMemoryUnavailable", err)
+			}
+			if got := pagesHeld(err); got != tc.wantHeld {
+				t.Errorf("pagesHeld(%v) = %v, want %v", err, got, tc.wantHeld)
+			}
+			if got := lockedPagesHeld(err); got != tc.wantLocked {
+				t.Errorf("lockedPagesHeld(%v) = %v, want %v", err, got, tc.wantLocked)
+			}
+			var held *pagesHeldError
+			if errors.As(err, &held) && held.orphan != m {
+				t.Errorf("abandon left pages held without handing over the mapping that holds them")
+			}
+			if tc.free && !directRan {
+				t.Error("memcall.Free was refused and abandon did not fall back to the bare unmap")
+			}
+			if !tc.free && directRan {
+				t.Error("abandon took the bare unmap although memcall.Free succeeded")
+			}
+
+			// Whatever the row left mapped is handed back here, so a refused
+			// cleanup does not leak a locked page into every later test.
+			if tc.free && tc.direct {
+				if err := memcall.Free(memory); err != nil {
+					t.Errorf("cleanup Free: %v", err)
+				}
+			}
+		})
 	}
 }

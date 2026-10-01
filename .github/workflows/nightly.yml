@@ -10,8 +10,8 @@
 # automatic.
 #
 # the fips job needs this repo's build deps; trivy needs
-# the repo's .trivyignore and skip-dirs. Both jobs are copied verbatim from
-# ci.yml (they are unchanged by the move).
+# the repo's .trivyignore and skip-dirs. Both jobs began as copies of ci.yml's;
+# they have since diverged, so compare them rather than assume.
 
 name: Nightly
 
@@ -21,7 +21,7 @@ on:
   workflow_dispatch:
 
 env:
-  GO_VERSION: "1.26.7"   # track ci.yml
+  GO_VERSION: "1.27.0"   # MUST equal ci.yml's GO_VERSION (devops.md §9: one toolchain, adopted in one pass)
 
 jobs:
   fips:

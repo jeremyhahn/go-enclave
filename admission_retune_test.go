@@ -1607,8 +1607,11 @@ func TestAllocator_TransferTo_ConcurrentOppositeDirections(t *testing.T) {
 //
 // The interesting rows are the ones with a NEGATIVE free — an over-subscribed
 // allocator — beside a large budget, because that is the only combination whose
-// difference can exceed int64. Deleting the guard makes the MaxInt64 rows report
-// a negative byte count; widening it to catch a non-negative free breaks the
+// difference can exceed int64, and the ones with free ABOVE limit — headroom
+// read before a lowering — which go negative without wrapping (#83). Deleting
+// the guard makes both kinds report a negative byte count; narrowing it to the
+// wrap alone (free < 0) lets the stale rows through, which was the defect; and
+// widening it to refuse any pair a consistent allocator can hold breaks the
 // ordinary rows.
 func TestInUseFrom(t *testing.T) {
 	const max = int64(math.MaxInt64)
@@ -1631,6 +1634,14 @@ func TestInUseFrom(t *testing.T) {
 		{"one byte too wide", max, -1, 0, false},
 		{"a page too wide", max, -pageSize, 0, false},
 		{"as wide as int64 gets", max, -max, 0, false},
+		// The other skew, and the one the free < 0 guard missed (#83): a
+		// headroom reading from BEFORE a lowering, beside the lowered limit.
+		// Nothing wraps here -- limit-free is an ordinary subtraction -- and
+		// the result is negative because the pair is stale, not because it
+		// is wide. A consistent pair never has free above limit, so this is
+		// unrepresentable for the same reason a wrap is.
+		{"stale headroom beside a lowered limit", 0, 2 * pageSize, 0, false},
+		{"stale headroom a byte above the limit", pageSize, pageSize + 1, 0, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, ok := inUseFrom(tc.limit, tc.free)
@@ -1689,6 +1700,41 @@ func TestAllocator_budgetSnapshot_FallsBackWhenSkewed(t *testing.T) {
 				limit, inUse, int64(math.MaxInt64), pageSize)
 		}
 	})
+}
+
+// TestAllocator_budgetSnapshot_FallsBackWhenLoweredUnderAStaleRead is the
+// regression for the second window into a negative InUse (#83), which needs no
+// over-subscription and no extreme budget at all.
+//
+// An empty allocator with two pages free. One goroutine asks for three pages
+// and is refused, having loaded free = 2 pages; before it loads the limit to
+// describe the refusal, another goroutine quiesces the allocator with
+// SetLimit(0). The refusal then pairs a limit of 0 with a headroom of two
+// pages and reports InUse = -2 pages -- not a wrap, so the wrap-only guard let
+// it through, and BudgetError documents InUse as never negative.
+//
+// That window is as narrow as the other one, so the test hands budgetSnapshot
+// the stale reading directly, exactly as
+// TestAllocator_budgetSnapshot_FallsBackWhenSkewed does. The allocator itself is
+// settled at (0, 0), so the exact answer is known.
+func TestAllocator_budgetSnapshot_FallsBackWhenLoweredUnderAStaleRead(t *testing.T) {
+	a, err := NewAllocator(2 * pageSize)
+	if err != nil {
+		t.Fatalf("NewAllocator: %v", err)
+	}
+	stale := a.free.Load()
+	if err := a.SetLimit(0); err != nil {
+		t.Fatalf("SetLimit(0) on an empty allocator: %v", err)
+	}
+
+	limit, inUse := a.budgetSnapshot(stale)
+	if inUse < 0 {
+		t.Fatalf("budgetSnapshot reported InUse = %d against a limit of %d; a "+
+			"reserved-byte count is never negative", inUse, limit)
+	}
+	if limit != 0 || inUse != 0 {
+		t.Errorf("budgetSnapshot = (%d, %d), want the allocator's settled (0, 0)", limit, inUse)
+	}
 }
 
 // TestAllocator_Refusal_NeverReportsNegativeInUse drives the real window rather

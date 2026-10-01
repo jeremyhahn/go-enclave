@@ -83,6 +83,17 @@ type SoftwareProvider struct {
 	protects uint64
 }
 
+// SoftwareProvider is the default provider for both modes — [NewSealer] uses it
+// as a [KeyProtector] under [ModePerOperation] and as a [RootUnsealer] under
+// [ModeRootKey]. The provider reaches the Sealer untyped and is matched against
+// the seam at run time, so without these a signature drift on either interface
+// would still compile and surface only as [ErrProviderMode] from the DEFAULT
+// constructor. They make it fail the build here instead.
+var (
+	_ KeyProtector = (*SoftwareProvider)(nil)
+	_ RootUnsealer = (*SoftwareProvider)(nil)
+)
+
 // NewSoftwareProvider returns a software provider with no root yet; the root
 // is generated at first use so that merely constructing one — which
 // [NewSealer] does by default — costs no locked memory.

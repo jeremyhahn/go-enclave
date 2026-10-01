@@ -1,6 +1,6 @@
 # golangci-lint configuration for go-enclave (Google Go style + security).
 # staticcheck, errcheck, unused, ineffassign, misspell, gocritic and the
-# ineffassign, misspell, gocritic and the security linters enabled.
+# security linters are enabled.
 version: "2"
 
 run:

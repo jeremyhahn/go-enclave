@@ -522,6 +522,21 @@ func TestWipeAll_ConcurrentWithAllocatorConstructionKeepsTheBudgetExact(t *testi
 				// passing every time pinned to a single CPU. The sleep is a
 				// small multiple of the sweeper's period, so the sweeper gets a
 				// turn on any machine.
+				//
+				// KNOWN WEAK: this is a passive wait, and it guarantees nothing.
+				// "A small multiple of the sweeper's period" is a scheduling hope,
+				// not an ordering: on a loaded host the sweeper can still miss
+				// every one of these windows, and the only thing standing between
+				// that and a silently half-tested run is the swept == 0 guard at
+				// the end, which turns it into a red build rather than a vacuous
+				// green one. The active replacement is test-only (no production
+				// seam is needed) — on some iterations hand the sweeper a reply
+				// channel AFTER New returns and block until it closes it, which
+				// makes the sweep-destroys-it branch certain rather than likely —
+				// but it changes which interleavings the race detector gets to
+				// see, so it has to be re-measured against the restored
+				// publication-order mutant (8/8 above) before it lands. Tracked
+				// in issue #83.
 				time.Sleep(25 * time.Microsecond)
 
 				if e.IsAlive() {
@@ -557,6 +572,17 @@ func TestWipeAll_ConcurrentWithAllocatorConstructionKeepsTheBudgetExact(t *testi
 			// including pinned to one CPU, and blew its own drain bound on the
 			// build runner.) The window this test aims at is entered once per
 			// construction, so sweeping far more often than that buys nothing.
+			//
+			// KNOWN WEAK: this sleep is pacing, not synchronization, and pacing
+			// by wall clock is exactly the thing that behaves differently on an
+			// idle machine and a loaded one. The rate it is trying to express —
+			// at most one sweep per construction — has an event to hang off: a
+			// worker could post to a one-slot kick channel just before each
+			// New, and this loop would block on that instead of the clock,
+			// sweeping exactly as often as there is a window to land in and
+			// burning nothing in between. Not done here because it is the same
+			// redesign as the worker-side sleep above and needs the same
+			// re-measurement against the mutant. Tracked in issue #83.
 			time.Sleep(10 * time.Microsecond)
 		}
 	}()
@@ -891,6 +917,61 @@ func TestWipeAll_ReportsHowManyEnclavesWereCorrupt(t *testing.T) {
 	if got := err.Error(); !strings.Contains(got, strconv.Itoa(corruptCount)) {
 		t.Errorf("WipeAll error = %q, want it to name how many enclaves were corrupt (%d): an operator "+
 			"reading one line needs the number, and a single sentinel cannot carry it", got, corruptCount)
+	}
+}
+
+// TestWipeAll_ReportsCorruptionWhoseReleaseWasRefused pins the case where
+// detecting corruption and reclaiming the pages are different attempts (#83).
+// The sweep finds a failed canary, wipes, and is then refused the munmap: the
+// enclave stays mapped, so it belongs in the count — and it is still corrupt,
+// which the count cannot say. Before #83 the sweep only tallied corruption on
+// the pass that reclaimed the pages, so a refusal that persisted for the whole
+// sweep reported a clean nil. Every one of the sweep's passes retries the same
+// enclave, so the figure in the message also pins that one enclave is counted
+// once rather than once per attempt.
+func TestWipeAll_ReportsCorruptionWhoseReleaseWasRefused(t *testing.T) {
+	if remaining := sweep(t); remaining != 0 {
+		t.Fatalf("the process already holds %d unwipeable enclaves; this test needs a clean ledger", remaining)
+	}
+
+	e, err := NewMemoryEnclaveSized(64)
+	if err != nil {
+		t.Fatalf("NewMemoryEnclaveSized: %v", err)
+	}
+	if len(e.m.canary) == 0 {
+		t.Fatal("no canary slack at this size; the test would be vacuous")
+	}
+	e.m.canary[0] ^= 0xFF
+
+	prev := freeMemory
+	t.Cleanup(func() {
+		freeMemory = prev
+		_, _ = WipeAll()
+	})
+	// VirtualUnlock semantics, so every pass after the first must skip the
+	// unlock its predecessor already did (#83).
+	installStrictUnlock(t)
+	freeMemory = func([]byte) error { return errors.New("munmap: cannot allocate memory") }
+
+	remaining, err := WipeAll()
+	if remaining != 1 {
+		t.Errorf("WipeAll = %d with the corrupt enclave's munmap refused, want 1: its pages are still mapped", remaining)
+	}
+	if !errors.Is(err, ErrEnclaveCorrupted) {
+		t.Fatalf("WipeAll error = %v, want one matching ErrEnclaveCorrupted: the corruption was detected "+
+			"and then lost because the pages could not be released", err)
+	}
+	if got := err.Error(); !strings.Contains(got, "1 of the swept enclaves failed canary verification") {
+		t.Errorf("WipeAll error = %q, want it to count the one corrupt enclave once, not once per pass", got)
+	}
+
+	freeMemory = prev
+	remaining, err = WipeAll()
+	if remaining != 0 {
+		t.Errorf("WipeAll = %d once munmap is allowed again, want 0", remaining)
+	}
+	if !errors.Is(err, ErrEnclaveCorrupted) {
+		t.Errorf("the sweep that reclaimed the corrupt enclave reported %v, want ErrEnclaveCorrupted", err)
 	}
 }
 

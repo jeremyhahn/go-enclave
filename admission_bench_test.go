@@ -45,8 +45,9 @@ const refusalBudgetBytes = 1
 //
 // What it does NOT cover, so that nobody reads more into a green run than is
 // there: the rare [Allocator.budgetSnapshot] fallback, which takes the read
-// lock deliberately and only in the overflow window, is never reached from
-// here — limit and free are both small and the pair is representable. That is
+// lock deliberately and only when a concurrent retune has left the lock-free
+// pair unrepresentable, is never reached from here — nothing retunes, and
+// limit and free are both small and the pair is representable. That is
 // the intended coverage. The fallback is not the path a flood drives, and a
 // benchmark that entered it would be measuring the exception rather than the
 // rule.

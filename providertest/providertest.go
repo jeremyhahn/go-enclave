@@ -180,20 +180,22 @@ type Config struct {
 
 // TestProvider runs the conformance suite against the provider cfg describes
 // and returns nil if it conforms. Otherwise it returns an error joining one
-// entry per failed property, each naming the property, what was observed and
-// what the seam requires — so a failure is actionable without reading this
-// package.
+// [*PropertyError] per failed property, each naming the property, what was
+// observed and what the seam requires — so a failure is actionable without
+// reading this package.
 //
-// A returned error means the provider does not honor the seam. A nil return
-// means every property the suite could MEASURE held; which ones it could not
-// measure, and why, went to [Config.Logf].
+// A returned error means the provider does not honor the seam, EXCEPT one
+// matching [ErrInvalidConfig] (a [*ConfigError]): that means cfg itself could
+// not be run, and no provider was tested at all. A nil return means every
+// property the suite could MEASURE held; which ones it could not measure, and
+// why, went to [Config.Logf].
 func TestProvider(cfg Config) error {
 	if cfg.New == nil {
-		return errors.New("providertest: Config.New is nil; the suite has no provider to test")
+		return &ConfigError{Field: "New", Reason: "is nil; the suite has no provider to test"}
 	}
 	if len(cfg.Modes) == 0 {
-		return errors.New("providertest: Config.Modes is empty; name the modes this provider serves, " +
-			"since an unnamed mode is one the suite requires NewSealer to refuse")
+		return &ConfigError{Field: "Modes", Reason: "is empty; name the modes this provider serves, " +
+			"since an unnamed mode is one the suite requires NewSealer to refuse"}
 	}
 
 	claims := make(map[enclave.Mode]bool, len(cfg.Modes))
@@ -202,7 +204,7 @@ func TestProvider(cfg Config) error {
 		case enclave.ModeRootKey, enclave.ModePerOperation:
 			claims[m] = true
 		default:
-			return fmt.Errorf("providertest: Config.Modes contains %v, which names no sealing mode", m)
+			return &ConfigError{Field: "Modes", Reason: "contains " + m.String() + ", which names no sealing mode"}
 		}
 	}
 
@@ -228,7 +230,7 @@ type report struct {
 
 // fail records a failed property.
 func (r *report) fail(property, format string, args ...any) {
-	r.failures = append(r.failures, fmt.Errorf("%s: %s", property, fmt.Sprintf(format, args...)))
+	r.failures = append(r.failures, &PropertyError{Property: property, Detail: fmt.Sprintf(format, args...)})
 }
 
 // note records something a reader of a GREEN run needs to know — chiefly, what
@@ -266,11 +268,10 @@ func modeInterface(m enclave.Mode) string {
 func newProvider(cfg Config) (any, error) {
 	p, err := cfg.New()
 	if err != nil {
-		return nil, fmt.Errorf("Config.New: %w", err)
+		return nil, &stepError{step: "Config.New", err: err}
 	}
 	if isNilProvider(p) {
-		return nil, fmt.Errorf("Config.New returned a nil provider (%T); a typed nil satisfies the seam "+
-			"interfaces and panics at the first call, which is why NewSealer refuses it with ErrProviderMode", p)
+		return nil, &nilProviderError{provider: p}
 	}
 	return p, nil
 }
@@ -298,8 +299,7 @@ func newProtector(cfg Config) (enclave.KeyProtector, error) {
 	}
 	kp, ok := p.(enclave.KeyProtector)
 	if !ok {
-		return nil, fmt.Errorf("%T does not implement enclave.KeyProtector, "+
-			"which Config.Modes claims it serves ModePerOperation with", p)
+		return nil, &missingSeamError{provider: p, iface: "enclave.KeyProtector", mode: "ModePerOperation"}
 	}
 	return kp, nil
 }
@@ -312,8 +312,7 @@ func newUnsealer(cfg Config) (enclave.RootUnsealer, error) {
 	}
 	ru, ok := p.(enclave.RootUnsealer)
 	if !ok {
-		return nil, fmt.Errorf("%T does not implement enclave.RootUnsealer, "+
-			"which Config.Modes claims it serves ModeRootKey with", p)
+		return nil, &missingSeamError{provider: p, iface: "enclave.RootUnsealer", mode: "ModeRootKey"}
 	}
 	return ru, nil
 }
@@ -322,7 +321,7 @@ func newUnsealer(cfg Config) (enclave.RootUnsealer, error) {
 func randKey() ([]byte, error) {
 	k := make([]byte, keyBytes)
 	if _, err := rand.Read(k); err != nil {
-		return nil, fmt.Errorf("generating a test key: %w", err)
+		return nil, &stepError{step: "generating a test key", err: err}
 	}
 	return k, nil
 }

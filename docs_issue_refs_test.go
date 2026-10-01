@@ -222,10 +222,37 @@ var docIssueRefLedger = []docIssueRef{
 	{"registry.go", 2, classHistorical, "df0e1f9aa49f", "Option B (#2) deleted memguard's process-global registry because"},
 	{"registry.go", 20, classHistorical, "99e173cd6f5b", "on the one guarantee this function makes (Codex, PR #20)."},
 	{"registry.go", 33, classHistorical, "7cc13ef4b8e8", "NOT be extended to cover them (#33, decided), for three reasons"},
-	{"sealed.go", 33, classHistorical, "92d72215ed9e", "and will not cover this type (#33, decided): its count means"},
+	{"sealed.go", 33, classHistorical, "30c3a6a7d81a", "and will not cover this type (#33, decided): its count means"},
 	{"sealed.go", 34, classHistorical, "08a2e0f591db", "instead, so this call fails on every seal (#34, closed)."},
 	{"sealer.go", 50, classHistorical, "2460085c0048", "(the Decrypter/Signer adapter, since split out to issue #50)."},
 	{"sealer.go", 50, classHistorical, "7ae0030527d1", "split out of the initial seam PR to its own decision (issue #50)."},
+
+	// #83 — the release-readiness review fixes: a negative BudgetError.InUse,
+	// Destroy panicking on a refused release, corruption lost across a retried
+	// release, constructor refunds for pages still locked, and a second
+	// UnsealRoot after a failed KEK mint.
+	{"admission.go", 83, classHistorical, "4b2b25d03852", "had no handle left to release (#83) — so an allocator sized"},
+	{"admission.go", 83, classHistorical, "484e8e1660b7", "(free < 0) and reported that -2 pages as the bytes in use (#83)."},
+	{"enclave.go", 83, classHistorical, "653549ee0dff", "and the constructors' refund depends on the difference (#83)."},
+	{"registry.go", 83, classHistorical, "43aec9096d4b", "— the memory-safety event this error exists to surface (#83)."},
+	{"admission.go", 83, classHistorical, "c85d9f81b7c3", "against and the difference is negative without wrapping (#83)."},
+	{"enclave.go", 83, classHistorical, "82c2bdc4fc96", "the caller can act on by retrying, and until #83 it panicked too."},
+	{"enclave.go", 83, classHistorical, "97ad0733c40d", "failure too, contrary to every statement of the contract (#83)."},
+	{"enclave.go", 83, classHistorical, "00281b3a6391", "Since #83 a release that detects corruption and is then refused"},
+	{"enclave.go", 83, classHistorical, "135e07374702", "— so the reservation behind them cannot be returned (#83)."},
+	{"mapping.go", 83, classHistorical, "5b7d3eb07943", "Before #83 that retry re-verified and reported a clean release;"},
+	{"mapping.go", 83, classHistorical, "070f60205562", "[pagesHeldError] whenever nothing could unmap the region (#83)."},
+	{"mapping.go", 83, classHistorical, "e911311e30e0", "A retried release must not unlock again (#83)."},
+	{"mapping.go", 83, classHistorical, "5dcada135818", "release reads it to keep that fallback on every RETRY (#83)."},
+	{"admission.go", 83, classHistorical, "f675c1026c13", "Before #83 the mapping was dropped instead, and the charge was"},
+	{"enclave.go", 83, classHistorical, "fe9f3986f6ad", "And the mark carries the MAPPING (#83)."},
+	{"registry.go", 83, classHistorical, "6132c9fe7336", "ledger, of orphans, that WipeAll retries the same way (#83)."},
+	{"registry.go", 83, classHistorical, "6ce9bfdcf9fe", "hand back to the kernel, kept so [WipeAll] can retry it (#83)."},
+	{"registry.go", 83, classHistorical, "2962738fb8a3", "failed constructions whose release is still being refused (#83)."},
+	{"mapping.go", 83, classHistorical, "93155c342373", "a fresh comparison of the zeroes that run left behind (#83)."},
+	{"mapping.go", 83, classHistorical, "f63c87effc61", "as leaving the pages held (#83): dropping the refusal would"},
+	{"sealer.go", 83, classHistorical, "81b218859bb5", "root (a consumed unseal handle) cannot be asked again (#83)."},
+	{"sealer.go", 83, classHistorical, "b4d203577ea8", "again — what this did until #83 — called UnsealRoot a"},
 
 	// providertest — the conformance suite added by #64, in its own package.
 	// Scanned because the file walk is recursive; a root-only scan would have

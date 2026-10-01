@@ -20,11 +20,13 @@
 #   - every folded fragment is deleted; changelog.d/.gitkeep stays.
 #
 # It fails, changing nothing, when: the version section already exists and
-# fragments are still waiting (they would be silently left out); there is no
+# fragments are still waiting, or `## [Unreleased]` still holds an entry
+# (either would be silently left out); there is no
 # `## [Unreleased]` heading; a fragment or the Unreleased body has text outside
 # a `### ` subsection, or a `#`/`##` heading of its own; or there is nothing at
-# all to release. When the version section already exists and no fragment is
-# waiting it is a no-op, so a section written by hand still releases.
+# all to release. When the version section already exists, no fragment is
+# waiting and [Unreleased] is empty it is a no-op, so a section written by
+# hand still releases.
 set -eu
 export LC_ALL=C
 
@@ -53,7 +55,18 @@ fi
 esc=$(printf '%s' "$version" | sed 's/[.]/\\./g')
 if grep -Eq "^## +\[?$esc\]?( |\$)" "$changelog"; then
   [ $# -eq 0 ] || die "$changelog already has a section for $version but $# fragment(s) are still in $fragdir/ — they would be left out of the release: $*"
-  echo "changelog-assemble: $changelog already has a section for $version and no fragment is waiting; nothing to do"
+  # The same hazard from the other side: entries still under [Unreleased]
+  # would be tagged OUTSIDE the release they were written for. A bare
+  # `### ` heading is not an entry — the fold drops empty subsections too —
+  # but any other non-blank line is, stray text included.
+  pending=$(awk '
+    /^## +\[Unreleased\][ \t]*$/ { inside = 1; next }
+    inside && /^## / { exit }
+    inside && /^### / { next }
+    inside && !/^[ \t]*$/ { print; exit }
+  ' "$changelog")
+  [ -z "$pending" ] || die "$changelog already has a section for $version but [Unreleased] still holds entries — they would be left out of the release: $pending"
+  echo "changelog-assemble: $changelog already has a section for $version, no fragment is waiting and [Unreleased] is empty; nothing to do"
   exit 0
 fi
 

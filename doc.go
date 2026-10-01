@@ -19,9 +19,9 @@
 // A core file would write those pages to disk in plaintext, so they are kept out
 // of one at two levels: RLIMIT_CORE is lowered process-wide on import, which is
 // best effort and reported by [CoreDumpsDisabled] rather than assumed, and every
-// enclave's pages are additionally marked MADV_DONTDUMP as they are locked. The
-// second one is checked rather than attempted-and-forgotten: its error fails the
-// allocation. That the refusal is REPORTED at all is covered by a test; that the
+// enclave's pages are additionally marked MADV_DONTDUMP (MADV_NOCORE on FreeBSD)
+// as they are locked. The second one is checked rather than
+// attempted-and-forgotten: its error fails the allocation. That the refusal is REPORTED at all is covered by a test; that the
 // report is acted on at the call site is guaranteed by construction, being one
 // branch in [newMapping] that no test can reach — the region it passes is always
 // page-aligned, and an aligned madvise does not fail.
@@ -41,7 +41,9 @@
 //
 // [MemoryEnclave.Destroy] PANICS when the canary guarding an enclave did not
 // verify, after wiping the material, releasing the pages and returning any
-// [Allocator] reservation. Everything else in this package hands failures back;
+// [Allocator] reservation — or, if the kernel refuses that release, after wiping
+// and keeping the pages and the reservation for a retry. Everything else in this
+// package hands failures back, a refused release included;
 // this one does not, and the distinction is deliberate rather than an oversight.
 // A failed canary means memory the enclave did not own was written — the state a
 // caller would use to handle the error is the state that is already wrong — and
@@ -195,7 +197,8 @@
 // # Shutdown
 //
 // WipeAll destroys every enclave the package has handed out and not yet
-// reclaimed. It is for an ORDERLY EXIT — a signal handler, a defer in main —
+// reclaimed, and retries the pages of any construction whose failure left them
+// mapped. It is for an ORDERLY EXIT — a signal handler, a defer in main —
 // where locked memory still held is material that should not outlive the
 // process. Nothing calls it for you.
 //
@@ -207,17 +210,19 @@
 // retried on later passes, so a momentary reader costs a pass rather than the
 // enclave; only one still held after every pass is counted.
 //
-// It returns two independent things. The COUNT is how many enclaves are still
-// holding locked memory, so a non-zero value means workers outlived the
-// shutdown. That is often an ordering problem in the caller and is not
-// necessarily one, since a read outlasting the bounded retry budget (about
-// 1.4ms) produces the same number — read it as "these were still in use,"
-// not as a diagnosis. The ERROR reports detected canary
-// corruption, matching ErrEnclaveCorrupted exactly as Destroy's panic value
-// does. They are orthogonal: a corrupt enclave's pages ARE reclaimed, so it
-// never appears in the count, and without a second return value the fact that
-// something wrote into memory it did not own would vanish at exit behind a zero
-// that looks like success. Destroy panics on that same condition because a
+// It returns two different things. The COUNT is what is still held: enclaves
+// and failed constructions' mappings whose pages are still mapped. A non-zero
+// value most often means workers outlived the shutdown, but a read outlasting
+// the bounded retry budget (about 1.4ms) produces the same number, and so does
+// a kernel still refusing to take pages back — read it as "these were still
+// held," not as a diagnosis. The ERROR reports what the sweep found: detected
+// canary corruption, matching ErrEnclaveCorrupted exactly as Destroy's panic
+// value does, and enclaves unmapped without an in-process wipe because mprotect
+// was denied, matching ErrReleasedWithoutWipe. Neither is a held page, so the
+// count cannot carry them; they overlap only for a corrupt enclave whose pages
+// the kernel then refused to give back, which is in both. Without the error
+// the fact that something wrote into memory it did not own would vanish at
+// exit behind a zero that looks like success. Destroy panics on that same condition because a
 // single enclave's caller cannot act on state that is by definition wrong; a
 // sweep must not abort, but non-fatal must not mean invisible either.
 //

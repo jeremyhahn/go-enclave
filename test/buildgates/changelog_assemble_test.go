@@ -192,6 +192,43 @@ func TestChangelogAssemble_HandWrittenSectionWithNoFragmentsStillReleases(t *tes
 	}
 }
 
+// TestChangelogAssemble_RefusesUnreleasedEntriesLeftOutOfAHandWrittenSection is
+// the other half of the fragment refusal above. With the version section
+// already written and no fragment waiting, the script used to take its no-op
+// exit without looking at [Unreleased] at all, so `make release-alpha` tagged a
+// CHANGELOG whose release section silently omitted every entry still sitting
+// there. A bare subsection heading is not an entry and must not block — that
+// row keeps the refusal from being satisfied by refusing everything.
+func TestChangelogAssemble_RefusesUnreleasedEntriesLeftOutOfAHandWrittenSection(t *testing.T) {
+	section := "\n## [v9.9.9-alpha] - 2026-01-01\n\n### Added\n\n- HAND-WRITTEN\n\n" + assemblePrevious
+	cases := []struct {
+		name       string
+		unreleased string
+		wantOK     bool
+	}{
+		{"an entry under a subsection", "\n### Fixed\n\n- STILL-UNRELEASED\n", false},
+		{"stray text with no subsection", "\n- STILL-UNRELEASED\n", false},
+		{"only an empty subsection heading", "\n### Fixed\n\n", true},
+		{"only blank lines", "\n\n", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			changelog := assembleHeader + tc.unreleased + section
+			dir := assembleTree(t, changelog, nil)
+			out, ok := runAssemble(t, dir)
+			if ok != tc.wantOK {
+				t.Fatalf("assembly ok = %v, want %v:\n%s", ok, tc.wantOK, out)
+			}
+			if !ok && !strings.Contains(out, "STILL-UNRELEASED") {
+				t.Errorf("the refusal does not quote the entry it would leave out:\n%s", out)
+			}
+			if got := readFile(t, filepath.Join(dir, "CHANGELOG.md")); got != changelog {
+				t.Errorf("assembly against an existing section modified CHANGELOG.md:\n%s", got)
+			}
+		})
+	}
+}
+
 func TestChangelogAssemble_RefusesWhatItCannotPlace(t *testing.T) {
 	good := assembleHeader + "\n" + assemblePrevious
 	cases := []struct {

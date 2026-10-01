@@ -32,6 +32,35 @@ COVERAGE_PROFILE := coverage.out
 # workflow refuses to network-install over the baked copy).
 GOLANGCI_VERSION := v2.13.2
 
+# The toolchain this module selects (go.mod's go/toolchain line), resolved HERE,
+# inside the module, and handed to every `go install tool@version` below.
+#
+# Without it the installs are built by whatever toolchain the TOOL's go.mod asks
+# for: `go install pkg@version` runs outside this module's context, so under
+# GOTOOLCHAIN=auto it switches to the tool's own floor. Measured on a host
+# whose PATH go is 1.24.3: golangci-lint and staticcheck were both built with
+# go1.26.8, and both then refused this go 1.27.0 module — "the Go language
+# version (go1.26) used to build golangci-lint is lower than the targeted Go
+# version (1.27.0)", and staticcheck died parsing the 1.27 stdlib. `make ci`
+# failed at lint on a tree CI passes, which is the drift TESTFLAGS exists to
+# prevent.
+TOOLCHAIN := $(shell $(GOCMD) env GOVERSION)
+GOINSTALL := GOTOOLCHAIN=$(TOOLCHAIN) $(GOCMD) install
+
+# The coverage floor, the same figure ci.yml's COVERAGE_THRESHOLD enforces.
+# Raise the two together.
+COVERAGE_THRESHOLD ?= 90
+
+# Every GOOS/GOARCH pair a consumer may build this library for. 386 and arm are
+# here because a 32-bit target is where a uintptr comparison against
+# math.MaxInt64 stops compiling (security-review.md §5), and that is exactly how
+# providertest shipped unbuildable on 32-bit Linux through v0.6.1-alpha: nothing
+# built it. dragonfly is ABSENT on purpose — the pinned memcall v0.5.0 does not
+# compile there (it references unix.MADV_DONTDUMP, which x/sys does not define
+# for dragonfly), so it is unsupported until that dependency is.
+CROSS_TARGETS := linux/amd64 linux/arm64 linux/386 linux/arm \
+	darwin/amd64 darwin/arm64 freebsd/amd64 openbsd/amd64 netbsd/amd64 windows/amd64
+
 .PHONY: all
 all: ci
 
@@ -90,25 +119,25 @@ tidy:
 ## lint: golangci-lint (pinned)
 .PHONY: lint
 lint:
-	@go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_VERSION)
+	@$(GOINSTALL) github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_VERSION)
 	@$$(go env GOPATH)/bin/golangci-lint run --timeout=5m $(PKG)
 
 ## staticcheck: honnef.co staticcheck
 .PHONY: staticcheck
 staticcheck:
-	@go install honnef.co/go/tools/cmd/staticcheck@latest
+	@$(GOINSTALL) honnef.co/go/tools/cmd/staticcheck@latest
 	@$$(go env GOPATH)/bin/staticcheck $(PKG)
 
 ## gosec: security static analysis
 .PHONY: gosec
 gosec:
-	@go install github.com/securego/gosec/v2/cmd/gosec@latest
+	@$(GOINSTALL) github.com/securego/gosec/v2/cmd/gosec@latest
 	@$$(go env GOPATH)/bin/gosec -quiet -exclude-dir=test -severity=medium -confidence=medium $(PKG)
 
 ## govulncheck: known-vuln scan (also the toolchain-currency forcing function)
 .PHONY: govulncheck
 govulncheck:
-	@go install golang.org/x/vuln/cmd/govulncheck@latest
+	@$(GOINSTALL) golang.org/x/vuln/cmd/govulncheck@latest
 	@$$(go env GOPATH)/bin/govulncheck $(PKG)
 
 ## modverify: verify module integrity
@@ -158,9 +187,13 @@ test:
 .PHONY: coverage
 # Same shape as the CI step, matrix included: coverage is measured on the run
 # that actually gates, not on a cheaper one that exercises less.
+# The threshold is enforced HERE, not only in the workflow (project-scaffold §6,
+# devops §4): a floor that exists only in ci.yml cannot be reproduced locally.
 coverage:
 	$(GOTEST) $(TESTFLAGS) -covermode=atomic -timeout=900s -coverprofile=$(COVERAGE_PROFILE) $(PKG)
-	$(GOCMD) tool cover -func=$(COVERAGE_PROFILE) | tail -1
+	@TOTAL=$$($(GOCMD) tool cover -func=$(COVERAGE_PROFILE) | awk '/^total:/ {sub("%","",$$3); print $$3}'); \
+	echo "Total coverage: $$TOTAL% (floor $(COVERAGE_THRESHOLD)%)"; \
+	awk -v t="$$TOTAL" -v f="$(COVERAGE_THRESHOLD)" 'BEGIN { exit !(t+0 >= f+0) }' || { echo "FAIL: coverage $$TOTAL% is below the $(COVERAGE_THRESHOLD)% floor"; exit 1; }
 
 ## test-fips: build + unit tests under Go native FIPS 140-3 strict mode
 # Mirrors the `test` scope exactly; only the FIPS env differs (security-review.md
@@ -177,9 +210,18 @@ test-fips:
 build:
 	$(GOCMD) build $(PKG)
 
+## cross-build: compile (and vet) every package for every supported GOOS/GOARCH
+.PHONY: cross-build
+cross-build:
+	@set -e; for t in $(CROSS_TARGETS); do \
+	  echo "cross-build $$t"; \
+	  GOOS=$${t%/*} GOARCH=$${t#*/} $(GOCMD) build $(PKG); \
+	  GOOS=$${t%/*} GOARCH=$${t#*/} $(GOCMD) vet $(PKG); \
+	done
+
 ## ci: the full local gate
 .PHONY: ci
-ci: tidy fmt-check vet check-action-pins check-releasability check-changelog-assembly lint staticcheck security test build
+ci: tidy fmt-check vet check-action-pins check-releasability check-changelog-assembly lint staticcheck security test build cross-build
 	@echo "CI pipeline completed successfully"
 
 ## deps-latest: bump internal dependencies to their latest tags (none today)
@@ -223,6 +265,13 @@ deps-latest:
 # release.yml only rewrites the runner-workspace copy. If the section was
 # written by hand and a fragment is still waiting, the script refuses rather
 # than tag a CHANGELOG that leaves it out.
+#
+# Fourth, the remote-tag guard fails CLOSED. It used to read
+# `! git ls-remote ... dev ...`, and `!` turns EVERY failure into a pass —
+# including exit 128 from a clone with no `dev` remote at all, measured passing
+# for the already-published v0.6.1-alpha. The recipe then committed VERSION,
+# tagged locally and died at the push. Exit 2 (no such ref) is the only answer
+# that means "free"; anything else is an unanswered question.
 .PHONY: release-alpha
 release-alpha:
 	@test -n '$(AGENT_GIT)' || { echo 'ERROR: AGENT_GIT is unset - point it at your commit-signing/release wrapper (maintainer tooling; not needed to build or test)'; exit 1; }
@@ -231,7 +280,13 @@ release-alpha:
 	@echo "$(VERSION)" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+-alpha$$' || { echo "ERROR: '$(VERSION)' is not vX.Y.Z-alpha"; exit 1; }
 	@test -n "$(REPO_NAME)" || { echo "ERROR: REPO_NAME is empty — set it to the literal repo name in the Makefile, never \$$(notdir \$$(CURDIR))"; exit 1; }
 	@! git rev-parse -q --verify "refs/tags/$(VERSION)" >/dev/null || { echo "ERROR: tag $(VERSION) already exists locally"; exit 1; }
-	@! git ls-remote --exit-code --tags dev "refs/tags/$(VERSION)" >/dev/null 2>&1 || { echo "ERROR: tag $(VERSION) already exists on dev (a local check alone would miss this and fail the push AFTER committing VERSION)"; exit 1; }
+	@git remote get-url dev >/dev/null 2>&1 || { echo "ERROR: no 'dev' remote. The Gitea remote is named dev (version-control.md §2): git remote rename origin dev"; exit 1; }
+	@rc=0; git ls-remote --exit-code --tags dev "refs/tags/$(VERSION)" >/dev/null 2>&1 || rc=$$?; \
+	case $$rc in \
+	  0) echo "ERROR: tag $(VERSION) already exists on dev (a local check alone would miss this and fail the push AFTER committing VERSION)"; exit 1 ;; \
+	  2) ;; \
+	  *) echo "ERROR: could not query dev for tag $(VERSION) (git ls-remote exit $$rc) — refusing to release on an unanswered check"; exit 1 ;; \
+	esac
 	@test -z "$$(git status --porcelain)" || { echo "ERROR: working tree not clean"; exit 1; }
 	sh scripts/changelog-assemble.sh "$(VERSION)" "$$(date -u +%Y-%m-%d)"
 	@grep -Eq '^#+ +\[?'"$(VERSION)"'\]?' CHANGELOG.md || { echo "ERROR: CHANGELOG.md has no release SECTION heading for $(VERSION) (an unanchored prose mention does not count)"; exit 1; }

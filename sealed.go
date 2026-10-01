@@ -415,7 +415,7 @@ func newKeyEnclave(n int) (*MemoryEnclave, error) {
 // [WipeAll].
 //
 // The sweep does not and will not cover this type (#33, decided): its count
-// means "still holding locked memory", and a sealed value holds none, so
+// means "still holding this package's pages", and a sealed value holds none, so
 // covering it would either corrupt that number or need a second one. More
 // than costly, it would be WRONG — a per-operation hardware value stays
 // legitimately openable after a sweep, and destroying it would destroy

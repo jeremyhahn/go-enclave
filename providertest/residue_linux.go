@@ -14,6 +14,7 @@ import (
 	"bytes"
 	"io"
 	"math"
+	"math/bits"
 	"os"
 	"strconv"
 	"strings"
@@ -111,11 +112,14 @@ func mappingContains(mem io.ReaderAt, lo, hi uintptr, needle, buf []byte) bool {
 
 	overlap := len(needle) - 1
 	for off := lo; off < hi; {
-		if off > math.MaxInt64 {
+		if uint64(off) > math.MaxInt64 {
 			// Unreachable on every architecture this builds for — a user-space
 			// address lives far below 2^63 — but ReadAt takes a SIGNED offset,
 			// and a wrap here would silently scan a wildly different region and
-			// report a clean sweep of it.
+			// report a clean sweep of it. The comparison is widened to uint64
+			// because on a 32-bit target uintptr cannot hold math.MaxInt64 and
+			// the untyped constant would not compile; there the guard is simply
+			// always false, which is the truth.
 			return false
 		}
 		n := len(buf)
@@ -139,6 +143,12 @@ func mappingContains(mem io.ReaderAt, lo, hi uintptr, needle, buf []byte) bool {
 
 // parseMapsHeader recognizes a /proc/self/maps line ("7f0c…-7f0c… rw-p …") and
 // returns its bounds.
+//
+// The bounds are parsed at the width of a uintptr (bits.UintSize, which every
+// Go port keeps equal to the pointer size), not a fixed 64: on a 32-bit target
+// a value that does not fit is not an address in this process, and narrowing it
+// would silently scan — or exclude as home — a different range than the line
+// names. It is reported as unparsable instead.
 func parseMapsHeader(line string) (lo, hi uintptr, ok bool) {
 	first, _, cut := strings.Cut(line, " ")
 	if !cut {
@@ -148,11 +158,11 @@ func parseMapsHeader(line string) (lo, hi uintptr, ok bool) {
 	if !cut {
 		return 0, 0, false
 	}
-	lv, err := strconv.ParseUint(l, 16, 64)
+	lv, err := strconv.ParseUint(l, 16, bits.UintSize)
 	if err != nil {
 		return 0, 0, false
 	}
-	rv, err := strconv.ParseUint(r, 16, 64)
+	rv, err := strconv.ParseUint(r, 16, bits.UintSize)
 	if err != nil {
 		return 0, 0, false
 	}

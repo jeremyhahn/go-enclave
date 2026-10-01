@@ -831,19 +831,22 @@ func TestSuiteCatchesARootDestinationThatIsNeverPopulated(t *testing.T) {
 
 func TestConfigIsValidated(t *testing.T) {
 	tests := []struct {
-		name string
-		cfg  Config
-		want string
+		name  string
+		cfg   Config
+		want  string
+		field string
 	}{
 		{
-			name: "no provider",
-			cfg:  Config{Modes: []enclave.Mode{enclave.ModeRootKey}},
-			want: "Config.New is nil",
+			name:  "no provider",
+			cfg:   Config{Modes: []enclave.Mode{enclave.ModeRootKey}},
+			want:  "Config.New is nil",
+			field: "New",
 		},
 		{
-			name: "no modes claimed",
-			cfg:  Config{New: func() (any, error) { return software(), nil }},
-			want: "Config.Modes is empty",
+			name:  "no modes claimed",
+			cfg:   Config{New: func() (any, error) { return software(), nil }},
+			want:  "Config.Modes is empty",
+			field: "Modes",
 		},
 		{
 			name: "a mode that names nothing",
@@ -851,7 +854,8 @@ func TestConfigIsValidated(t *testing.T) {
 				New:   func() (any, error) { return software(), nil },
 				Modes: []enclave.Mode{enclave.Mode(99)},
 			},
-			want: "names no sealing mode",
+			want:  "Config.Modes contains Mode(99), which names no sealing mode",
+			field: "Modes",
 		},
 	}
 	for _, tc := range tests {
@@ -863,7 +867,41 @@ func TestConfigIsValidated(t *testing.T) {
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("TestProvider(%s) = %v, want it to mention %q", tc.name, err, tc.want)
 			}
+			// A harness mistake must be distinguishable from a provider
+			// defect without parsing the message.
+			if !errors.Is(err, ErrInvalidConfig) {
+				t.Errorf("TestProvider(%s) = %v, want an error matching ErrInvalidConfig", tc.name, err)
+			}
+			var ce *ConfigError
+			if !errors.As(err, &ce) || ce.Field != tc.field {
+				t.Errorf("TestProvider(%s) = %#v, want a *ConfigError naming Config.%s", tc.name, err, tc.field)
+			}
 		})
+	}
+}
+
+// TestPropertyFailuresAreTyped pins the other half of that distinction: a
+// provider that ran and failed reports every failure as a *PropertyError, and
+// none of them matches ErrInvalidConfig.
+func TestPropertyFailuresAreTyped(t *testing.T) {
+	cfg := perOp(func() (any, error) { return &silentProtector{inner: software()}, nil })
+	cfg.Logf = t.Logf
+	err := TestProvider(cfg)
+	if err == nil {
+		t.Fatal("the suite PASSED a provider whose Unprotect writes nothing")
+	}
+	if errors.Is(err, ErrInvalidConfig) {
+		t.Errorf("a provider defect matched ErrInvalidConfig:\n%v", err)
+	}
+	joined, ok := err.(interface{ Unwrap() []error })
+	if !ok {
+		t.Fatalf("TestProvider returned %T, want a joined error that can be walked per property", err)
+	}
+	for _, e := range joined.Unwrap() {
+		var pe *PropertyError
+		if !errors.As(e, &pe) || pe.Property == "" || pe.Detail == "" {
+			t.Errorf("a failure is not a populated *PropertyError: %#v", e)
+		}
 	}
 }
 

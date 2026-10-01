@@ -109,10 +109,11 @@ type BudgetError struct {
 	// a budget beneath live reservations on purpose, and until they drain this
 	// is what an over-subscribed allocator looks like from the refusal path.
 	//
-	// It is never negative. A byte count that has wrapped is not a stale
+	// It is never negative. A negative byte count — one that wrapped, or one
+	// computed from headroom read before a concurrent lowering — is not a stale
 	// reading but an impossible one, and a consumer graphing this or deciding
 	// on it cannot tell the difference; see [Allocator.budgetSnapshot] for the
-	// window that would otherwise produce one.
+	// windows that would otherwise produce one.
 	InUse int64
 	// Limit is the allocator's total budget in locked bytes.
 	Limit int64
@@ -426,13 +427,18 @@ func (a *Allocator) ceilingForRaise() (LockedMemoryLimit, error) {
 // wiped before this returns, on every path including refusal and construction
 // failure.
 //
-// Returns, all leaving the budget as it was found:
+// Returns, all leaving the budget as it was found except where noted:
 //   - ErrEmptyEnclave when data is empty (no reservation is taken);
 //   - ErrBudgetExhausted (as a [BudgetError]) when the page-rounded cost of
 //     len(data) would exceed the budget — decided before any locked memory is
 //     requested, so no syscall is made;
 //   - ErrLockedMemoryUnavailable if the kernel refuses the lock despite
-//     admission (the reservation is released before returning).
+//     admission. The reservation is released before returning — unless the
+//     failed construction's own cleanup was refused too and left locked pages
+//     behind, in which case the charge STAYS, because the process still holds
+//     that memory and the budget must not offer it again. The error then
+//     carries the cleanup failure alongside the original one, and the pages
+//     are kept for [WipeAll], which returns the charge once it reclaims them.
 //
 // On success the returned enclave holds a reservation of [LockedSize](len(data))
 // bytes — len(data) rounded up to a whole page — until its Destroy runs.
@@ -466,7 +472,7 @@ func (a *Allocator) New(data []byte) (*MemoryEnclave, error) {
 		// Admission succeeded but the OS still refused (or the input was
 		// rejected): release the reservation so the failure does not shrink
 		// the budget permanently. data was already wiped by newMemoryEnclave.
-		a.free.Add(charge)
+		a.refundFailed(charge, cerr)
 		return nil, cerr
 	}
 
@@ -496,13 +502,14 @@ func (a *Allocator) New(data []byte) (*MemoryEnclave, error) {
 // [Allocator.New], so a refusal costs no syscall. A non-positive size is one of
 // the things admission refuses, which is why no separate size check precedes it.
 //
-// Returns, all leaving the budget as it was found:
+// Returns, all leaving the budget as it was found except where noted:
 //   - ErrInvalidSize when n is a size no enclave can have — non-positive, or
 //     too large to map (no reservation is taken);
 //   - ErrBudgetExhausted (as a [BudgetError]) when the page-rounded cost of n
 //     would exceed the budget;
 //   - ErrLockedMemoryUnavailable if the kernel refuses the lock despite
-//     admission (the reservation is released before returning).
+//     admission. The reservation is released before returning unless the
+//     cleanup left locked pages behind, exactly as for [Allocator.New].
 //
 // On success the returned enclave holds a reservation of [LockedSize](n) bytes
 // — n rounded up to a whole page — until its Destroy runs, which callers must
@@ -520,7 +527,7 @@ func (a *Allocator) NewSized(n int) (*MemoryEnclave, error) {
 	if cerr != nil {
 		// Admission succeeded but the OS still refused: release the reservation
 		// so the failure does not shrink the budget permanently.
-		a.free.Add(charge)
+		a.refundFailed(charge, cerr)
 		return nil, cerr
 	}
 
@@ -528,6 +535,46 @@ func (a *Allocator) NewSized(n int) (*MemoryEnclave, error) {
 
 	// Publication last, for the reason spelled out in New.
 	return register(e), nil
+}
+
+// refundFailed returns a failed construction's charge to the budget — but only
+// when the failure left no locked pages behind.
+//
+// A constructor that fails after mapping and locking rolls the mapping back, and
+// that rollback can itself be refused: the kernel that just refused one thing is
+// the kernel most likely to refuse the next. Refunding unconditionally then told
+// the budget that memory was available which the process still held locked and
+// had no handle left to release (#83) — so an allocator sized against
+// RLIMIT_MEMLOCK would admit allocations the kernel could only refuse, the late,
+// uncorrelated [ErrLockedMemoryUnavailable] admission control exists to prevent.
+// The kept charge is refunded LATER, exactly once, when the pages finally go
+// back. A failed constructor hands back no enclave to retry through, so the
+// mapping goes onto the orphan ledger ([adoptOrphan]) with this refund attached,
+// and the [WipeAll] sweep that releases it runs the refund and drops the record.
+// Before #83 the mapping was dropped instead, and the charge was lost to the
+// budget for the process lifetime even after the refusal lifted.
+//
+// The policy is NOT DestroyErr's, and differs in one case. DestroyErr keeps an
+// enclave's reservation until the pages are UNMAPPED, since the enclave itself
+// is the handle a retry goes through. Here the charge is kept only while the
+// pages are still LOCKED: a cleanup that unlocked them and was then refused the
+// munmap costs address space, not locked memory, so it is refunded at once and
+// its orphan record carries no refund — a second one would return the charge
+// twice.
+//
+// The answer comes from the mapping layer, which marks such failures with
+// [pagesHeldError] and says whether the pages are still LOCKED; see
+// [mapping.abandon] for what counts. Every other failure — a refused mmap, a
+// refused mlock, a rollback that succeeded, a cleanup that unlocked the pages
+// and was then refused the munmap — leaves nothing locked and is refunded in
+// full.
+func (a *Allocator) refundFailed(charge int64, cerr error) {
+	if !lockedPagesHeld(cerr) {
+		a.free.Add(charge)
+		adoptOrphan(cerr, nil)
+		return
+	}
+	adoptOrphan(cerr, func() { a.free.Add(charge) })
 }
 
 // allocSized returns an enclave over n bytes of locked, zeroed memory,
@@ -621,23 +668,35 @@ func (a *Allocator) reserve(n int64) (int64, error) {
 // counter that goes with it, and reports whether the pair could express it.
 //
 // The subtraction is not obviously safe, which is why it is a named function
-// with its own tests rather than an expression at the call site. limit is always
-// in [0, MaxInt64] — every path that writes it refuses a negative — but free
-// goes NEGATIVE while an allocator is over-subscribed, and limit-free then
-// exceeds int64 for a large enough limit. It wraps to a negative byte count: a
-// figure that is not merely stale but impossible, and a consumer plotting it or
-// deciding on it has no way to tell.
+// with its own tests rather than an expression at the call site. A CONSISTENT
+// pair -- one read while no retune is moving either word -- always has free no
+// greater than limit, since free is the limit minus everything reserved. The
+// pairs the lock-free refusal path can actually hold are not always consistent,
+// and there are two distinct ways for the result to come out negative.
 //
-// The wrap is detected exactly rather than approximated. limit-free is only at
-// risk when free is negative, since a non-negative free makes the result no
-// larger than limit. And when free is negative the true result is greater than
-// limit and therefore positive, while a wrapped one lands in [MinInt64, -2] —
-// the sum cannot reach 2^64, so it can wrap at most once and can never come back
-// around into the positives. A negative result is therefore a wrap and nothing
-// else.
+// A WRAP. limit is always in [0, MaxInt64] — every path that writes it refuses
+// a negative — but free goes NEGATIVE while an allocator is over-subscribed, and
+// limit-free then exceeds int64 for a large enough limit. It wraps to a negative
+// byte count. When free is negative the true result is greater than limit and
+// therefore positive, while a wrapped one lands in [MinInt64, -2] — the sum
+// cannot reach 2^64, so it can wrap at most once and can never come back around
+// into the positives.
+//
+// A STALE HEADROOM. free was read before a LOWERING landed and limit after it,
+// so free exceeds limit and the ordinary subtraction is negative with nothing
+// wrapped at all: an empty allocator refusing a three-page request at two pages
+// free, quiesced by SetLimit(0) between the two loads, pairs a limit of 0 with
+// two pages of headroom. An earlier revision tested only for the wrap (free < 0)
+// and reported that -2 pages as the bytes in use (#83).
+//
+// Both are figures that are not merely stale but impossible, and a consumer
+// plotting one or deciding on it has no way to tell. Neither can be told apart
+// from the other by the result, and neither needs to be: a reserved-byte count
+// is never negative, so a negative result means the pair did not describe one
+// state, whichever way it failed to. That is the whole test.
 func inUseFrom(limit, free int64) (int64, bool) {
 	used := limit - free
-	if free < 0 && used < 0 {
+	if used < 0 {
 		return 0, false
 	}
 	return used, true
@@ -652,21 +711,32 @@ func inUseFrom(limit, free int64) (int64, bool) {
 // skews the figures by the size of that retune, which [BudgetError] documents.
 //
 // Skewed is tolerable. UNREPRESENTABLE is not, and the two are not the same
-// thing. [Allocator.raiseLocked] stores the new limit before crediting free, so
-// an over-subscribed allocator being raised to a very large budget has a window
-// — a couple of instructions wide — in which a lock-free reader sees a huge
-// limit beside a still-negative free and computes a byte count that wrapped.
-// Nothing else reaches that state: outside a retune the pair is consistent, and
-// a consistent pair with a negative free necessarily has a small limit.
+// thing. Two retunes can leave the lock-free reader holding a pair that
+// describes no state the allocator was ever in:
+//
+//   - [Allocator.raiseLocked] stores the new limit before crediting free, so an
+//     over-subscribed allocator being raised to a very large budget has a
+//     window — a couple of instructions wide — in which a reader sees a huge
+//     limit beside a still-negative free and computes a byte count that
+//     wrapped.
+//   - A LOWERING — [Allocator.SetLimit], [Allocator.ForceLimit] or a
+//     [Allocator.TransferTo] out of this allocator — can land between the
+//     refusal's load of free and its load of limit, so the free it was decided
+//     on is larger than the limit it is quoted against and the difference is
+//     negative without wrapping (#83). This one needs no over-subscription and
+//     no extreme budget: quiescing an idle allocator is enough.
+//
+// [inUseFrom] reports both the same way, as a pair it cannot express, and
+// outside a retune the pair is consistent and expressible.
 //
 // So the fallback takes the read lock, and ONLY there. It excludes retunes, so
 // limit is pinned and free is the headroom that belongs to it, which makes
-// limit-free exactly the bytes reserved — and representable, since that
-// difference is the reserved total and a reserved total is an int64 by
-// construction. Because the window is a few instructions wide and needs an
-// over-subscribed allocator being raised at that instant, the ordinary refusal
-// — the one an unauthenticated flood drives, and the reason this path avoids
-// syscalls and locks in the first place — stays lock-free.
+// limit-free exactly the bytes reserved — and representable and non-negative,
+// since that difference is the reserved total and a reserved total is a
+// non-negative int64 by construction. Because both windows are a few
+// instructions wide and need a retune landing at that instant, the ordinary
+// refusal — the one an unauthenticated flood drives, and the reason this path
+// avoids syscalls and locks in the first place — stays lock-free.
 func (a *Allocator) budgetSnapshot(free int64) (int64, int64) {
 	limit := a.limit.Load()
 	if inUse, ok := inUseFrom(limit, free); ok {

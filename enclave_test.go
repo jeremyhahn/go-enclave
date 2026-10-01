@@ -628,3 +628,162 @@ func TestEqualToErrSeparatesMismatchFromDestroyed(t *testing.T) {
 		}
 	})
 }
+
+// panicValue runs fn and returns what it panicked with, or nil.
+func panicValue(fn func()) (r any) {
+	defer func() { r = recover() }()
+	fn()
+	return nil
+}
+
+// isRegistered reports whether e is still on the shutdown ledger.
+func isRegistered(e *MemoryEnclave) bool {
+	registryMu.Lock()
+	defer registryMu.Unlock()
+	_, ok := live[e]
+	return ok
+}
+
+// TestDestroy_ReleaseFailureIsReturnedNotPanicked is the regression for #83's
+// Destroy finding: a plain release failure — the munlock or munmap after a
+// successful wipe refused, ENOMEM at vm.max_map_count being the realistic one —
+// PANICKED, because DestroyErr panicked on every error that was not
+// ErrReleasedWithoutWipe. The documentation on Destroy, DestroyErr and the
+// package said only detected corruption panics, and a resource refusal is the
+// opposite of a state the caller cannot reason about: the material is gone, the
+// pages are held for a retry, and a retry is exactly what the caller should do.
+//
+// Asserts the whole retained-for-retry contract, not just the absence of the
+// panic: the error is returned and typed, the mapping is kept, the enclave reads
+// destroyed, it stays on the ledger for WipeAll, the Allocator keeps the charge
+// for the pages the kernel still holds — and a retry once the refusal lifts
+// completes the release and returns all of it.
+func TestDestroy_ReleaseFailureIsReturnedNotPanicked(t *testing.T) {
+	a, err := NewAllocator(4 * pageSize)
+	if err != nil {
+		t.Fatalf("NewAllocator: %v", err)
+	}
+	e, err := a.New([]byte("material whose pages the kernel will not take back"))
+	if err != nil {
+		t.Fatalf("Allocator.New: %v", err)
+	}
+
+	denied := errors.New("munlock: cannot allocate memory")
+	prev := unlockMemory
+	t.Cleanup(func() {
+		unlockMemory = prev
+		if e.m != nil {
+			_ = e.DestroyErr()
+		}
+	})
+	unlockMemory = func([]byte) error { return denied }
+
+	var derr error
+	if r := panicValue(func() { derr = e.DestroyErr() }); r != nil {
+		t.Fatalf("DestroyErr panicked with %v on a release failure that is not corruption", r)
+	}
+	if !errors.Is(derr, ErrLockedMemoryUnavailable) || !errors.Is(derr, denied) {
+		t.Fatalf("DestroyErr = %v, want the refused munlock as ErrLockedMemoryUnavailable", derr)
+	}
+	if errors.Is(derr, ErrEnclaveCorrupted) {
+		t.Errorf("DestroyErr = %v reports corruption that did not happen", derr)
+	}
+	if e.m == nil || e.m.memory == nil {
+		t.Fatal("the mapping was dropped although its pages are still held; there is no handle to retry through")
+	}
+	if e.IsAlive() {
+		t.Error("the enclave reads alive although its material was wiped")
+	}
+	if !isRegistered(e) {
+		t.Error("the enclave left the ledger with its pages still held; WipeAll can no longer retry it")
+	}
+	if used := a.InUse(); used != pageSize {
+		t.Errorf("InUse = %d after a failed release, want %d: the kernel still holds the pages", used, pageSize)
+	}
+
+	// The deferable form swallows it rather than panicking.
+	if r := panicValue(e.Destroy); r != nil {
+		t.Fatalf("Destroy panicked with %v on a release failure that is not corruption", r)
+	}
+
+	unlockMemory = prev
+	if derr := e.DestroyErr(); derr != nil {
+		t.Fatalf("retried DestroyErr = %v, want nil once the refusal lifted", derr)
+	}
+	if e.m != nil {
+		t.Error("the mapping is still held after a successful retry")
+	}
+	if isRegistered(e) {
+		t.Error("the enclave is still on the ledger after its pages went back")
+	}
+	if used := a.InUse(); used != 0 {
+		t.Errorf("InUse = %d after the retry released the pages, want 0", used)
+	}
+}
+
+// TestDestroy_CorruptionSurvivesAFailedRelease is the enclave-level half of the
+// sticky-corruption regression (#83). A corrupted canary whose release is also
+// refused must still PANIC with ErrEnclaveCorrupted — the one condition Destroy
+// panics on — keeping the mapping and the charge; and the retry that finally
+// releases the pages must report the corruption AGAIN rather than nil, because
+// the first attempt's wipe zeroed the very bytes a second verification would
+// compare.
+func TestDestroy_CorruptionSurvivesAFailedRelease(t *testing.T) {
+	a, err := NewAllocator(4 * pageSize)
+	if err != nil {
+		t.Fatalf("NewAllocator: %v", err)
+	}
+	e, err := a.NewSized(32)
+	if err != nil {
+		t.Fatalf("Allocator.NewSized: %v", err)
+	}
+	if len(e.m.canary) == 0 {
+		t.Fatal("a 32-byte enclave has no canary slack; this test would be vacuous")
+	}
+	// An underflow through a retained slice. A sized enclave is writable, so
+	// this is a store rather than a fault.
+	e.m.canary[len(e.m.canary)-1] ^= 0xFF
+
+	denied := errors.New("munmap: cannot allocate memory")
+	prev := freeMemory
+	t.Cleanup(func() {
+		freeMemory = prev
+		if e.m != nil {
+			_ = panicValue(func() { _ = e.DestroyErr() })
+		}
+	})
+	// VirtualUnlock semantics: the first attempt's munlock succeeds, so a retry
+	// that unlocks again is refused on Windows before it reaches the munmap.
+	installStrictUnlock(t)
+	freeMemory = func([]byte) error { return denied }
+
+	r := panicValue(e.Destroy)
+	if rerr, ok := r.(error); !ok || !errors.Is(rerr, ErrEnclaveCorrupted) {
+		t.Fatalf("Destroy over a corrupted canary with a refused munmap panicked with %v, want ErrEnclaveCorrupted", r)
+	}
+	if e.m == nil || e.m.memory == nil {
+		t.Fatal("the mapping was dropped although its pages are still mapped")
+	}
+	if used := a.InUse(); used != pageSize {
+		t.Errorf("InUse = %d with the pages still mapped, want %d", used, pageSize)
+	}
+	if !isRegistered(e) {
+		t.Error("the enclave left the ledger with its pages still mapped")
+	}
+
+	freeMemory = prev
+	r = panicValue(e.Destroy)
+	if rerr, ok := r.(error); !ok || !errors.Is(rerr, ErrEnclaveCorrupted) {
+		t.Fatalf("the retry that released the pages panicked with %v, want ErrEnclaveCorrupted: "+
+			"the corruption detected on the first attempt was lost", r)
+	}
+	if e.m != nil {
+		t.Error("the mapping is still held after the retry released the pages")
+	}
+	if used := a.InUse(); used != 0 {
+		t.Errorf("InUse = %d after the pages went back, want 0", used)
+	}
+	if isRegistered(e) {
+		t.Error("the enclave is still on the ledger after its pages went back")
+	}
+}

@@ -306,6 +306,23 @@ type Sealer struct {
 	kekGen   uint32
 	kekUsed  atomic.Uint64
 	kekBlobs map[uint32][]byte
+
+	// pendingRoot is a root that UnsealRoot DELIVERED but that has not been
+	// published as root, because minting the first KEK under it failed —
+	// memlock exhausted, the transient condition initHierarchy's retry exists
+	// for. It is kept so that retry re-attempts only the mint: the
+	// [RootUnsealer] contract is that UnsealRoot is called at most once unless
+	// that call failed, and a one-shot root (a consumed unseal handle) cannot
+	// be asked again (#83).
+	//
+	// It is deliberately NOT root. root non-nil means "a hierarchy exists and
+	// every dead enclave in it is a sweep", and the wiped checks rely on that;
+	// a root with no KEK beside it would read as wiped, since a nil kek is not
+	// alive. It is an ordinary registered enclave, so [WipeAll] destroys it
+	// like any other; initHierarchy then reports [ErrSealerWiped] rather than
+	// unsealing a replacement. It is written only under mu held exclusively,
+	// and cleared when it is promoted to root.
+	pendingRoot *MemoryEnclave
 }
 
 // sealerConfig collects what the options set; see [NewSealer].
@@ -934,6 +951,14 @@ func (s *Sealer) unwrapRetiredKEKLocked(kekBlob []byte) (*MemoryEnclave, error) 
 // first attempt can fail at the RLIMIT_MEMLOCK ceiling or on a transient
 // provider condition, and a ceiling is a condition that lifts. A sync.Once
 // would make one transient failure permanent for the process lifetime.
+//
+// The retry re-attempts only the step that FAILED. A failed unseal is retried
+// with a fresh UnsealRoot call, as the [RootUnsealer] contract permits; a
+// successful unseal followed by a failed KEK mint retains the root in
+// pendingRoot and retries only the mint. Destroying that root and unsealing
+// again — what this did until #83 — called UnsealRoot a second time after it
+// had succeeded, which the contract forbids and a one-shot root provider
+// cannot survive.
 func (s *Sealer) initHierarchy() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -948,23 +973,42 @@ func (s *Sealer) initHierarchy() error {
 		return nil
 	}
 
-	root, err := NewMemoryEnclaveSized(RootKeyBytes)
-	if err != nil {
-		return err
-	}
-	// The provider writes the root DIRECTLY into locked pages; it never
-	// exists on the ordinary heap on this path. (What the provider does on
-	// its side is its contract; see [RootUnsealer].)
-	if err := root.WithBytes(func(b []byte) error {
-		return s.ru.UnsealRoot(b)
-	}); err != nil {
-		root.Destroy()
-		return providerSealFailure(err)
+	root := s.pendingRoot
+	if root == nil {
+		var err error
+		root, err = NewMemoryEnclaveSized(RootKeyBytes)
+		if err != nil {
+			return err
+		}
+		// The provider writes the root DIRECTLY into locked pages; it never
+		// exists on the ordinary heap on this path. (What the provider does on
+		// its side is its contract; see [RootUnsealer].)
+		if err := root.WithBytes(func(b []byte) error {
+			return s.ru.UnsealRoot(b)
+		}); err != nil {
+			// The unseal itself failed, so the contract permits asking again
+			// and nothing is retained.
+			root.Destroy()
+			return providerSealFailure(err)
+		}
+		// From here the unseal has SUCCEEDED and must not be repeated; the
+		// root is retained across a failed mint below.
+		s.pendingRoot = root
+	} else if !root.IsAlive() {
+		// A sweep destroyed the retained root between attempts. UnsealRoot
+		// already succeeded once and may not be called again, so this sealer
+		// is wiped exactly as one whose published root was swept is — and
+		// rebuilding it here would be the silent re-keying [ErrSealerWiped]
+		// exists to prevent.
+		return ErrSealerWiped
 	}
 
 	kek, blob, err := newGeneration(root, 1)
 	if err != nil {
-		root.Destroy()
+		// root stays in pendingRoot: the next attempt mints again under it.
+		// A sweep that destroyed it during the mint surfaces here as
+		// ErrSealerWiped through hierarchyFailure, and on the next attempt
+		// through the IsAlive check above.
 		return err
 	}
 
@@ -972,6 +1016,7 @@ func (s *Sealer) initHierarchy() error {
 	// observe a root without its KEK; the ready checks treat the pair as one
 	// state.
 	s.root = root
+	s.pendingRoot = nil
 	s.kek, s.kekGen = kek, 1
 	s.kekBlobs = map[uint32][]byte{1: blob}
 	s.kekUsed.Store(0)

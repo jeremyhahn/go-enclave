@@ -1098,3 +1098,135 @@ func TestSealer_NilProvidersAreRefusedAtConstruction(t *testing.T) {
 		t.Errorf("NewSealer(live provider): %v", err)
 	}
 }
+
+// countingRootUnsealer counts UnsealRoot calls and runs an optional hook after
+// a successful one, so a test can arrange for the step AFTER the unseal to fail.
+type countingRootUnsealer struct {
+	calls int
+	after func()
+	inner fixedRootUnsealer
+}
+
+func (c *countingRootUnsealer) UnsealRoot(dst []byte) error {
+	c.calls++
+	if err := c.inner.UnsealRoot(dst); err != nil {
+		return err
+	}
+	if c.after != nil {
+		c.after()
+	}
+	return nil
+}
+
+// failNextLock makes the next mlock in the package fail, once, and restores the
+// real one on the test's cleanup whatever happens.
+func failNextLock(t *testing.T) {
+	t.Helper()
+	prev := lockMemory
+	t.Cleanup(func() { lockMemory = prev })
+	lockMemory = func([]byte) error {
+		lockMemory = prev
+		return errors.New("mlock: cannot allocate memory")
+	}
+}
+
+// TestSealer_KEKFailureDoesNotReunsealTheRoot is the regression for the
+// root-unseal finding in #83.
+//
+// initHierarchy unsealed the root, then minted the first KEK; when the MINT
+// failed — memlock exhausted, the case the retry exists for — it destroyed the
+// successfully unsealed root, and the next seal called UnsealRoot AGAIN. The
+// RootUnsealer contract says a Sealer calls it at most once, retrying only if
+// that call failed, and a one-shot root provider (a consumed unseal handle;
+// providertest's Config.SingleUseRoot) cannot answer twice. The retry must
+// re-attempt only the step that failed.
+func TestSealer_KEKFailureDoesNotReunsealTheRoot(t *testing.T) {
+	ru := &countingRootUnsealer{inner: fixedRootUnsealer{fill: 0x5A}}
+	// The root's pages are already locked when UnsealRoot runs, so the next
+	// mlock in this goroutine is the first KEK's.
+	ru.after = func() {
+		if ru.calls == 1 {
+			failNextLock(t)
+		}
+	}
+	s, err := NewSealer(WithProvider(ru), WithMode(ModeRootKey))
+	if err != nil {
+		t.Fatalf("NewSealer: %v", err)
+	}
+
+	if _, err := s.Seal([]byte("first attempt")); !errors.Is(err, ErrLockedMemoryUnavailable) {
+		t.Fatalf("Seal with the KEK mint refused = %v, want ErrLockedMemoryUnavailable", err)
+	}
+	if ru.calls != 1 {
+		t.Fatalf("UnsealRoot was called %d times by the first seal, want 1", ru.calls)
+	}
+	if err := s.hierarchyOpenable(); err != nil {
+		t.Errorf("hierarchyOpenable = %v after a failed mint; nothing was sealed, so nothing was wiped", err)
+	}
+
+	want := []byte("second attempt")
+	v, err := s.Seal(append([]byte(nil), want...))
+	if err != nil {
+		t.Fatalf("Seal after the mint failure = %v", err)
+	}
+	defer v.Destroy()
+	if ru.calls != 1 {
+		t.Fatalf("UnsealRoot was called %d times, want 1: a successful unseal was retried "+
+			"because the KEK mint after it failed", ru.calls)
+	}
+
+	e, err := v.Open()
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer e.Destroy()
+	if !e.EqualTo(want) {
+		t.Error("the round trip after the retry returned the wrong material")
+	}
+}
+
+// TestSealer_SweptPendingRootIsWipedNotReunsealed covers the retained root's
+// interaction with a shutdown sweep. A root unsealed but not yet published —
+// its KEK mint failed — is a live enclave on the ledger like any other, so
+// WipeAll must destroy it; and the sealer must then report ErrSealerWiped
+// rather than quietly unsealing a fresh root, which is both the silent re-keying
+// that sentinel exists to prevent and a second UnsealRoot call.
+func TestSealer_SweptPendingRootIsWipedNotReunsealed(t *testing.T) {
+	ru := &countingRootUnsealer{inner: fixedRootUnsealer{fill: 0x6B}}
+	ru.after = func() {
+		if ru.calls == 1 {
+			failNextLock(t)
+		}
+	}
+	s, err := NewSealer(WithProvider(ru), WithMode(ModeRootKey))
+	if err != nil {
+		t.Fatalf("NewSealer: %v", err)
+	}
+	if _, err := s.Seal([]byte("first attempt")); !errors.Is(err, ErrLockedMemoryUnavailable) {
+		t.Fatalf("Seal with the KEK mint refused = %v, want ErrLockedMemoryUnavailable", err)
+	}
+
+	s.mu.RLock()
+	pending := s.pendingRoot
+	s.mu.RUnlock()
+	if pending == nil || !pending.IsAlive() {
+		t.Fatal("the unsealed root was not retained after the mint failed")
+	}
+	if !isRegistered(pending) {
+		t.Fatal("the retained root is not on the ledger, so a sweep cannot reach it")
+	}
+
+	if _, err := WipeAll(); err != nil {
+		t.Fatalf("WipeAll: %v", err)
+	}
+	if pending.IsAlive() {
+		t.Fatal("WipeAll left the retained root alive")
+	}
+
+	if _, err := s.Seal([]byte("after the sweep")); !errors.Is(err, ErrSealerWiped) {
+		t.Errorf("Seal after the sweep = %v, want ErrSealerWiped", err)
+	}
+	if ru.calls != 1 {
+		t.Errorf("UnsealRoot was called %d times, want 1: a swept root was re-unsealed", ru.calls)
+	}
+}

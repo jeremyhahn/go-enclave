@@ -185,6 +185,10 @@ type MemoryEnclave struct {
 func NewMemoryEnclave(data []byte) (*MemoryEnclave, error) {
 	e, err := newMemoryEnclave(data)
 	if err != nil {
+		// Pages a failed cleanup left mapped go to the orphan ledger, so a
+		// later WipeAll can still reclaim them. No budget is involved, so no
+		// refund rides with them.
+		adoptOrphan(err, nil)
 		return nil, err
 	}
 	return register(e), nil
@@ -264,6 +268,7 @@ func newMemoryEnclave(data []byte) (*MemoryEnclave, error) {
 func NewMemoryEnclaveCopy(src []byte) (*MemoryEnclave, error) {
 	e, err := newMemoryEnclaveCopy(src)
 	if err != nil {
+		adoptOrphan(err, nil) // see NewMemoryEnclave
 		return nil, err
 	}
 	return register(e), nil
@@ -302,9 +307,22 @@ func newMemoryEnclaveCopy(src []byte) (*MemoryEnclave, error) {
 	// material with no syscall before it attempts anything that can be denied.
 	// What can still fail is handing the pages back, and that is reported
 	// rather than dropped — an unreleasable mapping the caller is told about is
-	// a resource leak, one it is not told about is an invisible one.
+	// a resource leak, one it is not told about is an invisible one. The release
+	// error keeps its pagesHeldError mark through the join, which is how an
+	// [Allocator] constructor knows not to refund the charge for those pages.
+	//
+	// And the mark carries the MAPPING (#83). Returning nil here drops the only
+	// handle to pages the kernel still holds, so no sweep could ever reclaim
+	// them even once the refusal lifted; handed over, the public constructor
+	// puts them on the orphan ledger and [WipeAll] retries them. release
+	// already recorded how far it got — wiped, verified, unlocked — so the
+	// retry resumes rather than repeats.
 	if ferr := m.freeze(); ferr != nil {
 		if rerr := m.release(); rerr != nil {
+			var held *pagesHeldError
+			if errors.As(rerr, &held) {
+				held.orphan = m
+			}
 			return nil, errors.Join(ferr, rerr)
 		}
 		return nil, ferr
@@ -390,6 +408,7 @@ func newMemoryEnclaveCopy(src []byte) (*MemoryEnclave, error) {
 func NewMemoryEnclaveSized(n int) (*MemoryEnclave, error) {
 	e, err := newMemoryEnclaveSized(n)
 	if err != nil {
+		adoptOrphan(err, nil) // see NewMemoryEnclave
 		return nil, err
 	}
 	return register(e), nil
@@ -748,17 +767,36 @@ func (e *MemoryEnclave) EqualToErr(other []byte) (bool, error) {
 // A panic from a foundational library is close to never right, and this is the
 // exception the rest of the package is built to avoid: detected memory
 // corruption is not a condition a caller can handle, because the state the
-// caller would act on is the state that is wrong. The material is wiped and the
-// pages are returned before the panic, so nothing leaks either way. It is also
-// what this method already did before v0.3.0-alpha — memguard's canary check
-// called core.Panic — except that it no longer destroys every other enclave in
-// the process on its way out.
+// caller would act on is the state that is wrong. The material is wiped and,
+// unless the kernel refuses, the pages are returned before the panic, so
+// nothing leaks either way. It is also what this method already did before
+// v0.3.0-alpha — memguard's canary check called core.Panic — except that it no
+// longer destroys every other enclave in the process on its way out.
+//
+// If the kernel DOES refuse the unlock or unmap after a failed canary, the panic
+// value carries both: it matches ErrEnclaveCorrupted and the refusal's
+// [ErrLockedMemoryUnavailable]. The material is still wiped; the pages are kept
+// for a retry as described below, and the retry that finally releases them
+// panics with ErrEnclaveCorrupted again, because the detection is not lost
+// between attempts.
+//
+// # When the release is refused
+//
+// Corruption is the ONLY panic. Every other failure is a report: an
+// [ErrReleasedWithoutWipe] fallback, and a refused munlock or munmap — ENOMEM at
+// vm.max_map_count is the realistic one — which leaves the pages held. Destroy
+// discards the report, as it must, but not the pages: the enclave keeps its
+// mapping, reads destroyed once its material is wiped, stays on the ledger so
+// [WipeAll] retries it, and keeps any [Allocator] reservation until the pages
+// actually go back. Calling Destroy again retries; [MemoryEnclave.DestroyErr]
+// says whether it worked.
 func (e *MemoryEnclave) Destroy() {
 	// The non-fatal report is discarded here and only here. Destroy is the
 	// deferable form and cannot return anything; DestroyErr is the same teardown
 	// with the report kept, exactly as EqualToErr is EqualTo with the reason
 	// kept. A caller that cares whether the environment is denying the
-	// wipe-enabling mprotect must use that one.
+	// wipe-enabling mprotect, or whether the release is being refused and has to
+	// be retried, must use that one.
 	_ = e.DestroyErr()
 }
 
@@ -773,9 +811,20 @@ func (e *MemoryEnclave) Destroy() {
 // through, so without this the only signal that a sandbox has removed part of
 // the teardown contract is invisible on the main path.
 //
+// It returns [ErrLockedMemoryUnavailable] (as a [LockedMemoryError]) when the
+// release itself was refused — the munlock or munmap, or both the
+// wipe-enabling mprotect and the bare-unmap fallback. The pages are still held,
+// so the enclave keeps its mapping and its place on the [WipeAll] ledger, any
+// [Allocator] reservation stays charged against pages the kernel has not taken
+// back, and calling DestroyErr again retries the release. The material is gone
+// whenever the wipe got as far as running, and the enclave then reports itself
+// destroyed even though its pages are not yet released.
+//
 // It returns nil for an ordinary release, and PANICS on detected corruption for
 // the reasons given on Destroy: that is the one condition a caller cannot act
-// on, because the state it would act on is the state that is wrong.
+// on, because the state it would act on is the state that is wrong. Nothing
+// else panics — a refused release is a resource condition the caller can act on
+// by retrying, and until #83 it panicked too.
 func (e *MemoryEnclave) DestroyErr() error {
 	if e == nil {
 		return nil
@@ -799,12 +848,19 @@ func (e *MemoryEnclave) DestroyErr() error {
 		deregister(e)
 	}
 
-	// ErrReleasedWithoutWipe is NOT a panic. The pages are gone and nothing
-	// leaked; what it reports is a denied mprotect in the environment, which is
-	// an operator's problem and not a state a caller cannot reason about. Only
-	// detected corruption keeps the panic, because there the state a caller
-	// would act on is the state that is wrong.
-	if err != nil && !errors.Is(err, ErrReleasedWithoutWipe) {
+	// ONLY detected corruption panics, because there the state a caller would
+	// act on is the state that is wrong. ErrReleasedWithoutWipe is not a panic:
+	// the pages are gone and nothing leaked, and what it reports is a denied
+	// mprotect in the environment, an operator's problem. Nor is a refused
+	// munlock or munmap: the pages are held for a retry, which the caller can
+	// make. This test was once "anything but ErrReleasedWithoutWipe", which
+	// panicked on that second, ordinary resource failure too, contrary to every
+	// statement of the contract (#83).
+	//
+	// A corruption that was detected on an attempt whose release was ALSO
+	// refused still panics here — the value matches both — and the bookkeeping
+	// above has already declined to treat those pages as released.
+	if errors.Is(err, ErrEnclaveCorrupted) {
 		panic(err)
 	}
 
@@ -816,13 +872,85 @@ func (e *MemoryEnclave) DestroyErr() error {
 // about what already happened), and a release that fell back to unmapping
 // because mprotect was denied. Everything else means the region is still mapped.
 //
+// A failed canary qualifies only when it arrives ALONE. Since #83 a release that
+// detects corruption and is then refused the unlock or unmap returns both,
+// joined, so that the detection is not lost — and that joined error matches
+// ErrEnclaveCorrupted while the pages are very much still mapped. The
+// [pagesHeldError] mark is what tells the two apart, and it vetoes everything
+// else: a held error is never released, whatever else it matches.
+//
 // It exists so the handle-drop, the reservation return and the deregistration
-// cannot answer this question differently -- three copies of one predicate drift,
-// and the failure mode is an enclave that is alive over freed memory.
+// cannot answer this question differently -- copies of one predicate drift, and
+// the failure mode is an enclave that is alive over freed memory, or a budget
+// refunded for pages the kernel still holds.
 func releasedPages(err error) bool {
+	if pagesHeld(err) {
+		return false
+	}
 	return err == nil ||
 		errors.Is(err, ErrEnclaveCorrupted) ||
 		errors.Is(err, ErrReleasedWithoutWipe)
+}
+
+// pagesHeldError marks a failure that left the pages MAPPED — and, as far as
+// this package can vouch, still locked — so the reservation behind them cannot
+// be returned (#83).
+//
+// It is a mark rather than a sentinel because what it wraps already has a
+// public identity: a [LockedMemoryError] matching [ErrLockedMemoryUnavailable],
+// joined with [ErrEnclaveCorrupted] when the same release detected corruption.
+// Callers keep matching those. The mark is for this package's own bookkeeping,
+// which has to answer a question those sentinels cannot: a corruption report
+// matches ErrEnclaveCorrupted whether or not the pages went back, and every
+// constructor failure matches ErrLockedMemoryUnavailable whether or not its
+// rollback succeeded. Error and Unwrap pass straight through, so the mark
+// changes neither the message nor what errors.Is and errors.As reach.
+//
+// Two places produce it: [mapping.release], for every failure that keeps the
+// mapping for a retry, and [mapping.abandon], for a constructor rollback that
+// could not unmap the region. Three places read it: [releasedPages], the
+// [Allocator] constructors deciding whether a failed construction's charge can
+// be refunded now, and [adoptOrphan], which takes a failed construction's
+// mapping onto the orphan ledger.
+//
+// locked separates the two things "held" can mean, and the constructors' refund
+// depends on the difference (#83). A mapping whose munlock succeeded and whose
+// munmap was then refused is still MAPPED — [releasedPages] is false — but it
+// no longer pins locked memory, so the charge a failed constructor took for it
+// goes back at once. Only pages that are still mlock'd keep the charge:
+// refunding those would let the allocator admit allocations RLIMIT_MEMLOCK
+// cannot satisfy. The kept charge rides on the orphan record and is returned
+// when a sweep finally releases the pages.
+//
+// orphan is the mapping a failed CONSTRUCTION is giving up, set only on that
+// path: an enclave's own failed release keeps its mapping on the enclave, and
+// leaves this nil. It is how the handle survives the constructor's nil return.
+type pagesHeldError struct {
+	err    error
+	locked bool
+	orphan *mapping
+}
+
+// Error implements error, unchanged from the wrapped failure.
+func (e *pagesHeldError) Error() string { return e.err.Error() }
+
+// Unwrap returns the wrapped failure, so the sentinels it matches still match.
+func (e *pagesHeldError) Unwrap() error { return e.err }
+
+// pagesHeld reports whether err left pages held: whether anything in its tree is
+// a [pagesHeldError]. errors.As walks joined errors, so a constructor that joins
+// its own failure with a held release still reports held.
+func pagesHeld(err error) bool {
+	var held *pagesHeldError
+	return errors.As(err, &held)
+}
+
+// lockedPagesHeld reports whether err left pages that are still mlock'd — the
+// narrower question an [Allocator] constructor asks before refunding a failed
+// construction's charge. See [pagesHeldError].
+func lockedPagesHeld(err error) bool {
+	var held *pagesHeldError
+	return errors.As(err, &held) && held.locked
 }
 
 // releaseMapping wipes, verifies and unmaps the pages under the write lock, and
@@ -833,9 +961,10 @@ func releasedPages(err error) bool {
 // could not be unmapped — or could not be made writable, so it was never wiped —
 // the enclave KEEPS its mapping: the memory is still resident, and discarding
 // the only reference to it would strand it for the process lifetime with no way
-// to retry. The enclave still reports itself alive in that case, which is the
-// truth, and a caller that recovers from the panic can call Destroy again to
-// retry the release.
+// to retry. The enclave reports itself alive in that case only if the wipe never
+// ran, which is the truth either way, and the caller can call Destroy again to
+// retry the release — it is returned by DestroyErr, not panicked, unless the
+// same attempt also detected corruption.
 func (e *MemoryEnclave) releaseMapping() error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -875,8 +1004,11 @@ func (e *MemoryEnclave) releaseLocked() error {
 	// mapping for either would leave the enclave reporting itself alive over
 	// memory the kernel has taken back, which is a use-after-free waiting for a
 	// reader. Every other error means the region is still mapped, so the handle
-	// is kept and Destroy can be retried.
-	if err != nil && !errors.Is(err, ErrEnclaveCorrupted) && !errors.Is(err, ErrReleasedWithoutWipe) {
+	// is kept and Destroy can be retried. That includes a failed canary joined
+	// with a refused unlock or unmap, which matches ErrEnclaveCorrupted with the
+	// pages still mapped; releasedPages is the predicate DestroyErr and WipeAll
+	// use, and this was a fourth spelling of it that could not have seen that.
+	if !releasedPages(err) {
 		return err
 	}
 	e.m = nil

@@ -210,7 +210,7 @@ func sweepOutsideHome(probe *enclave.MemoryEnclave, home uintptr) ([]string, err
 		hits, scanErr = residueMappings(needle, home)
 		return nil
 	}); err != nil {
-		return nil, fmt.Errorf("borrowing the needle: %w", err)
+		return nil, &stepError{step: "borrowing the needle", err: err}
 	}
 	return hits, scanErr
 }
@@ -236,11 +236,11 @@ func equalBytes(a, b []byte) bool {
 // does not itself need the unsafe package.
 func addrOf(b []byte) (uintptr, error) {
 	if len(b) == 0 {
-		return 0, fmt.Errorf("providertest: cannot take the address of an empty slice")
+		return 0, errEmptySlice
 	}
 	var addr uint64
 	if _, err := fmt.Sscanf(fmt.Sprintf("%p", b), "0x%x", &addr); err != nil {
-		return 0, fmt.Errorf("providertest: parsing slice address: %w", err)
+		return 0, &stepError{step: "providertest: parsing slice address", err: err}
 	}
 	return uintptr(addr), nil
 }

@@ -105,11 +105,17 @@ func TestMappingContainsSpansChunkBoundaries(t *testing.T) {
 // TestParseMapsHeader pins the line recognizer the home exclusion depends on:
 // a header that fails to parse is a mapping silently skipped, and a bad range
 // is a mapping wrongly excluded.
+//
+// The expected bounds are uint64 so the table compiles on 32-bit targets too.
+// There a 64-bit address does not fit a uintptr and must be REJECTED, not
+// narrowed into a different range, so a row's expected ok is its wantOK and
+// "the bound fits this platform's uintptr" — and the 32-bit row keeps every
+// platform asserting at least one successful parse.
 func TestParseMapsHeader(t *testing.T) {
 	tests := []struct {
 		name   string
 		line   string
-		lo, hi uintptr
+		lo, hi uint64
 		wantOK bool
 	}{
 		{
@@ -126,6 +132,13 @@ func TestParseMapsHeader(t *testing.T) {
 			hi:     0xc004000000,
 			wantOK: true,
 		},
+		{
+			name:   "a mapping inside 32 bits",
+			line:   "08048000-08049000 r-xp 00000000 08:01 1234 /bin/true",
+			lo:     0x08048000,
+			hi:     0x08049000,
+			wantOK: true,
+		},
 		{name: "empty", line: "", wantOK: false},
 		{name: "no range separator", line: "7f0c00000000 rw-p", wantOK: false},
 		{name: "not hexadecimal", line: "zzzz-7f0c00021000 rw-p", wantOK: false},
@@ -133,11 +146,12 @@ func TestParseMapsHeader(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			wantOK := tc.wantOK && tc.hi <= uint64(^uintptr(0))
 			lo, hi, ok := parseMapsHeader(tc.line)
-			if ok != tc.wantOK {
-				t.Fatalf("parseMapsHeader ok = %v, want %v", ok, tc.wantOK)
+			if ok != wantOK {
+				t.Fatalf("parseMapsHeader ok = %v, want %v", ok, wantOK)
 			}
-			if ok && (lo != tc.lo || hi != tc.hi) {
+			if ok && (uint64(lo) != tc.lo || uint64(hi) != tc.hi) {
 				t.Errorf("parseMapsHeader = %#x-%#x, want %#x-%#x", lo, hi, tc.lo, tc.hi)
 			}
 		})
