@@ -45,3 +45,7 @@ func TestDiscoverLockedMemoryLimit_ReportsUnsupported(t *testing.T) {
 		t.Fatalf("Limit = %d, want the budget asked for", a.Limit())
 	}
 }
+
+// testMemlockHardLimit: no test on this platform drops CAP_IPC_LOCK to inject
+// a locked-memory ceiling, so there is no hard-limit half to the requirement.
+func testMemlockHardLimit() (uint64, bool) { return 0, true }

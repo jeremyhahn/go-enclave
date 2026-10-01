@@ -1,0 +1,49 @@
+// Copyright (c) 2025 Jeremy Hahn
+// Copyright (c) 2025 Automate The Things, LLC
+//
+// SPDX-License-Identifier: MIT
+//
+// This file is part of go-enclave. Use of this source code is governed by the
+// MIT license that can be found in the LICENSE file.
+
+//go:build !linux
+
+package providertest
+
+import (
+	"fmt"
+	"strings"
+	"testing"
+)
+
+// TestResidueSweepReportsItselfNotRunOffLinux is the non-Linux half of the
+// retention-by-copy control. Off Linux there is no residue sweep, so a provider
+// that retains a copy cannot be caught — and the suite must SAY so through
+// Logf, in the words a reader of a green run will search for, rather than
+// return nil as if the property had been measured. The Linux half, where the
+// same provider must be caught, is TestSuiteCatchesAProviderThatRetainsACopy
+// in residue_linux_test.go (#90: a build constraint, never a runtime skip).
+func TestResidueSweepReportsItselfNotRunOffLinux(t *testing.T) {
+	if sweepSupported {
+		t.Fatal("sweepSupported is true in a !linux build; residue_other.go is not the file in effect")
+	}
+	var log strings.Builder
+	cfg := perOp(func() (any, error) { return &retainingProtector{inner: software()}, nil })
+	cfg.Logf = func(format string, args ...any) { fmt.Fprintf(&log, format+"\n", args...) }
+
+	if err := TestProvider(t.Context(), cfg); err != nil {
+		t.Fatalf("with no sweep available the retaining provider conforms in every measured way: %v", err)
+	}
+	if !strings.Contains(log.String(), "residue sweep not run") ||
+		!strings.Contains(log.String(), sweepUnsupportedReason) {
+		t.Errorf("the unmeasured property was not reported; a reader of this green run would not know "+
+			"retention by copy went unmeasured. Log was:\n%s", log.String())
+	}
+
+	// residueMappings exists off Linux only to keep the platform surfaces
+	// alike; it must refuse rather than report an empty — clean-looking —
+	// sweep.
+	if hits, err := residueMappings([]byte("needle"), 0); err == nil || hits != nil {
+		t.Errorf("residueMappings = %v, %v off Linux; want nil and an error", hits, err)
+	}
+}

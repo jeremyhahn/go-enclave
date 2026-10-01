@@ -384,9 +384,7 @@ func TestWipeAll_ConcurrentWithConstructionAndDestruction(t *testing.T) {
 // sweep would deadlock instantly if WipeAll still held the registry lock while
 // destroying.
 func TestWipeAll_DoesNotReturnZeroWhileAnEnclaveIsAlive(t *testing.T) {
-	if remaining := sweep(t); remaining != 0 {
-		t.Skipf("the process already holds %d unwipeable enclaves; this test needs a clean ledger", remaining)
-	}
+	requireCleanLedger(t)
 
 	trigger, err := NewMemoryEnclaveSized(32)
 	if err != nil {
@@ -450,32 +448,50 @@ func TestWipeAll_DoesNotReturnZeroWhileAnEnclaveIsAlive(t *testing.T) {
 // rather than leaving for someone to discover when one of them goes quiet:
 //
 //   - THE RACE DETECTOR is what catches the defect, on the unsynchronized read
-//     of release against its assignment. Measured 8/8 against the defective
-//     shape restored as a mutant, with the one-page payload below. The CI test
-//     job runs -race, so this is the oracle that guards the tree.
+//     of release against its assignment. The CI test job runs -race, so this
+//     is the oracle that guards the tree.
 //   - THE BUDGET assertion is an end-state check, not a second detector. It
 //     pins that every reservation is settled exactly once when enclaves are
-//     destroyed by two different parties at once — a real property, and the one
-//     the defect would have broken — but on its own it only fires when a sweep
-//     lands inside the window, so it is not what makes this test load-bearing.
+//     destroyed by two different parties — a real property, and the one the
+//     defect would have broken.
 //
-// Two earlier revisions were built the other way round, and the cost is worth
-// recording. To make the budget oracle reliable they widened the window with a
-// large payload (1 MiB, then 512 KiB) and sampled it with a sweeper that spun
-// without yielding. Both worked locally — including pinned to a single CPU — and
-// both blew this test's own drain bound on the build runner, twice, while the
-// rest of the suite merely ran slower. The payload was the expensive half: under
-// -race, hundreds of megabytes of mlock churn in a memory-capped container is a
-// different order of problem from slow CPU.
+// # Every sweep is caused by an event, never by the clock (#90)
 //
-// The width turned out to be unnecessary. Race detection needs the window
-// ENTERED, not held open — a single page hits it just as reliably (8/8), for
-// 1/128th of the memory and about a hundredth of the time. The strength that the
-// big payload was buying belonged to the weaker oracle all along.
+// Earlier revisions paced a free-running sweeper with time.Sleep and gave it
+// "a turn" with a second sleep in each worker. Both were passive waits marked
+// KNOWN WEAK: on a loaded host the sweeper could miss every window, and the
+// only defense was a "the sweep never won" guard turning that into a red
+// build. They are replaced by two events, each tied to what it is for:
+//
+//   - KICK, posted to a one-slot channel just BEFORE every construction, so
+//     the sweeper runs one WipeAll per construction, concurrently with it.
+//     That is the race-detector oracle's input: a sweep in flight while New
+//     publishes. It costs nothing between constructions, unlike a sweeper
+//     that spins or polls.
+//   - SETTLE, a reply channel handed to the sweeper AFTER New returns on every
+//     other iteration. The worker blocks until that sweep has finished, and
+//     the sweep started after the enclave was published, so it CERTAINLY
+//     destroyed it: the sweep-destroys-it branch — the one where a lost refund
+//     is permanent — is exercised deterministically, half the iterations,
+//     on any machine and any core count. The other half let the worker race
+//     a kicked sweep for its own enclave, so both parties destroy enclaves.
+//
+// Measured against the restored publication-order mutant (register before the
+// release callback is installed), -race, 20 runs at each of -cpu=1, 2 and 8:
+// the race detector reports the release read/write race in every run.
+//
+// # Environment
+//
+// Allocates one 4 KiB payload per worker at a time, so at most a few pages are
+// locked at once: the classic 64 KiB container RLIMIT_MEMLOCK is enough. A
+// refused lock is a FAILURE, not a skip — the runner must provide that much
+// locked memory (see the Test job in .github/workflows/ci.yml).
 func TestWipeAll_ConcurrentWithAllocatorConstructionKeepsTheBudgetExact(t *testing.T) {
+	requireCleanLedger(t)
+
 	const (
 		goroutines = 4
-		iterations = 25
+		iterations = 26
 		payload    = 4 << 10
 		budget     = 8 << 20
 	)
@@ -485,24 +501,17 @@ func TestWipeAll_ConcurrentWithAllocatorConstructionKeepsTheBudgetExact(t *testi
 		t.Fatalf("NewAllocator: %v", err)
 	}
 
-	var swept, verified atomic.Int64
-	var lockRefused atomic.Bool
+	var swept, settled, verified atomic.Int64
 	material := bytes.Repeat([]byte{0x5A}, payload)
 
 	// Phase 1, QUIESCENT: a successful return is a usable enclave holding
-	// exactly its material. This is checked with no sweeper running, because it
-	// is a property of construction rather than of the race, and asserting it
-	// against a live sweeper made it flaky in exactly the environments where the
-	// sweeper wins most: on a single CPU the sweep took 99 of 100 enclaves, so
-	// "at least one came back alive" failed while nothing was wrong.
+	// exactly its material. Checked with no sweeper running, because it is a
+	// property of construction rather than of the race.
 	func() {
 		e, err := a.New(append([]byte(nil), material...))
-		if errors.Is(err, ErrLockedMemoryUnavailable) {
-			lockRefused.Store(true)
-			return
-		}
 		if err != nil {
-			t.Fatalf("Allocator.New with no sweep running: %v", err)
+			t.Fatalf("Allocator.New with no sweep running: %v (a refused lock means the runner's "+
+				"RLIMIT_MEMLOCK is below one page — a provisioning defect, not a skip)", err)
 		}
 		defer e.Destroy()
 		if !e.IsAlive() {
@@ -512,79 +521,10 @@ func TestWipeAll_ConcurrentWithAllocatorConstructionKeepsTheBudgetExact(t *testi
 			t.Fatal("Allocator.New returned an enclave that does not hold its material")
 		}
 	}()
-	if lockRefused.Load() {
-		_, _ = WipeAll(context.Background())
-		t.Skipf("the kernel refused to lock a %d-byte payload: RLIMIT_MEMLOCK is too low here "+
-			"(a container default of 64 KiB will do this), and this test has to allocate to run at all",
-			payload)
-	}
 
-	var workers sync.WaitGroup
-	for g := 0; g < goroutines; g++ {
-		workers.Add(1)
-		go func() {
-			defer workers.Done()
-			for i := 0; i < iterations; i++ {
-				e, err := a.New(append([]byte(nil), material...))
-				if errors.Is(err, ErrLockedMemoryUnavailable) {
-					// A CI container with the classic 64 KiB RLIMIT_MEMLOCK
-					// cannot lock a 1 MiB payload, and that is the environment
-					// refusing, not a defect. Every other allocation test in this
-					// package skips on this for the same reason; failing here
-					// would turn a container default into a red build.
-					lockRefused.Store(true)
-					return
-				}
-				if err != nil {
-					t.Errorf("Allocator.New: %v", err)
-					return
-				}
-				// Give the sweeper a real turn before deciding who destroys
-				// this one. Without it the caller always wins on a fast machine,
-				// so the sweep-destroys-it branch below — the one where a lost
-				// refund is permanent — never executes and the test proves half
-				// of what it claims.
-				//
-				// A sleep rather than runtime.Gosched: Gosched yields to the
-				// local run queue, so on a many-core host it can return before
-				// the sweeper, parked on another P, has run at all. Measured:
-				// with Gosched this tripped its own "the sweep never won a
-				// single race" guard in 2 of 10 runs on a 24-core host, while
-				// passing every time pinned to a single CPU. The sleep is a
-				// small multiple of the sweeper's period, so the sweeper gets a
-				// turn on any machine.
-				//
-				// KNOWN WEAK: this is a passive wait, and it guarantees nothing.
-				// "A small multiple of the sweeper's period" is a scheduling hope,
-				// not an ordering: on a loaded host the sweeper can still miss
-				// every one of these windows, and the only thing standing between
-				// that and a silently half-tested run is the swept == 0 guard at
-				// the end, which turns it into a red build rather than a vacuous
-				// green one. The active replacement is test-only (no production
-				// seam is needed) — on some iterations hand the sweeper a reply
-				// channel AFTER New returns and block until it closes it, which
-				// makes the sweep-destroys-it branch certain rather than likely —
-				// but it changes which interleavings the race detector gets to
-				// see, so it has to be re-measured against the restored
-				// publication-order mutant (8/8 above) before it lands. Tracked
-				// in issue #83.
-				time.Sleep(25 * time.Microsecond)
-
-				if e.IsAlive() {
-					if e.EqualTo(material) {
-						verified.Add(1)
-					}
-					e.Destroy()
-					continue
-				}
-				// The sweep already took it. Deliberately NOT destroyed: this
-				// is the shutdown pattern where WipeAll owns the reclamation,
-				// and it is the path on which a missing refund is permanent.
-				swept.Add(1)
-			}
-		}()
-	}
-
+	// The sweeper runs WipeAll only when asked, and never between requests.
+	kick := make(chan struct{}, 1)
+	settle := make(chan chan struct{})
 	stop := make(chan struct{})
 	sweeperDone := make(chan struct{})
 	go func() {
@@ -593,30 +533,73 @@ func TestWipeAll_ConcurrentWithAllocatorConstructionKeepsTheBudgetExact(t *testi
 			select {
 			case <-stop:
 				return
-			default:
+			case <-kick:
+				_, _ = WipeAll(context.Background())
+			case reply := <-settle:
+				_, _ = WipeAll(context.Background())
+				close(reply)
 			}
-			_, _ = WipeAll(context.Background())
-			// Sleep rather than spin. An unbounded sweep loop is a hostile CI
-			// citizen: on a shared or CPU-capped runner it burns the budget the
-			// workers need and starves the very construction it is racing.
-			// (Measured: the spinning version passed everywhere locally,
-			// including pinned to one CPU, and blew its own drain bound on the
-			// build runner.) The window this test aims at is entered once per
-			// construction, so sweeping far more often than that buys nothing.
-			//
-			// KNOWN WEAK: this sleep is pacing, not synchronization, and pacing
-			// by wall clock is exactly the thing that behaves differently on an
-			// idle machine and a loaded one. The rate it is trying to express —
-			// at most one sweep per construction — has an event to hang off: a
-			// worker could post to a one-slot kick channel just before each
-			// New, and this loop would block on that instead of the clock,
-			// sweeping exactly as often as there is a window to land in and
-			// burning nothing in between. Not done here because it is the same
-			// redesign as the worker-side sleep above and needs the same
-			// re-measurement against the mutant. Tracked in issue #83.
-			time.Sleep(10 * time.Microsecond)
 		}
 	}()
+
+	var workers sync.WaitGroup
+	for g := 0; g < goroutines; g++ {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for i := 0; i < iterations; i++ {
+				// A sweep in flight while New publishes. Non-blocking: one
+				// pending kick already guarantees the next sweep.
+				select {
+				case kick <- struct{}{}:
+				default:
+				}
+
+				e, err := a.New(append([]byte(nil), material...))
+				if err != nil {
+					t.Errorf("Allocator.New: %v (ErrLockedMemoryUnavailable here means the runner's "+
+						"RLIMIT_MEMLOCK cannot hold %d one-page enclaves at once — provision it)", err, goroutines)
+					return
+				}
+
+				if i%2 == 0 {
+					// Deterministic: a sweep that STARTS after New returned
+					// finds the enclave on the ledger with nothing holding it,
+					// and destroys it. The worker does not touch it again —
+					// this is the shutdown pattern where WipeAll owns the
+					// reclamation, and the path on which a missing refund is
+					// permanent.
+					reply := make(chan struct{})
+					select {
+					case settle <- reply:
+					case <-stop:
+						return
+					}
+					<-reply
+					if e.IsAlive() {
+						t.Errorf("an enclave published before a WipeAll began survived that sweep")
+						e.Destroy()
+						continue
+					}
+					settled.Add(1)
+					swept.Add(1)
+					continue
+				}
+
+				// Racing a kicked sweep for this enclave: whoever gets it
+				// first destroys it, and the refund must happen exactly once
+				// either way.
+				if e.IsAlive() {
+					if e.EqualTo(material) {
+						verified.Add(1)
+					}
+					e.Destroy()
+					continue
+				}
+				swept.Add(1)
+			}
+		}()
+	}
 
 	workersDone := make(chan struct{})
 	go func() {
@@ -640,23 +623,16 @@ func TestWipeAll_ConcurrentWithAllocatorConstructionKeepsTheBudgetExact(t *testi
 		t.Fatal("WipeAll did not return within 30s after the workers finished")
 	}
 
-	if lockRefused.Load() {
-		_, _ = WipeAll(context.Background())
-		t.Skipf("the kernel refused to lock a %d-byte payload: RLIMIT_MEMLOCK is too low here "+
-			"(a container default of 64 KiB will do this), and this test has to allocate to run at all",
-			payload)
-	}
-
 	if remaining := sweep(t); remaining != 0 {
 		t.Errorf("final WipeAll = %d, want 0", remaining)
 	}
-	t.Logf("%d of %d enclaves were destroyed by the sweep rather than by their caller; "+
-		"%d came back alive and holding exactly their material",
-		swept.Load(), goroutines*iterations, verified.Load())
+	t.Logf("%d of %d enclaves were destroyed by a sweep rather than by their caller (%d of them by a "+
+		"sweep the worker waited for); %d came back alive and holding exactly their material",
+		swept.Load(), goroutines*iterations, settled.Load(), verified.Load())
 
-	if swept.Load() == 0 {
-		t.Error("the sweep never won a single race, so the branch where a lost refund would be " +
-			"permanent was never executed and the budget assertion below proves nothing")
+	if want := int64(goroutines * iterations / 2); settled.Load() != want && !t.Failed() {
+		t.Errorf("%d enclaves were reclaimed by a settled sweep, want %d: the branch where a lost "+
+			"refund would be permanent was not exercised as designed", settled.Load(), want)
 	}
 
 	if got := a.InUse(); got != 0 {
@@ -704,9 +680,7 @@ func TestWipeAll_ConcurrentWithAllocatorConstructionKeepsTheBudgetExact(t *testi
 // survives with probability 2^-16, while the fixed behavior passes every trial
 // regardless of order.
 func TestWipeAll_RetriesAReaderRatherThanAbandoningIt(t *testing.T) {
-	if remaining := sweep(t); remaining != 0 {
-		t.Skipf("the process already holds %d unwipeable enclaves; this test needs a clean ledger", remaining)
-	}
+	requireCleanLedger(t)
 
 	const trials = 16
 
@@ -719,13 +693,13 @@ func TestWipeAll_RetriesAReaderRatherThanAbandoningIt(t *testing.T) {
 		// held is the enclave a reader is touching when the sweep arrives.
 		held, err := NewMemoryEnclaveSized(64)
 		if err != nil {
-			t.Skipf("could not allocate: %v", err)
+			t.Fatalf("trial %d: NewMemoryEnclaveSized: %v", trial, err)
 		}
 		// gate runs code INSIDE the sweep, after the batch has been taken.
 		gate, err := a.NewSized(64)
 		if err != nil {
 			held.Destroy()
-			t.Skipf("could not allocate: %v", err)
+			t.Fatalf("trial %d: Allocator.NewSized: %v", trial, err)
 		}
 
 		inBorrow := make(chan struct{})
@@ -812,9 +786,7 @@ func TestWipeAll_RetriesAReaderRatherThanAbandoningIt(t *testing.T) {
 // what already happened, so ErrEnclaveCorrupted counts as released on the same
 // terms Destroy uses.
 func TestWipeAll_DoesNotPanicOnACorruptCanaryAndFinishesTheSweep(t *testing.T) {
-	if remaining := sweep(t); remaining != 0 {
-		t.Skipf("the process already holds %d unwipeable enclaves; this test needs a clean ledger", remaining)
-	}
+	requireCleanLedger(t)
 
 	const count, corruptAt = 5, 2
 
@@ -920,16 +892,14 @@ func TestWipeAll_DoesNotPanicOnACorruptCanaryAndFinishesTheSweep(t *testing.T) {
 // and tell an operator less than the count does — "3 of the swept enclaves
 // failed canary verification" is the actionable form.
 func TestWipeAll_ReportsHowManyEnclavesWereCorrupt(t *testing.T) {
-	if remaining := sweep(t); remaining != 0 {
-		t.Skipf("the process already holds %d unwipeable enclaves; this test needs a clean ledger", remaining)
-	}
+	requireCleanLedger(t)
 
 	const total, corruptCount = 5, 3
 
 	for i := 0; i < total; i++ {
 		e, err := NewMemoryEnclaveSized(64)
 		if err != nil {
-			t.Skipf("could not allocate: %v", err)
+			t.Fatalf("NewMemoryEnclaveSized: %v", err)
 		}
 		if i < corruptCount {
 			if len(e.m.canary) == 0 {
@@ -968,9 +938,7 @@ func TestWipeAll_ReportsHowManyEnclavesWereCorrupt(t *testing.T) {
 // retries the corrupt one — under strict unlock semantics, so that retry must
 // also skip the unlock its predecessor already did (#83).
 func TestWipeAll_ReportsCorruptionWhoseReleaseWasRefused(t *testing.T) {
-	if remaining := sweep(t); remaining != 0 {
-		t.Fatalf("the process already holds %d unwipeable enclaves; this test needs a clean ledger", remaining)
-	}
+	requireCleanLedger(t)
 
 	e, err := NewMemoryEnclaveSized(64)
 	if err != nil {
@@ -1035,13 +1003,11 @@ func TestWipeAll_ReportsCorruptionWhoseReleaseWasRefused(t *testing.T) {
 // reported corruption unconditionally, which is the failure mode of every
 // assertion that only ever checks the interesting case.
 func TestWipeAll_ReportsNoErrorWhenNothingIsCorrupt(t *testing.T) {
-	if remaining := sweep(t); remaining != 0 {
-		t.Skipf("the process already holds %d unwipeable enclaves; this test needs a clean ledger", remaining)
-	}
+	requireCleanLedger(t)
 
 	for i := 0; i < 4; i++ {
 		if _, err := NewMemoryEnclaveSized(64); err != nil {
-			t.Skipf("could not allocate: %v", err)
+			t.Fatalf("NewMemoryEnclaveSized: %v", err)
 		}
 	}
 
@@ -1230,5 +1196,1294 @@ func TestWipeAll_ABorrowEndingWakesTheSweep(t *testing.T) {
 	}
 	if got := waits.Load(); got != 1 {
 		t.Errorf("the sweep waited %d times, want exactly 1: one borrow, one end, one wake-up", got)
+	}
+}
+
+// The tests from here on pin the lifecycle surface #88 introduced: WipeAll's
+// event-driven wait and its context bound, the termination guarantee against a
+// constructor that never stops, SweepError, and the holder handshake that makes
+// the wait impossible to miss. None of them sleeps; every ordering is made by a
+// channel or by a seam inside the sweep.
+
+// holdBorrow starts a WithBytes borrow on e in its own goroutine and returns
+// once it is inside the borrow. end finishes the borrow and waits for it to
+// return; it is idempotent and also registered as cleanup, so a failing test
+// never leaves the borrow parked.
+func holdBorrow(t *testing.T, e *MemoryEnclave) (end func()) {
+	t.Helper()
+	inBorrow := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = e.WithBytes(func([]byte) error {
+			close(inBorrow)
+			<-release
+			return nil
+		})
+	}()
+	<-inBorrow
+	var once sync.Once
+	end = func() {
+		once.Do(func() {
+			close(release)
+			<-done
+		})
+	}
+	t.Cleanup(end)
+	return end
+}
+
+// sweepResult is one WipeAll's return, carried over a channel.
+type sweepResult struct {
+	n   int
+	err error
+}
+
+// sweepAsync runs WipeAll(ctx) in its own goroutine and returns its result, or
+// fails the test at sweepHangBound with what a hang there means.
+func sweepAsync(t *testing.T, ctx context.Context, hang string) sweepResult {
+	t.Helper()
+	out := make(chan sweepResult, 1)
+	go func() {
+		n, err := WipeAll(ctx)
+		out <- sweepResult{n, err}
+	}()
+	select {
+	case r := <-out:
+		return r
+	case <-time.After(sweepHangBound):
+		t.Fatalf("WipeAll did not return within %v: %s", sweepHangBound, hang)
+		return sweepResult{}
+	}
+}
+
+// TestWipeAll_ACanceledCtxStillSweepsWhatIsFree pins what an already-done
+// context means: not a refusal, but "do not wait". Everything not currently
+// held is reclaimed exactly as it would be under any other context, the held
+// enclave is counted, and the sweep never enters its wait — the check before
+// the wait decides, not a coin flip in a select between a pending wake-up and
+// a closed done channel.
+func TestWipeAll_ACanceledCtxStillSweepsWhatIsFree(t *testing.T) {
+	requireCleanLedger(t)
+
+	free, err := NewMemoryEnclaveSized(32)
+	if err != nil {
+		t.Fatalf("NewMemoryEnclaveSized: %v", err)
+	}
+	held, err := NewMemoryEnclaveSized(32)
+	if err != nil {
+		t.Fatalf("NewMemoryEnclaveSized: %v", err)
+	}
+	end := holdBorrow(t, held)
+
+	var waits atomic.Int32
+	sweepWaitingForTest = func() { waits.Add(1) }
+	t.Cleanup(func() { sweepWaitingForTest = nil })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	r := sweepAsync(t, ctx, "a canceled context must never be waited on")
+
+	if r.err != nil {
+		t.Errorf("WipeAll err = %v, want nil: a context ending is not something the sweep found", r.err)
+	}
+	if r.n != 1 {
+		t.Errorf("WipeAll = %d, want 1: the held enclave is still held", r.n)
+	}
+	if free.IsAlive() {
+		t.Error("the free enclave survived a sweep under a canceled context; an expired deadline must " +
+			"still reclaim everything that needs no waiting")
+	}
+	if !held.IsAlive() {
+		t.Error("the held enclave was destroyed underneath its borrow")
+	}
+
+	if got := waits.Load(); got != 0 {
+		t.Errorf("the sweep blocked in its wait %d times under a canceled context, want 0", got)
+	}
+
+	end()
+	if remaining := sweep(t); remaining != 0 {
+		t.Errorf("WipeAll after the borrow ended = %d, want 0", remaining)
+	}
+}
+
+// TestWipeAll_ANilCtxNeverWaitsAndNeverPanics pins the documented treatment of
+// a nil context: the same as an already-done one. A nil context in a shutdown
+// path is a programming error, and the two other choices are both worse —
+// dereferencing it breaks the never-panics promise, and treating it as
+// Background turns the mistake into a shutdown that can hang.
+func TestWipeAll_ANilCtxNeverWaitsAndNeverPanics(t *testing.T) {
+	requireCleanLedger(t)
+
+	free, err := NewMemoryEnclaveSized(32)
+	if err != nil {
+		t.Fatalf("NewMemoryEnclaveSized: %v", err)
+	}
+	held, err := NewMemoryEnclaveSized(32)
+	if err != nil {
+		t.Fatalf("NewMemoryEnclaveSized: %v", err)
+	}
+	end := holdBorrow(t, held)
+
+	var waits atomic.Int32
+	sweepWaitingForTest = func() { waits.Add(1) }
+	t.Cleanup(func() { sweepWaitingForTest = nil })
+
+	var nilCtx context.Context // a variable, so vet's nil-context check is not what is being tested
+	var r sweepResult
+	if p := panicValue(func() { r = sweepAsync(t, nilCtx, "a nil context must never be waited on") }); p != nil {
+		t.Fatalf("WipeAll(nil) panicked with %v; it is documented never to panic", p)
+	}
+	if r.n != 1 || r.err != nil {
+		t.Errorf("WipeAll(nil) = (%d, %v), want (1, nil): the held enclave counted, nothing waited for", r.n, r.err)
+	}
+	if free.IsAlive() {
+		t.Error("the free enclave survived WipeAll(nil)")
+	}
+	if got := waits.Load(); got != 0 {
+		t.Errorf("WipeAll(nil) blocked in its wait %d times, want 0", got)
+	}
+
+	end()
+	if remaining := sweep(t); remaining != 0 {
+		t.Errorf("WipeAll after the borrow ended = %d, want 0", remaining)
+	}
+}
+
+// TestWipeAll_AConstructorThatNeverStopsCannotKeepTheSweepRunning is the
+// termination guarantee, made deterministic.
+//
+// Every enclave in the chain constructs its successor from inside its own
+// release, which WipeAll runs in the sweep's goroutine — so every reclamation
+// registers something new, for as long as the test lets it. That is a
+// constructor that never stops, racing the sweep at the worst possible moment,
+// with no scheduler involved. Under context.Background a sweep that re-ran
+// whenever it reclaimed anything would never return; the design's answer is
+// that only entries the sweep OWES — present at its first pass — earn another
+// pass, and late arrivals are tried but never extend it.
+//
+// The late link it leaves behind is counted, which is the truth: it is still
+// held. The bound is what is under test, not a zero.
+func TestWipeAll_AConstructorThatNeverStopsCannotKeepTheSweepRunning(t *testing.T) {
+	requireCleanLedger(t)
+
+	var (
+		stop  atomic.Bool
+		made  atomic.Int32
+		cerrs = make(chan error, 1)
+	)
+	var link func() *MemoryEnclave
+	link = func() *MemoryEnclave {
+		e, err := NewMemoryEnclaveSized(32)
+		if err != nil {
+			select {
+			case cerrs <- err:
+			default:
+			}
+			return nil
+		}
+		e.release = func() {
+			if !stop.Load() {
+				made.Add(1)
+				link()
+			}
+		}
+		return e
+	}
+	if link() == nil {
+		t.Fatalf("constructing the first link: %v", <-cerrs)
+	}
+	t.Cleanup(func() {
+		stop.Store(true)
+		_, _ = WipeAll(context.Background())
+	})
+
+	r := sweepAsync(t, context.Background(),
+		"a constructor that never stops kept a context.Background sweep running; late registrations "+
+			"must be tried, never waited for, and never earn another pass")
+
+	select {
+	case err := <-cerrs:
+		t.Fatalf("a link failed to construct, so the chain stopped by itself: %v", err)
+	default:
+	}
+	if made.Load() == 0 {
+		t.Fatal("no link was constructed during the sweep; the test raced nothing")
+	}
+	if r.err != nil {
+		t.Errorf("WipeAll err = %v, want nil", r.err)
+	}
+	if n := liveCount(); n != r.n {
+		t.Errorf("WipeAll = %d but the ledger holds %d: the count is not the ledger", r.n, n)
+	}
+	if r.n != 1 {
+		t.Errorf("WipeAll = %d, want 1: exactly one late link is left, registered by the last reclamation", r.n)
+	}
+
+	stop.Store(true)
+	if remaining := sweep(t); remaining != 0 {
+		t.Errorf("WipeAll after the chain stopped = %d, want 0", remaining)
+	}
+}
+
+// TestWipeAll_TerminatesAgainstALiveConstructorUnderBackground is the same
+// guarantee against a real goroutine: one constructing and borrowing enclaves
+// in a loop, never destroying any, for the whole life of the sweep. Its
+// enclaves are owed by the sweep only if they existed at its first pass, and
+// the borrows on later ones are never waited for, so a context.Background
+// sweep returns while the goroutine is still going.
+//
+// It is not allowed to pass vacuously. Every construction must succeed — a
+// failure ends the goroutine and fails the test, since a constructor that
+// stopped proves nothing about one that does not — and the sweep starts only
+// after one has. A trigger enclave's release, which runs INSIDE the sweep after
+// its first snapshot, then REQUESTS a construction from the live goroutine and
+// waits for the acknowledgment the goroutine sends once that enclave is
+// registered. The request is issued after the snapshot and the registration
+// follows the request, so at least one registration provably lands after the
+// sweep's first snapshot: one the sweep does not owe. (A counter of finished
+// constructions cannot prove that: one registered before the snapshot and
+// borrowed after it would advance the counter just the same.)
+func TestWipeAll_TerminatesAgainstALiveConstructorUnderBackground(t *testing.T) {
+	requireCleanLedger(t)
+
+	// want carries a request for one construction; the goroutine answers on
+	// the request's channel once that enclave is REGISTERED (the constructor
+	// has returned), before it is borrowed.
+	want := make(chan chan *MemoryEnclave)
+	cerr := make(chan error, 1)
+	stop := make(chan struct{})
+	started := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		var once sync.Once
+		for {
+			var ack chan *MemoryEnclave
+			select {
+			case <-stop:
+				return
+			case ack = <-want:
+			default:
+			}
+			e, err := NewMemoryEnclaveSized(32)
+			if err != nil {
+				cerr <- err
+				return
+			}
+			if ack != nil {
+				ack <- e // registered: NewMemoryEnclaveSized publishes before returning
+			}
+			_ = e.WithBytes(func(b []byte) error {
+				b[0] = 0x5A
+				return nil
+			})
+			once.Do(func() { close(started) })
+		}
+	}()
+	stopped := false
+	stopConstructor := func() {
+		if !stopped {
+			stopped = true
+			close(stop)
+			<-done
+		}
+	}
+	t.Cleanup(stopConstructor)
+
+	select {
+	case <-started:
+	case err := <-cerr:
+		t.Fatalf("the constructor failed before the sweep began: %v", err)
+	}
+
+	trigger, err := NewMemoryEnclaveSized(32)
+	if err != nil {
+		t.Fatalf("NewMemoryEnclaveSized: %v", err)
+	}
+	var lateRegistrations atomic.Int64
+	trigger.release = func() {
+		// Inside the sweep, after its first snapshot: ask the live goroutine
+		// for a construction and wait until it is registered. A constructor
+		// failure releases the sweep and is reported below.
+		ack := make(chan *MemoryEnclave, 1)
+		select {
+		case want <- ack:
+		case err := <-cerr:
+			cerr <- err
+			return
+		}
+		select {
+		case <-ack:
+			lateRegistrations.Add(1)
+		case err := <-cerr:
+			cerr <- err
+		}
+	}
+
+	r := sweepAsync(t, context.Background(),
+		"a goroutine constructing and borrowing in a loop kept a context.Background sweep running")
+	if r.err != nil {
+		t.Errorf("WipeAll err = %v, want nil", r.err)
+	}
+	if lateRegistrations.Load() == 0 {
+		select {
+		case err := <-cerr:
+			t.Fatalf("the live constructor failed during the sweep: %v", err)
+		default:
+		}
+		t.Fatal("no enclave was registered by the live goroutine during the sweep; the test raced nothing")
+	}
+
+	stopConstructor()
+	select {
+	case err := <-cerr:
+		t.Fatalf("the live constructor failed: %v", err)
+	default:
+	}
+	if remaining := sweep(t); remaining != 0 {
+		t.Errorf("WipeAll after the constructor stopped = %d, want 0", remaining)
+	}
+}
+
+// TestWipeAll_ALateBorrowIsNeverWaitedFor pins the half of the termination rule
+// that is about borrows rather than passes. An enclave that registers during the
+// sweep and is borrowed is not owed, so even under context.Background the
+// sweep does not wait for it: it is counted, and left alone.
+//
+// The late enclave is constructed and its borrow STARTED from inside the sweep
+// (the first link's release), and the hook waits until the borrow is inside
+// its callback before the sweep continues. So the sweep's next pass is certain
+// to find it held.
+func TestWipeAll_ALateBorrowIsNeverWaitedFor(t *testing.T) {
+	requireCleanLedger(t)
+
+	trigger, err := NewMemoryEnclaveSized(32)
+	if err != nil {
+		t.Fatalf("NewMemoryEnclaveSized: %v", err)
+	}
+	var (
+		late   *MemoryEnclave
+		endMu  sync.Mutex
+		endFn  func()
+		lateOK = make(chan error, 1)
+	)
+	trigger.release = func() {
+		e, cerr := NewMemoryEnclaveSized(32)
+		if cerr != nil {
+			lateOK <- cerr
+			return
+		}
+		late = e
+		end := holdBorrow(t, e)
+		endMu.Lock()
+		endFn = end
+		endMu.Unlock()
+		lateOK <- nil
+	}
+
+	var waits atomic.Int32
+	sweepWaitingForTest = func() { waits.Add(1) }
+	t.Cleanup(func() { sweepWaitingForTest = nil })
+
+	r := sweepAsync(t, context.Background(),
+		"the sweep waited for a borrow on an enclave registered after it began; only owed entries are waited for")
+	if err := <-lateOK; err != nil {
+		t.Fatalf("constructing the late enclave: %v", err)
+	}
+	if r.n != 1 || r.err != nil {
+		t.Errorf("WipeAll = (%d, %v), want (1, nil): the late, borrowed enclave is counted", r.n, r.err)
+	}
+	if got := waits.Load(); got != 0 {
+		t.Errorf("the sweep blocked in its wait %d times, want 0: nothing it owed was held", got)
+	}
+	if !late.IsAlive() {
+		t.Error("the late enclave was destroyed underneath its borrow")
+	}
+
+	endMu.Lock()
+	end := endFn
+	endMu.Unlock()
+	end()
+	if remaining := sweep(t); remaining != 0 {
+		t.Errorf("WipeAll after the late borrow ended = %d, want 0", remaining)
+	}
+}
+
+// TestWipeAll_RetriesAContendedLockAtOnce pins the tryContended branch: a
+// TryLock that fails while the holder count reads zero has nobody to wake the
+// sweep later, so the sweep must retry at once rather than wait — waiting there
+// is exactly the lost wake-up the holder count exists to rule out.
+//
+// Production cannot produce a contended lock on demand: every acquisition is
+// counted, so this is a spurious TryLock failure or a holder that came and
+// went between two reads. The test produces it by taking the read lock
+// DIRECTLY, bypassing the count, and lets go from inside the sweep's second
+// pass — which only exists if the first pass retried instead of waiting.
+func TestWipeAll_RetriesAContendedLockAtOnce(t *testing.T) {
+	requireCleanLedger(t)
+
+	e, err := NewMemoryEnclaveSized(32)
+	if err != nil {
+		t.Fatalf("NewMemoryEnclaveSized: %v", err)
+	}
+	e.mu.RLock() // uncounted on purpose: see the comment above
+	var unlockOnce sync.Once
+	unlock := func() { unlockOnce.Do(e.mu.RUnlock) }
+	t.Cleanup(unlock)
+
+	var passes, waits atomic.Int32
+	sweepPassForTest = func(pass int) {
+		passes.Store(int32(pass))
+		if pass == 2 {
+			unlock()
+		}
+	}
+	sweepWaitingForTest = func() { waits.Add(1) }
+	t.Cleanup(func() {
+		sweepPassForTest = nil
+		sweepWaitingForTest = nil
+	})
+
+	r := sweepAsync(t, context.Background(),
+		"the sweep waited on a contended lock that no holder would ever announce")
+	if r.n != 0 || r.err != nil {
+		t.Errorf("WipeAll = (%d, %v), want (0, nil)", r.n, r.err)
+	}
+	if got := waits.Load(); got != 0 {
+		t.Errorf("the sweep blocked in its wait %d times on a contended lock, want 0", got)
+	}
+	if got := passes.Load(); got < 2 {
+		t.Errorf("the sweep made %d passes, want at least 2: the contended first pass was not retried", got)
+	}
+	if e.IsAlive() {
+		t.Error("the enclave survived once its lock was free")
+	}
+}
+
+// TestTryReleaseMapping_ClassifiesTheLock pins the three outcomes the sweep
+// acts on, each against the lock state that produces it.
+func TestTryReleaseMapping_ClassifiesTheLock(t *testing.T) {
+	newEnclave := func(t *testing.T) *MemoryEnclave {
+		t.Helper()
+		e, err := NewMemoryEnclaveSized(32)
+		if err != nil {
+			t.Fatalf("NewMemoryEnclaveSized: %v", err)
+		}
+		t.Cleanup(func() { _ = e.Destroy() })
+		return e
+	}
+
+	t.Run("a counted reader is held", func(t *testing.T) {
+		e := newEnclave(t)
+		e.rlock()
+		got, err := e.tryReleaseMapping()
+		e.runlock()
+		if got != tryHeld || err != nil {
+			t.Errorf("tryReleaseMapping = (%d, %v), want (tryHeld, nil)", got, err)
+		}
+	})
+	t.Run("a counted writer is held", func(t *testing.T) {
+		e := newEnclave(t)
+		e.lock()
+		got, err := e.tryReleaseMapping()
+		e.unlock()
+		if got != tryHeld || err != nil {
+			t.Errorf("tryReleaseMapping = (%d, %v), want (tryHeld, nil)", got, err)
+		}
+	})
+	t.Run("an uncounted lock is contended", func(t *testing.T) {
+		e := newEnclave(t)
+		e.mu.RLock()
+		got, err := e.tryReleaseMapping()
+		e.mu.RUnlock()
+		if got != tryContended || err != nil {
+			t.Errorf("tryReleaseMapping = (%d, %v), want (tryContended, nil)", got, err)
+		}
+	})
+	t.Run("a free lock is released", func(t *testing.T) {
+		e := newEnclave(t)
+		got, err := e.tryReleaseMapping()
+		if got != tryReleased || err != nil {
+			t.Errorf("tryReleaseMapping = (%d, %v), want (tryReleased, nil)", got, err)
+		}
+		if e.IsAlive() {
+			t.Error("a released enclave still reports alive")
+		}
+	})
+}
+
+// drainWake empties the wake slot and reports whether it held a wake-up.
+func drainWake() bool {
+	select {
+	case <-sweepWake:
+		return true
+	default:
+		return false
+	}
+}
+
+// TestHolders_TheLastReleaseWakesOnlyAnArmedSweep pins the borrow side of the
+// handshake: outside a sweep a release posts nothing, inside one only the
+// release that takes the count to zero does, and wake-ups coalesce in the
+// one-slot channel rather than blocking a releaser.
+func TestHolders_TheLastReleaseWakesOnlyAnArmedSweep(t *testing.T) {
+	e, err := NewMemoryEnclaveSized(32)
+	if err != nil {
+		t.Fatalf("NewMemoryEnclaveSized: %v", err)
+	}
+	t.Cleanup(func() {
+		sweepWaiting.Store(false)
+		drainWake()
+		_ = e.Destroy()
+	})
+	drainWake()
+
+	e.rlock()
+	e.runlock()
+	if drainWake() {
+		t.Error("a release outside any sweep posted a wake-up; the borrow path must cost one load and nothing else there")
+	}
+
+	sweepWaiting.Store(true)
+	e.rlock()
+	e.rlock()
+	e.runlock()
+	if drainWake() {
+		t.Error("a release that left another holder posted a wake-up; the sweep cannot take the lock yet")
+	}
+	e.runlock()
+	if !drainWake() {
+		t.Error("the last release under an armed sweep posted no wake-up: a waiting sweep would never hear it")
+	}
+
+	// Coalescing: two releases with nobody draining in between must neither
+	// block nor queue two wake-ups.
+	e.rlock()
+	e.runlock()
+	e.lock()
+	e.unlock()
+	if !drainWake() {
+		t.Error("no wake-up pending after two armed releases")
+	}
+	if drainWake() {
+		t.Error("two wake-ups were queued; they must coalesce into the one slot")
+	}
+}
+
+// TestHolders_EveryMethodLeavesTheCountBalanced pins that every acquisition on
+// MemoryEnclave is bracketed: a count left above zero would make every later
+// sweep think the enclave is held forever — under context.Background, a
+// shutdown that never finishes — and one below zero would let a sweep wait
+// with no holder left to wake it. A borrow whose callback panics is included,
+// because the release is deferred and must still run.
+func TestHolders_EveryMethodLeavesTheCountBalanced(t *testing.T) {
+	e, err := NewMemoryEnclaveSized(32)
+	if err != nil {
+		t.Fatalf("NewMemoryEnclaveSized: %v", err)
+	}
+	errBoom := errors.New("callback failed")
+
+	for _, tc := range []struct {
+		name string
+		call func()
+	}{
+		{"WithBytes", func() { _ = e.WithBytes(func([]byte) error { return nil }) }},
+		{"WithBytes returning an error", func() { _ = e.WithBytes(func([]byte) error { return errBoom }) }},
+		{"WithBytes panicking", func() { _ = panicValue(func() { _ = e.WithBytes(func([]byte) error { panic(errBoom) }) }) }},
+		{"Open", func() { _, _ = e.Open() }},
+		{"OpenString", func() { _, _ = e.OpenString() }},
+		{"EqualTo", func() { _ = e.EqualTo([]byte("x")) }},
+		{"Size", func() { _ = e.Size() }},
+		{"IsAlive", func() { _ = e.IsAlive() }},
+		{"String", func() { _ = e.String() }},
+		{"Freeze", func() { _ = e.Freeze() }},
+		{"Destroy", func() { _ = e.Destroy() }},
+		{"Destroy again", func() { _ = e.Destroy() }},
+		{"WithBytes after Destroy", func() { _ = e.WithBytes(func([]byte) error { return nil }) }},
+	} {
+		tc.call()
+		if got := e.holders.Load(); got != 0 {
+			t.Fatalf("%s left the holder count at %d, want 0", tc.name, got)
+		}
+	}
+}
+
+// TestDestroy_NilAndRepeatedReturnNil pins the deferable half of Destroy's
+// contract: a nil enclave and an already-destroyed one have nothing to
+// release, and report nothing.
+func TestDestroy_NilAndRepeatedReturnNil(t *testing.T) {
+	var nilEnclave *MemoryEnclave
+	if err := nilEnclave.Destroy(); err != nil {
+		t.Errorf("Destroy on a nil enclave = %v, want nil", err)
+	}
+
+	e, err := NewMemoryEnclaveSized(32)
+	if err != nil {
+		t.Fatalf("NewMemoryEnclaveSized: %v", err)
+	}
+	if err := e.Destroy(); err != nil {
+		t.Fatalf("Destroy = %v, want nil", err)
+	}
+	if err := e.Destroy(); err != nil {
+		t.Errorf("a second Destroy = %v, want nil", err)
+	}
+}
+
+// TestSweepError_ContractTable pins SweepError's methods field by field: which
+// sentinels it matches, the text it renders, and that a zero field never
+// matches its sentinel.
+func TestSweepError_ContractTable(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		e             *SweepError
+		wantCorrupt   bool
+		wantUnwiped   bool
+		wantFragments []string
+	}{
+		{
+			name:        "corruption only",
+			e:           &SweepError{Corrupt: 3},
+			wantCorrupt: true,
+			wantFragments: []string{
+				"enclave: 3 of the swept enclaves failed canary verification: " + ErrEnclaveCorrupted.Error(),
+			},
+		},
+		{
+			name:        "unwiped only",
+			e:           &SweepError{Unwiped: 2},
+			wantUnwiped: true,
+			wantFragments: []string{
+				"enclave: 2 of the swept enclaves were unmapped without an in-process wipe because mprotect " +
+					"was denied: " + ErrReleasedWithoutWipe.Error(),
+			},
+		},
+		{
+			name:        "both",
+			e:           &SweepError{Corrupt: 1, Unwiped: 4},
+			wantCorrupt: true,
+			wantUnwiped: true,
+			wantFragments: []string{
+				"enclave: 1 of the swept enclaves failed canary verification: ",
+				"\nenclave: 4 of the swept enclaves were unmapped without an in-process wipe",
+			},
+		},
+		{
+			name:          "neither",
+			e:             &SweepError{},
+			wantFragments: []string{"enclave: sweep reported nothing"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var err error = tc.e
+			if got := errors.Is(err, ErrEnclaveCorrupted); got != tc.wantCorrupt {
+				t.Errorf("errors.Is(%+v, ErrEnclaveCorrupted) = %v, want %v", tc.e, got, tc.wantCorrupt)
+			}
+			if got := errors.Is(err, ErrReleasedWithoutWipe); got != tc.wantUnwiped {
+				t.Errorf("errors.Is(%+v, ErrReleasedWithoutWipe) = %v, want %v", tc.e, got, tc.wantUnwiped)
+			}
+			if errors.Is(err, ErrEnclaveDestroyed) {
+				t.Errorf("errors.Is(%+v, ErrEnclaveDestroyed) = true; a sweep report matches only its own sentinels", tc.e)
+			}
+			for _, f := range tc.wantFragments {
+				if !strings.Contains(err.Error(), f) {
+					t.Errorf("Error() = %q, want it to contain %q", err.Error(), f)
+				}
+			}
+			var se *SweepError
+			if !errors.As(err, &se) || se != tc.e {
+				t.Errorf("errors.As did not recover the *SweepError")
+			}
+		})
+	}
+}
+
+// TestWipeAll_SweepErrorCountsAreReadableWithErrorsAs pins the error WipeAll
+// actually returns: a *SweepError, reachable with errors.As, carrying the
+// number of corrupt enclaves — and nothing in the field for a condition that
+// did not happen.
+func TestWipeAll_SweepErrorCountsAreReadableWithErrorsAs(t *testing.T) {
+	requireCleanLedger(t)
+
+	const total, corrupt = 4, 2
+	for i := 0; i < total; i++ {
+		e, err := NewMemoryEnclaveSized(64)
+		if err != nil {
+			t.Fatalf("NewMemoryEnclaveSized: %v", err)
+		}
+		if i < corrupt {
+			if len(e.m.canary) == 0 {
+				t.Fatal("no canary slack at this size; the test would be vacuous")
+			}
+			e.m.canary[0] ^= 0xFF
+		}
+	}
+
+	remaining, err := WipeAll(context.Background())
+	if remaining != 0 {
+		t.Errorf("WipeAll = %d, want 0: corrupt enclaves are still released", remaining)
+	}
+	var se *SweepError
+	if !errors.As(err, &se) {
+		t.Fatalf("WipeAll err = %v (%T), want a *SweepError", err, err)
+	}
+	if se.Corrupt != corrupt || se.Unwiped != 0 {
+		t.Errorf("SweepError = %+v, want {Corrupt:%d Unwiped:0}", *se, corrupt)
+	}
+	if errors.Is(err, ErrReleasedWithoutWipe) {
+		t.Error("the sweep error matches ErrReleasedWithoutWipe although no wipe was skipped")
+	}
+}
+
+// parkSweepOnABorrow starts a context.Background sweep that parks waiting for
+// a borrow on e that never ends until the returned end is called. It returns
+// once the sweep is inside its wait, and a channel carrying the sweep's result.
+func parkSweepOnABorrow(t *testing.T, e *MemoryEnclave) (end func(), result <-chan sweepResult) {
+	t.Helper()
+	end = holdBorrow(t, e)
+	parked := make(chan struct{})
+	var once sync.Once
+	sweepWaitingForTest = func() { once.Do(func() { close(parked) }) }
+	t.Cleanup(func() { sweepWaitingForTest = nil })
+
+	out := make(chan sweepResult, 1)
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		n, err := WipeAll(context.Background())
+		out <- sweepResult{n, err}
+	}()
+	// Waits for the sweep to RETURN, not for its result, which the test may
+	// already have taken.
+	t.Cleanup(func() {
+		end()
+		<-finished
+	})
+	<-parked
+	return end, out
+}
+
+// TestWipeAll_AParkedSweepDoesNotHoldASecondCallerHostage is the regression
+// for admission ignoring ctx (Codex on #95). Sweep A runs under
+// context.Background and parks on a borrow that has not ended. Sweep B arrives
+// with a context that is canceled, that is canceled while B waits for
+// admission, or that is nil. Each must return before the borrow ends,
+// reporting the ledger as it stands and ErrSweepInProgress, rather than
+// queueing behind A for as long as A waits. A must still finish its sweep once
+// the borrow ends.
+func TestWipeAll_AParkedSweepDoesNotHoldASecondCallerHostage(t *testing.T) {
+	requireCleanLedger(t)
+
+	e, err := NewMemoryEnclaveSized(32)
+	if err != nil {
+		t.Fatalf("NewMemoryEnclaveSized: %v", err)
+	}
+	end, aResult := parkSweepOnABorrow(t, e)
+
+	check := func(t *testing.T, name string, r sweepResult) {
+		t.Helper()
+		if !errors.Is(r.err, ErrSweepInProgress) {
+			t.Errorf("%s: WipeAll err = %v, want ErrSweepInProgress: this call swept nothing", name, r.err)
+		}
+		if r.n != 1 {
+			t.Errorf("%s: WipeAll = %d, want 1: the borrowed enclave is still held", name, r.n)
+		}
+	}
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	check(t, "already canceled", sweepAsync(t, canceled,
+		"a canceled context queued behind a parked sweep"))
+
+	var nilCtx context.Context
+	check(t, "nil", sweepAsync(t, nilCtx, "a nil context queued behind a parked sweep"))
+
+	waiting, cancelWaiting := context.WithCancel(context.Background())
+	defer cancelWaiting()
+	var admissionWaits atomic.Int32
+	sweepAdmissionWaitForTest = func() {
+		admissionWaits.Add(1)
+		cancelWaiting()
+	}
+	t.Cleanup(func() { sweepAdmissionWaitForTest = nil })
+	check(t, "canceled while waiting", sweepAsync(t, waiting,
+		"a context canceled while waiting for admission did not release the caller"))
+	if got := admissionWaits.Load(); got != 1 {
+		t.Errorf("the second caller waited for admission %d times, want 1", got)
+	}
+
+	if !e.IsAlive() {
+		t.Error("the borrowed enclave was destroyed while its borrow was live")
+	}
+	if g := sweepGeneration(); !sweepInFlight(g) {
+		t.Errorf("sweep generation %d is even while A is still sweeping: a refused caller touched the parity", g)
+	}
+
+	end()
+	select {
+	case r := <-aResult:
+		if r.n != 0 || r.err != nil {
+			t.Errorf("sweep A = (%d, %v) after the borrow ended, want (0, nil)", r.n, r.err)
+		}
+	case <-time.After(sweepHangBound):
+		t.Fatal("sweep A did not finish after the borrow it waited for ended")
+	}
+	if g := sweepGeneration(); sweepInFlight(g) {
+		t.Errorf("sweep generation %d is odd after every sweep returned", g)
+	}
+}
+
+// TestWipeAll_ContentionRetriesHonorCtx pins that the immediate retry of a
+// contended lock is not a loop around the context. The lock is held
+// uncounted for the whole sweep, so every pass is contention-only; a sweep
+// that retried without consulting ctx would never return. Canceling ctx at
+// the third pass must end it, and a nil ctx must make no contention retry at
+// all.
+func TestWipeAll_ContentionRetriesHonorCtx(t *testing.T) {
+	requireCleanLedger(t)
+
+	e, err := NewMemoryEnclaveSized(32)
+	if err != nil {
+		t.Fatalf("NewMemoryEnclaveSized: %v", err)
+	}
+	e.mu.RLock() // uncounted: every TryLock fails with holders at zero
+	var unlockOnce sync.Once
+	unlock := func() { unlockOnce.Do(e.mu.RUnlock) }
+	t.Cleanup(unlock)
+
+	var passes atomic.Int32
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sweepPassForTest = func(pass int) {
+		passes.Store(int32(pass))
+		if pass == 3 {
+			cancel()
+		}
+	}
+	t.Cleanup(func() { sweepPassForTest = nil })
+
+	r := sweepAsync(t, ctx, "contention retries ignored a canceled context")
+	if r.n != 1 || r.err != nil {
+		t.Errorf("WipeAll = (%d, %v), want (1, nil): the contended enclave is still held", r.n, r.err)
+	}
+	if got := passes.Load(); got != 3 {
+		t.Errorf("the sweep made %d passes, want 3: it retried at once until ctx ended, then stopped", got)
+	}
+
+	passes.Store(0)
+	var nilCtx context.Context
+	r = sweepAsync(t, nilCtx, "contention retries ignored a nil context")
+	if r.n != 1 || r.err != nil {
+		t.Errorf("WipeAll(nil) = (%d, %v), want (1, nil)", r.n, r.err)
+	}
+	if got := passes.Load(); got != 1 {
+		t.Errorf("WipeAll(nil) made %d passes, want 1: a nil ctx never retries contention", got)
+	}
+	if !e.IsAlive() {
+		t.Error("the contended enclave was destroyed")
+	}
+
+	unlock()
+	if remaining := sweep(t); remaining != 0 {
+		t.Errorf("WipeAll after the lock was released = %d, want 0", remaining)
+	}
+}
+
+// orphanCount reports how many failed constructions' mappings are on the
+// orphan ledger.
+func orphanCount() int {
+	registryMu.Lock()
+	defer registryMu.Unlock()
+	return len(orphans)
+}
+
+// requireCleanLedger sweeps and fails the test unless nothing — no enclave and
+// no orphan — is left held, so the counts a test asserts are its own.
+func requireCleanLedger(t *testing.T) {
+	t.Helper()
+	if remaining := sweep(t); remaining != 0 {
+		t.Fatalf("the process already holds %d unreclaimable entries; this test needs a clean ledger", remaining)
+	}
+}
+
+// denyProtect refuses every mprotect made through the protectMemory seam until
+// the returned func lifts it; t.Cleanup lifts it as well. The mapping keeps its
+// real slices throughout, so nothing but the refusal differs from production.
+//
+// Failures are injected ONLY through the seams. An earlier helper handed the
+// kernel a malformed range instead — the mapping's handle re-pointed at an
+// unaligned probe slice — on the assumption that mprotect must refuse it. That
+// holds for POSIX mprotect and not for VirtualProtect, which accepts a range
+// crossing page boundaries: on Windows the probe was made writable and the
+// release then touched the real mapping's still-inaccessible guard pages.
+func denyProtect(t *testing.T) (lift func()) {
+	t.Helper()
+	prev := protectMemory
+	lift = func() { protectMemory = prev }
+	t.Cleanup(lift)
+	protectMemory = func([]byte, protection) error {
+		return errors.New("mprotect denied by policy")
+	}
+	return lift
+}
+
+// denyProtectAndUnmap is denyProtect with the unmap refused too, which is
+// every way release has of returning the pages: it cannot make the region
+// writable, so it was not wiped by the mprotect path, and the unmap it falls
+// back to is refused. The pages stay mapped AND locked. A copy constructor's
+// freeze fails under it and so does its cleanup.
+func denyProtectAndUnmap(t *testing.T) (lift func()) {
+	t.Helper()
+	liftProtect := denyProtect(t)
+	prev := unmapMemory
+	liftUnmap := func() { unmapMemory = prev }
+	t.Cleanup(liftUnmap)
+	unmapMemory = func([]byte) error { return errors.New("munmap denied too") }
+	return func() { liftProtect(); liftUnmap() }
+}
+
+// TestAllocator_New_FailedConstructionIsReclaimedByWipeAll is the regression
+// for the dropped-handle finding in #83, on the path that kept the charge.
+//
+// A construction whose freeze was refused, and whose cleanup was refused too,
+// returned nil and an error and dropped the only reference to its mapping. The
+// pages never reached the ledger, so no WipeAll could ever reclaim them — even
+// after the refusal lifted — and the Allocator charge kept for those still-
+// locked pages was kept for the process lifetime with nothing to return it.
+//
+// Asserted end to end: the failed construction leaves an orphan; a sweep with
+// the refusal still in force counts it and keeps the charge; a sweep after the
+// refusal lifts reclaims it, counts zero and returns the charge; and a further
+// sweep returns nothing more, so the refund happened exactly once.
+func TestAllocator_New_FailedConstructionIsReclaimedByWipeAll(t *testing.T) {
+	requireCleanLedger(t)
+	a, err := NewAllocator(4 * pageSize)
+	if err != nil {
+		t.Fatalf("NewAllocator: %v", err)
+	}
+	t.Cleanup(func() { _, _ = WipeAll(context.Background()) })
+	restore := denyProtectAndUnmap(t)
+
+	e, err := a.New(material())
+	if err == nil {
+		e.Destroy()
+		t.Fatal("Allocator.New succeeded although its freeze was refused")
+	}
+	if !lockedPagesHeld(err) {
+		t.Fatalf("lockedPagesHeld(%v) = false; the setup did not strand locked pages", err)
+	}
+	if got := orphanCount(); got != 1 {
+		t.Fatalf("orphan ledger holds %d, want 1: the failed construction's pages are unreachable", got)
+	}
+	if used := a.InUse(); used != pageSize {
+		t.Errorf("InUse = %d with the pages still locked, want %d", used, pageSize)
+	}
+
+	remaining, werr := WipeAll(context.Background())
+	if remaining != 1 {
+		t.Errorf("WipeAll = %d with the cleanup still refused, want 1: the orphan still holds its pages", remaining)
+	}
+	if werr != nil {
+		t.Errorf("WipeAll error = %v, want nil: nothing was corrupt or released unwiped", werr)
+	}
+	if used := a.InUse(); used != pageSize {
+		t.Errorf("InUse = %d after a sweep that could not reclaim the orphan, want %d", used, pageSize)
+	}
+
+	restore()
+	remaining, werr = WipeAll(context.Background())
+	if remaining != 0 {
+		t.Errorf("WipeAll = %d once the refusal lifted, want 0", remaining)
+	}
+	if werr != nil {
+		t.Errorf("WipeAll error = %v, want nil", werr)
+	}
+	if got := orphanCount(); got != 0 {
+		t.Errorf("orphan ledger holds %d after the reclaiming sweep, want 0", got)
+	}
+	if used := a.InUse(); used != 0 {
+		t.Errorf("InUse = %d after the orphan's pages went back, want 0", used)
+	}
+
+	if remaining := sweep(t); remaining != 0 {
+		t.Errorf("a further WipeAll = %d, want 0", remaining)
+	}
+	if used := a.InUse(); used != 0 {
+		t.Errorf("InUse = %d after a further sweep, want 0: the refund ran more than once", used)
+	}
+}
+
+// TestAllocator_NewSized_UnlockedOrphanIsReclaimedWithoutASecondRefund is the
+// other refund arm. An mlock refused at the ceiling leaves nothing locked, so
+// the constructor refunds at once — but when the unmap is refused the pages
+// are still MAPPED, and they must reach the orphan ledger with NO refund of
+// their own: a record carrying the charge as well would hand it back twice
+// and take the budget past its limit.
+func TestAllocator_NewSized_UnlockedOrphanIsReclaimedWithoutASecondRefund(t *testing.T) {
+	requireCleanLedger(t)
+	a, err := NewAllocator(4 * pageSize)
+	if err != nil {
+		t.Fatalf("NewAllocator: %v", err)
+	}
+	t.Cleanup(func() { _, _ = WipeAll(context.Background()) })
+
+	prevLock, prevUnmap := lockMemory, unmapMemory
+	restore := func() { lockMemory, unmapMemory = prevLock, prevUnmap }
+	t.Cleanup(restore)
+	lockMemory = func([]byte) error { return errors.New("mlock: cannot allocate memory") }
+	unmapMemory = func([]byte) error { return errors.New("munmap refused") }
+
+	if _, err := a.NewSized(32); !pagesHeld(err) || lockedPagesHeld(err) {
+		t.Fatalf("NewSized = %v, want pages held but not locked", err)
+	}
+	if used := a.InUse(); used != 0 {
+		t.Errorf("InUse = %d after a construction that left nothing locked, want 0", used)
+	}
+	if got := orphanCount(); got != 1 {
+		t.Fatalf("orphan ledger holds %d, want 1: the mapped pages are unreachable", got)
+	}
+	if remaining := sweep(t); remaining != 1 {
+		t.Errorf("WipeAll = %d with the unmap still refused, want 1", remaining)
+	}
+
+	restore()
+	if remaining := sweep(t); remaining != 0 {
+		t.Errorf("WipeAll = %d once the unmap is allowed, want 0", remaining)
+	}
+	if used := a.InUse(); used != 0 {
+		t.Errorf("InUse = %d after the orphan was reclaimed, want 0: the charge was refunded twice", used)
+	}
+	if avail := a.Available(); avail != 4*pageSize {
+		t.Errorf("Available = %d, want the budget of %d exactly", avail, 4*pageSize)
+	}
+}
+
+// TestNewMemoryEnclaveCopy_FailedConstructionIsReclaimedByWipeAll is the
+// unadmitted constructors' half: no budget is involved, but the stranded pages
+// are locked memory all the same, and WipeAll's whole purpose is that none
+// outlive the process unreported.
+func TestNewMemoryEnclaveCopy_FailedConstructionIsReclaimedByWipeAll(t *testing.T) {
+	requireCleanLedger(t)
+	t.Cleanup(func() { _, _ = WipeAll(context.Background()) })
+	restore := denyProtectAndUnmap(t)
+
+	if _, err := NewMemoryEnclaveCopy(material()); !lockedPagesHeld(err) {
+		t.Fatalf("NewMemoryEnclaveCopy = %v, want locked pages held", err)
+	}
+	if got := orphanCount(); got != 1 {
+		t.Fatalf("orphan ledger holds %d, want 1", got)
+	}
+	if remaining := sweep(t); remaining != 1 {
+		t.Errorf("WipeAll = %d with the cleanup still refused, want 1", remaining)
+	}
+
+	restore()
+	if remaining := sweep(t); remaining != 0 {
+		t.Errorf("WipeAll = %d once the refusal lifted, want 0", remaining)
+	}
+	if got := orphanCount(); got != 0 {
+		t.Errorf("orphan ledger holds %d after the reclaiming sweep, want 0", got)
+	}
+}
+
+// TestWipeAll_ReclaimsALockedOrphanWhoseUnlockStaysRefused pins the retry for
+// an orphan that is still LOCKED (#83). A construction that locked its pages
+// and then failed is rolled back by abandon, which carries on to the unmap when
+// munlock is refused — munmap takes the lock with it. The sweep's retries must
+// do the same. Until they did, a release that met the refused munlock returned
+// before the unmap, so the orphan and the charge kept for it stayed held for
+// as long as munlock stayed refused, however available the unmap became.
+// TestAllocator_NewSized_UnlockedOrphanIsReclaimedWithoutASecondRefund cannot
+// see this: its orphan never locked.
+func TestWipeAll_ReclaimsALockedOrphanWhoseUnlockStaysRefused(t *testing.T) {
+	requireCleanLedger(t)
+	t.Cleanup(func() { _, _ = WipeAll(context.Background()) })
+
+	m, err := newMapping(64)
+	if err != nil {
+		t.Fatalf("newMapping: %v", err)
+	}
+
+	prevUnlock, prevUnmap := unlockMemory, unmapMemory
+	t.Cleanup(func() { unlockMemory, unmapMemory = prevUnlock, prevUnmap })
+	refused := func([]byte) error { return errors.New("refused") }
+	unlockMemory, unmapMemory = refused, refused
+
+	herr := m.abandon(errors.New("the step that failed"), true)
+	if !lockedPagesHeld(herr) {
+		t.Fatalf("abandon = %v, want locked pages held", herr)
+	}
+	refunds := 0
+	adoptOrphan(herr, func() { refunds++ })
+	if got := orphanCount(); got != 1 {
+		t.Fatalf("orphan ledger holds %d, want 1", got)
+	}
+
+	// The unmap becomes available; munlock stays refused.
+	unmapMemory = prevUnmap
+	if remaining := sweep(t); remaining != 0 {
+		t.Errorf("WipeAll = %d with the unmap available again, want 0: the release stopped at the "+
+			"refused munlock and never tried the unmap that would have taken the lock with it", remaining)
+	}
+	if got := orphanCount(); got != 0 {
+		t.Errorf("orphan ledger holds %d after the reclaiming sweep, want 0", got)
+	}
+	if refunds != 1 {
+		t.Errorf("the kept charge was refunded %d times, want exactly once", refunds)
+	}
+}
+
+// TestWipeAll_ReclaimsOrphansAddedConcurrently runs failing constructions on
+// several goroutines while WipeAll sweeps, for the race detector. Constructors
+// add to the orphan ledger without the sweep slot; the sweep reads and drops records
+// and runs their refunds. Every refusal here is transient — a region's first
+// wipe-enabling mprotect is refused and its second allowed — so each orphan
+// is reclaimable by whichever sweep reaches it, and the final accounting must
+// come out exact.
+//
+// It must not pass vacuously, which an earlier revision could: it counted
+// EVERY construction error, so a host whose real mlock refused first would
+// fail every construction, refund normally, adopt nothing, and still pass. So
+// each failure must be the orphan path's — locked pages held — and at least one
+// orphan must be reclaimed by the CONCURRENT sweeper, not the final drain. That
+// is made deterministic rather than hoped for: the first worker to strand a
+// mapping waits until the sweeper has reclaimed one, while the other workers
+// keep constructing.
+//
+// The wait is bounded by SWEEPS, not time, so a regression fails rather than
+// hangs. The sweeper offers a tick after every WipeAll, which only a waiting
+// worker can take; the second tick belongs to a sweep that STARTED after the
+// wait did, and so after the adoption, and that sweep must have reclaimed the
+// orphan. Three ticks without a reclaim is therefore a failure, not bad luck.
+func TestWipeAll_ReclaimsOrphansAddedConcurrently(t *testing.T) {
+	requireCleanLedger(t)
+	const workers, perWorker = 4, 16
+	// Room for every construction's charge at once, so no failure below can be
+	// a budget refusal instead of the orphan path under test.
+	a, err := NewAllocator(workers * perWorker * pageSize)
+	if err != nil {
+		t.Fatalf("NewAllocator: %v", err)
+	}
+	t.Cleanup(func() { _, _ = WipeAll(context.Background()) })
+
+	// reclaimed counts the ALLOWED wipe-enabling mprotects. A region's second
+	// one only ever happens in a sweep's retry of an orphan, so this is the
+	// number of orphan releases the sweeps reached.
+	var reclaimed atomic.Int64
+	firstReclaim := make(chan struct{})
+	var firstReclaimOnce sync.Once
+
+	prevProtect, prevUnmap := protectMemory, unmapMemory
+	t.Cleanup(func() { protectMemory, unmapMemory = prevProtect, prevUnmap })
+	var mu sync.Mutex
+	refusedOnce := make(map[*byte]struct{})
+	protectMemory = func(b []byte, p protection) error {
+		if p == protReadOnly {
+			return errors.New("mprotect denied by policy") // every freeze fails
+		}
+		mu.Lock()
+		_, seen := refusedOnce[&b[0]]
+		if seen {
+			delete(refusedOnce, &b[0])
+		} else {
+			refusedOnce[&b[0]] = struct{}{}
+		}
+		mu.Unlock()
+		if !seen {
+			return errors.New("mprotect denied by policy")
+		}
+		reclaimed.Add(1)
+		firstReclaimOnce.Do(func() { close(firstReclaim) })
+		return prevProtect(b, p)
+	}
+	// The unmap is refused exactly while a region's wipe-enabling mprotect is:
+	// the construction's fallback unmap fails, so the pages are stranded, and
+	// the retry that was allowed its mprotect is allowed its unmap too.
+	unmapMemory = func(b []byte) error {
+		mu.Lock()
+		_, pending := refusedOnce[&b[0]]
+		mu.Unlock()
+		if pending {
+			return errors.New("munmap denied too")
+		}
+		return prevUnmap(b)
+	}
+
+	var adopted atomic.Int64
+	var waitedOnce atomic.Bool
+	var wg sync.WaitGroup
+	done := make(chan struct{})
+	sweeperDone := make(chan struct{})
+	swept := make(chan struct{}) // unbuffered: a tick reaches only a waiter
+	go func() {
+		defer close(sweeperDone)
+		for {
+			select {
+			case <-done:
+				return
+			default:
+				_, _ = WipeAll(context.Background())
+				select {
+				case swept <- struct{}{}:
+				default:
+				}
+			}
+		}
+	}()
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < perWorker; i++ {
+				e, err := a.New(material())
+				if err == nil {
+					e.Destroy()
+					t.Errorf("Allocator.New succeeded although every freeze is refused")
+					continue
+				}
+				if !lockedPagesHeld(err) {
+					t.Errorf("Allocator.New = %v, want a failure that left locked pages for the orphan "+
+						"ledger; this failure never reached the path under test", err)
+					continue
+				}
+				adopted.Add(1)
+				// One worker, once, holds still until the concurrent sweeper has
+				// reclaimed an orphan, or three sweeps have finished without one.
+				// The sweeper loops until every worker is done, so this cannot
+				// wait on anything that is not running.
+				if waitedOnce.CompareAndSwap(false, true) {
+					for ticks := 0; ticks < 3; {
+						select {
+						case <-firstReclaim:
+							ticks = 3
+						case <-swept:
+							ticks++
+						}
+					}
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	close(done)
+	<-sweeperDone
+	concurrent := reclaimed.Load()
+
+	if got := adopted.Load(); got != workers*perWorker {
+		t.Fatalf("%d of %d constructions stranded locked pages, want all of them", got, workers*perWorker)
+	}
+	if concurrent == 0 {
+		t.Fatal("the concurrent sweeper reclaimed no orphan; only the final drain would have been tested")
+	}
+	if remaining := sweep(t); remaining != 0 {
+		t.Errorf("WipeAll = %d after every refusal lifted, want 0", remaining)
+	}
+	if got := orphanCount(); got != 0 {
+		t.Errorf("orphan ledger holds %d, want 0", got)
+	}
+	if used := a.InUse(); used != 0 {
+		t.Errorf("InUse = %d after every orphan was reclaimed, want 0", used)
 	}
 }

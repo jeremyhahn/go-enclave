@@ -90,7 +90,7 @@ func TestMemoryEnclave_AllocateInsideBorrow(t *testing.T) {
 			inner.Destroy()
 
 			// And the outer material is still there and still correct.
-			if string(b) != outerMaterial {
+			if !bytes.Equal(b, []byte(outerMaterial)) {
 				return errors.New("outer material changed underneath the borrow")
 			}
 			return nil
@@ -982,5 +982,98 @@ func TestMapping_ReleaseIsExactlyItsExplicitSteps(t *testing.T) {
 				t.Error("the mapping kept its handle after the pages went back")
 			}
 		})
+	}
+}
+
+// errNotLocked is what installStrictUnlock returns for a second unlock of the
+// same region: Windows' VirtualUnlock fails with ERROR_NOT_LOCKED on pages that
+// are not locked, where Linux's munlock succeeds.
+var errNotLocked = errors.New("VirtualUnlock: ERROR_NOT_LOCKED")
+
+// installStrictUnlock replaces unlockMemory with one that has VirtualUnlock's
+// semantics: the first unlock of a region goes through to the real call, and
+// any later unlock of a region already unlocked is REFUSED with errNotLocked.
+//
+// Linux tolerates a repeated munlock, so without this a release path that
+// unlocks again on every retry passes here and fails on Windows (#83). The
+// seam is restored by t.Cleanup; register any cleanup that must run with the
+// real unlock BEFORE calling this, since cleanups run last-in first-out.
+func installStrictUnlock(t *testing.T) {
+	t.Helper()
+	prev := unlockMemory
+	t.Cleanup(func() { unlockMemory = prev })
+
+	var mu sync.Mutex
+	unlocked := make(map[*byte]struct{})
+	unlockMemory = func(b []byte) error {
+		mu.Lock()
+		defer mu.Unlock()
+		if _, done := unlocked[&b[0]]; done {
+			return errNotLocked
+		}
+		if err := prev(b); err != nil {
+			return err
+		}
+		unlocked[&b[0]] = struct{}{}
+		return nil
+	}
+}
+
+// TestMapping_RetryAfterARefusedUnmapDoesNotUnlockAgain is the regression for
+// the repeated-unlock finding in #83.
+//
+// release unlocked the pages on EVERY attempt. When the first attempt's munlock
+// succeeded and its munmap was refused, the retry unlocked again — harmless on
+// Linux, but on Windows VirtualUnlock refuses pages that are not locked, so
+// every retry returned at the unlock and never reached the unmap again. The
+// mapping, and any Allocator reservation behind it, was then held for the
+// process lifetime however often DestroyErr or WipeAll retried.
+//
+// The held attempt must also report the pages as NOT locked, since the unlock
+// that did succeed is the state the retry now trusts.
+func TestMapping_RetryAfterARefusedUnmapDoesNotUnlockAgain(t *testing.T) {
+	m, err := newMapping(32)
+	if err != nil {
+		t.Fatalf("newMapping: %v", err)
+	}
+	prevUnmap := unmapMemory
+	t.Cleanup(func() {
+		unmapMemory = prevUnmap
+		if m.memory != nil {
+			_ = m.release()
+		}
+	})
+	installStrictUnlock(t)
+
+	unmaps := 0
+	unmapMemory = func(b []byte) error {
+		unmaps++
+		if unmaps == 1 {
+			return errors.New("munmap: cannot allocate memory")
+		}
+		return prevUnmap(b)
+	}
+
+	err = m.release()
+	if !pagesHeld(err) {
+		t.Fatalf("release with a refused munmap = %v, want a held failure", err)
+	}
+	if lockedPagesHeld(err) {
+		t.Errorf("lockedPagesHeld(%v) = true, want false: the munlock succeeded", err)
+	}
+
+	err = m.release()
+	if errors.Is(err, errNotLocked) {
+		t.Fatalf("the retry unlocked the region a second time and was refused (%v); on Windows the "+
+			"mapping can then never be released", err)
+	}
+	if err != nil {
+		t.Fatalf("retry = %v, want nil once the munmap is allowed", err)
+	}
+	if unmaps != 2 {
+		t.Errorf("munmap attempted %d times, want 2: the retry never reached it", unmaps)
+	}
+	if m.memory != nil {
+		t.Error("the mapping is still held after the retry released the pages")
 	}
 }

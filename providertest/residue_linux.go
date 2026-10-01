@@ -107,8 +107,21 @@ func residueMappings(needle []byte, home uintptr) ([]string, error) {
 // nothing more principled than the order the kernel lists mappings in — which
 // is why the wipe is here, where it can be tested, instead of at the end of a
 // loop where a mutant of it survives.
+//
+// It wipes exactly the prefix of buf this call handed to ReadAt — the largest
+// request it made — and no more. io.ReaderAt may use ALL of the slice it is
+// given as scratch even when it reports a short read, so the bound is what was
+// requested, not what was returned; and nothing past the largest request was
+// written at all, so the rest of buf is still the zeroes the previous call
+// left. The bound is not an optimization of taste. buf is a full 1 MiB chunk
+// and most mappings are a few pages, so wiping all of it per mapping cost a
+// sweep hundreds of megabytes of writes, and under the race detector — where
+// every byte Wipe stores is an instrumented write — that made each conformance
+// run take seconds and pushed the package past go test's default timeout in
+// the repository's own -race -cpu=1,2,8 gate (#90).
 func mappingContains(mem io.ReaderAt, lo, hi uintptr, needle, buf []byte) bool {
-	defer enclave.Wipe(buf)
+	used := 0
+	defer func() { enclave.Wipe(buf[:used]) }()
 
 	overlap := len(needle) - 1
 	for off := lo; off < hi; {
@@ -126,6 +139,7 @@ func mappingContains(mem io.ReaderAt, lo, hi uintptr, needle, buf []byte) bool {
 		if remaining := int(hi - off); remaining < n {
 			n = remaining
 		}
+		used = max(used, n)
 		read, rerr := mem.ReadAt(buf[:n], int64(off))
 		if read > 0 && bytes.Contains(buf[:read], needle) {
 			return true

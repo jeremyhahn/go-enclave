@@ -88,16 +88,17 @@ import (
 // The online half resolves every classPending entry against the Gitea API and
 // fails if the issue is closed — the exact shape of #65, for the case where a
 // legitimately-open reference is written today and the issue closes next month.
-// It skips only for GENUINE TRANSPORT UNAVAILABILITY, because a build that
-// fails when a private git server is down is worse than the problem it guards.
-// It does NOT skip for an HTTP status, a rejected token, a malformed endpoint
-// or an answer from the wrong repository: those are configuration failures and
-// they fail, because setting ENCLAVE_ISSUE_API is what asks for the check.
-// That was the second finding on PR #66, and it is the silent-instrument
-// pattern this repository has caught repeatedly — a probe that cannot answer
-// reports exactly what a clean probe reports. See onlineFailurePolicy for the
-// decision table and for why the middle "warn" state it used to have was
-// removed rather than kept.
+// It NEVER skips (#90). A ledger with no classPending entry makes no claim
+// about the world, so there is nothing to resolve and the half passes on the
+// ledger alone, without a network. A ledger WITH one makes a claim only the
+// issue tracker can settle, and then an unconfigured endpoint, an unreachable
+// one, an HTTP status, a rejected token, a malformed endpoint and an answer
+// from the wrong repository all FAIL: a probe that cannot answer reports
+// exactly what a clean probe reports, which is the silent-instrument pattern
+// this repository has caught repeatedly (the second finding on PR #66 was the
+// configuration half of it; #90 removed the transport and unconfigured skips
+// that were left). See onlineFailurePolicy for the decision table, and for why
+// neither a "skip" nor a "warn" state survives in it.
 //
 // # What this guard CANNOT catch
 //
@@ -118,12 +119,14 @@ import (
 //     CHANGELOG.md, *_test.go, the Makefile and .github/ are excluded by
 //     choice, for the reasons given there. A stale claim in those is not
 //     caught.
-//   - The online half is opt-in through the environment. Where
-//     ENCLAVE_ISSUE_API is never set — which is every default local run and
-//     this repository's CI today, since the repository is private — only the
-//     offline half runs. Unsetting it is a way to switch the state check off,
-//     and no test can prevent that; the offline half is what carries the
-//     invariant everywhere.
+//   - The online half needs the issue tracker only while the ledger claims
+//     pending work. Today it claims none, so every run — local and CI, where
+//     ENCLAVE_ISSUE_API is not set because the repository is private — passes
+//     it on the ledger alone. The first classPending entry makes
+//     ENCLAVE_ISSUE_API and ENCLAVE_ISSUE_TOKEN REQUIREMENTS of every run,
+//     CI's Test job included: without them the test fails rather than
+//     reporting a claim nobody checked. Adding such an entry therefore means
+//     provisioning those two variables in the same change.
 //   - Nothing this file could do would make a PASSING test say anything in a
 //     non-verbose run. Measured: t.Log, os.Stdout and os.Stderr are all
 //     discarded for a package that passes without -v. So there is no such
@@ -290,6 +293,10 @@ var docIssueRefLedger = []docIssueRef{
 	// missed a whole package's docs, silently.
 	{"providertest/providertest.go", 45, classHistorical, "af42f5722bd4", "Both were measured in this repository (#45)."},
 	{"providertest/residue.go", 45, classHistorical, "f31ce514c0c4", "measured in this repository (#45), are the reason that"},
+	// #90 — the residue sweep's scan-buffer wipe bounded to what each mapping's
+	// scan could have written, which is what brought the -race gate back
+	// under go test's default timeout.
+	{"providertest/residue_linux.go", 90, classHistorical, "75a3b7c680ff", "timeout in the repository's own -race -cpu=1,2,8 gate (#90)."},
 }
 
 // docIssueRefFiles is the documented surface this guard covers: the package
@@ -697,21 +704,21 @@ func TestDocIssueRefsAreClassified(t *testing.T) {
 // # The online half, and why its policy is a value rather than a t.Fatalf
 //
 // Review on PR #66 found the third defect in this file, and it was the same
-// class as the two before it: the failure policy below was decided inline with
-// t.Skipf and t.Fatalf calls, so the only way to exercise it was to have a
-// real Gitea, real credentials and a classPending entry. There are none, the
-// default run skips, and every branch — the control lookup, the pending
-// lookup, HTTP and auth failure, a malformed response, a closed pending issue,
-// and the fatal branch of the policy itself — was covered by nothing. A
-// regression turning any of them fail-open would have left go test green.
-// That is the defect this whole file exists to prevent, living inside the
-// guard.
+// class as the two before it: the failure policy below was decided inline
+// with test-skip and t.Fatalf calls, so the only way to exercise it was to
+// have a real Gitea, real credentials and a classPending entry. There were
+// none, the default run skipped, and every branch — the control lookup, the
+// pending lookup, HTTP and auth failure, a malformed response, a closed
+// pending issue, and the fatal branch of the policy itself — was covered by
+// nothing. A regression turning any of them fail-open would have left go test
+// green. That is the defect this whole file exists to prevent, living inside
+// the guard.
 //
-// So the decision is now a VALUE. evaluateIssueState returns what should
-// happen and why; the test function's only job is to translate that into a
-// skip, a log or a failure. Everything above it is exercised in the default
-// run by TestIssueStatePolicy against a stubbed http.RoundTripper: hermetic,
-// no network, no Gitea, no credentials, and not even a loopback port.
+// So the decision is a VALUE. evaluateIssueState returns what should happen
+// and why; the test function's only job is to translate that into a log or a
+// failure. Everything above it is exercised in the default run by
+// TestIssueStatePolicy against a stubbed http.RoundTripper: hermetic, no
+// network, no Gitea, no credentials, and not even a loopback port.
 
 // TestCitationExtraction pins the two extractor rules that a false positive or
 // a false negative would quietly rot.
@@ -802,16 +809,19 @@ func TestDocIssueRefFilesReachesSubpackages(t *testing.T) {
 
 // onlineAction is what the online half decided to do. It exists so the policy
 // can be asserted in a table rather than observed through a t.Fatalf.
+//
+// There are exactly two, and there is deliberately no third (#90): a "skip"
+// is a pass that measured nothing, and a "warn" prints nothing in a
+// non-verbose run — see onlineFailurePolicy.
 type onlineAction int
 
 const (
-	// actionVerified: the check ran. Problems, if any, are real findings.
+	// actionVerified: every claim the ledger makes was settled — against the
+	// tracker, or, when the ledger claims nothing pending, by the ledger
+	// itself.
 	actionVerified onlineAction = iota
-	// actionSkip: the check could not run for a reason that is not anyone's
-	// fault — no configuration, or the server is genuinely unreachable.
-	actionSkip
 	// actionFail: the check must fail. Either it found a stale reference, or
-	// it could not run for a reason that WOULD hide one.
+	// it could not settle a claim the ledger makes.
 	actionFail
 )
 
@@ -819,8 +829,6 @@ func (a onlineAction) String() string {
 	switch a {
 	case actionVerified:
 		return "verified"
-	case actionSkip:
-		return "skip"
 	case actionFail:
 		return "fail"
 	default:
@@ -844,20 +852,32 @@ type onlineResult struct {
 // onlineFailurePolicy decides what an issue-API failure means, and it exists as
 // a named thing because getting it wrong is how a guard goes quiet.
 //
-//	                       | ENCLAVE_ISSUE_API unset | ENCLAVE_ISSUE_API set
-//	-----------------------+-------------------------+----------------------
-//	 nothing else wrong    | skip                    | verify
-//	 transport failure     | (cannot arise)          | skip
-//	 HTTP status / auth    | (cannot arise)          | FAIL
-//	 malformed config      | (cannot arise)          | FAIL
-//	 malformed response    | (cannot arise)          | FAIL
-//	 wrong state reported  | (cannot arise)          | FAIL
-//	 wrong repository      | (cannot arise)          | FAIL
-//	 pending issue closed  | (cannot arise)          | FAIL
+//	                       | ENCLAVE_ISSUE_API unset      | ENCLAVE_ISSUE_API set
+//	-----------------------+------------------------------+----------------------
+//	 nothing pending       | verified (by the ledger)     | verify
+//	 pending present       | FAIL (cannot settle a claim) | verify
+//	 transport failure     | (cannot arise)               | FAIL
+//	 HTTP status / auth    | (cannot arise)               | FAIL
+//	 malformed config      | (cannot arise)               | FAIL
+//	 malformed response    | (cannot arise)               | FAIL
+//	 wrong state reported  | (cannot arise)               | FAIL
+//	 wrong repository      | (cannot arise)               | FAIL
+//	 pending issue closed  | (cannot arise)               | FAIL
 //
-// Setting ENCLAVE_ISSUE_API IS the opt-in. A developer without credentials
-// leaves it unset and gets the skip; a developer who sets it has asked for the
-// check, so a rejected token or a wrong endpoint is their bug and fails.
+// The unset column is decided by the LEDGER, not by convenience. With nothing
+// classPending the docs make no claim about unresolved work, so "every pending
+// reference is open" is true of the empty set and needs no network to know.
+// With something classPending it is a claim only the tracker can settle, and
+// an unconfigured run cannot settle it: that is a failure, never a skip (#90).
+// A developer who sets ENCLAVE_ISSUE_API has asked for the full check, so a
+// rejected token or a wrong endpoint is their bug and fails too.
+//
+// TRANSPORT FAILURE FAILS. It used to skip, on the reasoning that a build
+// which fails when a private git server is down is worse than the problem it
+// guards; #90 retired that. A run that could not reach the tracker has not
+// verified anything, and reporting it green is the silent instrument again —
+// the remedy for an unreachable server is to make it reachable, or to unset
+// ENCLAVE_ISSUE_API while nothing is pending, not to pass.
 //
 // This used to have a third state — warn, rather than fail, when the endpoint
 // was broken but nothing was classPending, on the reasoning that a credential
@@ -871,9 +891,9 @@ type onlineResult struct {
 // gone. The reasoning behind it was also thinner than it looked: nobody is
 // forced to set the variable.
 //
-// The row that could never be a skip, and still cannot, is a probe reporting
-// the WRONG state or the WRONG repository. That is not unavailability, it is
-// an instrument that lies, and every verdict below it would be worthless.
+// The rows that were never negotiable are a probe reporting the WRONG state or
+// the WRONG repository. That is not unavailability, it is an instrument that
+// lies, and every verdict below it would be worthless.
 //
 // misconfigured is the SINGLE place a misconfiguration is turned into a
 // verdict. Expressing it here and again in its caller would let the two drift,
@@ -918,11 +938,23 @@ type issueAPI struct {
 // makes every decision; the caller only reports it.
 func evaluateIssueState(ctx context.Context, api issueAPI, pending []docIssueRef) onlineResult {
 	if api.base == "" {
+		if len(pending) == 0 {
+			return onlineResult{
+				Action: actionVerified,
+				Reason: "ENCLAVE_ISSUE_API is not set, and none is needed: the ledger " +
+					"has no classPending citations, so the docs make no claim about " +
+					"unresolved work and there is no issue state to verify. This half " +
+					"is vacuous BY CONSTRUCTION here, not by accident.",
+			}
+		}
 		return onlineResult{
-			Action: actionSkip,
-			Reason: fmt.Sprintf("ENCLAVE_ISSUE_API is not set, so the issue-state "+
-				"half did not run (%d classPending entries would have been "+
-				"checked). The classification half still ran.", len(pending)),
+			Action: actionFail,
+			Reason: fmt.Sprintf("ENCLAVE_ISSUE_API is not set, but %d classPending "+
+				"entries claim their issues are unresolved, and only the issue "+
+				"tracker can settle that. Provision ENCLAVE_ISSUE_API and "+
+				"ENCLAVE_ISSUE_TOKEN for every run that executes this test — CI's "+
+				"Test job included — or reword the sentences so they no longer "+
+				"present the work as pending.", len(pending)),
 		}
 	}
 
@@ -953,11 +985,15 @@ func evaluateIssueState(ctx context.Context, api issueAPI, pending []docIssueRef
 	state := facts.state
 	switch {
 	case err != nil && isTransport(err):
+		// A failure, not a skip (#90): the run asked for the check by setting
+		// ENCLAVE_ISSUE_API and the check did not happen.
 		return onlineResult{
-			Action: actionSkip,
-			Reason: fmt.Sprintf("issue API at %s is not reachable (%v), so the "+
-				"issue-state half did not run (%d classPending entries would have "+
-				"been checked). The classification half still ran.",
+			Action: actionFail,
+			Reason: fmt.Sprintf("issue API at %s is not reachable (%v), so none of "+
+				"the %d classPending entries could be verified and the instrument "+
+				"check did not run. An unreachable tracker has verified nothing; "+
+				"make it reachable from this runner, or unset ENCLAVE_ISSUE_API "+
+				"while the ledger claims nothing pending.",
 				api.base, err, len(pending)),
 		}
 	case err != nil:
@@ -1086,8 +1122,6 @@ func TestDocIssueRefsPendingAreStillOpen(t *testing.T) {
 
 	res := evaluateIssueState(t.Context(), api, pendingRefs())
 	switch res.Action {
-	case actionSkip:
-		t.Skip(res.Reason)
 	case actionVerified:
 		t.Log(res.Reason)
 		if res.Checked > 0 {
@@ -1100,6 +1134,8 @@ func TestDocIssueRefsPendingAreStillOpen(t *testing.T) {
 		for _, p := range res.Problems {
 			t.Error(p)
 		}
+	default:
+		t.Fatalf("evaluateIssueState returned %v, which this test cannot report", res.Action)
 	}
 }
 
@@ -1120,10 +1156,11 @@ func fetchIssue(ctx context.Context, api issueAPI, num int) (issueFacts, error) 
 		// Not every Do error is the network being down. A scheme-less or
 		// otherwise unusable URL fails inside the client BEFORE any dial —
 		// "unsupported protocol scheme" — and blanketing that as transport
-		// would make a misconfigured endpoint take the SKIP path under the
-		// very policy that exists to stop it (found by review on PR #66,
-		// reproduced: NewRequestWithContext accepts "gitea.local/api/..."
-		// happily and Do rejects it).
+		// would report a misconfigured endpoint as an unreachable one (it
+		// took the old SKIP path under the very policy that exists to stop
+		// it, found by review on PR #66; since #90 it would fail naming the
+		// wrong remedy). Reproduced: NewRequestWithContext accepts
+		// "gitea.local/api/..." happily and Do rejects it.
 		//
 		// A real network failure implements net.Error — dial refusals, DNS
 		// failures and client timeouts all do. The trap is that *url.Error,
@@ -1181,7 +1218,8 @@ type issueFacts struct {
 }
 
 // transportError marks a failure to reach the endpoint at all, as opposed to
-// reaching it and being refused. Only the former is a clean skip.
+// reaching it and being refused. Both fail; the distinction exists so the
+// failure names the right remedy — reachability, not configuration.
 type transportError struct{ err error }
 
 func (e *transportError) Error() string { return e.err.Error() }
@@ -1214,7 +1252,7 @@ type issueStub struct {
 	// status maps issue number to a non-200 status. Takes precedence.
 	status map[int]int
 	// err, when set, is returned instead of any response: a transport failure,
-	// the one condition that is legitimately a skip.
+	// which fails like every other way of not answering.
 	err error
 	// gotAuth records the Authorization header of the last request, so the
 	// test can prove the token is actually sent rather than assumed.
@@ -1286,7 +1324,7 @@ func pendingLedger(issue int) []docIssueRef {
 // standing between a stale forward reference and a green build — was reachable
 // only with a live Gitea and a classPending entry, so nothing exercised it.
 func TestIssueStatePolicy(t *testing.T) {
-	// A dial that never completes: the one failure that is legitimately a skip.
+	// A dial that never completes: a transport failure, which FAILS (#90).
 	// Produced exactly rather than arranged, so the case cannot quietly become
 	// something else (a refused connection is not the same as a DNS failure,
 	// and both must read as transport).
@@ -1309,17 +1347,24 @@ func TestIssueStatePolicy(t *testing.T) {
 		wantChecked int
 	}{
 		{
-			name:   "not configured, nothing pending, skips",
+			name:   "not configured, nothing pending, verified by the ledger alone",
 			api:    func(*testing.T) issueAPI { return issueAPI{} },
-			want:   actionSkip,
-			wantIn: "ENCLAVE_ISSUE_API is not set",
+			want:   actionVerified,
+			wantIn: "vacuous BY CONSTRUCTION",
 		},
 		{
-			name:    "not configured, pending present, still skips",
+			name:    "not configured, pending present, FAILS",
 			api:     func(*testing.T) issueAPI { return issueAPI{} },
 			pending: pendingLedger(99),
-			want:    actionSkip,
-			wantIn:  "1 classPending entries would have been checked",
+			want:    actionFail,
+			wantIn:  "1 classPending entries claim their issues are unresolved",
+		},
+		{
+			name:    "not configured, two pending, FAILS naming the count",
+			api:     func(*testing.T) issueAPI { return issueAPI{} },
+			pending: append(pendingLedger(98), pendingLedger(99)...),
+			want:    actionFail,
+			wantIn:  "Provision ENCLAVE_ISSUE_API and ENCLAVE_ISSUE_TOKEN",
 		},
 		{
 			// The exact value review on PR #66 reproduced: accepted by the
@@ -1485,17 +1530,17 @@ func TestIssueStatePolicy(t *testing.T) {
 			wantIn:  "instrument check failed",
 		},
 		{
-			name:   "transport failure, nothing pending, skips",
+			name:   "transport failure, nothing pending, FAILS",
 			api:    unreachable,
-			want:   actionSkip,
+			want:   actionFail,
 			wantIn: "is not reachable",
 		},
 		{
-			name:    "transport failure, pending present, still skips",
+			name:    "transport failure, pending present, FAILS",
 			api:     unreachable,
 			pending: pendingLedger(99),
-			want:    actionSkip,
-			wantIn:  "is not reachable",
+			want:    actionFail,
+			wantIn:  "none of the 1 classPending entries could be verified",
 		},
 		{
 			name: "control closed, nothing pending, verified and says it is vacuous",

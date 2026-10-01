@@ -11,7 +11,9 @@
 package enclave
 
 import (
+	"context"
 	"crypto/rand"
+	"errors"
 	"io"
 	"testing"
 )
@@ -59,10 +61,22 @@ func TestWipeAll_LeavesNoResidentMaterial(t *testing.T) {
 	// allocation.
 	const copies = 4
 	for i := 0; i < copies; i++ {
-		tmp := make([]byte, len(m.data))
-		copy(tmp, m.data)
-		if _, err := NewMemoryEnclave(tmp); err != nil {
+		// Handed over from a LOCKED transfer enclave, never a heap copy:
+		// NewMemoryEnclave wipes its input, and that wipe lands in locked
+		// pages (security-review §6).
+		transfer, err := NewMemoryEnclaveSized(len(m.data))
+		if err != nil {
+			t.Fatalf("allocating the transfer enclave: %v", err)
+		}
+		if err := transfer.WithBytes(func(dst []byte) error {
+			copy(dst, m.data)
+			_, nerr := NewMemoryEnclave(dst)
+			return nerr
+		}); err != nil {
 			t.Fatalf("NewMemoryEnclave: %v", err)
+		}
+		if err := transfer.Destroy(); err != nil {
+			t.Fatalf("destroying the transfer enclave: %v", err)
 		}
 	}
 
@@ -72,10 +86,10 @@ func TestWipeAll_LeavesNoResidentMaterial(t *testing.T) {
 	// version of this control never established.
 	withLive, err := processMemoryFind(m.data)
 	if err != nil {
-		t.Skipf("cannot sweep process memory: %v", err)
+		t.Fatalf("cannot sweep process memory: %v (see processMemoryFind for what the runner must allow)", err)
 	}
 	if outside := rangesOutside(withLive, home); len(outside) == 0 {
-		t.Skipf("the sweep found no match outside the needle's own mapping while %d enclaves held the "+
+		t.Fatalf("the sweep found no match outside the needle's own mapping while %d enclaves held the "+
 			"material (%d matches total); it cannot see the mappings a leak would live in and a negative "+
 			"result would be vacuous", copies, len(withLive))
 	}
@@ -99,12 +113,7 @@ func TestWipeAll_LeavesNoResidentMaterial(t *testing.T) {
 // cleared its registry and marked everything destroyed without unmapping would
 // satisfy every other assertion in this file and leave the pages locked.
 func TestWipeAll_ReturnsLockedMemoryToTheKernel(t *testing.T) {
-	if _, err := vmLckBytes(); err != nil {
-		t.Skipf("cannot read VmLck: %v", err)
-	}
-	if remaining := sweep(t); remaining != 0 {
-		t.Skipf("the process already holds %d unwipeable enclaves; this measurement would be noisy", remaining)
-	}
+	requireCleanLedger(t)
 
 	before, err := vmLckBytes()
 	if err != nil {
@@ -123,7 +132,9 @@ func TestWipeAll_ReturnsLockedMemoryToTheKernel(t *testing.T) {
 		t.Fatalf("VmLck: %v", err)
 	}
 	if during-before == 0 {
-		t.Skip("allocating moved VmLck by 0 bytes; mlock is not accounted here and this test would be vacuous")
+		t.Fatal("allocating moved VmLck by 0 bytes: the kernel is not accounting mlock, so the return-to-" +
+			"baseline assertion below would be vacuous. The runner must be a real Linux kernel that reports " +
+			"VmLck in /proc/self/status (see vmLckBytes)")
 	}
 	if want := int64(n) * LockedSize(64); during-before != want {
 		t.Errorf("allocating %d enclaves locked %d bytes, want %d", n, during-before, want)
@@ -140,5 +151,51 @@ func TestWipeAll_ReturnsLockedMemoryToTheKernel(t *testing.T) {
 	if after != before {
 		t.Errorf("VmLck = %d after WipeAll, want the pre-allocation %d: the sweep marked enclaves destroyed "+
 			"without returning their pages", after, before)
+	}
+}
+
+// TestWipeAllAccountsAnUnwipedRelease is the regression for the sweep half.
+//
+// releaseLocked clears the mapping for an unwiped release -- the pages ARE gone --
+// so a sweep that still treated only nil and ErrEnclaveCorrupted as released
+// left the enclave registered with its Allocator reservation unreturned, and
+// reported it as still held. A retry on a later pass then saw a nil error and
+// the mprotect denial vanished entirely.
+//
+// Asserts all three: the count, the reservation, and that the condition is
+// REPORTED rather than swallowed.
+func TestWipeAllAccountsAnUnwipedRelease(t *testing.T) {
+	a, err := NewAllocator(1 << 20)
+	if err != nil {
+		t.Fatalf("NewAllocator: %v", err)
+	}
+
+	e, err := a.New([]byte("material the sweep must account for"))
+	if err != nil {
+		t.Fatalf("Allocator.New: %v", err)
+	}
+	if e.m.mutable {
+		t.Fatal("enclave is not frozen; this test would not exercise the path")
+	}
+
+	denied := errors.New("mprotect denied by policy")
+	prev := protectMemory
+	t.Cleanup(func() { protectMemory = prev })
+	protectMemory = func([]byte, protection) error { return denied }
+
+	remaining, werr := WipeAll(context.Background())
+
+	if remaining != 0 {
+		t.Errorf("WipeAll = %d remaining, want 0: the pages were unmapped, so "+
+			"the enclave is not still held and must not be counted", remaining)
+	}
+	if !errors.Is(werr, ErrReleasedWithoutWipe) {
+		t.Errorf("WipeAll error = %v, want ErrReleasedWithoutWipe: a sweep that "+
+			"swallows the mprotect denial hides it on the one path a shutdown "+
+			"actually runs", werr)
+	}
+	if used := a.InUse(); used != 0 {
+		t.Errorf("allocator still holds %d bytes reserved after the sweep; the "+
+			"pages went back, so the reservation must have too", used)
 	}
 }

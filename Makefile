@@ -429,16 +429,36 @@ test:
 coverage-profile:
 	"$$GOCMD" test $(TESTFLAGS) -covermode=atomic -timeout=900s -coverprofile="$$COVERAGE_PROFILE" $(PKG)
 
-## coverage: unit tests with coverage; FAILS below COVERAGE_THRESHOLD
+## coverage: unit tests with coverage; FAILS below COVERAGE_THRESHOLD, in total AND per package
 # The threshold is enforced HERE, and CI runs this target (project-scaffold §6,
 # devops §4): a floor that exists only in a workflow cannot be reproduced
 # locally, and two copies of it drift.
+#
+# The floor binds EVERY PACKAGE, not only the total (testing-guidelines: "ALL
+# packages have at least 90%"; #90). A total is a statement-weighted average,
+# and the root package is several times providertest's size, so providertest
+# sat at 84.6% for releases while the total read green. Each package's figure
+# is computed from the same profile the total is — covered statements over
+# statements, exactly what `go tool cover -func` totals — so one run gates both.
+# The comparison is exact — covered*100 against floor*statements, no rounding
+# and no tolerance — so a package a hair below the floor fails.
 .PHONY: coverage
 coverage: coverage-threshold coverage-profile
 	@TOTAL=$$("$$GOCMD" tool cover -func="$$COVERAGE_PROFILE" | awk '/^total:/ {sub("%","",$$3); print $$3}'); \
 	test -n "$$TOTAL" || { echo "FAIL: no total in $$COVERAGE_PROFILE"; exit 1; }; \
 	echo "Total coverage: $$TOTAL% (floor $$COVERAGE_THRESHOLD%)"; \
 	awk -v t="$$TOTAL" -v f="$$COVERAGE_THRESHOLD" 'BEGIN { exit !(t+0 >= f+0) }' || { echo "FAIL: coverage $$TOTAL% is below the $$COVERAGE_THRESHOLD% floor"; exit 1; }
+	@awk -v f="$$COVERAGE_THRESHOLD" ' \
+	  NR > 1 && NF == 3 { file = $$1; sub(/:[^:]*$$/, "", file); pkg = file; sub(/\/[^\/]*$$/, "", pkg); \
+	    if (!(pkg in stmts)) pkgs++; stmts[pkg] += $$2; if ($$3 > 0) hit[pkg] += $$2 } \
+	  END { if (pkgs == 0) { print "FAIL: no package in " FILENAME; exit 1 } \
+	    bad = 0; \
+	    for (p in stmts) { pct = 100 * hit[p] / stmts[p]; \
+	      printf "%s coverage: %.1f%% (floor %s%%)\n", p, pct, f | "sort"; \
+	      if (100 * hit[p] < (f + 0) * stmts[p]) { below[p] = pct; bad = 1 } } \
+	    close("sort"); \
+	    for (p in below) printf "FAIL: %s coverage %.1f%% is below the %s%% floor\n", p, below[p], f; \
+	    exit bad }' "$$COVERAGE_PROFILE"
 
 # The floor is checked to be a number BEFORE the suite spends minutes running.
 .PHONY: coverage-threshold

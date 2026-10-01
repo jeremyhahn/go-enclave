@@ -13,12 +13,36 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"testing"
 
 	enclave "github.com/jeremyhahn/go-enclave"
 )
+
+// testMemlockRequirement is the locked memory this suite needs at once:
+// measured at about 1 MiB (it fails at 256 KiB and passes at 1 MiB, #90),
+// doubled for headroom. Checked once, so a short environment fails with one
+// actionable message rather than a run of conformance failures that would
+// read as provider defects. An unbounded limit satisfies it.
+const testMemlockRequirement = 2 << 20
+
+func TestMain(m *testing.M) {
+	lim, err := enclave.DiscoverLockedMemoryLimit()
+	if err != nil {
+		// The requirement cannot be checked, so it is not assumed met.
+		fmt.Fprintf(os.Stderr, "cannot read RLIMIT_MEMLOCK to check the suite's %d-byte requirement: %v\n", testMemlockRequirement, err)
+		os.Exit(2)
+	}
+	if lim.Bounded && lim.Bytes < testMemlockRequirement {
+		fmt.Fprintf(os.Stderr, "providertest's tests need RLIMIT_MEMLOCK >= %d bytes (soft); this process has %d. "+
+			"Raise it (ulimit -l %d, or the CI runner's --ulimit memlock).\n",
+			testMemlockRequirement, lim.Bytes, testMemlockRequirement/1024)
+		os.Exit(2)
+	}
+	os.Exit(m.Run())
+}
 
 // These tests are the suite's own deliberate-leak controls, and they are the
 // reason anything else here is worth reading.
@@ -122,22 +146,12 @@ func (p *retainingProtector) Unprotect(ctx context.Context, blob, key []byte) er
 	return nil
 }
 
-// TestSuiteCatchesAProviderThatRetainsACopy is the deliberate-leak control the
-// whole design is ranked around.
-func TestSuiteCatchesAProviderThatRetainsACopy(t *testing.T) {
-	if !sweepSupported {
-		t.Skipf("the residue sweep is the only instrument for retention by copy and it needs Linux: %s",
-			sweepUnsupportedReason)
-	}
-	kept := &retainingProtector{inner: software()}
-	wantFail(t, perOp(func() (any, error) { return kept, nil }),
-		"no copy of the key is findable in the process after Unprotect returns")
-	// Hold the retained copies past the sweep so the failure cannot be
-	// explained away as garbage the collector had not yet reached.
-	if len(kept.kept) == 0 {
-		t.Fatal("the planted provider retained nothing; the control proved nothing")
-	}
-}
+// The deliberate-leak control for retainingProtector is
+// TestSuiteCatchesAProviderThatRetainsACopy, in residue_linux_test.go: the
+// residue sweep is the only instrument that can see a retained copy, and it
+// exists only on Linux. Its non-Linux counterpart,
+// TestResidueSweepReportsItselfNotRunOffLinux in residue_other_test.go,
+// pins that the suite says so there instead of passing in silence (#90).
 
 // TestResidueSweepSkipIsRecordedNotSilent pins the escape hatch's cost: a
 // skipped sweep is reported through Logf in the same words every time, so a
@@ -720,12 +734,21 @@ func TestSuiteCatchesAClaimedModeTheProviderCannotServe(t *testing.T) {
 type halfWritingUnsealer struct{ inner *enclave.SoftwareProvider }
 
 func (p *halfWritingUnsealer) UnsealRoot(ctx context.Context, dst []byte) error {
-	full := make([]byte, enclave.RootKeyBytes)
-	if err := p.inner.UnsealRoot(ctx, full); err != nil {
+	// The full root comes from a LOCKED scratch enclave, so the defect under
+	// test — a partial write — is the only thing this fixture gets wrong;
+	// its intermediate copy of the root never touches the ordinary heap.
+	scratch, err := enclave.NewMemoryEnclaveSized(enclave.RootKeyBytes)
+	if err != nil {
 		return err
 	}
-	copy(dst[:len(dst)/2], full) // THE DEFECT.
-	return nil
+	defer func() { _ = scratch.Destroy() }()
+	return scratch.WithBytes(func(full []byte) error {
+		if err := p.inner.UnsealRoot(ctx, full); err != nil {
+			return err
+		}
+		copy(dst[:len(dst)/2], full) // THE DEFECT.
+		return nil
+	})
 }
 
 func TestSuiteCatchesARootThatIsOnlyPartlyWritten(t *testing.T) {
@@ -1108,6 +1131,14 @@ func TestContainsRun(t *testing.T) {
 			}
 		})
 	}
+	// A NEEDLE shorter than the window can never be found, even in a haystack
+	// holding it whole: a run that short is a chance collision rather than
+	// evidence, and reporting it would turn noise into leak findings.
+	t.Run("a needle shorter than the window", func(t *testing.T) {
+		if containsRun(bytes.Clone(key), key[:plaintextRunBytes-1]) {
+			t.Error("containsRun matched a needle shorter than its window")
+		}
+	})
 }
 
 // TestFlipPositions pins the tamper sample: in range, deduplicated, and
@@ -1480,4 +1511,387 @@ func assertAbortedOnly(t *testing.T, err error) {
 		t.Errorf("an aborted run charged the provider with %q; a call refused because the RUN's context "+
 			"ended is the provider conforming, not failing", pe)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// A provider call that FAILS is a finding, never a pass (#90)
+// ---------------------------------------------------------------------------
+//
+// Every check makes a fixed sequence of provider calls, and every one of those
+// calls can fail on a real device — a TPM busy, a KMS throttled, a session
+// expired. Each failure has its own branch in each check, and before #90 most
+// of those branches were covered by nothing: a regression turning any of them
+// into a silent `return` would have let a provider that cannot do the
+// operation pass the property that depends on it. These tests drive each call
+// ordinal to failure in turn and require the run to fail, under the right
+// property, naming the call and carrying the device's own error text.
+
+// errDeviceFault is the failure the planted providers below report.
+var errDeviceFault = errors.New("device: transient fault")
+
+// failingProtector is the software provider with ONE call refused: the
+// failProtect-th Protect or the failUnprotect-th Unprotect made on this
+// instance, counting from 1 and counting every call (ended-context calls,
+// which the suite makes on a goroutine of its own, included). Zero refuses
+// nothing. Every other call is the conforming software provider's, so the
+// refused call is the only thing wrong with it.
+type failingProtector struct {
+	inner                      *enclave.SoftwareProvider
+	failProtect, failUnprotect int
+
+	mu                   sync.Mutex
+	protects, unprotects int
+}
+
+func (p *failingProtector) Protect(ctx context.Context, key []byte) ([]byte, error) {
+	p.mu.Lock()
+	p.protects++
+	n := p.protects
+	p.mu.Unlock()
+	if n == p.failProtect {
+		return nil, errDeviceFault
+	}
+	return p.inner.Protect(ctx, key)
+}
+
+func (p *failingProtector) Unprotect(ctx context.Context, blob, key []byte) error {
+	p.mu.Lock()
+	p.unprotects++
+	n := p.unprotects
+	p.mu.Unlock()
+	if n == p.failUnprotect {
+		return errDeviceFault
+	}
+	return p.inner.Unprotect(ctx, blob, key)
+}
+
+// failingUnsealer is failingProtector's RootUnsealer counterpart.
+type failingUnsealer struct {
+	inner  *enclave.SoftwareProvider
+	failAt int
+
+	mu    sync.Mutex
+	calls int
+}
+
+func (p *failingUnsealer) UnsealRoot(ctx context.Context, dst []byte) error {
+	p.mu.Lock()
+	p.calls++
+	n := p.calls
+	p.mu.Unlock()
+	if n == p.failAt {
+		return errDeviceFault
+	}
+	return p.inner.UnsealRoot(ctx, dst)
+}
+
+// requireOnlyPropertyFailures runs cfg and requires a run that FAILED, did so
+// with nothing but property failures (not an abort, not a Config refusal),
+// and names every "<property>: <detail prefix>" in wants.
+func requireOnlyPropertyFailures(t *testing.T, cfg Config, wants ...string) {
+	t.Helper()
+	cfg.Logf = t.Logf
+	err := TestProvider(t.Context(), cfg)
+	if err == nil {
+		t.Fatal("the suite PASSED a provider whose device refused a call it needed; the failure branch " +
+			"returned as if the property held")
+	}
+	if errors.Is(err, ErrAborted) || errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("TestProvider = %v; want property failures, not an abort or a Config refusal", err)
+	}
+	joined, ok := err.(interface{ Unwrap() []error })
+	if !ok {
+		t.Fatalf("TestProvider returned %T, want the joined property failures", err)
+	}
+	for _, e := range joined.Unwrap() {
+		var pe *PropertyError
+		if !errors.As(e, &pe) {
+			t.Errorf("a joined failure is %T (%v), want *PropertyError", e, e)
+		}
+	}
+	for _, want := range wants {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the run did not report %q:\n%v", want, err)
+		}
+	}
+}
+
+// TestSuiteReportsEveryFailedKeyProtectorCall walks the call ordinals the
+// KeyProtector checks make and requires each refusal to fail the property
+// whose check made the call, naming the call and the device's error.
+func TestSuiteReportsEveryFailedKeyProtectorCall(t *testing.T) {
+	fault := errDeviceFault.Error()
+	const (
+		roundTrip = "Protect/Unprotect round trip: "
+		retain    = "Protect does not retain the caller's key slice: "
+		afterWipe = "Unprotect does not write into a destination the caller has finished with: "
+		disturb   = "a later provider call does not disturb an earlier destination: "
+		tamper    = "a blob this provider did not produce is refused: "
+		length    = "a destination of the wrong length is an authentication failure: "
+		ended     = "Protect and Unprotect refuse a context that has already ended: "
+	)
+	tests := []struct {
+		name                       string
+		failProtect, failUnprotect int
+		wants                      []string
+	}{
+		{
+			name:        "the first Protect",
+			failProtect: 1,
+			wants: []string{
+				roundTrip + "Protect: " + fault,
+				retain + "Protect: " + fault,
+				afterWipe + "Protect: " + fault,
+				disturb + "Protect: " + fault,
+				tamper + "Protect: " + fault,
+				length + "Protect: " + fault,
+				ended + "the control did not hold — Protect with a live context: " + fault,
+			},
+		},
+		{
+			name:        "the second Protect",
+			failProtect: 2,
+			wants: []string{
+				afterWipe + "Protect: " + fault,
+				disturb + "Protect: " + fault,
+			},
+		},
+		{
+			name:        "the third Protect",
+			failProtect: 3,
+			wants: []string{
+				afterWipe + "a later Protect failed: " + fault,
+				disturb + "a later Protect failed: " + fault,
+			},
+		},
+		{
+			name:          "the first Unprotect",
+			failUnprotect: 1,
+			wants: []string{
+				roundTrip + "Unprotect of a blob this provider's own Protect produced: " + fault,
+				retain + "the control did not hold — Unprotect before any wipe returned " + fault,
+				afterWipe + "Unprotect: " + fault,
+				disturb + "Unprotect: " + fault,
+				ended + "the control did not hold — Unprotect with a live context returned " + fault,
+			},
+		},
+		{
+			name:          "the second Unprotect",
+			failUnprotect: 2,
+			wants: []string{
+				retain + "after the caller wiped the key slice Protect was handed, Unprotect of that blob " +
+					"failed with " + fault,
+				afterWipe + "a second Unprotect failed: " + fault,
+				disturb + "a second Unprotect failed: " + fault,
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := perOp(func() (any, error) {
+				return &failingProtector{inner: software(), failProtect: tc.failProtect, failUnprotect: tc.failUnprotect}, nil
+			})
+			requireOnlyPropertyFailures(t, cfg, tc.wants...)
+		})
+	}
+}
+
+// TestSuiteReportsEveryFailedUnsealRootCall is the same walk for the
+// RootUnsealer checks.
+func TestSuiteReportsEveryFailedUnsealRootCall(t *testing.T) {
+	fault := errDeviceFault.Error()
+	const (
+		fills  = "UnsealRoot writes a root across the whole destination: "
+		spy    = "UnsealRoot does not retain the caller's destination: "
+		refuse = "UnsealRoot refuses a context that has already ended, and consumes nothing: "
+	)
+	tests := []struct {
+		name   string
+		failAt int
+		wants  []string
+	}{
+		{
+			name:   "the first UnsealRoot",
+			failAt: 1,
+			wants: []string{
+				fills + "UnsealRoot: " + fault,
+				spy + "UnsealRoot: " + fault,
+				// The first call of the context check is an ended-context
+				// one: a device error there is the wrong refusal.
+				refuse + "UnsealRoot refused an already-canceled context with " + fault,
+			},
+		},
+		{
+			name:   "the second UnsealRoot",
+			failAt: 2,
+			wants: []string{
+				fills + "a second UnsealRoot on the same provider: " + fault,
+				spy + "a second UnsealRoot failed: " + fault,
+			},
+		},
+		{
+			name:   "the third UnsealRoot",
+			failAt: 3,
+			wants: []string{
+				spy + "a third UnsealRoot failed: " + fault,
+				refuse + "after refusing ended contexts, UnsealRoot on the same provider with a live context " +
+					"failed: " + fault,
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := rootOnly(func() (any, error) { return &failingUnsealer{inner: software(), failAt: tc.failAt}, nil })
+			requireOnlyPropertyFailures(t, cfg, tc.wants...)
+		})
+	}
+}
+
+// TestSuiteReportsAProviderThatCannotBeConstructed pins the Config.New
+// failure path in every check: a provider that cannot be built has measured
+// nothing, so every property it claims fails — naming Config.New and the
+// constructor's own error — and none of them passes for want of an instance.
+func TestSuiteReportsAProviderThatCannotBeConstructed(t *testing.T) {
+	cfg := Config{
+		New:   func() (any, error) { return nil, errDeviceFault },
+		Modes: []enclave.Mode{enclave.ModeRootKey, enclave.ModePerOperation},
+	}
+	want := "Config.New: " + errDeviceFault.Error()
+	requireOnlyPropertyFailures(t, cfg,
+		"mode/interface pairing: "+want,
+		"Protect/Unprotect round trip: "+want,
+		"Protect does not retain the caller's key slice: "+want,
+		"Unprotect does not write into a destination the caller has finished with: "+want,
+		"a later provider call does not disturb an earlier destination: "+want,
+		"a blob this provider did not produce is refused: "+want,
+		"a destination of the wrong length is an authentication failure: "+want,
+		"Protect and Unprotect refuse a context that has already ended: "+want,
+		"UnsealRoot writes a root across the whole destination: "+want,
+		"UnsealRoot does not retain the caller's destination: "+want,
+		"UnsealRoot refuses a context that has already ended, and consumes nothing: "+want,
+	)
+
+	// The step error keeps the constructor's error MATCHABLE, not merely
+	// printable: that is what lets a caller of the internals tell a device
+	// fault from a nil provider without parsing a message.
+	_, err := newProvider(cfg)
+	if !errors.Is(err, errDeviceFault) {
+		t.Errorf("newProvider = %v, want it to wrap the constructor's error so errors.Is reaches it", err)
+	}
+}
+
+// TestSuiteReportsAKeyProtectorClaimTheProviderCannotServe is the
+// KeyProtector half of the missing-seam path: Config.Modes claims
+// ModePerOperation for a provider that only unseals roots, and every
+// KeyProtector check names the missing interface rather than panicking on a
+// failed type assertion or skipping itself.
+func TestSuiteReportsAKeyProtectorClaimTheProviderCannotServe(t *testing.T) {
+	cfg := perOp(func() (any, error) { return &failingUnsealer{inner: software()}, nil })
+	requireOnlyPropertyFailures(t, cfg,
+		"mode/interface pairing: NewSealer refused this provider in ModePerOperation",
+		"Protect/Unprotect round trip: *providertest.failingUnsealer does not implement enclave.KeyProtector, "+
+			"which Config.Modes claims it serves ModePerOperation with",
+	)
+}
+
+// emptyBlobProtector "protects" every key into an empty blob: a provider
+// whose device returned nothing and that passed the nothing along.
+type emptyBlobProtector struct{ inner *enclave.SoftwareProvider }
+
+func (emptyBlobProtector) Protect(ctx context.Context, _ []byte) ([]byte, error) {
+	return []byte{}, ctx.Err()
+}
+
+func (p emptyBlobProtector) Unprotect(ctx context.Context, blob, key []byte) error {
+	return p.inner.Unprotect(ctx, blob, key)
+}
+
+// TestSuiteCatchesAnEmptyBlob pins the contract's non-empty-blob requirement:
+// a Sealer that stored an empty blob would hold a value nothing can recover,
+// and the tamper check has nothing to tamper with — which must read as a
+// failure, not as a vacuous pass of every tamper case.
+func TestSuiteCatchesAnEmptyBlob(t *testing.T) {
+	wantFail(t, perOp(func() (any, error) { return emptyBlobProtector{inner: software()}, nil }),
+		"Protect/Unprotect round trip: Protect returned an empty blob",
+		"a blob this provider did not produce is refused: Protect returned an empty blob; nothing to tamper with")
+}
+
+// firstDestinationRewriter keeps the FIRST destination it was handed and
+// writes the root into it again on every later call. The root is
+// deterministic, so the destination the caller is still using never CHANGES —
+// the overwrite direction of the spy cannot see this — and the defect is
+// visible only once the caller has wiped those pages: the provider puts root
+// material back into memory the caller has released.
+type firstDestinationRewriter struct {
+	inner *enclave.SoftwareProvider
+	mu    sync.Mutex
+	first []byte
+}
+
+func (p *firstDestinationRewriter) UnsealRoot(ctx context.Context, dst []byte) error {
+	if err := p.inner.UnsealRoot(ctx, dst); err != nil {
+		return err
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.first == nil {
+		p.first = dst
+		return nil
+	}
+	copy(p.first, dst) // THE DEFECT.
+	return nil
+}
+
+func TestSuiteCatchesARootWrittenIntoAWipedDestination(t *testing.T) {
+	cfg := rootOnly(func() (any, error) { return &firstDestinationRewriter{inner: software()}, nil })
+	cfg.Logf = t.Logf
+	err := TestProvider(t.Context(), cfg)
+	if err == nil {
+		t.Fatal("the suite PASSED a RootUnsealer that writes root material into a destination the caller wiped")
+	}
+	if !strings.Contains(err.Error(), "UnsealRoot does not retain the caller's destination: the destination of "+
+		"an earlier UnsealRoot was written again after the caller wiped it") {
+		t.Fatalf("the suite failed, but not on the wiped-destination write:\n%v", err)
+	}
+	// The overwrite direction must NOT have fired: the root never changed, so
+	// a report of it would be the wrong diagnosis.
+	if strings.Contains(err.Error(), "by a later call") {
+		t.Errorf("the overwrite arm fired on a destination whose contents never changed:\n%v", err)
+	}
+}
+
+// hangingUnsealer blocks, until released, on any UnsealRoot made with an
+// ended context. entered is closed when the first such call arrives.
+type hangingUnsealer struct {
+	inner   *enclave.SoftwareProvider
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (p *hangingUnsealer) UnsealRoot(ctx context.Context, dst []byte) error {
+	if ctx.Err() != nil {
+		p.once.Do(func() { close(p.entered) })
+		<-p.release
+		return ctx.Err()
+	}
+	return p.inner.UnsealRoot(ctx, dst)
+}
+
+// TestAnUnfinishedEndedContextUnsealIsAnAbortNotAFinding is
+// TestAnUnfinishedEndedContextCallIsAnAbortNotAFinding for UnsealRoot: the
+// run's context ends while an ended-context UnsealRoot is still inside the
+// provider, and the run is reported aborted with nothing charged to it.
+func TestAnUnfinishedEndedContextUnsealIsAnAbortNotAFinding(t *testing.T) {
+	p := &hangingUnsealer{inner: software(), entered: make(chan struct{}), release: make(chan struct{})}
+	t.Cleanup(func() { close(p.release) }) // frees the abandoned goroutine
+	ctx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(cancel)
+	go func() {
+		<-p.entered
+		cancel()
+	}()
+	cfg := rootOnly(func() (any, error) { return p, nil })
+	cfg.Logf = t.Logf
+	assertAbortedOnly(t, TestProvider(ctx, cfg))
 }

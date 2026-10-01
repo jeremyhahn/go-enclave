@@ -11,21 +11,27 @@
 package enclave
 
 import (
+	"bufio"
 	"bytes"
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
+	"strconv"
 	"strings"
 	"testing"
-
-	"golang.org/x/sys/unix"
+	"unsafe"
 )
 
 const (
 	// guardMarker selects the child half of the guard-page test, and names which
 	// guard it should write to.
 	guardMarker = "GO_ENCLAVE_GUARD_WRITE"
+
+	// guardArmed is printed by the child immediately before the store into the
+	// guard. The parent requires it: a child that died before getting there —
+	// a refused mapping, say — exits non-zero too, and would otherwise read as
+	// the fault this test is looking for.
+	guardArmed = "mapped; writing to the guard page now"
 
 	// guardSurvived is printed by the child if a write to an inaccessible guard
 	// page RETURNED. The parent treats seeing it as the failure: the guard is
@@ -53,19 +59,8 @@ func TestMapping_GuardPagesFault(t *testing.T) {
 
 	for _, guard := range []string{"pre", "post"} {
 		t.Run(guard, func(t *testing.T) {
-			cmd := exec.Command(os.Args[0], "-test.run=^TestMapping_GuardPagesFault$", "-test.v")
-			cmd.Env = append(os.Environ(), guardMarker+"="+guard)
-			out, err := cmd.CombinedOutput()
-
-			if strings.Contains(string(out), guardSurvived) {
-				t.Fatalf("writing to the %sguard returned instead of faulting; the page is accessible:\n%s", guard, out)
-			}
-			if err == nil {
-				t.Fatalf("the child exited cleanly after writing to the %sguard; it should have faulted:\n%s", guard, out)
-			}
-			if strings.Contains(string(out), "--- SKIP") {
-				t.Skipf("child skipped:\n%s", out)
-			}
+			out, err := runTestChild(t, "TestMapping_GuardPagesFault", guardMarker, guard)
+			requireChildFaulted(t, out, err, guardArmed, guardSurvived, "writing to the "+guard+"guard")
 		})
 	}
 }
@@ -75,13 +70,14 @@ func guardWriteChild(t *testing.T, guard string) {
 
 	m, err := newMapping(32)
 	if err != nil {
-		t.Skipf("could not map: %v", err)
+		t.Fatalf("newMapping: %v", err)
 	}
 
 	target := m.preguard
 	if guard == "post" {
 		target = m.postguard
 	}
+	fmt.Println(guardArmed)
 
 	// The write the guard exists to stop. If the page really is PROT_NONE this
 	// never returns.
@@ -125,17 +121,12 @@ func TestMapping_FailedAllocationLeaksNothing(t *testing.T) {
 		return
 	}
 
-	cmd := exec.Command(os.Args[0], "-test.run=^TestMapping_FailedAllocationLeaksNothing$", "-test.v")
-	cmd.Env = append(os.Environ(), leakMarker+"=1")
-	out, err := cmd.CombinedOutput()
+	out, err := runTestChild(t, "TestMapping_FailedAllocationLeaksNothing", leakMarker, "1")
 	if err != nil {
 		t.Fatalf("subprocess failed: %v\n%s", err, out)
 	}
-	if strings.Contains(string(out), "--- SKIP") {
-		t.Skipf("subprocess could not inject the fault:\n%s", out)
-	}
 	for _, want := range []string{leakFaultArmed, leakNone} {
-		if !strings.Contains(string(out), want) {
+		if !strings.Contains(out, want) {
 			t.Fatalf("subprocess did not confirm %q:\n%s", want, out)
 		}
 	}
@@ -144,23 +135,18 @@ func TestMapping_FailedAllocationLeaksNothing(t *testing.T) {
 func allocLeakChild(t *testing.T) {
 	t.Helper()
 
-	var original unix.Rlimit
-	if err := unix.Getrlimit(unix.RLIMIT_MEMLOCK, &original); err != nil {
-		t.Skipf("cannot read RLIMIT_MEMLOCK: %v", err)
-	}
 	// Zero locked memory allowed, so every mapping below gets as far as mmap
 	// and then fails at mlock — which is the path under test.
-	if err := unix.Setrlimit(unix.RLIMIT_MEMLOCK, &unix.Rlimit{Cur: 0, Max: original.Max}); err != nil {
-		t.Skipf("cannot lower RLIMIT_MEMLOCK: %v", err)
-	}
+	setCeiling, _ := injectMemlockCeiling(t)
+	setCeiling(0)
 
 	lockedBefore, err := vmLckBytes()
 	if err != nil {
-		t.Skipf("cannot read VmLck: %v", err)
+		t.Fatalf("cannot read VmLck: %v", err)
 	}
 	vmasBefore, err := vmaCount()
 	if err != nil {
-		t.Skipf("cannot read /proc/self/maps: %v", err)
+		t.Fatalf("cannot read /proc/self/maps: %v", err)
 	}
 
 	const attempts = 256
@@ -179,7 +165,8 @@ func allocLeakChild(t *testing.T) {
 	}
 
 	if failures == 0 {
-		t.Skip("no mapping failed under a zero RLIMIT_MEMLOCK; the fault was not armed")
+		t.Fatalf("all %d mappings succeeded under a zero RLIMIT_MEMLOCK: the ceiling did not bind, the "+
+			"fault was not armed, and the leak assertions below would be vacuous", attempts)
 	}
 	t.Logf("%s (%d/%d)", leakFaultArmed, failures, attempts)
 
@@ -218,6 +205,10 @@ func vmaCount() (int, error) {
 const (
 	// frozenMarker selects the child half of the frozen-pages test.
 	frozenMarker = "GO_ENCLAVE_FROZEN_WRITE"
+
+	// frozenArmed is printed by the child immediately before the store, for
+	// the reason given on guardArmed.
+	frozenArmed = "move-constructed and opened; writing through the view now"
 
 	// frozenSurvived is printed by the child if a write through a
 	// move-constructed enclave's borrow RETURNED. Seeing it is the failure: the
@@ -263,20 +254,9 @@ func TestMemoryEnclave_MoveConstructedPagesAreReadOnly(t *testing.T) {
 	sized.Destroy()
 
 	// The read-only half kills the process when it works, so it needs a child.
-	cmd := exec.Command(os.Args[0], "-test.run=^TestMemoryEnclave_MoveConstructedPagesAreReadOnly$", "-test.v")
-	cmd.Env = append(os.Environ(), frozenMarker+"=1")
-	out, cerr := cmd.CombinedOutput()
-
-	if strings.Contains(string(out), frozenSurvived) {
-		t.Fatalf("a write through a move-constructed enclave returned instead of faulting; "+
-			"its pages are not frozen:\n%s", out)
-	}
-	if cerr == nil {
-		t.Fatalf("the child exited cleanly after writing to frozen pages; it should have faulted:\n%s", out)
-	}
-	if strings.Contains(string(out), "--- SKIP") {
-		t.Skipf("child skipped:\n%s", out)
-	}
+	out, cerr := runTestChild(t, "TestMemoryEnclave_MoveConstructedPagesAreReadOnly", frozenMarker, "1")
+	requireChildFaulted(t, out, cerr, frozenArmed, frozenSurvived,
+		"a write through a move-constructed enclave (its pages are not frozen)")
 }
 
 func frozenWriteChild(t *testing.T) {
@@ -284,13 +264,14 @@ func frozenWriteChild(t *testing.T) {
 
 	e, err := NewMemoryEnclave([]byte("private-key-material"))
 	if err != nil {
-		t.Skipf("could not allocate: %v", err)
+		t.Fatalf("NewMemoryEnclave: %v", err)
 	}
 
 	view, err := e.Open()
 	if err != nil {
-		t.Skipf("Open: %v", err)
+		t.Fatalf("Open: %v", err)
 	}
+	fmt.Println(frozenArmed)
 
 	// The write the freeze exists to stop.
 	view[0] = 0xFF
@@ -304,6 +285,10 @@ const (
 	// test. It is a separate child from frozenMarker's because the write under
 	// test kills the process: one child can only ever demonstrate one of them.
 	copyFrozenMarker = "GO_ENCLAVE_COPY_FROZEN_WRITE"
+
+	// copyFrozenArmed is printed by the child immediately before the store,
+	// for the reason given on guardArmed.
+	copyFrozenArmed = "copy-constructed and opened; writing through the view now"
 
 	// copyFrozenSurvived is printed by the child if a write through a
 	// copy-constructed enclave's borrow RETURNED. Seeing it is the failure.
@@ -329,20 +314,9 @@ func TestMemoryEnclave_CopyConstructedPagesAreReadOnly(t *testing.T) {
 		return
 	}
 
-	cmd := exec.Command(os.Args[0], "-test.run=^TestMemoryEnclave_CopyConstructedPagesAreReadOnly$", "-test.v")
-	cmd.Env = append(os.Environ(), copyFrozenMarker+"=1")
-	out, cerr := cmd.CombinedOutput()
-
-	if strings.Contains(string(out), copyFrozenSurvived) {
-		t.Fatalf("a write through a copy-constructed enclave returned instead of faulting; "+
-			"its pages are not frozen:\n%s", out)
-	}
-	if cerr == nil {
-		t.Fatalf("the child exited cleanly after writing to frozen pages; it should have faulted:\n%s", out)
-	}
-	if strings.Contains(string(out), "--- SKIP") {
-		t.Skipf("child skipped:\n%s", out)
-	}
+	out, cerr := runTestChild(t, "TestMemoryEnclave_CopyConstructedPagesAreReadOnly", copyFrozenMarker, "1")
+	requireChildFaulted(t, out, cerr, copyFrozenArmed, copyFrozenSurvived,
+		"a write through a copy-constructed enclave (its pages are not frozen)")
 }
 
 func copyFrozenWriteChild(t *testing.T) {
@@ -351,7 +325,7 @@ func copyFrozenWriteChild(t *testing.T) {
 	src := []byte("private-key-material")
 	e, err := NewMemoryEnclaveCopy(src)
 	if err != nil {
-		t.Skipf("could not allocate: %v", err)
+		t.Fatalf("NewMemoryEnclaveCopy: %v", err)
 	}
 
 	// The source is deliberately still live and still holds the material — that
@@ -361,8 +335,9 @@ func copyFrozenWriteChild(t *testing.T) {
 
 	view, err := e.Open()
 	if err != nil {
-		t.Skipf("Open: %v", err)
+		t.Fatalf("Open: %v", err)
 	}
+	fmt.Println(copyFrozenArmed)
 
 	// The write the freeze exists to stop.
 	view[0] = 0xFF
@@ -403,20 +378,18 @@ func TestMemoryEnclave_DestroyPanicsOnCorruption(t *testing.T) {
 		return
 	}
 
-	cmd := exec.Command(os.Args[0], "-test.run=^TestMemoryEnclave_DestroyPanicsOnCorruption$", "-test.v")
-	cmd.Env = append(os.Environ(), corruptMarker+"=1")
-	out, err := cmd.CombinedOutput()
+	out, err := runTestChild(t, "TestMemoryEnclave_DestroyPanicsOnCorruption", corruptMarker, "1")
 	if err != nil {
 		t.Fatalf("subprocess failed: %v\n%s", err, out)
 	}
-	if strings.Contains(string(out), destroySurvived) {
+	if strings.Contains(out, destroySurvived) {
 		t.Fatalf("Destroy swallowed a detected corruption:\n%s", out)
 	}
-	if !strings.Contains(string(out), destroyPanicked) {
+	if !strings.Contains(out, destroyPanicked) {
 		t.Fatalf("subprocess did not confirm the panic:\n%s", out)
 	}
 	// The reservation must have come back before the panic unwound.
-	if !strings.Contains(string(out), "inuse=0") {
+	if !strings.Contains(out, "inuse=0") {
 		t.Fatalf("the Allocator reservation was not released before the panic:\n%s", out)
 	}
 }
@@ -434,7 +407,7 @@ func destroyCorruptChild(t *testing.T) {
 	// specific to sized enclaves in the first place.
 	e, err := a.NewSized(64)
 	if err != nil {
-		t.Skipf("could not allocate: %v", err)
+		t.Fatalf("NewSized: %v", err)
 	}
 	if err := e.WithBytes(func(b []byte) error {
 		copy(b, bytes.Repeat([]byte{0xA5}, len(b)))
@@ -492,7 +465,8 @@ func destroyCorruptChild(t *testing.T) {
 // itself return nil. It does NOT reach a mutant that swallows the error at the
 // call site in newMapping, because newMapping always passes a page-aligned inner
 // region, which cannot be made to fail. That call-site branch remains
-// guaranteed by construction, and doc.go says so.
+// guaranteed by construction, as docs/locked-memory/engineering.md (Test
+// strategy) records.
 func TestExcludeFromCoreDump_ReportsRefusal(t *testing.T) {
 	region, err := sysMap(2 * int(pageSize))
 	if err != nil {
@@ -517,4 +491,476 @@ func TestExcludeFromCoreDump_ReportsRefusal(t *testing.T) {
 		t.Error("excludeFromCoreDump reported success on an unaligned region: " +
 			"the kernel's refusal is being swallowed, and enclave pages could reach a core file")
 	}
+}
+
+// mappedAt reports whether addr still falls inside any mapping of this process.
+//
+// This is the assertion #12 asks for and the reason the test is not merely
+// "an error came back": the defect it guards against is material left RESIDENT,
+// so the test has to establish that the pages are gone, not that a function
+// returned. Reading /proc/self/maps does that without dereferencing an address
+// that may or may not still be mapped -- touching it to find out would either
+// succeed silently or kill the test process, and neither is an assertion.
+func mappedAt(t *testing.T, addr uintptr) bool {
+	t.Helper()
+
+	f, err := os.Open("/proc/self/maps")
+	if err != nil {
+		t.Fatalf("open /proc/self/maps: %v", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		line := sc.Text()
+		dash := strings.IndexByte(line, '-')
+		sp := strings.IndexByte(line, ' ')
+		if dash < 0 || sp < 0 || sp < dash {
+			continue
+		}
+		lo, err1 := strconv.ParseUint(line[:dash], 16, 64)
+		hi, err2 := strconv.ParseUint(line[dash+1:sp], 16, 64)
+		if err1 != nil || err2 != nil {
+			continue
+		}
+		if uint64(addr) >= lo && uint64(addr) < hi {
+			return true
+		}
+	}
+	if err := sc.Err(); err != nil {
+		t.Fatalf("scan /proc/self/maps: %v", err)
+	}
+	return false
+}
+
+// TestFrozenReleaseUnmapsWhenMprotectIsDenied is the regression for #12.
+//
+// A frozen enclave skips wipeAndVerify's early wipe -- its pages are read-only,
+// so there is nothing it may write -- and can only be cleared through the
+// release mprotect that makes the region writable again. Under a PERMANENT
+// denial of that mprotect the old code returned an error and kept the mapping,
+// leaving the secret resident in locked memory for the process lifetime.
+//
+// The fix hands the pages back with a bare munmap instead. This asserts the
+// pages are actually GONE, and that the outcome is reported rather than passed
+// off as an ordinary release.
+func TestFrozenReleaseUnmapsWhenMprotectIsDenied(t *testing.T) {
+	secret := []byte("material that must not stay resident")
+
+	// newMemoryEnclave, NOT NewMemoryEnclave: this test drives m.release()
+	// directly rather than Destroy(), and Destroy is what deregisters. The
+	// exported constructor publishes to the shutdown ledger, so using it here
+	// leaves a live entry behind and every WipeAll test in the package then
+	// counts it -- measured, on the first version of this file.
+	e, err := newMemoryEnclave(append([]byte(nil), secret...))
+	if err != nil {
+		t.Fatalf("newMemoryEnclave: %v", err)
+	}
+
+	// The mapping is frozen by this constructor; if that ever stops being true
+	// the test is no longer exercising the case it exists for.
+	if e.m.mutable {
+		t.Fatal("enclave is not frozen, so this test would pass without " +
+			"covering the frozen path #12 is about")
+	}
+
+	addr := uintptr(unsafe.Pointer(&e.m.memory[0]))
+	if !mappedAt(t, addr) {
+		t.Fatal("the region is not mapped before release, so the assertion " +
+			"after it would be vacuous")
+	}
+
+	denied := errors.New("mprotect denied by policy")
+	previous := protectMemory
+	t.Cleanup(func() { protectMemory = previous })
+	protectMemory = func([]byte, protection) error { return denied }
+
+	rerr := e.m.release()
+
+	if !errors.Is(rerr, ErrReleasedWithoutWipe) {
+		t.Fatalf("release = %v, want ErrReleasedWithoutWipe: a denied mprotect "+
+			"on a frozen enclave must fall back to unmapping, and must say so", rerr)
+	}
+	if !errors.Is(rerr, denied) {
+		t.Errorf("release = %v, want the underlying mprotect refusal reachable "+
+			"through errors.Is; an operator needs to know what denied it", rerr)
+	}
+
+	// The point of the whole exercise.
+	if mappedAt(t, addr) {
+		t.Fatal("the region is STILL MAPPED after release: the material is " +
+			"resident in locked memory for the process lifetime, which is " +
+			"exactly the defect #12 reports")
+	}
+
+	if e.m.memory != nil || e.m.data != nil || e.m.inner != nil {
+		t.Error("the mapping kept its slices after the pages were unmapped; a " +
+			"reader would be looking at memory the kernel has taken back")
+	}
+}
+
+// TestFrozenReleaseKeepsTheMappingWhenTheBypassAlsoFails pins the other half:
+// when the fallback cannot run either, nothing is dropped.
+//
+// Losing the handle there would strand a region that is still mapped, possibly
+// still locked and possibly still holding material, with no way to retry -- and
+// would tell an Allocator those bytes are free while the kernel still holds them.
+func TestFrozenReleaseKeepsTheMappingWhenTheBypassAlsoFails(t *testing.T) {
+	e, err := newMemoryEnclave([]byte("material"))
+	if err != nil {
+		t.Fatalf("newMemoryEnclave: %v", err)
+	}
+	t.Cleanup(func() {
+		if e.m != nil {
+			_ = e.m.release()
+		}
+	})
+
+	denied := errors.New("mprotect denied by policy")
+	prevProtect := protectMemory
+	prevUnmap := unmapMemory
+	t.Cleanup(func() { protectMemory, unmapMemory = prevProtect, prevUnmap })
+	protectMemory = func([]byte, protection) error { return denied }
+	unmapMemory = func([]byte) error { return errors.New("munmap denied too") }
+
+	rerr := e.m.release()
+
+	if errors.Is(rerr, ErrReleasedWithoutWipe) {
+		t.Fatalf("release = %v, want a failure: the bypass did not run, so "+
+			"claiming an unwiped RELEASE would report pages returned that were not", rerr)
+	}
+	if e.m.memory == nil {
+		t.Fatal("the mapping was dropped although the pages are still mapped; " +
+			"there is now no handle to retry the release through")
+	}
+}
+
+// TestKeptMappingReadsAsDestroyedOnceWiped is the regression for #13.
+//
+// When the wipe succeeded but the munlock or munmap after it was refused, the
+// mapping is deliberately KEPT so Destroy can be retried. Before this it then
+// read as an ordinary live enclave: IsAlive true, a non-zero Size, and Open
+// handing back zeroes from a region whose guard pages the release path had
+// already left READ-WRITE. A caller that recovers from Destroy's panic and reads
+// rather than re-destroying would derive from an all-zero secret with the guards
+// off, and nothing would say so.
+func TestKeptMappingReadsAsDestroyedOnceWiped(t *testing.T) {
+	e, err := newMemoryEnclave([]byte("material that is about to be wiped"))
+	if err != nil {
+		t.Fatalf("newMemoryEnclave: %v", err)
+	}
+	t.Cleanup(func() {
+		if e.m != nil {
+			_ = e.m.release()
+		}
+	})
+
+	// wipeAndVerify is driven directly rather than through release() because
+	// this test is about the state release() LEAVES BEHIND when the munlock or
+	// munmap after a successful wipe is refused: material gone, pages still
+	// held. Calling the step that produces that state is the shortest honest
+	// way to reach it, and needs no syscall stub at all.
+	if err := e.m.wipeAndVerify(); err != nil {
+		t.Fatalf("wipeAndVerify: %v", err)
+	}
+	if !e.m.wiped {
+		t.Fatal("wipeAndVerify did not record that the material is gone, so " +
+			"this test cannot be asserting what it claims")
+	}
+	if e.m.memory == nil {
+		t.Fatal("the mapping was released; this test needs the KEPT-mapping case")
+	}
+
+	if e.IsAlive() {
+		t.Error("IsAlive reports true for an enclave whose material is gone")
+	}
+	if n := e.Size(); n != 0 {
+		t.Errorf("Size = %d, want 0: there is no material left to have a size", n)
+	}
+	if _, err := e.Open(); !errors.Is(err, ErrEnclaveDestroyed) {
+		t.Errorf("Open = %v, want ErrEnclaveDestroyed: it would otherwise hand "+
+			"back zeroes from a region whose guards are already read-write", err)
+	}
+	if err := e.WithBytes(func([]byte) error { return nil }); !errors.Is(err, ErrEnclaveDestroyed) {
+		t.Errorf("WithBytes = %v, want ErrEnclaveDestroyed", err)
+	}
+	// Both comparison spellings go through the same withLocked path, and both
+	// are asserted: EqualTo's bare false is indistinguishable from an ordinary
+	// mismatch, so on its own it would pass against an implementation that
+	// compared the caller's bytes with a region of zeroes and simply found them
+	// different. EqualToErr is what shows the comparison did not RUN.
+	if e.EqualTo([]byte("anything")) {
+		t.Error("EqualTo reported a match against wiped memory")
+	}
+	if _, err := e.EqualToErr([]byte("anything")); !errors.Is(err, ErrEnclaveDestroyed) {
+		t.Errorf("EqualToErr = %v, want ErrEnclaveDestroyed: there is no "+
+			"material left, so the comparison could not have run", err)
+	}
+}
+
+// TestReleaseNeverUnmapsMaterialItCouldNotWipe kills mutant M12 from #14.
+//
+// release()'s wipe guard is what stops it carrying on to the ordinary unlock and
+// unmap of a region that was never wiped, as if the wipe had happened. Deleting
+// that guard left the whole suite green, so the property was unpinned: nothing
+// established that a refused wipe diverts the release rather than merely being
+// reported alongside it.
+//
+// The assertions are on the SYSCALLS as well as the error. Since #86 the
+// fallback and the ordinary teardown share one unmap seam, so counting unmaps
+// alone no longer separates them; what does is that the fallback never
+// unlocks -- munmap drops the lock with the mapping -- and that its error
+// carries the mprotect denial that diverted it.
+func TestReleaseNeverUnmapsMaterialItCouldNotWipe(t *testing.T) {
+	e, err := newMemoryEnclave([]byte("material that must not be handed back unwiped"))
+	if err != nil {
+		t.Fatalf("newMemoryEnclave: %v", err)
+	}
+	t.Cleanup(func() {
+		if e.m != nil {
+			_ = e.m.release()
+		}
+	})
+
+	denied := errors.New("mprotect denied by policy")
+	prevProtect, prevUnmap := protectMemory, unmapMemory
+	t.Cleanup(func() { protectMemory, unmapMemory = prevProtect, prevUnmap })
+
+	prevUnlock := unlockMemory
+	t.Cleanup(func() { unlockMemory = prevUnlock })
+
+	unmaps, unlocks := 0, 0
+	protectMemory = func([]byte, protection) error { return denied }
+	unlockMemory = func(b []byte) error {
+		unlocks++
+		return prevUnlock(b)
+	}
+	unmapMemory = func([]byte) error {
+		unmaps++
+		// Refuse, so the mapping is kept and the test can inspect it.
+		return errors.New("munmap denied too")
+	}
+
+	rerr := e.m.release()
+
+	if !errors.Is(rerr, denied) {
+		t.Errorf("release = %v, want the mprotect denial that diverted it to the fallback", rerr)
+	}
+	if !pagesHeld(rerr) {
+		t.Errorf("pagesHeld(%v) = false, want true: the fallback unmap was refused", rerr)
+	}
+	if unlocks != 0 {
+		t.Errorf("release unlocked %d times on a region it could not wipe: it carried on to the "+
+			"ordinary teardown as though the wipe had happened", unlocks)
+	}
+
+	if e.m.wiped {
+		t.Fatal("the mapping reports itself wiped although the wipe was refused")
+	}
+	if e.m.memory == nil {
+		t.Fatal("release dropped a mapping it could not wipe: the pages may " +
+			"still hold material and there is no handle left to retry through")
+	}
+	if unmaps != 1 {
+		t.Errorf("the fallback unmap ran %d times for one release, want 1", unmaps)
+	}
+}
+
+// TestKeptMutableMappingReadsAsDestroyedOnceWiped is the other branch of #13,
+// found by the local Codex review of the first fix.
+//
+// wipeAndVerify destroys the material FIRST, before any syscall that can be
+// refused -- but only for a mapping that is still mutable, which is what a
+// [NewMemoryEnclaveSized] enclave is for its whole life. If the mprotect after
+// that early wipe is then refused and release's unmap fallback is refused too,
+// the mapping is KEPT with its material already zeroed. Recording the wipe only
+// after the mprotect left exactly the state the flag exists to close, reached
+// down the branch the frozen-path test cannot see: IsAlive true, a non-zero
+// Size, and Open handing back zeroes.
+func TestKeptMutableMappingReadsAsDestroyedOnceWiped(t *testing.T) {
+	e, err := newMemoryEnclaveSized(32)
+	if err != nil {
+		t.Fatalf("newMemoryEnclaveSized: %v", err)
+	}
+	t.Cleanup(func() {
+		if e.m != nil {
+			_ = e.m.release()
+		}
+	})
+
+	// The premise. A sized enclave is never frozen, and if that ever changes
+	// this test stops exercising the path it is named for.
+	if !e.m.mutable {
+		t.Fatal("the mapping is not mutable, so wipeAndVerify's early wipe " +
+			"would not run and this test would cover nothing")
+	}
+	if err := e.WithBytes(func(b []byte) error { copy(b, "material in a fillable enclave"); return nil }); err != nil {
+		t.Fatalf("WithBytes: %v", err)
+	}
+
+	denied := errors.New("mprotect denied by policy")
+	prevProtect, prevUnmap := protectMemory, unmapMemory
+	t.Cleanup(func() { protectMemory, unmapMemory = prevProtect, prevUnmap })
+	protectMemory = func([]byte, protection) error { return denied }
+	unmapMemory = func([]byte) error { return errors.New("munmap denied too") }
+
+	_ = e.m.release()
+
+	// Both refusals landed, so the pages are still held -- which is the only
+	// situation in which the questions below have anything to answer.
+	if e.m == nil || e.m.memory == nil {
+		t.Fatal("the mapping was released; this test needs the KEPT-mapping case")
+	}
+
+	if e.IsAlive() {
+		t.Error("IsAlive reports true for a mutable enclave whose material the " +
+			"early wipe already destroyed")
+	}
+	if n := e.Size(); n != 0 {
+		t.Errorf("Size = %d, want 0: there is no material left to have a size", n)
+	}
+	if _, err := e.Open(); !errors.Is(err, ErrEnclaveDestroyed) {
+		t.Errorf("Open = %v, want ErrEnclaveDestroyed: it would otherwise hand "+
+			"back zeroes from a region whose guards are already read-write", err)
+	}
+	if err := e.WithBytes(func([]byte) error { return nil }); !errors.Is(err, ErrEnclaveDestroyed) {
+		t.Errorf("WithBytes = %v, want ErrEnclaveDestroyed", err)
+	}
+	if _, err := e.EqualToErr([]byte("anything")); !errors.Is(err, ErrEnclaveDestroyed) {
+		t.Errorf("EqualToErr = %v, want ErrEnclaveDestroyed", err)
+	}
+}
+
+// Process-memory sweep, shared by every test that has to prove material is not
+// resident somewhere it should not be.
+//
+// There is exactly ONE copy. PR #16 (SealedEnclave) grew it inline and it was
+// extracted so #18 could use it without a second copy drifting from the first;
+// it lives here, with the other /proc instruments over this process's
+// mappings, since #90 consolidated the test files onto the sources they cover.
+//
+// # Environment requirement (#90)
+//
+// It reads /proc/self/maps and /proc/self/mem. A process may always read its
+// own, so this needs no privilege — but it does need a mounted /proc that is
+// not filtered, and every test that sweeps FAILS without one rather than
+// reporting a negative it could not have measured.
+//
+// The design is the corrected one, and the correction is worth keeping attached
+// to the code: the first version skipped every kernel-NAMED mapping to avoid
+// matching the test binary's own rodata, and the Go runtime NAMES its heap
+// `[anon: Go: heap]`. Measured, that left one mapping swept and thirty skipped,
+// so a plaintext copy retained on the heap forever went unnoticed by the one
+// test written to catch it.
+//
+// The second lesson is the mirror of the first: an instrument can also SEE TOO
+// MUCH — specifically, itself. The scan buffer holds copies of everything it
+// reads, needle included, and an unwiped buffer becomes heap garbage a later
+// sweep can find and misreport as a leak in the code under test. The first
+// failure mode made the sweep blind; this one made it hallucinate. Both are
+// documented at the code that fixes them.
+
+// rangesOutside returns the matches that do not contain addr — that is, every
+// copy of the needle other than the one the test is holding on purpose.
+func rangesOutside(hits []string, addr uintptr) []string {
+	var out []string
+	for _, h := range hits {
+		lo, hi, ok := parseSmapsHeader(h)
+		if ok && addr >= lo && addr < hi {
+			continue
+		}
+		out = append(out, h)
+	}
+	return out
+}
+
+// processMemoryFind returns the /proc/self/maps lines of every ANONYMOUS mapping
+// that contains needle.
+//
+// File-backed mappings are excluded because the test binary's own rodata would
+// match a literal needle in every run. Anonymous mappings are swept whether or
+// not the kernel named them: the Go runtime labels its heap `[anon: Go: heap]`,
+// and skipping named mappings is what made the first version of this sweep blind
+// to the only place a leak could be.
+func processMemoryFind(needle []byte) ([]string, error) {
+	maps, err := os.ReadFile("/proc/self/maps")
+	if err != nil {
+		return nil, err
+	}
+	mem, err := os.Open("/proc/self/mem")
+	if err != nil {
+		return nil, err
+	}
+	defer mem.Close()
+
+	const chunk = 1 << 20
+	// Chunks overlap by len(needle)-1 so a needle straddling a boundary is not
+	// missed — the failure mode of a fixed-window scan.
+	overlap := len(needle) - 1
+	buf := make([]byte, chunk+overlap)
+	// THE SCAN BUFFER IS WIPED ON EVERY RETURN PATH, and this line is
+	// load-bearing: without it the instrument PLANTS the very thing it looks
+	// for. Scanning the needle's own (legitimate) mapping copies the needle
+	// into buf — an ordinary heap allocation — and when buf becomes garbage
+	// those bytes linger in the freed span until it is reused. A LATER sweep
+	// then finds the EARLIER sweep's buffer and reports a heap residue that
+	// never existed in the code under test. The same self-contamination shape
+	// was independently hit and fixed in a parent-scans-child probe during
+	// the PR #45 review, where the counts climbed 2->6->10 across scans.
+	//
+	// This buffer is ONE of two ways a sweep-based test was measured to smear
+	// its own needle on PR #45. The other — a control copy in a
+	// stack-allocatable local, stranded intact on the freed old stack when a
+	// growth intervened between fill and wipe — cannot be fixed here or
+	// anywhere, and retired that test's sweep formulation outright. (The
+	// test in question left with the Decrypter/Signer adapter, split out to
+	// issue #50; the forensics — hex-dump of the hit, addr2line on the
+	// surrounding frames — are recorded there and on the PR #45 review.)
+	// Tests that keep using this sweep must keep their needles out of plain
+	// locals: generate into locked pages, hand copies only to callees that
+	// take ownership and wipe (NewSealed), and compare from inside borrows.
+	// The residency tests in this package hold to that; a new sweep-based
+	// test that plants a bare heap or stack control copy will inherit the
+	// flake.
+	defer wipe(buf)
+
+	var hits []string
+	for _, line := range strings.Split(string(maps), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 5 {
+			continue
+		}
+		if !strings.HasPrefix(fields[1], "r") {
+			continue
+		}
+		// File-backed only: a pathname starts with '/'. Kernel labels like
+		// [anon: Go: heap], [stack] and [heap] are anonymous and ARE swept.
+		if len(fields) > 5 && strings.HasPrefix(fields[5], "/") {
+			continue
+		}
+		lo, hi, ok := parseSmapsHeader(line)
+		if !ok || hi <= lo {
+			continue
+		}
+
+		for off := lo; off < hi; {
+			n := chunk
+			if remaining := int(hi - off); remaining < n {
+				n = remaining
+			}
+			read, rerr := mem.ReadAt(buf[:n], int64(off))
+			if read > 0 && bytes.Contains(buf[:read], needle) {
+				hits = append(hits, strings.TrimSpace(line))
+				break
+			}
+			if rerr != nil {
+				break
+			}
+			if read <= overlap {
+				break
+			}
+			off += uintptr(read - overlap)
+		}
+	}
+	return hits, nil
 }

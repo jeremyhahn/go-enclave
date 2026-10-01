@@ -67,10 +67,6 @@ func vmLckBytes() (int64, error) {
 // pages too, the reservation silently becomes an undercount again and only a
 // kernel-sourced yardstick notices.
 func TestAllocator_ChargesWhatTheKernelLocks(t *testing.T) {
-	if _, err := vmLckBytes(); err != nil {
-		t.Skipf("cannot read VmLck from /proc/self/status: %v", err)
-	}
-
 	a, err := NewAllocator(64 * pageSize)
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
@@ -93,7 +89,9 @@ func TestAllocator_ChargesWhatTheKernelLocks(t *testing.T) {
 	}
 	probe.Destroy()
 	if probeAfter-probeBefore == 0 {
-		t.Skipf("allocating an enclave moved VmLck by 0 bytes; mlock is not accounted in this environment")
+		t.Fatal("allocating an enclave moved VmLck by 0 bytes: the kernel is not accounting mlock, so every " +
+			"comparison below would be vacuous. The runner must be a real Linux kernel that reports VmLck " +
+			"in /proc/self/status (see vmLckBytes)")
 	}
 
 	for _, size := range []int{1, 32, int(pageSize) - 1, int(pageSize), int(pageSize) + 1, 3*int(pageSize) - 1} {

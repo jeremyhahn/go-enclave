@@ -13,6 +13,7 @@ package providertest
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"testing"
 )
 
@@ -67,6 +68,51 @@ func TestMappingContainsWipesTheScanBufferOnAMiss(t *testing.T) {
 	}
 	if !allZero(buf) {
 		t.Error("the scan buffer still holds the region it read after a MISS; only the hit path is wiped")
+	}
+}
+
+// scratchingReader is an io.ReaderAt that uses the WHOLE slice it is handed as
+// scratch — filling it with fill — and then reports a short read, which the
+// io.ReaderAt contract explicitly permits.
+type scratchingReader struct {
+	fill     byte
+	calls    int
+	requests []int // len(p) of every call, so a test can prove the reader ran
+}
+
+func (r *scratchingReader) ReadAt(p []byte, _ int64) (int, error) {
+	r.calls++
+	r.requests = append(r.requests, len(p))
+	for i := range p {
+		p[i] = r.fill
+	}
+	return 1, io.EOF
+}
+
+// TestMappingContainsWipesWhatTheReaderUsedAsScratch pins the bound of the
+// wipe. mappingContains wipes only the prefix it handed to ReadAt (#90), and
+// that prefix has to be the REQUEST, not the count ReadAt returned: a reader
+// may scribble over all of p and report one byte. A bound taken from the
+// returned count would leave the scribbled tail — a copy of whatever the
+// reader read — for the next mapping's scan to find.
+func TestMappingContainsWipesWhatTheReaderUsedAsScratch(t *testing.T) {
+	needle := []byte("not present")
+	buf := scratch(2048, len(needle))
+	const regionLen = 1500 // shorter than buf: the request is the region, not the buffer
+
+	r := &scratchingReader{fill: 0x5C}
+	if mappingContains(r, 0, regionLen, needle, buf) {
+		t.Fatal("reported a match the reader never produced")
+	}
+	// The reader must have run and been asked for the whole region — or the
+	// zero buffer below proves nothing: a mappingContains that returned
+	// before reading would leave it zero too.
+	if r.calls == 0 || r.requests[0] != regionLen {
+		t.Fatalf("mappingContains called the reader %d time(s) with requests %v; want a first request of %d bytes", r.calls, r.requests, regionLen)
+	}
+	if !allZero(buf) {
+		t.Errorf("the reader's scratch survived mappingContains; first non-zero byte at index %d of the %d "+
+			"requested", bytes.IndexFunc(buf, func(r rune) bool { return r != 0 }), regionLen)
 	}
 }
 
@@ -142,6 +188,7 @@ func TestParseMapsHeader(t *testing.T) {
 		{name: "empty", line: "", wantOK: false},
 		{name: "no range separator", line: "7f0c00000000 rw-p", wantOK: false},
 		{name: "not hexadecimal", line: "zzzz-7f0c00021000 rw-p", wantOK: false},
+		{name: "high bound not hexadecimal", line: "7f0c00000000-zzzz rw-p", wantOK: false},
 		{name: "no fields", line: "7f0c00000000-7f0c00021000", wantOK: false},
 	}
 	for _, tc := range tests {
@@ -169,13 +216,19 @@ func TestResidueMappingsFindsAndExcludesHome(t *testing.T) {
 		needle[i] = byte(i*7 + 13)
 	}
 
+	// Both preconditions FAIL rather than skip (#90). Reading /proc/self/maps
+	// and /proc/self/mem of one's own process needs no privilege on Linux, so
+	// an error here means the runner's /proc is missing or filtered; and a
+	// sweep that cannot find a needle live in this very process cannot see
+	// anything, so the exclusion assertion below would be vacuous.
 	hits, err := residueMappings(needle, 0)
 	if err != nil {
-		t.Skipf("cannot sweep process memory here: %v", err)
+		t.Fatalf("cannot sweep process memory: %v (the runner must mount /proc and allow a process to read "+
+			"its own /proc/self/maps and /proc/self/mem)", err)
 	}
 	if len(hits) == 0 {
-		t.Skip("the sweep found no mapping holding a needle that is live in this process; it cannot see " +
-			"anything here and this assertion would be vacuous")
+		t.Fatal("the sweep found no mapping holding a needle that is live in this process; it cannot see " +
+			"anything here and the exclusion assertion would be vacuous")
 	}
 
 	home, err := addrOf(needle)
@@ -194,5 +247,47 @@ func TestResidueMappingsFindsAndExcludesHome(t *testing.T) {
 	// by the collector having reclaimed it.
 	if needle[0] == 0xFF && needle[47] == 0xFF {
 		t.Fatal("unreachable; this exists only to keep the needle live")
+	}
+}
+
+// TestSuiteCatchesAProviderThatRetainsACopy is the deliberate-leak control the
+// whole design is ranked around.
+//
+// It lives in the Linux file because the residue sweep is the only instrument
+// for retention by COPY and it exists only here; on every other platform the
+// suite reports the sweep as not run, which
+// TestResidueSweepReportsItselfNotRunOffLinux (residue_other_test.go) pins. A
+// build constraint, not a runtime skip (#90).
+func TestSuiteCatchesAProviderThatRetainsACopy(t *testing.T) {
+	kept := &retainingProtector{inner: software()}
+	wantFail(t, perOp(func() (any, error) { return kept, nil }),
+		"no copy of the key is findable in the process after Unprotect returns")
+	// Hold the retained copies past the sweep so the failure cannot be
+	// explained away as garbage the collector had not yet reached.
+	if len(kept.kept) == 0 {
+		t.Fatal("the planted provider retained nothing; the control proved nothing")
+	}
+}
+
+// TestEqualBytes pins the comparison the residue check's recovery control
+// rests on: a recovery of the wrong LENGTH is not the key, whatever its
+// prefix holds.
+func TestEqualBytes(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		a, b []byte
+		want bool
+	}{
+		{"equal", []byte("key-bytes"), []byte("key-bytes"), true},
+		{"both empty", nil, []byte{}, true},
+		{"one byte differs", []byte("key-bytes"), []byte("key-bytez"), false},
+		{"a strict prefix", []byte("key-bytes"), []byte("key-byte"), false},
+		{"longer", []byte("key-bytes"), []byte("key-bytes!"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := equalBytes(tc.a, tc.b); got != tc.want {
+				t.Errorf("equalBytes = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }

@@ -15,12 +15,9 @@ import (
 	"errors"
 	"io"
 	"os"
-	"os/exec"
 	"runtime"
 	"strings"
 	"testing"
-
-	"golang.org/x/sys/unix"
 )
 
 const (
@@ -64,17 +61,12 @@ func TestSealedEnclave_LockedMemoryExhausted(t *testing.T) {
 		return
 	}
 
-	cmd := exec.Command(os.Args[0], "-test.run=^TestSealedEnclave_LockedMemoryExhausted$", "-test.v")
-	cmd.Env = append(os.Environ(), sealLimitMarker+"=1")
-	out, err := cmd.CombinedOutput()
+	out, err := runTestChild(t, "TestSealedEnclave_LockedMemoryExhausted", sealLimitMarker, "1")
 	if err != nil {
 		t.Fatalf("subprocess failed (an abort here is the behavior this test forbids): %v\n%s", err, out)
 	}
-	if strings.Contains(string(out), "--- SKIP") {
-		t.Skipf("subprocess could not inject the fault:\n%s", out)
-	}
 	for _, want := range []string{sealKeyRefused, sealOpenRefused, sealSurvivedRefusal} {
-		if !strings.Contains(string(out), want) {
+		if !strings.Contains(out, want) {
 			t.Fatalf("subprocess did not confirm %q:\n%s", want, out)
 		}
 	}
@@ -85,25 +77,18 @@ func sealLimitChild(t *testing.T) {
 
 	material := append([]byte(nil), sealedMaterial...)
 
-	var original unix.Rlimit
-	if err := unix.Getrlimit(unix.RLIMIT_MEMLOCK, &original); err != nil {
-		t.Skipf("cannot read RLIMIT_MEMLOCK: %v", err)
-	}
-	lower := func(cur uint64) error {
-		return unix.Setrlimit(unix.RLIMIT_MEMLOCK, &unix.Rlimit{Cur: cur, Max: original.Max})
-	}
+	setCeiling, original := injectMemlockCeiling(t)
 
 	// Zero locked bytes allowed, so no key enclave — not the provider root,
 	// not the hierarchy, not a DEK — can be created at all. This runs FIRST,
 	// before anything has caused any of them to exist.
-	if err := lower(0); err != nil {
-		t.Skipf("cannot lower RLIMIT_MEMLOCK: %v", err)
-	}
+	setCeiling(0)
 
 	s, err := NewSealed(t.Context(), append([]byte(nil), material...))
 	if err == nil {
 		s.Destroy()
-		t.Skip("NewSealed unexpectedly succeeded under a zero ceiling; no fault was injected")
+		t.Fatal("NewSealed succeeded under a zero RLIMIT_MEMLOCK: the ceiling did not bind, no fault " +
+			"was injected, and everything below would be vacuous")
 	}
 	if !errors.Is(err, ErrLockedMemoryUnavailable) {
 		t.Fatalf("NewSealed err = %v, want ErrLockedMemoryUnavailable", err)
@@ -113,21 +98,18 @@ func sealLimitChild(t *testing.T) {
 	// Lift the ceiling far enough to seal, then seal for real. This also
 	// exercises the retry-not-memoize contract on the hierarchy: the failed
 	// first seal must not have latched the failure.
-	if err := lower(original.Cur); err != nil {
-		t.Skipf("cannot restore RLIMIT_MEMLOCK: %v", err)
-	}
+	setCeiling(original.Cur)
 	s, err = NewSealed(t.Context(), append([]byte(nil), material...))
 	if err != nil {
-		t.Skipf("could not seal with the ceiling restored: %v", err)
+		t.Fatalf("NewSealed with the ceiling restored: %v (the failed first seal must not have latched "+
+			"its failure)", err)
 	}
 
 	// Now drop it again. The hierarchy's keys are already locked and stay
 	// locked — lowering the soft limit does not unlock existing pages — so
 	// what fails is Open's attempt to allocate fresh pages for the DEK and
 	// the destination.
-	if err := lower(uint64(os.Getpagesize())); err != nil {
-		t.Skipf("cannot lower RLIMIT_MEMLOCK: %v", err)
-	}
+	setCeiling(uint64(os.Getpagesize()))
 
 	var openErr error
 	for i := 0; i < 64; i++ {
@@ -142,7 +124,8 @@ func sealLimitChild(t *testing.T) {
 		_ = e
 	}
 	if openErr == nil {
-		t.Skip("Open never failed under a one-page ceiling; no fault was injected")
+		t.Fatal("64 Opens succeeded under a one-page RLIMIT_MEMLOCK: the ceiling did not bind and no " +
+			"fault was injected")
 	}
 	if !errors.Is(openErr, ErrLockedMemoryUnavailable) {
 		t.Fatalf("Open err = %v, want ErrLockedMemoryUnavailable", openErr)
@@ -154,9 +137,7 @@ func sealLimitChild(t *testing.T) {
 	if !s.IsAlive() {
 		t.Fatal("the sealed value was destroyed by a failed Open")
 	}
-	if err := lower(original.Cur); err != nil {
-		t.Skipf("cannot restore RLIMIT_MEMLOCK: %v", err)
-	}
+	setCeiling(original.Cur)
 	e, err := s.Open(t.Context())
 	if err != nil {
 		t.Fatalf("Open after the ceiling lifted: %v", err)
@@ -183,9 +164,6 @@ func sealLimitChild(t *testing.T) {
 // exactly the plaintext's page, not the DEK's too.
 func TestSealedEnclave_OpenedPlaintextIsLocked(t *testing.T) {
 	freshProcessSealer(t)
-	if _, err := vmLckBytes(); err != nil {
-		t.Skipf("cannot read VmLck: %v", err)
-	}
 
 	s, err := NewSealed(t.Context(), append([]byte(nil), sealedMaterial...))
 	if err != nil {
@@ -209,9 +187,6 @@ func TestSealedEnclave_OpenedPlaintextIsLocked(t *testing.T) {
 	}
 
 	locked := after - before
-	if locked == 0 {
-		t.Skip("opening moved VmLck by 0 bytes; mlock is not accounted in this environment")
-	}
 	if want := LockedSize(len(sealedMaterial)); locked != want {
 		t.Errorf("opening locked %d bytes, want %d (the page the plaintext should occupy; more means "+
 			"a per-open key enclave outlived the Open)", locked, want)
@@ -273,20 +248,12 @@ func TestSealedEnclave_NoPlaintextInProcessMemory(t *testing.T) {
 		t.Fatalf("generating the needle: %v", err)
 	}
 
-	// A transient heap copy is unavoidable to hand the material to NewSealed,
-	// which takes ownership and wipes it. That wipe is part of what this test
-	// checks: if it did not happen, the sweep finds the remains.
-	tmp := make([]byte, 64)
-	if err := needleEnclave.WithBytes(func(b []byte) error {
-		copy(tmp, b)
-		return nil
-	}); err != nil {
-		t.Fatalf("copying the needle: %v", err)
-	}
-	s, err := NewSealed(t.Context(), tmp)
-	if err != nil {
-		t.Fatalf("NewSealed: %v", err)
-	}
+	// NewSealed takes ownership of its input and wipes it, so the input is
+	// handed over from a LOCKED transfer enclave rather than a heap copy:
+	// the plaintext never exists on the ordinary heap, and the wipe NewSealed
+	// performs lands in locked pages. That wipe is part of what this test
+	// checks — if it did not happen, the sweep finds the remains.
+	s := sealFromEnclave(t, needleEnclave)
 	defer s.Destroy()
 
 	// home is the mapping the needle itself lives in. Every legitimate match
@@ -311,11 +278,11 @@ func TestSealedEnclave_NoPlaintextInProcessMemory(t *testing.T) {
 	withOpen, err := findNeedle(needleEnclave)
 	if err != nil {
 		open.Destroy()
-		t.Skipf("cannot sweep process memory: %v", err)
+		t.Fatalf("cannot sweep process memory: %v (see processMemoryFind for what the runner must allow)", err)
 	}
 	if outside := rangesOutside(withOpen, home); len(outside) == 0 {
 		open.Destroy()
-		t.Skipf("the sweep found no match outside the needle's own mapping even with an enclave open "+
+		t.Fatalf("the sweep found no match outside the needle's own mapping even with an enclave open "+
 			"(%d matches total); it cannot see the mappings a leak would live in and a negative result "+
 			"would be vacuous", len(withOpen))
 	}
@@ -364,9 +331,6 @@ func findNeedle(probe *MemoryEnclave) ([]string, error) {
 // what this package believes it released.
 func TestSealedEnclave_FailedOpenLeaksNoLockedMemory(t *testing.T) {
 	freshProcessSealer(t)
-	if _, err := vmLckBytes(); err != nil {
-		t.Skipf("cannot read VmLck: %v", err)
-	}
 
 	s, err := NewSealed(t.Context(), append([]byte(nil), sealedMaterial...))
 	if err != nil {
@@ -391,7 +355,9 @@ func TestSealedEnclave_FailedOpenLeaksNoLockedMemory(t *testing.T) {
 	}
 	e.Destroy()
 	if openDelta-base == 0 {
-		t.Skip("a successful Open moved VmLck by 0 bytes; mlock is not accounted here and this test would be vacuous")
+		t.Fatal("a successful Open moved VmLck by 0 bytes: the kernel is not accounting mlock, so the " +
+			"no-growth assertion below would pass vacuously. The runner must be a real Linux kernel " +
+			"that reports VmLck in /proc/self/status (see vmLckBytes)")
 	}
 
 	// Now make Open fail AFTER it has allocated: tamper with the sealed
@@ -460,17 +426,7 @@ func TestSealedEnclave_SizeMismatchDoesNotDecryptOntoTheHeap(t *testing.T) {
 		t.Fatalf("generating the needle: %v", err)
 	}
 
-	tmp := make([]byte, 64)
-	if err := needleEnclave.WithBytes(func(b []byte) error {
-		copy(tmp, b)
-		return nil
-	}); err != nil {
-		t.Fatalf("copying the needle: %v", err)
-	}
-	s, err := NewSealed(t.Context(), tmp)
-	if err != nil {
-		t.Fatalf("NewSealed: %v", err)
-	}
+	s := sealFromEnclave(t, needleEnclave)
 	defer s.Destroy()
 
 	var home uintptr
@@ -492,11 +448,11 @@ func TestSealedEnclave_SizeMismatchDoesNotDecryptOntoTheHeap(t *testing.T) {
 	withOpen, err := findNeedle(needleEnclave)
 	if err != nil {
 		open.Destroy()
-		t.Skipf("cannot sweep process memory: %v", err)
+		t.Fatalf("cannot sweep process memory: %v (see processMemoryFind for what the runner must allow)", err)
 	}
 	if outside := rangesOutside(withOpen, home); len(outside) == 0 {
 		open.Destroy()
-		t.Skipf("the sweep found no match outside the needle's own mapping even with an enclave open "+
+		t.Fatalf("the sweep found no match outside the needle's own mapping even with an enclave open "+
 			"(%d matches total); a negative result would be vacuous", len(withOpen))
 	}
 	open.Destroy()
@@ -535,4 +491,41 @@ func TestSealedEnclave_SizeMismatchDoesNotDecryptOntoTheHeap(t *testing.T) {
 			"Open: the AEAD decrypted onto the heap before the mismatch was noticed, so the refusal is "+
 			"cosmetic and the plaintext is in unlocked memory. First at %s", len(outside), outside[0])
 	}
+}
+
+// sealFromEnclave seals a copy of src's material without the plaintext ever
+// touching the ordinary heap: the copy is made into a locked transfer enclave
+// and NewSealed is called on that borrow, so the input NewSealed takes
+// ownership of — and wipes — is locked memory (security-review §6).
+func sealFromEnclave(t *testing.T, src *MemoryEnclave) *SealedEnclave {
+	t.Helper()
+	transfer, err := NewMemoryEnclaveSized(src.Size())
+	if err != nil {
+		t.Fatalf("allocating the transfer enclave: %v", err)
+	}
+	defer func() { _ = transfer.Destroy() }()
+	var sealed *SealedEnclave
+	if err := transfer.WithBytes(func(dst []byte) error {
+		if err := src.WithBytes(func(b []byte) error { copy(dst, b); return nil }); err != nil {
+			return err
+		}
+		var serr error
+		sealed, serr = NewSealed(t.Context(), dst)
+		if serr != nil {
+			return serr
+		}
+		// NewSealed takes ownership of its input and must wipe it. Checked
+		// HERE, inside the borrow, because the transfer enclave is destroyed
+		// below and its destruction would erase the evidence before any
+		// later memory sweep could see it.
+		for _, c := range dst {
+			if c != 0 {
+				return errors.New("NewSealed left its input unwiped")
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("sealing from a locked transfer enclave: %v", err)
+	}
+	return sealed
 }

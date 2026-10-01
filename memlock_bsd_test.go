@@ -62,3 +62,7 @@ func TestDiscoverLockedMemoryLimit_BSDReportsSomething(t *testing.T) {
 	}
 	t.Logf("host locked-memory ceiling: bytes=%d bounded=%v source=%s", limit.Bytes, limit.Bounded, limit.Source)
 }
+
+// testMemlockHardLimit: no test on this platform drops CAP_IPC_LOCK to inject
+// a locked-memory ceiling, so there is no hard-limit half to the requirement.
+func testMemlockHardLimit() (uint64, bool) { return 0, true }

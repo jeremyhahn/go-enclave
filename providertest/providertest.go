@@ -986,56 +986,104 @@ func checkUnsealRootFillsTheDestination(r *report, cfg Config) {
 	}
 
 	const canary = 0xAA
-	first := bytes.Repeat([]byte{canary}, enclave.RootKeyBytes)
-	if err := p.UnsealRoot(r.ctx, first); err != nil {
-		r.fail(property, "UnsealRoot: %v", err)
-		return
-	}
-
-	if cfg.SingleUseRoot != "" {
-		// One call is all this provider has, so the exact position-by-position
-		// proof is unavailable and what remains is the weaker set. Say so:
-		// silently downgrading an instrument is how a suite comes to certify
-		// what it did not measure.
-		r.note("providertest: UnsealRoot called ONCE — %q. The full-width-write and determinism proofs "+
-			"need a second call and were NOT taken; what is checked is that the root is not the caller's "+
-			"own fill, not zero, and not a constant", cfg.SingleUseRoot)
-		if bytes.Count(first, []byte{canary}) == len(first) {
-			r.fail(property, "UnsealRoot wrote NOTHING: the destination still holds the caller's own "+
-				"%#x fill across all %d bytes", canary, enclave.RootKeyBytes)
-			return
+	// Both destinations are LOCKED: against a real device these receive its
+	// actual root (see withLocked).
+	if err := withLocked(2, enclave.RootKeyBytes, func(bufs [][]byte) error {
+		first, second := bufs[0], bufs[1]
+		fill(first, canary)
+		if err := p.UnsealRoot(r.ctx, first); err != nil {
+			r.fail(property, "UnsealRoot: %v", err)
+			return nil
 		}
-		checkRootIsNotAPlaceholder(r, property, first)
-		return
-	}
 
-	second := bytes.Repeat([]byte{0x55}, enclave.RootKeyBytes)
-	if err := p.UnsealRoot(r.ctx, second); err != nil {
-		r.fail(property, "a second UnsealRoot on the same provider: %v. If this provider consumes a "+
-			"one-shot handle on a successful unseal, set Config.SingleUseRoot with the reason; the seam "+
-			"guarantees only that a Sealer calls UnsealRoot at most once", err)
-		return
-	}
-
-	if !bytes.Equal(first, second) {
-		var unwritten []int
-		for i := range first {
-			if first[i] == 0xAA && second[i] == 0x55 {
-				unwritten = append(unwritten, i)
+		if cfg.SingleUseRoot != "" {
+			// One call is all this provider has, so the exact position-by-position
+			// proof is unavailable and what remains is the weaker set. Say so:
+			// silently downgrading an instrument is how a suite comes to certify
+			// what it did not measure.
+			r.note("providertest: UnsealRoot called ONCE — %q. The full-width-write and determinism proofs "+
+				"need a second call and were NOT taken; what is checked is that the root is not the caller's "+
+				"own fill, not zero, and not a constant", cfg.SingleUseRoot)
+			if bytes.Count(first, []byte{canary}) == len(first) {
+				r.fail(property, "UnsealRoot wrote NOTHING: the destination still holds the caller's own "+
+					"%#x fill across all %d bytes", canary, enclave.RootKeyBytes)
+				return nil
 			}
+			checkRootIsNotAPlaceholder(r, property, first)
+			return nil
 		}
-		if len(unwritten) > 0 {
-			r.fail(property, "UnsealRoot left %d of %d destination bytes UNWRITTEN (first at index %d): each "+
-				"kept the caller's own fill, so the root a Sealer runs its whole KEK hierarchy under is part "+
-				"caller garbage", len(unwritten), enclave.RootKeyBytes, unwritten[0])
-			return
-		}
-		r.fail(property, "two successive UnsealRoot calls on one provider produced DIFFERENT roots; two "+
-			"Sealers over this device would each hold a different value while both believing they hold the root")
-		return
-	}
 
-	checkRootIsNotAPlaceholder(r, property, first)
+		fill(second, 0x55)
+		if err := p.UnsealRoot(r.ctx, second); err != nil {
+			r.fail(property, "a second UnsealRoot on the same provider: %v. If this provider consumes a "+
+				"one-shot handle on a successful unseal, set Config.SingleUseRoot with the reason; the seam "+
+				"guarantees only that a Sealer calls UnsealRoot at most once", err)
+			return nil
+		}
+
+		if !bytes.Equal(first, second) {
+			var unwritten []int
+			for i := range first {
+				if first[i] == 0xAA && second[i] == 0x55 {
+					unwritten = append(unwritten, i)
+				}
+			}
+			if len(unwritten) > 0 {
+				r.fail(property, "UnsealRoot left %d of %d destination bytes UNWRITTEN (first at index %d): each "+
+					"kept the caller's own fill, so the root a Sealer runs its whole KEK hierarchy under is part "+
+					"caller garbage", len(unwritten), enclave.RootKeyBytes, unwritten[0])
+				return nil
+			}
+			r.fail(property, "two successive UnsealRoot calls on one provider produced DIFFERENT roots; two "+
+				"Sealers over this device would each hold a different value while both believing they hold the root")
+			return nil
+		}
+
+		checkRootIsNotAPlaceholder(r, property, first)
+		return nil
+	}); err != nil {
+		r.fail(property, "allocating locked destinations for the root: %v", err)
+	}
+}
+
+// withLocked runs fn over n fresh buffers of size bytes each, every one a
+// borrow of its own LOCKED enclave, and destroys them all once fn returns.
+//
+// It is how the suite handles a provider's ROOT. Against a real device the
+// root UnsealRoot hands back is that device's actual root key, and a
+// conformance run must not be the thing that copies it onto the ordinary heap
+// and leaves it there: every destination, comparison snapshot and control the
+// root checks use lives here instead. The borrows are held for the whole of fn,
+// so each check's observation windows — a later call disturbing an earlier
+// destination, a write after the caller wiped — are exactly what they were.
+// Calls that can outlive the check (bounded ones, which an ended run may
+// abandon) must not be given these buffers: they are unmapped when fn returns.
+func withLocked(n, size int, fn func(bufs [][]byte) error) error {
+	encs := make([]*enclave.MemoryEnclave, 0, n)
+	defer func() {
+		for _, e := range encs {
+			_ = e.Destroy()
+		}
+	}()
+	for range n {
+		e, err := enclave.NewMemoryEnclaveSized(size)
+		if err != nil {
+			return err // the library's own typed error; the caller says what it was for
+		}
+		encs = append(encs, e)
+	}
+	bufs := make([][]byte, n)
+	var nest func(i int) error
+	nest = func(i int) error {
+		if i == n {
+			return fn(bufs)
+		}
+		return encs[i].WithBytes(func(b []byte) error {
+			bufs[i] = b
+			return nest(i + 1)
+		})
+	}
+	return nest(0)
 }
 
 // checkRootIsNotAPlaceholder is the stub smoke test, shared by both call
@@ -1077,44 +1125,49 @@ func checkRootDestinationNotDisturbedByALaterCall(r *report, cfg Config) {
 		return
 	}
 
-	spy := make([]byte, enclave.RootKeyBytes)
-	if err := p.UnsealRoot(r.ctx, spy); err != nil {
-		r.fail(property, "UnsealRoot: %v", err)
-		return
-	}
-	// CONTROL: it held material at return time, so a later zero or unchanged
-	// reading is attributable.
-	if allZero(spy) {
-		r.fail(property, "the control did not hold — UnsealRoot returned nil and left the destination all "+
-			"zero, so nothing below could be told apart from a destination that was never populated")
-		return
-	}
-	want := bytes.Clone(spy)
-
-	later := make([]byte, enclave.RootKeyBytes)
-	if err := p.UnsealRoot(r.ctx, later); err != nil {
-		r.fail(property, "a second UnsealRoot failed: %v", err)
-		return
-	}
-	if !bytes.Equal(spy, want) {
-		detail := "overwritten"
-		if allZero(spy) {
-			detail = "ZEROED — a Sealer would run its whole KEK hierarchy under zeros"
+	// Every buffer that holds the root — the spy, its snapshot and the later
+	// destinations — is LOCKED (see withLocked).
+	if err := withLocked(4, enclave.RootKeyBytes, func(bufs [][]byte) error {
+		spy, want, later, third := bufs[0], bufs[1], bufs[2], bufs[3]
+		if err := p.UnsealRoot(r.ctx, spy); err != nil {
+			r.fail(property, "UnsealRoot: %v", err)
+			return nil
 		}
-		r.fail(property, "the destination of an earlier UnsealRoot was %s by a later call: the provider "+
-			"retained a reference to the caller's locked slice", detail)
-	}
+		// CONTROL: it held material at return time, so a later zero or unchanged
+		// reading is attributable.
+		if allZero(spy) {
+			r.fail(property, "the control did not hold — UnsealRoot returned nil and left the destination all "+
+				"zero, so nothing below could be told apart from a destination that was never populated")
+			return nil
+		}
+		copy(want, spy)
 
-	// And the caller-wiped direction: once wiped, nothing may put bytes back.
-	enclave.Wipe(spy)
-	third := make([]byte, enclave.RootKeyBytes)
-	if err := p.UnsealRoot(r.ctx, third); err != nil {
-		r.fail(property, "a third UnsealRoot failed: %v", err)
-		return
-	}
-	if !allZero(spy) {
-		r.fail(property, "the destination of an earlier UnsealRoot was written again after the caller wiped "+
-			"it: the provider writes root material into pages the caller has released")
+		if err := p.UnsealRoot(r.ctx, later); err != nil {
+			r.fail(property, "a second UnsealRoot failed: %v", err)
+			return nil
+		}
+		if !bytes.Equal(spy, want) {
+			detail := "overwritten"
+			if allZero(spy) {
+				detail = "ZEROED — a Sealer would run its whole KEK hierarchy under zeros"
+			}
+			r.fail(property, "the destination of an earlier UnsealRoot was %s by a later call: the provider "+
+				"retained a reference to the caller's locked slice", detail)
+		}
+
+		// And the caller-wiped direction: once wiped, nothing may put bytes back.
+		enclave.Wipe(spy)
+		if err := p.UnsealRoot(r.ctx, third); err != nil {
+			r.fail(property, "a third UnsealRoot failed: %v", err)
+			return nil
+		}
+		if !allZero(spy) {
+			r.fail(property, "the destination of an earlier UnsealRoot was written again after the caller wiped "+
+				"it: the provider writes root material into pages the caller has released")
+		}
+		return nil
+	}); err != nil {
+		r.fail(property, "allocating locked destinations for the root: %v", err)
 	}
 }
 
@@ -1242,23 +1295,32 @@ func checkRootUnsealerRefusesAnEndedContext(r *report, cfg Config) {
 		}
 	}
 
-	root := make([]byte, enclave.RootKeyBytes)
-	if err := p.UnsealRoot(r.ctx, root); err != nil {
-		r.fail(property, "after refusing ended contexts, UnsealRoot on the same provider with a live context "+
-			"failed: %v. A refused call must consume nothing a later call needs — a Sealer retries an unseal "+
-			"that failed, and a one-shot handle spent on a refusal leaves it no root at all", err)
-		return
-	}
-	if allZero(root) {
-		// Without a real root the residue comparison below proves nothing.
-		r.fail(property, "the control did not hold — the live UnsealRoot returned nil and an all-zero root")
-		return
-	}
-	for _, dst := range refused {
-		if containsRun(dst, root) {
-			r.fail(property, "UnsealRoot refused an ended context and still wrote root material into the "+
-				"destination; its caller has been told the call failed and will not wipe it")
+	// The live control's root is LOCKED (see withLocked). The refused
+	// destinations above are not: a bounded call may be abandoned and outlive
+	// this check, and a locked buffer is unmapped when withLocked returns; they
+	// hold the caller's canary unless the provider broke the contract.
+	if err := withLocked(1, enclave.RootKeyBytes, func(bufs [][]byte) error {
+		root := bufs[0]
+		if err := p.UnsealRoot(r.ctx, root); err != nil {
+			r.fail(property, "after refusing ended contexts, UnsealRoot on the same provider with a live context "+
+				"failed: %v. A refused call must consume nothing a later call needs — a Sealer retries an unseal "+
+				"that failed, and a one-shot handle spent on a refusal leaves it no root at all", err)
+			return nil
 		}
+		if allZero(root) {
+			// Without a real root the residue comparison below proves nothing.
+			r.fail(property, "the control did not hold — the live UnsealRoot returned nil and an all-zero root")
+			return nil
+		}
+		for _, dst := range refused {
+			if containsRun(dst, root) {
+				r.fail(property, "UnsealRoot refused an ended context and still wrote root material into the "+
+					"destination; its caller has been told the call failed and will not wipe it")
+			}
+		}
+		return nil
+	}); err != nil {
+		r.fail(property, "allocating a locked destination for the root: %v", err)
 	}
 }
 
@@ -1275,5 +1337,13 @@ func checkRefusal(r *report, property, op string, ec endedContext, err error) {
 	case !errors.Is(err, ec.want):
 		r.fail(property, "%s refused an already-%s context with %v, want an error matching %v so every "+
 			"layer above can tell a caller that gave up from a device that failed", op, ec.name, err, ec.want)
+	}
+}
+
+// fill sets every byte of b to v, in place — a caller-chosen pattern written
+// into a (locked) destination, where bytes.Repeat would allocate a heap copy.
+func fill(b []byte, v byte) {
+	for i := range b {
+		b[i] = v
 	}
 }
