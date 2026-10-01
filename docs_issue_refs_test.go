@@ -236,7 +236,7 @@ var docIssueRefLedger = []docIssueRef{
 	{"enclave.go", 83, classHistorical, "653549ee0dff", "and the constructors' refund depends on the difference (#83)."},
 	{"registry.go", 83, classHistorical, "43aec9096d4b", "— the memory-safety event this error exists to surface (#83)."},
 	{"admission.go", 83, classHistorical, "c85d9f81b7c3", "against and the difference is negative without wrapping (#83)."},
-	{"enclave.go", 83, classHistorical, "82c2bdc4fc96", "the caller can act on by retrying, and until #83 it panicked too."},
+	{"enclave.go", 83, classHistorical, "570f09afdef2", "Before #83 a refused release panicked too, contrary to every"},
 	{"enclave.go", 83, classHistorical, "97ad0733c40d", "failure too, contrary to every statement of the contract (#83)."},
 	{"enclave.go", 83, classHistorical, "00281b3a6391", "Since #83 a release that detects corruption and is then refused"},
 	{"enclave.go", 83, classHistorical, "135e07374702", "— so the reservation behind them cannot be returned (#83)."},
@@ -248,11 +248,23 @@ var docIssueRefLedger = []docIssueRef{
 	{"enclave.go", 83, classHistorical, "fe9f3986f6ad", "And the mark carries the MAPPING (#83)."},
 	{"registry.go", 83, classHistorical, "6132c9fe7336", "ledger, of orphans, that WipeAll retries the same way (#83)."},
 	{"registry.go", 83, classHistorical, "6ce9bfdcf9fe", "hand back to the kernel, kept so [WipeAll] can retry it (#83)."},
-	{"registry.go", 83, classHistorical, "2962738fb8a3", "failed constructions whose release is still being refused (#83)."},
+	{"registry.go", 83, classHistorical, "e5f5dccbf7fc", "failed constructions whose release is still being refused (#83)."},
 	{"mapping.go", 83, classHistorical, "93155c342373", "a fresh comparison of the zeroes that run left behind (#83)."},
 	{"mapping.go", 83, classHistorical, "f63c87effc61", "as leaving the pages held (#83): dropping the refusal would"},
 	{"sealer.go", 83, classHistorical, "81b218859bb5", "root (a consumed unseal handle) cannot be asked again (#83)."},
 	{"sealer.go", 83, classHistorical, "b4d203577ea8", "again — what this did until #83 — called UnsealRoot a"},
+	// #88 (lifecycle API): Destroy returns its report, WipeAll takes a context
+	// and waits for borrows as an event. Every citation describes the change as
+	// made.
+	{"README.md", 88, classHistorical, "e5207ba8e7e0", "Replaces v0.6's `Destroy()` + `DestroyErr()` pair (#88)."},
+	{"enclave.go", 88, classHistorical, "a4f99c749f97", "release that takes it to zero wakes a waiting [WipeAll] (#88)."},
+	{"enclave.go", 88, classHistorical, "237399c1726e", "Until #88 this method returned nothing and the report needed a"},
+	{"registry.go", 88, classHistorical, "611eba1dce00", "What a borrow does add since #88 is two atomic adds on its own"},
+	{"registry.go", 88, classHistorical, "0dc12d0ac0d4", "The sweep's wait for a borrow to end (#88)."},
+	{"registry.go", 88, classHistorical, "23f45c11ad7e", "Until #88 that wait was a fixed 200µs sleep between at most"},
+	// PR #95 is #88's pull request; its review findings are fixed as cited.
+	{"registry.go", 95, classHistorical, "0415d0eb8047", "than a sync.Mutex for exactly that last clause (Codex on #95)."},
+	{"registry.go", 95, classHistorical, "5e5919f4426c", "is gated on ctx, the contention retry included (Codex on #95)."},
 
 	// #86 — go-enclave's own OS memory layer over golang.org/x/sys, replacing
 	// memcall: one system call per primitive, one unmap, and an honest

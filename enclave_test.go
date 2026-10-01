@@ -647,9 +647,9 @@ func isRegistered(e *MemoryEnclave) bool {
 // TestDestroy_ReleaseFailureIsReturnedNotPanicked is the regression for #83's
 // Destroy finding: a plain release failure — the munlock or munmap after a
 // successful wipe refused, ENOMEM at vm.max_map_count being the realistic one —
-// PANICKED, because DestroyErr panicked on every error that was not
-// ErrReleasedWithoutWipe. The documentation on Destroy, DestroyErr and the
-// package said only detected corruption panics, and a resource refusal is the
+// PANICKED, because what is now Destroy (DestroyErr until #88) panicked on every
+// error that was not ErrReleasedWithoutWipe. The documentation on both methods
+// and the package said only detected corruption panics, and a resource refusal is the
 // opposite of a state the caller cannot reason about: the material is gone, the
 // pages are held for a retry, and a retry is exactly what the caller should do.
 //
@@ -673,20 +673,20 @@ func TestDestroy_ReleaseFailureIsReturnedNotPanicked(t *testing.T) {
 	t.Cleanup(func() {
 		unlockMemory = prev
 		if e.m != nil {
-			_ = e.DestroyErr()
+			_ = e.Destroy()
 		}
 	})
 	unlockMemory = func([]byte) error { return denied }
 
 	var derr error
-	if r := panicValue(func() { derr = e.DestroyErr() }); r != nil {
-		t.Fatalf("DestroyErr panicked with %v on a release failure that is not corruption", r)
+	if r := panicValue(func() { derr = e.Destroy() }); r != nil {
+		t.Fatalf("Destroy panicked with %v on a release failure that is not corruption", r)
 	}
 	if !errors.Is(derr, ErrLockedMemoryUnavailable) || !errors.Is(derr, denied) {
-		t.Fatalf("DestroyErr = %v, want the refused munlock as ErrLockedMemoryUnavailable", derr)
+		t.Fatalf("Destroy = %v, want the refused munlock as ErrLockedMemoryUnavailable", derr)
 	}
 	if errors.Is(derr, ErrEnclaveCorrupted) {
-		t.Errorf("DestroyErr = %v reports corruption that did not happen", derr)
+		t.Errorf("Destroy = %v reports corruption that did not happen", derr)
 	}
 	if e.m == nil || e.m.memory == nil {
 		t.Fatal("the mapping was dropped although its pages are still held; there is no handle to retry through")
@@ -701,14 +701,18 @@ func TestDestroy_ReleaseFailureIsReturnedNotPanicked(t *testing.T) {
 		t.Errorf("InUse = %d after a failed release, want %d: the kernel still holds the pages", used, pageSize)
 	}
 
-	// The deferable form swallows it rather than panicking.
-	if r := panicValue(e.Destroy); r != nil {
-		t.Fatalf("Destroy panicked with %v on a release failure that is not corruption", r)
+	// A retry while the refusal persists reports it again, and still does not
+	// panic: the report is a resource condition, whichever attempt meets it.
+	if r := panicValue(func() { derr = e.Destroy() }); r != nil {
+		t.Fatalf("a retried Destroy panicked with %v on a release failure that is not corruption", r)
+	}
+	if !errors.Is(derr, ErrLockedMemoryUnavailable) {
+		t.Fatalf("a retried Destroy under the same refusal = %v, want ErrLockedMemoryUnavailable again", derr)
 	}
 
 	unlockMemory = prev
-	if derr := e.DestroyErr(); derr != nil {
-		t.Fatalf("retried DestroyErr = %v, want nil once the refusal lifted", derr)
+	if derr := e.Destroy(); derr != nil {
+		t.Fatalf("retried Destroy = %v, want nil once the refusal lifted", derr)
 	}
 	if e.m != nil {
 		t.Error("the mapping is still held after a successful retry")
@@ -749,7 +753,7 @@ func TestDestroy_CorruptionSurvivesAFailedRelease(t *testing.T) {
 	t.Cleanup(func() {
 		unmapMemory = prev
 		if e.m != nil {
-			_ = panicValue(func() { _ = e.DestroyErr() })
+			_ = panicValue(func() { _ = e.Destroy() })
 		}
 	})
 	// VirtualUnlock semantics: the first attempt's munlock succeeds, so a retry
@@ -757,7 +761,7 @@ func TestDestroy_CorruptionSurvivesAFailedRelease(t *testing.T) {
 	installStrictUnlock(t)
 	unmapMemory = func([]byte) error { return denied }
 
-	r := panicValue(e.Destroy)
+	r := panicValue(func() { _ = e.Destroy() })
 	if rerr, ok := r.(error); !ok || !errors.Is(rerr, ErrEnclaveCorrupted) {
 		t.Fatalf("Destroy over a corrupted canary with a refused munmap panicked with %v, want ErrEnclaveCorrupted", r)
 	}
@@ -772,7 +776,7 @@ func TestDestroy_CorruptionSurvivesAFailedRelease(t *testing.T) {
 	}
 
 	unmapMemory = prev
-	r = panicValue(e.Destroy)
+	r = panicValue(func() { _ = e.Destroy() })
 	if rerr, ok := r.(error); !ok || !errors.Is(rerr, ErrEnclaveCorrupted) {
 		t.Fatalf("the retry that released the pages panicked with %v, want ErrEnclaveCorrupted: "+
 			"the corruption detected on the first attempt was lost", r)

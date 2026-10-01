@@ -10,6 +10,7 @@ package enclave
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -1216,7 +1217,7 @@ func TestSealer_SweptPendingRootIsWipedNotReunsealed(t *testing.T) {
 		t.Fatal("the retained root is not on the ledger, so a sweep cannot reach it")
 	}
 
-	if _, err := WipeAll(); err != nil {
+	if _, err := WipeAll(context.Background()); err != nil {
 		t.Fatalf("WipeAll: %v", err)
 	}
 	if pending.IsAlive() {

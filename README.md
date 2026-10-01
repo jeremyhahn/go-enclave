@@ -207,8 +207,8 @@ process gets `ErrLockedMemoryUnavailable` from every allocation.
 | `(*MemoryEnclave) OpenString / EqualTo / Size / IsAlive / String` | Locked, concurrency-safe accessors. |
 | `(*MemoryEnclave) Freeze()` | Make the pages read-only once a sized enclave's fill is done, so a stray write **faults** instead of silently corrupting the material. Idempotent, not reversible, waits out in-flight borrows. A no-op on an enclave that is already frozen. |
 | `(*MemoryEnclave) Open()` | **Unsafe.** Returns a slice not covered by the lock; see its doc. |
-| `(*MemoryEnclave) Destroy()` | Zeroize and release; idempotent, nil-safe, deferrable. |
-| `WipeAll() (int, error)` | **Orderly shutdown only, and only from the program that owns the process** — never from a library, since it destroys enclaves belonging to subsystems it knows nothing about. The **count** is how many are still held, including the pages of any failed construction whose cleanup the kernel refused (retried on every sweep); read it as "these were still held" rather than as a diagnosis, since a read outlasting the bounded retry budget counts the same as a shutdown-ordering mistake. The **error** reports what the sweep found: detected canary corruption (matching `ErrEnclaveCorrupted`) and enclaves unmapped without an in-process wipe because `mprotect` was denied (matching `ErrReleasedWithoutWipe`). Neither is a held page, so neither is in the count, which is why they need their own return value; the one overlap is a corrupt enclave whose pages the kernel then refused to release, which is reported in both. Never panics, and never waits indefinitely on a reader — an enclave being read is retried on later passes with a short backoff between them. Nothing calls it for you. |
+| `(*MemoryEnclave) Destroy() error` | Zeroize and release; idempotent, nil-safe, deferrable. Returns `nil`, `ErrReleasedWithoutWipe` (pages gone, but `mprotect` was denied so they were unmapped without the in-process wipe), or `ErrLockedMemoryUnavailable` (the kernel refused the release; the enclave keeps its mapping, ledger entry and reservation, and calling `Destroy` again retries). **Panics only on detected canary corruption** — the package's one deliberate panic; see [Destroy and the one panic](#destroy-and-the-one-panic). Replaces v0.6's `Destroy()` + `DestroyErr()` pair (#88). |
+| `WipeAll(ctx) (int, error)` | **Orderly shutdown only, and only from the program that owns the process** — never from a library, since it destroys enclaves belonging to subsystems it knows nothing about. An enclave being read when the sweep reaches it is **waited for**: the end of the borrow wakes the sweep (no polling, no sleep), which then reclaims it. `ctx` bounds every wait and nothing else — the wait for such a borrow (when it ends, a still-borrowed enclave is left mapped and counted), immediate retries of a contended lock, and the wait to be admitted while another sweep runs (only one runs at a time; a call whose `ctx` ends first, or whose `ctx` is nil, sweeps nothing and returns the current count with `ErrSweepInProgress`). An already-done or nil `ctx` that is admitted still reclaims everything not currently held; it only declines to wait. With `context.Background()` the sweep — and a second `Background` caller queued behind it — waits as long as the borrows it owes take, so give it a deadline taken **at shutdown**. Constructors racing the sweep are reclaimed when reached but can never keep it running, under any `ctx`. The **count** is how many are still held when it returns, including the pages of any failed construction whose cleanup the kernel refused; read it as "these were still held" rather than as a diagnosis. The **error** is `nil`, `ErrSweepInProgress` (this call was never admitted), or a `*SweepError{Corrupt, Unwiped}` reporting what the sweep found: detected canary corruption (`errors.Is(err, ErrEnclaveCorrupted)`) and enclaves unmapped without an in-process wipe because `mprotect` was denied (`errors.Is(err, ErrReleasedWithoutWipe)`), with the numbers via `errors.As`. Neither is a held page, so neither is in the count; the one overlap is a corrupt enclave whose pages the kernel then refused to release, which is reported in both. A context ending during an admitted sweep is not an error. Never panics. Nothing calls it for you. |
 | `NewAllocator(maxBytes)` / `(*Allocator) New(data)` / `(*Allocator) NewSized(n)` | Bounded allocation with `ErrBudgetExhausted`; admission is decided before anything is mapped, and reservations are released on `Destroy`. The budget is in **locked bytes**, the unit `RLIMIT_MEMLOCK` uses. |
 | `(*Allocator) SetLimit(n)` / `ForceLimit(n)` / `TransferTo(dst, n)` | **Runtime retune.** `SetLimit` raises or lowers the budget and REFUSES (`ErrBudgetInUse`) rather than shrink below the memory already reserved, changing nothing on refusal. `ForceLimit` records a ceiling that moved anyway — a resized container, a lowered `RLIMIT_MEMLOCK` — keeping live enclaves alive, returning the over-subscription in bytes and admitting nothing until it drains. `TransferTo` moves headroom between two allocators in one operation, so a slack one can fund a pressured one; it takes the two locks in a fixed order and passes through "in neither", never "in both". All three are safe against concurrent allocation: a retune and an in-flight admission are decided by the same compare-and-swap on the same word, so they cannot both take the last page. |
 | `LockedSize(n int) int64` | What an enclave of `n` bytes actually costs — `n` rounded up to a whole page. Size budgets with this: every enclave occupies at least one page, so a budget for a hundred small credentials is a hundred **pages**. Returns `int64` to match the budget, so `NewAllocator(100 * LockedSize(32))` needs no conversion. |
@@ -232,7 +232,33 @@ Errors: `ErrEmptyEnclave`, `ErrInvalidSize`, `ErrEnclaveDestroyed`, `ErrLockedMe
 `ErrReleasedWithoutWipe` (+ `UnwipedReleaseError`), `ErrCoreDumpLimitUnsupported`;
 sealing: `ErrSealFailed`, `ErrSealedAuthentication`, `ErrSealerWiped`, `ErrProviderMode`,
 `ErrInvalidMode`, `ErrSealerInstalled`, `ErrNilSealer`, `ErrProviderMessageLimit`,
-`ErrMaterialTooLarge`, `ErrPlaintextEscaped`.
+`ErrMaterialTooLarge`, `ErrPlaintextEscaped`; shutdown: `SweepError` (matches
+`ErrEnclaveCorrupted` / `ErrReleasedWithoutWipe`), `ErrSweepInProgress`.
+
+### Destroy and the one panic
+
+Library code does not panic, and go-enclave keeps that rule everywhere but one
+place. `Destroy` returns its release failures — a refused `munlock`/`munmap`
+leaves the pages held and is retried by calling `Destroy` again; a denied
+`mprotect` is reported as `ErrReleasedWithoutWipe` — and **panics only when the
+canary guarding the enclave failed to verify**, with a value matching
+`ErrEnclaveCorrupted`, after wiping the material and (unless the kernel refuses)
+releasing the pages.
+
+That exception is deliberate and fail-stop, for two security reasons. A process
+holding secrets whose memory was written by something that did not own it must
+not carry on: whatever did the writing is still in the process with every other
+key in reach, and the state a caller would consult to handle the error is the
+state that is already wrong. And a returned error would be dropped on exactly
+the path that meets it most — `defer e.Destroy()` discards its result, so the
+evidence of a memory-safety event would vanish without anyone deciding to ignore
+it. `WipeAll` meets the same condition and does **not** panic, because a sweep
+that stopped at the first corrupt enclave would leave every enclave after it
+mapped at exit; it reports a `SweepError` instead.
+
+A bare `defer e.Destroy()` remains the right default for a caller with nothing
+to do about a refused release: the enclave stays on the shutdown ledger, and
+`WipeAll` retries it and counts it if it is still held.
 
 ### The obligation admission control does not remove
 
@@ -268,7 +294,16 @@ if err != nil {
 if err := enclave.SetAllocator(budget); err != nil { // before anything allocates
 	log.Fatal(err)
 }
-defer enclave.WipeAll()
+defer func() {
+	// The deadline is taken at shutdown, not at startup: it bounds how long the
+	// call waits — for borrows still in flight, or for another sweep — and
+	// nothing else.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if n, err := enclave.WipeAll(ctx); n != 0 || err != nil {
+		log.Printf("enclave: %d still held at exit: %v", n, err)
+	}
+}()
 
 // any library
 a, err := enclave.ProcessAllocator()

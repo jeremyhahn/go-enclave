@@ -43,17 +43,34 @@
 //
 // # The one thing that is not an error
 //
-// [MemoryEnclave.Destroy] PANICS when the canary guarding an enclave did not
-// verify, after wiping the material, releasing the pages and returning any
-// [Allocator] reservation — or, if the kernel refuses that release, after wiping
-// and keeping the pages and the reservation for a retry. Everything else in this
-// package hands failures back, a refused release included;
-// this one does not, and the distinction is deliberate rather than an oversight.
-// A failed canary means memory the enclave did not own was written — the state a
-// caller would use to handle the error is the state that is already wrong — and
-// it is the class Go reserves panic for. It is also what this method always did:
-// before v0.3.0-alpha the same check lived in memguard and called core.Panic,
-// which additionally destroyed every other enclave in the process on its way out.
+// Library code does not panic; it returns its failures. This package keeps that
+// rule everywhere but one place, and the exception is deliberate, documented and
+// fail-stop rather than an oversight.
+//
+// [MemoryEnclave.Destroy] returns what went wrong with a release — a refused
+// munlock or munmap, which leaves the pages held for a retry, or an mprotect
+// denial that forced a bare unmap — and PANICS, with a value matching
+// [ErrEnclaveCorrupted], only when the canary guarding the enclave did not
+// verify. It panics after wiping the material, releasing the pages and
+// returning any [Allocator] reservation — or, if the kernel refuses that
+// release, after wiping and keeping the pages and the reservation for a retry.
+//
+// The reason is security, not taste. A failed canary means memory the enclave
+// did not own was written, by something that is still in the process and has
+// every other key the process holds within its reach. A process holding secrets
+// in that state must not carry on, and there is no recovery for a caller to
+// choose: the state it would consult to handle the error is the state that is
+// already wrong. And a returned error would be lost on exactly the path that
+// meets it most — `defer e.Destroy()` discards whatever the call returns, so the
+// evidence of a memory-safety event would vanish without anyone having decided
+// to ignore it. A panic cannot be dropped by omission.
+//
+// It is also what this method always did: before v0.3.0-alpha the same check
+// lived in memguard and called core.Panic, which additionally destroyed every
+// other enclave in the process on its way out. [WipeAll] meets the same
+// condition and does NOT panic — a sweep that stopped at the first corrupt
+// enclave would leave every enclave after it mapped at exit — so it reports it
+// as a [SweepError] instead.
 //
 // The vocabulary is deliberate: the type describes its mechanism — a region of
 // locked memory — rather than what a caller keeps in it. It is never called a
@@ -187,8 +204,19 @@
 //		if err := enclave.SetAllocator(budget); err != nil {
 //			log.Fatal(err)
 //		}
-//		defer enclave.WipeAll()
+//		defer wipeAtExit()
 //		// ... construct the libraries that allocate locked memory ...
+//	}
+//
+//	// The deadline is taken AT SHUTDOWN, inside the deferred call. One
+//	// created at the top of main would count from startup and have expired
+//	// long before it was needed.
+//	func wipeAtExit() {
+//		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+//		defer cancel()
+//		if n, err := enclave.WipeAll(ctx); n != 0 || err != nil {
+//			log.Printf("enclave: %d still held at exit: %v", n, err)
+//		}
 //	}
 //
 //	// In a library:
@@ -211,24 +239,36 @@
 // to any failed allocation, unmapped every live buffer in the process and then
 // panicked. WipeAll is called on purpose, never panics, and never unmaps memory
 // underneath a reader. An enclave being read when the sweep reaches it is
-// retried on later passes, so a momentary reader costs a pass rather than the
-// enclave; only one still held after every pass is counted.
+// WAITED FOR: the end of the borrow wakes the sweep, which then reclaims it.
+// The context bounds every wait the call makes and nothing else: the wait for
+// such a borrow (when it ends, an enclave still being read is left alone and
+// counted), the immediate retries of a contended lock, and the wait to be
+// admitted at all when another sweep is running — a call whose context ends
+// first sweeps nothing and returns the current count with
+// ErrSweepInProgress. With [context.Background] the sweep waits as long as the
+// borrows it owes take, and so does a second Background caller, so give a
+// shutdown sweep a deadline. A constructor racing the sweep is reclaimed when
+// the sweep reaches it but can never keep the sweep running, under any
+// context.
 //
 // It returns two different things. The COUNT is what is still held: enclaves
 // and failed constructions' mappings whose pages are still mapped. A non-zero
-// value most often means workers outlived the shutdown, but a read outlasting
-// the bounded retry budget (about 1.4ms) produces the same number, and so does
-// a kernel still refusing to take pages back — read it as "these were still
-// held," not as a diagnosis. The ERROR reports what the sweep found: detected
-// canary corruption, matching ErrEnclaveCorrupted exactly as Destroy's panic
-// value does, and enclaves unmapped without an in-process wipe because mprotect
-// was denied, matching ErrReleasedWithoutWipe. Neither is a held page, so the
-// count cannot carry them; they overlap only for a corrupt enclave whose pages
-// the kernel then refused to give back, which is in both. Without the error
-// the fact that something wrote into memory it did not own would vanish at
-// exit behind a zero that looks like success. Destroy panics on that same condition because a
-// single enclave's caller cannot act on state that is by definition wrong; a
-// sweep must not abort, but non-fatal must not mean invisible either.
+// value most often means workers outlived the shutdown — still reading when the
+// context ended, or still constructing — and otherwise a kernel still refusing
+// to take pages back; read it as "these were still held," not as a diagnosis.
+// The ERROR is nil when an admitted sweep found nothing to report, and
+// ErrSweepInProgress when the call was never admitted — an admission result,
+// not a finding: it swept nothing, its count is still current, and the sweep
+// that was running reports its own findings to its own caller. Otherwise it is
+// a [SweepError] reporting what the sweep found: detected canary corruption, matching ErrEnclaveCorrupted exactly as Destroy's panic value
+// does, and enclaves unmapped without an in-process wipe because mprotect was
+// denied, matching ErrReleasedWithoutWipe, each with its count. Neither is a
+// held page, so the count cannot carry them; they overlap only for a corrupt
+// enclave whose pages the kernel then refused to give back, which is in both.
+// Without the error the fact that something wrote into memory it did not own
+// would vanish at exit behind a zero that looks like success. Destroy panics on
+// that same condition, for the reasons given above; a sweep must not abort, but
+// non-fatal must not mean invisible either.
 //
 // One more thing follows for callers: WipeAll is a global destroyer. An enclave
 // another component still holds is destroyed too, and a retained Open slice

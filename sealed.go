@@ -331,7 +331,7 @@ func newKeyEnclave(n int) (*MemoryEnclave, error) {
 		return nil, err
 	}
 	if err := e.WithBytes(fillRandom); err != nil {
-		e.Destroy()
+		destroyTransient(e)
 		return nil, errors.Join(ErrSealFailed, err)
 	}
 	return e, nil

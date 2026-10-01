@@ -10,6 +10,7 @@ package enclave
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"strings"
 	"sync"
@@ -295,7 +296,7 @@ func TestAllocator_Concurrent(t *testing.T) {
 // releases the mapping, and when THAT is refused too — the wipe-enabling
 // mprotect and the unmap fallback both denied — the locked pages stay
 // behind with no handle. New refunded the whole charge anyway, so the budget
-// advertised locked memory the process could not use: the stance DestroyErr
+// advertised locked memory the process could not use: the stance Destroy
 // refuses to take for exactly the same pages.
 //
 // The control is the same refusal with the fallback ALLOWED: the pages go back
@@ -324,7 +325,7 @@ func TestAllocator_New_KeepsTheChargeForPagesACleanupCouldNotRelease(t *testing.
 			// record of an unmapped region.
 			t.Cleanup(func() {
 				protectMemory, unmapMemory = prevProtect, prevUnmap
-				_, _ = WipeAll()
+				_, _ = WipeAll(context.Background())
 			})
 			protectMemory = func([]byte, protection) error { return denied }
 			unmapMemory = func(b []byte) error {
@@ -372,7 +373,7 @@ func TestAllocator_New_RefundsWhenTheCleanupUnlockedButCouldNotUnmap(t *testing.
 	// TestAllocator_New_KeepsTheChargeForPagesACleanupCouldNotRelease.
 	t.Cleanup(func() {
 		protectMemory, unmapMemory = prevProtect, prevUnmap
-		_, _ = WipeAll()
+		_, _ = WipeAll(context.Background())
 	})
 	// Only the freeze (read-only) is refused, so construction fails and the
 	// cleanup wipes, unlocks, and is refused the unmap.

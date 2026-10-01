@@ -560,7 +560,7 @@ func (s *Sealer) Seal(data []byte) (*SealedEnclave, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer dek.Destroy()
+	defer destroyTransient(dek)
 
 	blob, err := s.protect(dek)
 	if err != nil {
@@ -614,13 +614,13 @@ func (s *Sealer) open(a *Allocator, blob, sealed []byte, size int) (*MemoryEncla
 	// open is worse than an unadmitted page that a granted reservation gates.
 	dek, err := NewMemoryEnclaveSized(dekBytes)
 	if err != nil {
-		out.Destroy()
+		destroyTransient(out)
 		return nil, err
 	}
-	defer dek.Destroy()
+	defer destroyTransient(dek)
 
 	if err := s.unprotect(blob, dek); err != nil {
-		out.Destroy()
+		destroyTransient(out)
 		return nil, err
 	}
 
@@ -630,7 +630,7 @@ func (s *Sealer) open(a *Allocator, blob, sealed []byte, size int) (*MemoryEncla
 		// are individually authentic but were never sealed together.
 		return openWithKeyInto(dek, sealed, blob, pt)
 	}); err != nil {
-		out.Destroy()
+		destroyTransient(out)
 		return nil, err
 	}
 	return out, nil
@@ -916,7 +916,7 @@ func (s *Sealer) unprotectRootKey(blob []byte, dek *MemoryEnclave) error {
 		// A retired generation is materialized for exactly one unwrap: it
 		// costs a locked page for the duration of this call instead of for
 		// the sealer's lifetime.
-		defer retired.Destroy()
+		defer destroyTransient(retired)
 		kek = retired
 	}
 
@@ -940,7 +940,7 @@ func (s *Sealer) unwrapRetiredKEKLocked(kekBlob []byte) (*MemoryEnclave, error) 
 	if uerr := kek.WithBytes(func(k []byte) error {
 		return openWithKeyInto(s.root, kekBlob[blobHeaderLen:], kekBlob[:blobHeaderLen], k)
 	}); uerr != nil {
-		kek.Destroy()
+		destroyTransient(kek)
 		return nil, hierarchyFailure(uerr)
 	}
 	return kek, nil
@@ -988,7 +988,7 @@ func (s *Sealer) initHierarchy() error {
 		}); err != nil {
 			// The unseal itself failed, so the contract permits asking again
 			// and nothing is retained.
-			root.Destroy()
+			destroyTransient(root)
 			return providerSealFailure(err)
 		}
 		// From here the unseal has SUCCEEDED and must not be repeated; the
@@ -1057,7 +1057,7 @@ func (s *Sealer) rotateKEK() error {
 		return err
 	}
 
-	s.kek.Destroy()
+	destroyTransient(s.kek)
 	s.kek, s.kekGen = kek, s.kekGen+1
 	s.kekBlobs[s.kekGen] = blob
 	s.kekUsed.Store(0)
@@ -1082,7 +1082,7 @@ func newGeneration(root *MemoryEnclave, gen uint32) (*MemoryEnclave, []byte, err
 		body = b
 		return nil
 	}); err != nil {
-		kek.Destroy()
+		destroyTransient(kek)
 		return nil, nil, hierarchyFailure(err)
 	}
 	return kek, append(header, body...), nil

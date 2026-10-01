@@ -554,7 +554,7 @@ func (a *Allocator) NewSized(n int) (*MemoryEnclave, error) {
 // Before #83 the mapping was dropped instead, and the charge was lost to the
 // budget for the process lifetime even after the refusal lifted.
 //
-// The policy is NOT DestroyErr's, and differs in one case. DestroyErr keeps an
+// The policy is NOT Destroy's, and differs in one case. Destroy keeps an
 // enclave's reservation until the pages are UNMAPPED, since the enclave itself
 // is the handle a retry goes through. Here the charge is kept only while the
 // pages are still LOCKED: a cleanup that unlocked them and was then refused the

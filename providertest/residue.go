@@ -81,7 +81,7 @@ func checkNoResidueAfterUnprotect(r *report, cfg Config) {
 			"is unmeasured", err)
 		return
 	}
-	defer needle.Destroy()
+	defer release(r, "needle", needle)
 	if err := needle.WithBytes(func(b []byte) error {
 		_, rerr := io.ReadFull(rand.Reader, b)
 		return rerr
@@ -123,7 +123,7 @@ func checkNoResidueAfterUnprotect(r *report, cfg Config) {
 	destroyed := false
 	defer func() {
 		if !destroyed {
-			dst.Destroy()
+			release(r, "destination", dst)
 		}
 	}()
 
@@ -180,7 +180,9 @@ func checkNoResidueAfterUnprotect(r *report, cfg Config) {
 		r.fail(property, "wiping the destination: %v", err)
 		return
 	}
-	dst.Destroy()
+	// A refused release cannot taint the sweep below: the destination was
+	// wiped just above, so pages the kernel kept hold no copy of the key.
+	release(r, "destination", dst)
 	destroyed = true
 
 	after, err := sweepOutsideHome(needle, home)
@@ -243,4 +245,14 @@ func addrOf(b []byte) (uintptr, error) {
 		return 0, &stepError{step: "providertest: parsing slice address", err: err}
 	}
 	return uintptr(addr), nil
+}
+
+// release destroys a locked mapping the residue check made for itself. A
+// refused release is the environment's doing rather than the provider's, so it
+// is noted rather than failed: the pages stay on go-enclave's shutdown ledger,
+// and nothing the check measures depends on them being gone.
+func release(r *report, what string, e *enclave.MemoryEnclave) {
+	if err := e.Destroy(); err != nil {
+		r.note("providertest: releasing the residue check's %s was refused: %v", what, err)
+	}
 }

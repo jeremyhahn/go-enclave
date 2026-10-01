@@ -12,6 +12,7 @@ package enclave
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"os"
 	"strconv"
@@ -191,7 +192,7 @@ func TestWipeAllAccountsAnUnwipedRelease(t *testing.T) {
 	t.Cleanup(func() { protectMemory = prev })
 	protectMemory = func([]byte, protection) error { return denied }
 
-	remaining, werr := WipeAll()
+	remaining, werr := WipeAll(context.Background())
 
 	if remaining != 0 {
 		t.Errorf("WipeAll = %d remaining, want 0: the pages were unmapped, so "+
@@ -208,15 +209,16 @@ func TestWipeAllAccountsAnUnwipedRelease(t *testing.T) {
 	}
 }
 
-// TestDestroyErrReportsTheDeniedMprotect pins the public path.
+// TestDestroyReportsTheDeniedMprotect pins the public path.
 //
 // Destroy correctly does NOT panic on an unwiped release -- nothing was corrupted
-// and the invariant held -- but that left no channel at all, so the pattern this
-// library is actually used through, `defer e.Destroy()`, reported success while
-// the environment silently denied the wipe-enabling mprotect on every frozen
-// enclave. The denial reaches every other enclave in the process, so losing it
-// on the main path loses it everywhere.
-func TestDestroyErrReportsTheDeniedMprotect(t *testing.T) {
+// and the invariant held -- so it has to RETURN the report. Before there was a
+// return value for it, the pattern this library is actually used through,
+// `defer e.Destroy()`, reported success while the environment silently denied
+// the wipe-enabling mprotect on every frozen enclave. The denial reaches every
+// other enclave in the process, so losing it on the main path loses it
+// everywhere.
+func TestDestroyReportsTheDeniedMprotect(t *testing.T) {
 	e, err := NewMemoryEnclave([]byte("material for the public teardown path"))
 	if err != nil {
 		t.Fatalf("NewMemoryEnclave: %v", err)
@@ -227,29 +229,29 @@ func TestDestroyErrReportsTheDeniedMprotect(t *testing.T) {
 	t.Cleanup(func() { protectMemory = prev })
 	protectMemory = func([]byte, protection) error { return denied }
 
-	if derr := e.DestroyErr(); !errors.Is(derr, ErrReleasedWithoutWipe) {
-		t.Fatalf("DestroyErr = %v, want ErrReleasedWithoutWipe", derr)
+	if derr := e.Destroy(); !errors.Is(derr, ErrReleasedWithoutWipe) {
+		t.Fatalf("Destroy = %v, want ErrReleasedWithoutWipe", derr)
 	}
 	if e.IsAlive() {
-		t.Error("the enclave reports itself alive after DestroyErr")
+		t.Error("the enclave reports itself alive after Destroy")
 	}
 
 	// Idempotent, and a second call has nothing left to report.
-	if derr := e.DestroyErr(); derr != nil {
-		t.Errorf("second DestroyErr = %v, want nil", derr)
+	if derr := e.Destroy(); derr != nil {
+		t.Errorf("second Destroy = %v, want nil", derr)
 	}
 }
 
-// TestDestroyErrIsNilOnAnOrdinaryTeardown is the control that makes the test
+// TestDestroyIsNilOnAnOrdinaryTeardown is the control that makes the test
 // above mean something: without it, an implementation that returned the sentinel
 // unconditionally would pass.
-func TestDestroyErrIsNilOnAnOrdinaryTeardown(t *testing.T) {
+func TestDestroyIsNilOnAnOrdinaryTeardown(t *testing.T) {
 	e, err := NewMemoryEnclave([]byte("material"))
 	if err != nil {
 		t.Fatalf("NewMemoryEnclave: %v", err)
 	}
-	if derr := e.DestroyErr(); derr != nil {
-		t.Fatalf("DestroyErr on a clean teardown = %v, want nil", derr)
+	if derr := e.Destroy(); derr != nil {
+		t.Fatalf("Destroy on a clean teardown = %v, want nil", derr)
 	}
 }
 

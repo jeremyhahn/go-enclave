@@ -9,6 +9,7 @@
 package enclave
 
 import (
+	"context"
 	"errors"
 	"sync"
 	"sync/atomic"
@@ -87,7 +88,7 @@ func TestAllocator_New_FailedConstructionIsReclaimedByWipeAll(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
-	t.Cleanup(func() { _, _ = WipeAll() })
+	t.Cleanup(func() { _, _ = WipeAll(context.Background()) })
 	restore := denyProtectAndUnmap(t)
 
 	e, err := a.New(material())
@@ -105,7 +106,7 @@ func TestAllocator_New_FailedConstructionIsReclaimedByWipeAll(t *testing.T) {
 		t.Errorf("InUse = %d with the pages still locked, want %d", used, pageSize)
 	}
 
-	remaining, werr := WipeAll()
+	remaining, werr := WipeAll(context.Background())
 	if remaining != 1 {
 		t.Errorf("WipeAll = %d with the cleanup still refused, want 1: the orphan still holds its pages", remaining)
 	}
@@ -117,7 +118,7 @@ func TestAllocator_New_FailedConstructionIsReclaimedByWipeAll(t *testing.T) {
 	}
 
 	restore()
-	remaining, werr = WipeAll()
+	remaining, werr = WipeAll(context.Background())
 	if remaining != 0 {
 		t.Errorf("WipeAll = %d once the refusal lifted, want 0", remaining)
 	}
@@ -151,7 +152,7 @@ func TestAllocator_NewSized_UnlockedOrphanIsReclaimedWithoutASecondRefund(t *tes
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
-	t.Cleanup(func() { _, _ = WipeAll() })
+	t.Cleanup(func() { _, _ = WipeAll(context.Background()) })
 
 	prevLock, prevUnmap := lockMemory, unmapMemory
 	restore := func() { lockMemory, unmapMemory = prevLock, prevUnmap }
@@ -190,7 +191,7 @@ func TestAllocator_NewSized_UnlockedOrphanIsReclaimedWithoutASecondRefund(t *tes
 // outlive the process unreported.
 func TestNewMemoryEnclaveCopy_FailedConstructionIsReclaimedByWipeAll(t *testing.T) {
 	requireCleanLedger(t)
-	t.Cleanup(func() { _, _ = WipeAll() })
+	t.Cleanup(func() { _, _ = WipeAll(context.Background()) })
 	restore := denyProtectAndUnmap(t)
 
 	if _, err := NewMemoryEnclaveCopy(material()); !lockedPagesHeld(err) {
@@ -223,7 +224,7 @@ func TestNewMemoryEnclaveCopy_FailedConstructionIsReclaimedByWipeAll(t *testing.
 // see this: its orphan never locked.
 func TestWipeAll_ReclaimsALockedOrphanWhoseUnlockStaysRefused(t *testing.T) {
 	requireCleanLedger(t)
-	t.Cleanup(func() { _, _ = WipeAll() })
+	t.Cleanup(func() { _, _ = WipeAll(context.Background()) })
 
 	m, err := newMapping(64)
 	if err != nil {
@@ -261,7 +262,7 @@ func TestWipeAll_ReclaimsALockedOrphanWhoseUnlockStaysRefused(t *testing.T) {
 
 // TestWipeAll_ReclaimsOrphansAddedConcurrently runs failing constructions on
 // several goroutines while WipeAll sweeps, for the race detector. Constructors
-// add to the orphan ledger without sweepMu; the sweep reads and drops records
+// add to the orphan ledger without the sweep slot; the sweep reads and drops records
 // and runs their refunds. Every refusal here is transient — a region's first
 // wipe-enabling mprotect is refused and its second allowed — so each orphan
 // is reclaimable by whichever sweep reaches it, and the final accounting must
@@ -290,7 +291,7 @@ func TestWipeAll_ReclaimsOrphansAddedConcurrently(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
-	t.Cleanup(func() { _, _ = WipeAll() })
+	t.Cleanup(func() { _, _ = WipeAll(context.Background()) })
 
 	// reclaimed counts the ALLOWED wipe-enabling mprotects. A region's second
 	// one only ever happens in a sweep's retry of an orphan, so this is the
@@ -348,7 +349,7 @@ func TestWipeAll_ReclaimsOrphansAddedConcurrently(t *testing.T) {
 			case <-done:
 				return
 			default:
-				_, _ = WipeAll()
+				_, _ = WipeAll(context.Background())
 				select {
 				case swept <- struct{}{}:
 				default:

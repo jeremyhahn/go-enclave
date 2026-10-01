@@ -10,6 +10,7 @@ package enclave
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"sync/atomic"
 	"testing"
@@ -433,7 +434,7 @@ func TestWipeAll_ReclaimsAFrozenEnclave(t *testing.T) {
 		t.Fatalf("Freeze: %v", err)
 	}
 
-	remaining, err := WipeAll()
+	remaining, err := WipeAll(context.Background())
 	if err != nil {
 		t.Errorf("WipeAll: %v", err)
 	}

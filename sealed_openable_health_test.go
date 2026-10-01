@@ -9,6 +9,7 @@
 package enclave
 
 import (
+	"context"
 	"crypto/rand"
 	"errors"
 	"runtime"
@@ -292,7 +293,7 @@ func TestWipeAll_BumpsTheGenerationBeforeDestroying(t *testing.T) {
 	}
 	t.Cleanup(func() { sweepParkedForTest = nil })
 
-	if _, err := WipeAll(); err != nil {
+	if _, err := WipeAll(context.Background()); err != nil {
 		t.Fatalf("WipeAll: %v", err)
 	}
 
@@ -323,7 +324,7 @@ func TestWipeAll_GenerationIsMonotonicAcrossSweeps(t *testing.T) {
 
 	seen := make([]uint64, 0, 3)
 	for i := 0; i < 3; i++ {
-		if _, err := WipeAll(); err != nil {
+		if _, err := WipeAll(context.Background()); err != nil {
 			t.Fatalf("WipeAll %d: %v", i, err)
 		}
 		seen = append(seen, sweepGeneration())
@@ -382,7 +383,7 @@ func TestSealedEnclave_OpenableSuspectsASealThatOverlappedASweep(t *testing.T) {
 	}
 	t.Cleanup(func() { sweepParkedForTest = nil })
 
-	if _, err := WipeAll(); err != nil {
+	if _, err := WipeAll(context.Background()); err != nil {
 		t.Fatalf("WipeAll: %v", err)
 	}
 
@@ -500,7 +501,7 @@ func TestWipeAll_ConcurrentSweepsKeepTheParityInvariant(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if _, err := WipeAll(); err != nil {
+			if _, err := WipeAll(context.Background()); err != nil {
 				t.Errorf("WipeAll: %v", err)
 			}
 		}()

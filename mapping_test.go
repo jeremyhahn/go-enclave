@@ -562,11 +562,11 @@ func TestMemoryEnclave_FailedReleaseKeepsTheReservation(t *testing.T) {
 	lift := denyProtectAndUnmap(t)
 
 	var derr error
-	if r := panicValue(func() { derr = e.DestroyErr() }); r != nil {
-		t.Fatalf("DestroyErr panicked with %v; only detected corruption panics", r)
+	if r := panicValue(func() { derr = e.Destroy() }); r != nil {
+		t.Fatalf("Destroy panicked with %v; only detected corruption panics", r)
 	}
 	if !errors.Is(derr, ErrLockedMemoryUnavailable) {
-		t.Errorf("DestroyErr = %v after failing to release the pages, want ErrLockedMemoryUnavailable", derr)
+		t.Errorf("Destroy = %v after failing to release the pages, want ErrLockedMemoryUnavailable", derr)
 	}
 
 	if got := a.InUse(); got != reserved {

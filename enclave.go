@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 )
 
 var (
@@ -139,8 +140,8 @@ func (e *LockedMemoryError) Unwrap() error {
 // NewMemoryEnclaveSized to generate material directly into locked memory.
 // A nil *MemoryEnclave is a valid receiver for
 // every method: it reports itself as not alive, opens with
-// ErrEnclaveDestroyed, and destroys as a no-op, so callers holding an
-// optional enclave do not need nil guards at every use.
+// ErrEnclaveDestroyed, and destroys as a no-op returning nil, so callers
+// holding an optional enclave do not need nil guards at every use.
 //
 // A MemoryEnclave is safe for concurrent use through WithBytes, OpenString,
 // EqualTo, Size, IsAlive, String, Freeze and Destroy: each holds the enclave's
@@ -150,7 +151,42 @@ func (e *LockedMemoryError) Unwrap() error {
 // back a slice that outlives the lock, and its documentation says so.
 type MemoryEnclave struct {
 	mu sync.RWMutex
-	m  *mapping
+
+	// holders counts the goroutines inside — or waiting for — any acquisition
+	// of mu: every borrow, every Open, Size and IsAlive, every Freeze and every
+	// Destroy. It goes up BEFORE the lock is requested and down AFTER it is
+	// released, and the release that takes it to zero wakes a waiting
+	// [WipeAll] (#88). Every acquisition goes through [MemoryEnclave.rlock] or
+	// [MemoryEnclave.lock] for that reason; one that took mu directly would be
+	// invisible to the sweep, which could then wait for a wake-up that never
+	// comes. The one exception is the sweep's own TryLock, which nothing waits
+	// on.
+	//
+	// It exists because the lock cannot answer the question the sweep has to
+	// ask. The sweep tries for the write lock without waiting, and a failed
+	// TryLock carries nothing the memory model will vouch for: it is documented
+	// to have no synchronizing effect, and sync.Mutex's TryLock can fail with
+	// nobody holding the lock at all — it starts from a plain read of the state
+	// word, and its CAS loses to any change in the waiter bits. A sweep that
+	// went to sleep on the strength of a failed TryLock could be waiting for a
+	// release that had already happened, which under a context with no deadline
+	// is a shutdown that never finishes.
+	//
+	// The counter turns the handshake into a Dekker pair of sequentially
+	// consistent atomics instead. The sweep arms [sweepWaiting] and then reads
+	// holders; a holder decrements holders and then reads sweepWaiting. If the
+	// sweep read a non-zero count, the decrement that later takes it to zero
+	// comes after the arm in the total order of atomic operations, so that
+	// holder sees the arm and wakes the sweep. No wake-up can be lost, and
+	// nothing depends on how the runtime implements a mutex.
+	//
+	// The cost on the borrow path is two atomic adds on the cache line the lock
+	// word already occupies, and one load of a package-level flag that nothing
+	// writes outside a sweep: no lock and no allocation. The borrow benchmarks
+	// measure it.
+	holders atomic.Int32
+
+	m *mapping
 
 	// release, when non-nil, returns this enclave's reservation to the
 	// [Allocator] that created it. Destroy invokes it exactly once, via
@@ -461,11 +497,11 @@ func (e *MemoryEnclave) withLocked(fn func([]byte) error) error {
 		return ErrEnclaveDestroyed
 	}
 
-	// This enclave's own lock is now the whole story: only its Destroy can
-	// release these pages, and Destroy takes the write lock, so it waits out
-	// every in-flight reader.
-	e.mu.RLock()
-	defer e.mu.RUnlock()
+	// This enclave's own lock is now the whole story: only its Destroy (or a
+	// WipeAll, which also needs the write lock) can release these pages, and
+	// both wait out every in-flight reader.
+	e.rlock()
+	defer e.runlock()
 
 	if e.m == nil || e.m.wiped {
 		// wiped means the material is gone but the PAGES are still held,
@@ -515,8 +551,8 @@ func (e *MemoryEnclave) Open() ([]byte, error) {
 		return nil, ErrEnclaveDestroyed
 	}
 
-	e.mu.RLock()
-	defer e.mu.RUnlock()
+	e.rlock()
+	defer e.runlock()
 
 	if e.m == nil || e.m.wiped {
 		return nil, ErrEnclaveDestroyed
@@ -632,7 +668,7 @@ func (e *MemoryEnclave) WithBytes(fn func([]byte) error) error {
 //
 // A denied mprotect sends any enclave down the unwiped-release path, where the
 // pages are handed back with a bare munmap and
-// [MemoryEnclave.DestroyErr] reports [ErrReleasedWithoutWipe]. What is unique to
+// [MemoryEnclave.Destroy] reports [ErrReleasedWithoutWipe]. What is unique to
 // a FROZEN one is that the material is still there when it goes: an unfrozen
 // region was overwritten before the mprotect was ever attempted, and a frozen
 // region cannot be. Measured, not assumed —
@@ -641,8 +677,8 @@ func (e *MemoryEnclave) WithBytes(fn func([]byte) error) error {
 //
 // Nothing leaks either way: the pages were mlock'd for their whole life and the
 // kernel zeroes an anonymous page before reuse. But a caller that wants to know
-// its environment is denying mprotect has to call DestroyErr rather than
-// Destroy.
+// its environment is denying mprotect has to check what Destroy returns rather
+// than deferring it bare.
 //
 // That is already true of every enclave built by [NewMemoryEnclave] and
 // [NewMemoryEnclaveCopy], and it is the trade this method makes deliberately: an
@@ -661,8 +697,8 @@ func (e *MemoryEnclave) Freeze() error {
 	// would happily allow: a borrow writing when the pages turn read-only faults,
 	// so a method whose purpose is to convert silent corruption into a fault
 	// would be manufacturing the fault itself.
-	e.mu.Lock()
-	defer e.mu.Unlock()
+	e.lock()
+	defer e.unlock()
 
 	// wiped means the material is already gone while the pages are still held,
 	// because the munlock or munmap after the wipe was refused and the mapping is
@@ -688,8 +724,8 @@ func (e *MemoryEnclave) Size() int {
 		return 0
 	}
 
-	e.mu.RLock()
-	defer e.mu.RUnlock()
+	e.rlock()
+	defer e.runlock()
 
 	if e.m == nil || e.m.wiped {
 		return 0
@@ -704,8 +740,8 @@ func (e *MemoryEnclave) IsAlive() bool {
 		return false
 	}
 
-	e.mu.RLock()
-	defer e.mu.RUnlock()
+	e.rlock()
+	defer e.runlock()
 
 	return e.m != nil && !e.m.wiped
 }
@@ -748,84 +784,88 @@ func (e *MemoryEnclave) EqualToErr(other []byte) (bool, error) {
 	return equal, nil
 }
 
-// Destroy zeroizes the material and releases the locked region. It is
-// idempotent and safe on a nil enclave, so it can always be deferred.
+// Destroy zeroizes the material, releases the locked region and reports
+// whether the release worked. It is idempotent and safe on a nil enclave, so
+// it can always be deferred.
 //
 // It takes the write lock, so it BLOCKS until every in-flight WithBytes,
 // OpenString or EqualTo has returned. Nothing is wiped or unmapped while a
 // reader still holds a view obtained through those methods. A slice taken
 // from Open is outside that guarantee — see Open.
 //
-// # When the canary fails
+// # What it returns
 //
-// Releasing the pages verifies the canary sitting ahead of the data. If it
-// does not match, something wrote into memory it did not own — a buffer
-// underflow through a retained slice, or corruption from elsewhere in the
-// process — and Destroy PANICS with [ErrEnclaveCorrupted] after wiping and
-// releasing everything it holds.
+// nil for an ordinary release, and for every call after one: a destroyed or
+// nil enclave has nothing left to release.
 //
-// A panic from a foundational library is close to never right, and this is the
-// exception the rest of the package is built to avoid: detected memory
-// corruption is not a condition a caller can handle, because the state the
-// caller would act on is the state that is wrong. The material is wiped and,
-// unless the kernel refuses, the pages are returned before the panic, so
-// nothing leaks either way. It is also what this method already did before
-// v0.3.0-alpha — memguard's canary check called core.Panic — except that it no
-// longer destroys every other enclave in the process on its way out.
+// [ErrReleasedWithoutWipe] (as an [UnwipedReleaseError]) when the pages had to
+// be handed back with a bare unmap because the mprotect that makes a frozen
+// region writable was refused. Nothing leaked — the pages are gone and the
+// kernel zeroes an anonymous page before reuse — but the denial reaches every
+// other enclave in the process, and this return is the only signal on the main
+// path that a sandbox has removed part of the teardown contract.
 //
-// If the kernel DOES refuse the unlock or unmap after a failed canary, the panic
-// value carries both: it matches ErrEnclaveCorrupted and the refusal's
-// [ErrLockedMemoryUnavailable]. The material is still wiped; the pages are kept
-// for a retry as described below, and the retry that finally releases them
-// panics with ErrEnclaveCorrupted again, because the detection is not lost
-// between attempts.
+// [ErrLockedMemoryUnavailable] (as a [LockedMemoryError]) when the release
+// itself was refused — the munlock or munmap, or both the wipe-enabling
+// mprotect and the bare-unmap fallback; ENOMEM at vm.max_map_count is the
+// realistic cause. The pages are still held, so the enclave keeps its mapping
+// and its place on the [WipeAll] ledger, any [Allocator] reservation stays
+// charged against pages the kernel has not taken back, and calling Destroy
+// again retries the release, resuming where the last attempt stopped. The
+// material is gone whenever the wipe got as far as running, and the enclave
+// then reports itself destroyed even though its pages are not yet released.
 //
-// # When the release is refused
+// A bare `defer e.Destroy()` discards that report, and for a caller with
+// nothing to do about a refusal that is a legitimate choice rather than a
+// leak: the enclave stays on the ledger, and a shutdown [WipeAll] retries it
+// and counts it if it is still held. A caller that wants to know checks the
+// error. Until #88 this method returned nothing and the report needed a second
+// method, DestroyErr, which is gone.
 //
-// Corruption is the ONLY panic. Every other failure is a report: an
-// [ErrReleasedWithoutWipe] fallback, and a refused munlock or munmap — ENOMEM at
-// vm.max_map_count is the realistic one — which leaves the pages held. Destroy
-// discards the report, as it must, but not the pages: the enclave keeps its
-// mapping, reads destroyed once its material is wiped, stays on the ledger so
-// [WipeAll] retries it, and keeps any [Allocator] reservation until the pages
-// actually go back. Calling Destroy again retries; [MemoryEnclave.DestroyErr]
-// says whether it worked.
-func (e *MemoryEnclave) Destroy() {
-	// The non-fatal report is discarded here and only here. Destroy is the
-	// deferable form and cannot return anything; DestroyErr is the same teardown
-	// with the report kept, exactly as EqualToErr is EqualTo with the reason
-	// kept. A caller that cares whether the environment is denying the
-	// wipe-enabling mprotect, or whether the release is being refused and has to
-	// be retried, must use that one.
-	_ = e.DestroyErr()
-}
-
-// DestroyErr is [MemoryEnclave.Destroy] with its non-fatal report returned
-// rather than discarded.
+// # When the canary fails: the one panic in this package
 //
-// It returns [ErrReleasedWithoutWipe] when the pages had to be handed back with
-// a bare unmap because the mprotect that makes a frozen region writable was
-// refused. Nothing leaked -- the pages are gone and the kernel zeroes an
-// anonymous page before reuse -- but the denial reaches every other enclave in
-// the process, and `defer e.Destroy()` is the pattern this library is used
-// through, so without this the only signal that a sandbox has removed part of
-// the teardown contract is invisible on the main path.
+// Releasing the pages verifies the canary sitting ahead of the data. If it does
+// not match, something wrote into memory it did not own — a buffer underflow
+// through a retained slice, or corruption from elsewhere in the process — and
+// Destroy PANICS with a value matching [ErrEnclaveCorrupted], after wiping the
+// material, releasing the pages and returning any [Allocator] reservation.
 //
-// It returns [ErrLockedMemoryUnavailable] (as a [LockedMemoryError]) when the
-// release itself was refused — the munlock or munmap, or both the
-// wipe-enabling mprotect and the bare-unmap fallback. The pages are still held,
-// so the enclave keeps its mapping and its place on the [WipeAll] ledger, any
-// [Allocator] reservation stays charged against pages the kernel has not taken
-// back, and calling DestroyErr again retries the release. The material is gone
-// whenever the wipe got as far as running, and the enclave then reports itself
-// destroyed even though its pages are not yet released.
+// That is FAIL-STOP by design, and it is the single deliberate exception to
+// this package's rule that library code returns its failures rather than
+// panicking. Two reasons, and both are about security rather than style:
 //
-// It returns nil for an ordinary release, and PANICS on detected corruption for
-// the reasons given on Destroy: that is the one condition a caller cannot act
-// on, because the state it would act on is the state that is wrong. Nothing
-// else panics — a refused release is a resource condition the caller can act on
-// by retrying, and until #83 it panicked too.
-func (e *MemoryEnclave) DestroyErr() error {
+//   - A process that holds secrets, and whose memory has been written by
+//     something that did not own it, must not carry on. Whatever did the
+//     writing is still in the process, every other key the process holds is
+//     within its reach, and the state a caller would consult to handle an
+//     error is the state that is already wrong. There is no correct recovery
+//     for a caller to choose, so the library does not offer one.
+//   - A returned error would be dropped. `defer e.Destroy()` is how this type
+//     is used, and a deferred call's result goes nowhere: the evidence of a
+//     memory-safety event would vanish on exactly the path that meets it most
+//     often. A panic cannot be ignored by omission.
+//
+// Nothing else panics. A refused release is a resource condition with a remedy
+// — retry — and a denied mprotect is a report about the environment; both are
+// returned. Before #83 a refused release panicked too, contrary to every
+// statement of this contract.
+//
+// Nothing leaks on the way out: the material is wiped and, unless the kernel
+// refuses, the pages are returned before the panic. If the kernel DOES refuse
+// the unlock or unmap after a failed canary, the panic value carries both — it
+// matches ErrEnclaveCorrupted and the refusal's [ErrLockedMemoryUnavailable] —
+// the material is still wiped, the pages are kept for a retry as described
+// above, and the retry that finally releases them panics with
+// ErrEnclaveCorrupted again, because the detection is not lost between
+// attempts.
+//
+// It is also what this method has always done: before v0.3.0-alpha memguard's
+// canary check called core.Panic, which additionally destroyed every other
+// enclave in the process on its way out. That part is gone. [WipeAll] meets
+// the same condition differently, and deliberately: a sweep reports it as a
+// [SweepError] and never panics, because a sweep that stopped at the first
+// corrupt enclave would leave every enclave after it mapped at exit.
+func (e *MemoryEnclave) Destroy() error {
 	if e == nil {
 		return nil
 	}
@@ -865,6 +905,23 @@ func (e *MemoryEnclave) DestroyErr() error {
 	}
 
 	return err
+}
+
+// destroyTransient destroys an enclave this package created for one operation
+// and owns outright — a DEK, a retired or superseded KEK, a key or root whose
+// fill failed, a destination an open failed to fill — on a path whose own
+// result must not depend on whether the release worked.
+//
+// Discarding the report here loses nothing that matters, which is what makes
+// it a decision rather than a swallowed error: a refused release keeps the
+// enclave's mapping AND its place on the [WipeAll] ledger, so a shutdown sweep
+// retries it and counts it for as long as it is held. What the operation
+// returns — a sealed value, an opened enclave, the error that ended it — is
+// the same either way, and turning a successful seal into a failure because a
+// scratch key's munmap was refused would hand the caller an error with no
+// remedy. Detected corruption still panics, from Destroy, as everywhere.
+func destroyTransient(e *MemoryEnclave) {
+	_ = e.Destroy()
 }
 
 // releasedPages reports whether err came back with the pages actually returned
@@ -963,32 +1020,104 @@ func lockedPagesHeld(err error) bool {
 // the only reference to it would strand it for the process lifetime with no way
 // to retry. The enclave reports itself alive in that case only if the wipe never
 // ran, which is the truth either way, and the caller can call Destroy again to
-// retry the release — it is returned by DestroyErr, not panicked, unless the
-// same attempt also detected corruption.
+// retry the release — it is returned by Destroy, not panicked, unless the same
+// attempt also detected corruption.
 func (e *MemoryEnclave) releaseMapping() error {
-	e.mu.Lock()
-	defer e.mu.Unlock()
+	e.lock()
+	defer e.unlock()
 	return e.releaseLocked()
 }
 
-// tryReleaseMapping is releaseMapping without the wait: released is false and
-// nothing is done if the lock is unavailable, instead of blocking until it is.
+// rlock takes the read lock, counted in holders so a waiting [WipeAll] hears
+// when it is let go. Every read-side acquisition of e.mu goes through here and
+// [MemoryEnclave.runlock]; see holders for why one that bypassed them would be
+// a lost wake-up.
+func (e *MemoryEnclave) rlock() {
+	e.holders.Add(1)
+	e.mu.RLock()
+}
+
+// runlock releases what rlock took, and wakes a waiting sweep if this was the
+// last holder.
+func (e *MemoryEnclave) runlock() {
+	e.mu.RUnlock()
+	e.unhold()
+}
+
+// lock is rlock for the write lock: Freeze and Destroy.
+func (e *MemoryEnclave) lock() {
+	e.holders.Add(1)
+	e.mu.Lock()
+}
+
+// unlock releases what lock took. See runlock.
+func (e *MemoryEnclave) unlock() {
+	e.mu.Unlock()
+	e.unhold()
+}
+
+// unhold is the second half of the handshake documented on holders: the
+// decrement FIRST, then the read of sweepWaiting. Reversing them reopens the
+// lost wake-up the counter exists to close.
+//
+// Only the holder that takes the count to zero signals, because only then can
+// the sweep's TryLock succeed; an earlier one would cost the sweep a pass that
+// finds the enclave still held. Outside a sweep the whole cost is the add and
+// one load of a flag no borrow writes.
+func (e *MemoryEnclave) unhold() {
+	if e.holders.Add(-1) == 0 && sweepWaiting.Load() {
+		wakeSweep()
+	}
+}
+
+// tryOutcome is what [MemoryEnclave.tryReleaseMapping] reports about the lock.
+type tryOutcome uint8
+
+const (
+	// tryReleased: the lock was taken and a release was attempted. Whether the
+	// PAGES went back is the error's question — see [releasedPages].
+	tryReleased tryOutcome = iota
+	// tryHeld: somebody holds or is waiting for the lock, so holders was
+	// non-zero after the arm, and the release that frees it will wake the
+	// sweep. Safe to wait for.
+	tryHeld
+	// tryContended: the TryLock failed and holders read zero, so nobody was
+	// there to wake the sweep later — a TryLock that failed spuriously, or a
+	// holder that came and went between the two reads (whose wake-up is then
+	// already pending). Retry at once while ctx allows; never wait on it.
+	tryContended
+)
+
+// tryReleaseMapping is releaseMapping without the wait: nothing is done if the
+// lock is unavailable, instead of blocking until it is.
 //
 // The lock it tries for is the WRITE lock, so it loses to any concurrent
 // READER, not merely to a long WithBytes borrow — an IsAlive, a Size and an
-// EqualTo all take the read lock, and each is enough to make this report false.
-// Callers must therefore treat false as "not right now", never as "cannot be
-// released": [WipeAll] retries on its next pass for exactly this reason.
+// EqualTo all take the read lock, and each is enough to make the attempt fail.
+// Callers must therefore treat a failure as "not right now", never as "cannot
+// be released", and it says which kind of "not right now" it was: tryHeld is a
+// holder whose release will wake [WipeAll], tryContended is a failure nobody
+// will announce, so the sweep retries rather than waits.
 //
-// It exists for WipeAll, which must not hang a shutdown behind a goroutine that
-// is still reading. Nothing else should use it — an ordinary Destroy is supposed
-// to wait its turn.
-func (e *MemoryEnclave) tryReleaseMapping() (released bool, err error) {
+// It exists for WipeAll, which must not block on an enclave's lock — a blocked
+// Lock cannot be abandoned when the caller's context ends, and a pending writer
+// would stall every new reader of that enclave behind it. Nothing else should
+// use it — an ordinary Destroy is supposed to wait its turn.
+//
+// The sweep is deliberately NOT counted in holders: nothing waits on the
+// sweep's own hold, and counting it would make every enclave it releases wake
+// it once more for nothing.
+func (e *MemoryEnclave) tryReleaseMapping() (tryOutcome, error) {
 	if !e.mu.TryLock() {
-		return false, nil
+		// Read AFTER the failed TryLock, and after the caller armed
+		// sweepWaiting: that order is the sweep's half of the handshake.
+		if e.holders.Load() != 0 {
+			return tryHeld, nil
+		}
+		return tryContended, nil
 	}
 	defer e.mu.Unlock()
-	return true, e.releaseLocked()
+	return tryReleased, e.releaseLocked()
 }
 
 // releaseLocked is the body both paths share. The caller holds e.mu.
@@ -1006,7 +1135,7 @@ func (e *MemoryEnclave) releaseLocked() error {
 	// reader. Every other error means the region is still mapped, so the handle
 	// is kept and Destroy can be retried. That includes a failed canary joined
 	// with a refused unlock or unmap, which matches ErrEnclaveCorrupted with the
-	// pages still mapped; releasedPages is the predicate DestroyErr and WipeAll
+	// pages still mapped; releasedPages is the predicate Destroy and WipeAll
 	// use, and this was a fourth spelling of it that could not have seen that.
 	if !releasedPages(err) {
 		return err

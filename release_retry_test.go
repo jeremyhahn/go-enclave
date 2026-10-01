@@ -9,6 +9,7 @@
 package enclave
 
 import (
+	"context"
 	"errors"
 	"sync"
 	"testing"
@@ -117,13 +118,13 @@ func TestRelease_RetryReturnsTheReservationUnderStrictUnlock(t *testing.T) {
 		name  string
 		retry func(t *testing.T, e *MemoryEnclave, wantHeld bool)
 	}{
-		{"DestroyErr", func(t *testing.T, e *MemoryEnclave, wantHeld bool) {
-			err := e.DestroyErr()
+		{"Destroy", func(t *testing.T, e *MemoryEnclave, wantHeld bool) {
+			err := e.Destroy()
 			if got := pagesHeld(err); got != wantHeld {
-				t.Fatalf("DestroyErr = %v, pagesHeld %v, want %v", err, got, wantHeld)
+				t.Fatalf("Destroy = %v, pagesHeld %v, want %v", err, got, wantHeld)
 			}
 			if !wantHeld && err != nil {
-				t.Fatalf("DestroyErr = %v, want nil", err)
+				t.Fatalf("Destroy = %v, want nil", err)
 			}
 		}},
 		{"WipeAll", func(t *testing.T, _ *MemoryEnclave, wantHeld bool) {
@@ -152,7 +153,7 @@ func TestRelease_RetryReturnsTheReservationUnderStrictUnlock(t *testing.T) {
 			prevUnmap := unmapMemory
 			t.Cleanup(func() {
 				unmapMemory = prevUnmap
-				_, _ = WipeAll()
+				_, _ = WipeAll(context.Background())
 			})
 			installStrictUnlock(t)
 			unmapMemory = func([]byte) error { return errors.New("munmap: cannot allocate memory") }

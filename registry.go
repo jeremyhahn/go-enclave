@@ -9,11 +9,12 @@
 package enclave
 
 import (
+	"context"
 	"errors"
-	"fmt"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
-	"time"
 )
 
 // This file is the one thing v0.3.0-alpha removed and a consumer still needed.
@@ -30,13 +31,18 @@ import (
 //	triggered by a FAULT      called explicitly, at teardown
 //	panics afterwards         never panics
 //	runs mid-operation        runs when operations are finished
-//	unmaps live borrows       leaves a live borrow alone and says so
+//	unmaps live borrows       waits for a live borrow, as long as its context
+//	                          allows, and counts it if the context ends first
 //
 // So the registry here is a shutdown ledger, not a coordinator. It is touched
 // on construction, on destruction and by WipeAll, and by NOTHING on the borrow
 // path — which is what keeps purgeMu from coming back. A borrow takes only its
 // own enclave's lock, exactly as it has since v0.3.0-alpha, and allocating
-// inside a live borrow still works.
+// inside a live borrow still works. What a borrow does add since #88 is two
+// atomic adds on its own enclave's holder count and one load of sweepWaiting,
+// which is how a sweep waiting for that borrow hears it end: neither is a lock,
+// neither allocates, and the only package-level word involved is one a borrow
+// reads and never writes.
 //
 // Two costs this does carry, stated plainly because a ledger that hides them
 // would be the same mistake in a smaller size:
@@ -64,63 +70,63 @@ import (
 // way (#83). Before that, those pages were the one allocation in the package
 // with no handle anywhere.
 
-// maxSweepPasses bounds how many times [WipeAll] re-reads the ledger.
+// The sweep's wait for a borrow to end (#88).
 //
-// It has to loop for two reasons. A constructor can register between the
-// snapshot and the end of the sweep. And an enclave can be momentarily
-// unavailable — [MemoryEnclave.tryReleaseMapping] takes the write lock without
-// waiting, so it loses to any concurrent reader, including a cheap one like
-// IsAlive — and such an enclave must get another chance rather than being
-// written off on one lost race.
+// [WipeAll] never blocks on an enclave's lock: a blocked Lock cannot be
+// abandoned when the caller's context ends, and a pending writer stalls every
+// new reader of that enclave behind it. So it TRIES for the lock, and when an
+// enclave it owes is held it has to wait for the holder to let go. Until #88
+// that wait was a fixed 200µs sleep between at most eight passes — a guess at
+// how long a reader takes, which a health probe on a loaded host lost, and
+// which made "momentary" mean "about 1.4ms, nominally". It is now an event: the
+// release that frees an enclave wakes the sweep, and the sweep's context is the
+// only bound on how long it waits.
 //
-// It must not loop forever, because a goroutine still constructing, or one
-// parked inside a borrow, would then hang the shutdown — the failure the
-// skip-and-count design exists to avoid, arriving by a different road. In an
-// orderly shutdown nothing is constructing and the second pass finds nothing;
-// against a goroutine that never stops or a borrow that never returns, the bound
-// is reached and the count comes back non-zero, which is the truth and is the
-// caller's cue that their ordering is wrong.
-const maxSweepPasses = 8
+// The mechanism is a one-slot channel and a flag, chosen so that a borrow
+// outside a sweep pays one atomic load and nothing else:
+//
+//   - sweepWaiting is armed for the whole of a sweep. A holder of an enclave's
+//     lock reads it after letting go, and only when it is set does it touch
+//     the channel (see [MemoryEnclave.unhold]).
+//   - sweepWake carries at most one pending wake-up. A send that finds the
+//     slot full is dropped, because one pending wake-up already means "go
+//     again", so wake-ups coalesce and a sender never blocks.
+//
+// The sweep drains the slot at the start of every pass, BEFORE it tries any
+// lock, so a wake-up found waiting afterwards was sent after the drain — by a
+// release the pass may not have seen. Spurious wake-ups are possible and
+// harmless: they cost a pass. Lost ones are not possible; the argument is on
+// [MemoryEnclave.holders].
+//
+// Both are package-level rather than per-sweep because sweepSlot admits one
+// sweep at a time. A slot left full by a release after the previous sweep
+// returned is drained by the next sweep's first pass.
+var (
+	sweepWaiting atomic.Bool
+	sweepWake    = make(chan struct{}, 1)
 
-// sweepBackoff is how long [WipeAll] waits between passes when something is
-// still held.
-//
-// WHY THIS EXISTS. Without it the retry loop is temporally degenerate: all
-// eight passes complete in about 966 NANOSECONDS, so "still held after every
-// pass" means "held for more than roughly a microsecond." A reader doing
-// anything realistic — a health probe calling IsAlive, a Size, an EqualTo —
-// loses its enclave every time, measured 20/20 at 20µs, 100µs, 500µs and 2ms.
-// The documented promise that a momentary reader "costs the sweep a pass, not
-// the enclave" was false for every reader that actually exists.
-//
-// WHY THIS IS A BACKOFF AND NOT SYNCHRONIZATION, which matters because this
-// package otherwise forbids sleeping: the test is whether CORRECTNESS depends
-// on the duration. Delete this wait and the sweep is still correct — an enclave
-// simply is not reclaimed on THIS call, the count stays honest, and the
-// documented remedy still works. Nothing is racing; the sweep is only less
-// likely to win. A sleep standing in for an ordering guarantee would instead
-// become WRONG when removed, and flakiness would be its symptom. That is the
-// pattern the convention bans, and this is not it.
-//
-// There is also nothing to wait ON. The party being waited for is another
-// goroutine's read lock, and sync.RWMutex exposes no "notify when free" — so
-// there is no channel to select on, and runtime.Gosched() grants scheduling
-// opportunities rather than wall-clock time. Making readers observable would
-// mean registering every borrow on the hot path to serve a shutdown-only
-// sweep, which is the wrong trade and is deliberately not done.
-//
-// COST, stated as measured rather than as arithmetic: the nominal figure is
-// (maxSweepPasses-1) * sweepBackoff = 1.4ms, but that is a LOWER BOUND. Timer
-// granularity means each short sleep overshoots, and a real sweep against a
-// held enclave was measured at 7.5ms — about 5.4x nominal. Either way it is
-// milliseconds at shutdown, and only when something is genuinely still held: a
-// sweep that finds everything on the first pass breaks out before ever reaching
-// the wait and pays nothing.
-//
-// Anything comparing itself against this budget must use the MEASURED cost, not
-// the nominal one. A test that assumed 1.4ms picked a "well over budget" hold
-// of 5.6ms, which is under the real 7.5ms, and failed for that reason alone.
-const sweepBackoff = 200 * time.Microsecond
+	// sweepWaitingForTest runs each time the sweep is about to BLOCK waiting
+	// for a borrow: its pass found something it owes held, and its context has
+	// not ended. nil in every build
+	// but the tests that need to act at exactly that moment — end the borrow,
+	// cancel the context — rather than hoping the sweep has got there.
+	sweepWaitingForTest func()
+
+	// sweepPassForTest runs at the start of every pass, after the drain, with
+	// the pass's ordinal from 1. nil outside the tests that have to observe a
+	// pass that ends in neither a wait nor a return — the immediate retry of a
+	// contended lock — which nothing else makes visible.
+	sweepPassForTest func(pass int)
+)
+
+// wakeSweep posts a wake-up to a waiting sweep, dropping it if one is already
+// pending. It never blocks and never allocates.
+func wakeSweep() {
+	select {
+	case sweepWake <- struct{}{}:
+	default:
+	}
+}
 
 var (
 	registryMu sync.Mutex
@@ -165,7 +171,8 @@ var (
 	// reason: an ordering claim that cannot be entered cannot be tested.
 	sweepParkedForTest func()
 
-	// sweepMu serializes [WipeAll] end to end. The parity of sweepGen is a
+	// sweepSlot serializes [WipeAll] end to end: a sweep runs only while it
+	// holds the slot's one token. The parity of sweepGen is a
 	// SINGLE-WRITER invariant — the standard requirement of the sequence-lock
 	// reading it uses — and two concurrent sweeps break it outright: the
 	// second one's opening bump takes the sequence from odd back to EVEN
@@ -179,12 +186,76 @@ var (
 	// avoided in the first place. WipeAll is a teardown operation called once
 	// or twice in a process's life, so the contention cost is nil, and a
 	// second caller waiting for the first to finish is the behavior a
-	// concurrent caller wanted anyway.
+	// concurrent caller wanted anyway — for as long as ITS context allows.
+	//
+	// A channel rather than a sync.Mutex for exactly that last clause (Codex
+	// on #95). A sweep can wait on a borrow for as long as its own context
+	// allows, which under context.Background is indefinitely, and a mutex
+	// cannot be abandoned: a second caller with a deadline would queue behind
+	// the first for as long as the FIRST caller's context allowed, which
+	// repeals the second caller's bound. Acquiring is a send, so it can sit in
+	// a select beside ctx.Done() without a helper goroutine; releasing is the
+	// matching receive. The memory model gives the slot the same
+	// happens-before a mutex has — the k-th receive from a channel of capacity
+	// 1 is synchronized before the (k+1)-th send completes — so everything one
+	// sweep wrote is visible to the next one admitted.
 	//
 	// Taken BEFORE registryMu and never while holding it, which is the whole
 	// lock order in this file.
-	sweepMu sync.Mutex
+	sweepSlot = make(chan struct{}, 1)
+
+	// sweepAdmissionWaitForTest runs when a sweep finds the slot taken and is
+	// about to BLOCK for it under a non-nil ctx. nil outside the test that
+	// cancels a context at exactly that moment.
+	sweepAdmissionWaitForTest func()
 )
+
+// ErrSweepInProgress is returned by [WipeAll] when it was never admitted:
+// another sweep held the process's single sweep slot, and this call stopped
+// waiting for it — when its ctx ended, or at once for a nil ctx, which never
+// waits. It is an ADMISSION result, not a sweep finding: it reports nothing
+// about the memory, and it is not a [SweepError].
+//
+// Such a call reclaimed NOTHING. Its count is still the truth — the ledgers
+// read under their lock at the moment it gave up, exactly what an admitted
+// sweep reports — so a shutdown path logs the same figure either way. A nil
+// error there would claim that a sweep ran and found nothing to report, which
+// is false; a [SweepError] would claim findings it never looked for. The
+// sweep that does hold the slot is still running and will reclaim what it
+// can for its own caller.
+var ErrSweepInProgress = errors.New("enclave: another WipeAll is in progress; nothing was swept")
+
+// admitSweep takes the sweep slot, waiting for it no longer than ctx allows.
+// A free slot is taken even under a done ctx — an expired deadline still
+// sweeps what needs no waiting, and admission is the first such step. A nil
+// ctx only tries. It never starts a goroutine.
+func admitSweep(ctx context.Context) bool {
+	select {
+	case sweepSlot <- struct{}{}:
+		return true
+	default:
+	}
+	if ctx == nil {
+		return false
+	}
+	if sweepAdmissionWaitForTest != nil {
+		sweepAdmissionWaitForTest()
+	}
+	select {
+	case sweepSlot <- struct{}{}:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+// ledgerCount is how many entries still hold this package's pages, read under
+// the ledger lock: the count every WipeAll return reports.
+func ledgerCount() int {
+	registryMu.Lock()
+	defer registryMu.Unlock()
+	return len(live) + len(orphans)
+}
 
 // orphanRecord is a mapping a failed construction could not hand back to the
 // kernel, kept so [WipeAll] can retry it (#83).
@@ -200,7 +271,7 @@ var (
 // unadmitted constructor took none, and an admitted one refunds at once when
 // the pages were no longer locked (see [Allocator.refundFailed]). It runs
 // exactly once, from the sweep that releases the pages: only WipeAll touches a
-// record after adoption, sweepMu serializes WipeAll, and the record leaves the
+// record after adoption, sweepSlot serializes WipeAll, and the record leaves the
 // ledger in the same step that runs the refund.
 type orphanRecord struct {
 	m      *mapping
@@ -233,7 +304,8 @@ func adoptOrphan(err error, refund func()) {
 
 // releaseOrphan retries o's release. On success — the pages went back, by the
 // same [releasedPages] predicate Destroy and the enclave sweep use — it runs the
-// refund and drops the record, and reports true. The caller holds sweepMu.
+// refund and drops the record, and reports true. The caller holds the sweep
+// slot.
 func releaseOrphan(o *orphanRecord) (released bool, err error) {
 	err = o.m.release()
 	if !releasedPages(err) {
@@ -294,6 +366,78 @@ func deregister(e *MemoryEnclave) {
 	registryMu.Unlock()
 }
 
+// SweepError reports what a [WipeAll] sweep FOUND that is not a held page: a
+// memory-safety event, an environment removing a teardown step, or both.
+//
+// It is what an ADMITTED sweep returns when it found something — a call that
+// was never admitted returns [ErrSweepInProgress] instead — and it answers a
+// different question from the count. Neither condition leaves pages held — a corrupt enclave is
+// ordinarily wiped and unmapped like any other, and an unwiped one was unmapped
+// too — so the count cannot carry either, and without this the fact that
+// something wrote into memory it did not own would vanish at exit behind a
+// zero that looks like success.
+//
+// Match it with errors.Is against the sentinels — [ErrEnclaveCorrupted] when
+// Corrupt is non-zero, [ErrReleasedWithoutWipe] when Unwiped is — exactly as a
+// caller matches Destroy's panic value and Destroy's report. Read the numbers
+// with errors.As. WipeAll returns one only when at least one field is
+// non-zero, and never a nil *SweepError behind a non-nil error.
+type SweepError struct {
+	// Corrupt is how many entries this sweep found with a failed canary:
+	// enclaves, and the mappings of failed constructions that had material
+	// copied in before they failed. Each is counted once per sweep however
+	// many attempts its release took, and is counted whether or not its pages
+	// then went back — a corrupt entry the kernel would not release is ALSO in
+	// the count WipeAll returns, the one overlap between the two.
+	Corrupt int
+
+	// Unwiped is how many entries this sweep unmapped WITHOUT the in-process
+	// overwrite, because the mprotect that makes a frozen region writable was
+	// denied. Their pages are gone, so they are never in the count; the denial
+	// reaches every other enclave in the process, which is why it is reported.
+	Unwiped int
+}
+
+// Error implements error. Each non-zero condition is one line naming its
+// count and ending in its sentinel's text; both lines appear when both hold.
+func (e *SweepError) Error() string {
+	var b strings.Builder
+	if e.Corrupt > 0 {
+		b.WriteString("enclave: ")
+		b.WriteString(strconv.Itoa(e.Corrupt))
+		b.WriteString(" of the swept enclaves failed canary verification: ")
+		b.WriteString(ErrEnclaveCorrupted.Error())
+	}
+	if e.Unwiped > 0 {
+		if b.Len() > 0 {
+			b.WriteByte('\n')
+		}
+		b.WriteString("enclave: ")
+		b.WriteString(strconv.Itoa(e.Unwiped))
+		b.WriteString(" of the swept enclaves were unmapped without an in-process wipe because mprotect was denied: ")
+		b.WriteString(ErrReleasedWithoutWipe.Error())
+	}
+	if b.Len() == 0 {
+		// Only a SweepError built by hand can get here; WipeAll never returns
+		// one with nothing in it.
+		return "enclave: sweep reported nothing"
+	}
+	return b.String()
+}
+
+// Is reports whether e carries the condition target names:
+// [ErrEnclaveCorrupted] when Corrupt is non-zero, [ErrReleasedWithoutWipe]
+// when Unwiped is. A zero field never matches its sentinel.
+func (e *SweepError) Is(target error) bool {
+	switch target {
+	case ErrEnclaveCorrupted:
+		return e.Corrupt > 0
+	case ErrReleasedWithoutWipe:
+		return e.Unwiped > 0
+	}
+	return false
+}
+
 // WipeAll destroys every enclave holding LOCKED MEMORY that this package has
 // handed out and not yet reclaimed, and retries the release of every mapping a
 // failed construction could not give back. It reports how many it could not
@@ -303,6 +447,17 @@ func deregister(e *MemoryEnclave) {
 // process is about to exit and any locked memory still held is material that
 // should not outlive it. It is not a fault handler and not a garbage collector:
 // nothing calls it for you.
+//
+// ctx bounds how long it WAITS — for another sweep to finish, for borrows
+// still in progress, and for contended locks to come free — and never stops
+// it reclaiming what needs no waiting; see "How long it runs". Give a
+// shutdown sweep a deadline:
+//
+//	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+//	defer cancel()
+//	if n, err := enclave.WipeAll(ctx); n != 0 || err != nil {
+//	    log.Printf("enclave: %d still held at exit, err=%v", n, err)
+//	}
 //
 // # What "every enclave" covers, and what a sweep does to sealing
 //
@@ -372,82 +527,85 @@ func deregister(e *MemoryEnclave) {
 // It never panics, including on an enclave whose canary fails. A sweep that
 // aborted partway would leave every enclave after the failure untouched, which
 // is the opposite of what a caller wants at exit; the corruption is REPORTED
-// through the returned error and the sweep goes on. [MemoryEnclave.Destroy]
-// panics on that same condition, deliberately — a single enclave's caller cannot
-// act on state that is by definition wrong — but a sweep is not one enclave, and
-// non-fatal must not mean invisible.
+// through the returned [SweepError] and the sweep goes on.
+// [MemoryEnclave.Destroy] panics on that same condition, deliberately — it is
+// the package's one fail-stop, and its documentation gives the reasons — but a
+// sweep is not one enclave, and non-fatal must not mean invisible.
 //
-// It never waits indefinitely for a reader. An enclave being read when the
-// sweep reaches it is SKIPPED, not blocked on — a shutdown that hangs behind a
-// goroutine still reading a key is worse than one that reports what it could
-// not reach. It is RETRIED on later passes rather than written off, with a
-// short wait between them ([sweepBackoff]), so a reader that finishes inside
-// the retry budget costs the sweep a pass rather than the enclave.
+// It never unmaps underneath a reader, and it never blocks on an enclave's
+// lock. An enclave being read when the sweep reaches it is left alone and
+// WAITED FOR — not by sleeping, but until the release that frees it wakes the
+// sweep — for as long as ctx allows. One still held when ctx ends is skipped
+// and counted: memory being actively read must not be unmapped underneath the
+// reader, and a shutdown that hangs behind a goroutine still reading a key is
+// worse than one that reports what it could not reach. "Being read" means any
+// holder of the enclave's lock: a WithBytes, Open, OpenString, EqualTo, Size or
+// IsAlive in progress, a Freeze, or a Destroy waiting its turn.
 //
-// That budget is BOUNDED and worth knowing: (maxSweepPasses-1) * sweepBackoff,
-// about 1.4ms. A read that finishes well inside it is reclaimed on a later
-// pass; one still in flight after the whole budget is skipped and counted. So
-// "momentary" here means milliseconds, not any duration — a long-running
-// operation holding an enclave across a shutdown will be counted, correctly.
+// [MemoryEnclave.Open] hands back a slice that outlives the enclave's lock, and
+// a sweep CAN destroy the enclave behind such a slice. Open's own documentation
+// says so; WipeAll is one of the concurrent destroyers it means.
 //
-// A non-zero count therefore most often means SOMETHING WAS STILL BEING READ.
-// That is often a shutdown-ordering problem in the caller, and it is not
-// necessarily one: a read that simply took longer than the budget produces the
-// same number, and so does a release — an enclave's, or a failed
-// construction's — that the kernel is still refusing. Treat it as "these were
-// still held," not as a diagnosis.
+// Never call it from INSIDE a borrow. The sweep would wait for the very borrow
+// that is waiting for it, and only ctx ending would break the cycle.
 //
-// It never unmaps underneath a reader, which is the other half of the same
-// decision: [MemoryEnclave.Open] hands back a slice that outlives the enclave's
-// lock, and a sweep CAN destroy the enclave behind such a slice. Open's own
-// documentation says so; WipeAll is one of the concurrent destroyers it means.
+// # How long it runs
 //
-// # The return values
+// One sweep runs at a time. A call that finds another sweep running waits for
+// it — but only as long as ITS OWN ctx allows, so a caller with a deadline is
+// never held hostage by a sweep running under [context.Background]. If ctx
+// ends first, or ctx is nil, the call sweeps nothing and returns the ledger
+// count with [ErrSweepInProgress]; see that error for why that is the truthful
+// answer.
 //
-// They answer DIFFERENT QUESTIONS, and neither can be derived from the other.
+// An admitted sweep works in passes. Each pass re-reads both ledgers and tries
+// every entry on them, without blocking on any lock. The entries present at the
+// FIRST pass are what this call owes, and after each pass it does exactly one
+// of four things:
 //
-// The COUNT is what is still HELD when the sweep finished: enclaves still being
-// read after every pass, enclaves whose release failed, anything that
-// registered mid-sweep and could not be reached, and the mappings of failed
-// constructions whose release is still being refused (#83). It is read from the
-// ledgers themselves under the lock rather than tallied while sweeping, so zero
-// means both were empty at that instant — everything this package had allocated
-// was unmapped — rather than merely that this call was happy with the entries
-// it happened to see.
+//   - It goes again AT ONCE if it reclaimed something it owes. Giving pages
+//     back changes the kernel's state, so a release refused earlier in the
+//     pass — ENOMEM at vm.max_map_count is the realistic one — can succeed
+//     now, and anything that registered meanwhile gets a pass. This is the
+//     one retry that does not consult ctx, and it cannot repeat forever: each
+//     one is paid for by an owed entry leaving the ledger.
+//   - Otherwise, if ctx is still live and an owed enclave's lock was
+//     CONTENDED — its TryLock failed while nobody was counted as holding it,
+//     so no release will announce it — it goes again at once.
+//   - Otherwise, if ctx is still live and an owed enclave is HELD, it waits
+//     until a holder lets go or ctx ends, and then goes again.
+//   - Otherwise it stops. Everything left is held past ctx, a release the
+//     kernel refused with nothing changed since that could make a retry
+//     succeed, or an entry that arrived after the sweep began.
 //
-// The ERROR reports what the sweep FOUND, and it has two causes, joined when
-// both hold. [ErrEnclaveCorrupted], exactly as Destroy's panic value matches it,
-// naming how many enclaves failed their canary. And [ErrReleasedWithoutWipe],
-// naming how many had to be unmapped without an in-process wipe because the
-// wipe-enabling mprotect was denied — a denial that reaches every other enclave
-// in the process. Neither is a held page, so the count cannot carry them: a
-// corrupt enclave is ordinarily wiped and unmapped like any other, and an
-// unwiped one was unmapped too. Without the error, the fact that something wrote
-// into memory it did not own would vanish at exit behind a zero that looks like
-// success.
+// So the bound is structural rather than a budget. Retries earned by
+// reclamation are finite; every other retry and every wait is gated on ctx,
+// and a wait ends only when a borrow ends or ctx does. A ctx that ends
+// therefore bounds the call, including admission. Under [context.Background]
+// nothing bounds it but the borrows themselves: the call ends once every owed
+// enclave has been free at a moment the sweep could take it. A borrow that
+// never returns, or a goroutine that reads one owed enclave in a loop forever,
+// holds that enclave for as long as it runs — which, with no deadline, is how
+// long the sweep waits, and how long a second Background caller waits to be
+// admitted. That is the reason to pass a deadline.
 //
-// The two OVERLAP in one case, and only for corruption: a corrupt enclave whose
-// pages the kernel then refused to give back. It was wiped but is still mapped,
-// so it is in the count AND in the error, each reporting the fact it exists
-// for. An unwiped release never overlaps — that report exists only once the
-// pages are gone. The corruption tally is kept while sweeping rather than read
-// from the ledger — the opposite of how the count is derived, and correct for
-// the opposite reason: the ledger can express what is still held, but it cannot
-// express what was corrupt and is now gone. This call is the only place that
-// fact exists.
+// An already-done ctx is not a refusal: if no other sweep is running, the call
+// is admitted and makes every pass reclamation pays for, so everything not
+// currently held is reclaimed; it only declines to wait or to retry
+// contention. A nil ctx is treated the same way rather than as
+// [context.Background] — a programming error in a shutdown path must not turn
+// into a shutdown that never finishes — and is otherwise never dereferenced,
+// so WipeAll keeps its promise never to panic.
 //
-// Both are worth acting on and they are different actions. A non-zero count is
-// most often a shutdown-ordering bug in the caller, and otherwise a kernel still
-// refusing to take pages back. A non-nil error is a memory-safety event that has
-// already happened somewhere in the process, or a sandbox removing a teardown
-// step from every enclave in it, and it deserves a log line at minimum whatever
-// the count says.
+// # Constructors racing the sweep
 //
-// A constructor CAN register while the sweep is running. The sweep re-reads the
-// ledger for anything new, up to [maxSweepPasses] times, so an enclave created
-// during an orderly shutdown is still reclaimed; a goroutine that never stops
-// constructing exhausts the bound and shows up in the count instead of hanging
-// the shutdown.
+// A constructor CAN register while the sweep is running. An enclave that does
+// is tried on every later pass the sweep makes, so one created during an
+// orderly shutdown is still reclaimed. What it never does is EXTEND the sweep:
+// the sweep does not wait for a borrow on it, and reclaiming it does not earn
+// another pass. A goroutine that never stops constructing therefore cannot
+// keep the sweep running, under any ctx including [context.Background]; its
+// latest enclaves show up in the count instead, which is the truth.
 //
 // The corollary is that a constructor racing a sweep can return an
 // ALREADY-DESTROYED enclave to its caller — the sweep reached it between
@@ -455,10 +613,52 @@ func deregister(e *MemoryEnclave) {
 // allocating during shutdown is a consumer ordering problem rather than
 // something this function can paper over.
 //
-// A non-zero count is not worth retrying in a tight loop — if a borrow is still
-// live, the goroutine holding it has not finished, and calling again immediately
-// will skip it again. Callers that must be certain should stop their workers
-// first, which is the ordering the count is telling them they got wrong.
+// # The return values
+//
+// They answer DIFFERENT QUESTIONS, and neither can be derived from the other.
+//
+// The COUNT is what is still HELD when the sweep returns: enclaves still being
+// read when ctx ended, enclaves whose release the kernel refused, enclaves that
+// registered mid-sweep and were not reached, and the mappings of failed
+// constructions whose release is still being refused (#83). It is read from
+// the ledgers themselves under the lock rather than tallied while sweeping, so
+// zero means both were empty at that instant — everything this package had
+// allocated was unmapped — rather than merely that this call was happy with the
+// entries it happened to see.
+//
+// A non-zero count is therefore "these were still held," not a diagnosis. Most
+// often a worker outlived the shutdown — still reading when ctx ended, or still
+// constructing — which is a shutdown-ordering problem in the caller; otherwise
+// it is a kernel still refusing to take pages back. Calling again at once does
+// not help with either: a borrow still live will be waited for again, and a
+// refusal with nothing changed will be refused again. Callers that must be
+// certain stop their workers first, which is the ordering the count is telling
+// them they got wrong.
+//
+// The ERROR is nil, [ErrSweepInProgress] when this call was never admitted,
+// or a [*SweepError] reporting what the sweep FOUND:
+// enclaves that failed their canary (matching [ErrEnclaveCorrupted], exactly as
+// Destroy's panic value does) and enclaves that had to be unmapped without an
+// in-process wipe because the wipe-enabling mprotect was denied (matching
+// [ErrReleasedWithoutWipe]). Neither is a held page, so the count cannot carry
+// them; they overlap only for a corrupt enclave whose pages the kernel then
+// refused to give back, which is in both. The corruption tally is kept while
+// sweeping rather than read from the ledger — the opposite of how the count is
+// derived, and correct for the opposite reason: the ledger can express what is
+// still held, but it cannot express what was corrupt and is now gone. This call
+// is the only place that fact exists. ctx ending DURING an admitted sweep is
+// NOT an error: it is what bounded the wait, and the count already says what
+// it left behind. Only a call that was never admitted reports it, as
+// ErrSweepInProgress, because that call swept nothing at all.
+//
+// Both are worth acting on and they are different actions. A non-zero count is
+// most often a shutdown-ordering bug in the caller. A [*SweepError] is a
+// memory-safety event that has already happened somewhere in the process, or a
+// sandbox removing a teardown step from every enclave in it, and it deserves a
+// log line at minimum whatever the count says. [ErrSweepInProgress] is neither:
+// it says only that this call never swept, because another sweep was running
+// when it stopped waiting. Its count is still current, and the findings of the
+// sweep that was running go to that sweep's own caller.
 //
 // It is safe to call again, and safe to call when nothing is registered. The
 // error describes what THIS sweep found, so a corruption stops being reported
@@ -468,12 +668,16 @@ func deregister(e *MemoryEnclave) {
 // it — because the detection is sticky for as long as the mapping is held
 // (see mapping.corrupted). After that the enclave is gone and no later sweep
 // mentions it.
-func WipeAll() (int, error) {
+func WipeAll(ctx context.Context) (int, error) {
 	// Held for the whole sweep, so the sequence's odd/even meaning is true for
 	// a sweep's entire lifetime rather than only when one runs at a time by
-	// luck. See sweepMu.
-	sweepMu.Lock()
-	defer sweepMu.Unlock()
+	// luck. See sweepSlot. Admission honors ctx: a caller whose context ends
+	// while another sweep holds the slot is turned away rather than held
+	// hostage by that sweep's context.
+	if !admitSweep(ctx) {
+		return ledgerCount(), ErrSweepInProgress
+	}
+	defer func() { <-sweepSlot }()
 
 	// THE GENERATION IS BUMPED BEFORE ANYTHING IS DESTROYED, and the order is
 	// the correctness of the openability fallback rather than a detail of it.
@@ -502,6 +706,22 @@ func WipeAll() (int, error) {
 		sweepParkedForTest()
 	}
 
+	// ARMED BEFORE THE FIRST TryLock, and for the whole sweep. This is the
+	// sweep's half of the handshake on MemoryEnclave.holders: every holder
+	// count read below happens after this store, which is what guarantees a
+	// holder seen there will see the arm when it lets go.
+	sweepWaiting.Store(true)
+	defer sweepWaiting.Store(false)
+
+	// A nil ctx must neither panic nor wait. It cannot be told apart by its
+	// Done channel — context.Background's is nil too, and that one means
+	// "wait as long as it takes" — so it is decided here, once.
+	mayWait := ctx != nil
+	var done <-chan struct{}
+	if mayWait {
+		done = ctx.Done()
+	}
+
 	// Tallied, not read from the ledger, for the reason given above: a corrupt
 	// enclave is deregistered like any other, so by the time the count is taken
 	// this fact exists nowhere else.
@@ -520,7 +740,27 @@ func WipeAll() (int, error) {
 	corrupted := make(map[any]struct{})
 	unwiped := 0
 
-	for pass := 0; pass < maxSweepPasses; pass++ {
+	// owed is the first pass's snapshot: what this call is obliged to see
+	// through. Entries that register later are tried on every pass but never
+	// waited for and never earn a pass, which is what lets a goroutine that
+	// constructs forever coexist with a sweep that ends; see "Constructors
+	// racing the sweep".
+	var owed map[any]struct{}
+
+sweep:
+	for pass := 1; ; pass++ {
+		// Drain BEFORE trying any lock. A wake-up pending after this was sent
+		// by a release this pass may have missed; one pending before it is
+		// stale, and keeping it would cost a pass for nothing.
+		select {
+		case <-sweepWake:
+		default:
+		}
+
+		if sweepPassForTest != nil {
+			sweepPassForTest(pass)
+		}
+
 		// Snapshot under the lock, then release it before destroying anything.
 		// Destroy deregisters, which takes this same lock — holding it across
 		// the sweep would deadlock on the first enclave. It also means a Destroy
@@ -537,9 +777,6 @@ func WipeAll() (int, error) {
 		// and the process exited with the material still mapped and locked while
 		// WipeAll blamed the caller's shutdown ordering. That is the exact failure
 		// this function exists to prevent.
-		//
-		// Re-reading everything costs a TryLock per pass on whatever is left, and
-		// termination never depended on the seen-set: the pass count is the bound.
 		registryMu.Lock()
 		batch := make([]*MemoryEnclave, 0, len(live))
 		for e := range live {
@@ -551,27 +788,40 @@ func WipeAll() (int, error) {
 		}
 		registryMu.Unlock()
 
+		if owed == nil {
+			owed = make(map[any]struct{}, len(batch)+len(strays))
+			for _, e := range batch {
+				owed[e] = struct{}{}
+			}
+			for _, o := range strays {
+				owed[o] = struct{}{}
+			}
+		}
+
 		if len(batch) == 0 && len(strays) == 0 {
 			break
 		}
 
-		// After the break, so a sweep that finds nothing left pays nothing.
-		// See sweepBackoff for why a wait is the right primitive here and why
-		// it is a backoff rather than synchronization.
-		if pass > 0 {
-			time.Sleep(sweepBackoff)
-		}
+		// progressed: an owed entry's pages went back on this pass — the only
+		// thing that earns an immediate pass, and a finite resource.
+		// held: an owed enclave is held by someone whose release will wake us.
+		// contended: an owed enclave's TryLock failed with nobody to wake us;
+		// it gets an immediate retry, never a wait.
+		var progressed, held, contended bool
 
 		for _, e := range batch {
-			released, err := e.tryReleaseMapping()
-			if !released {
-				// A reader holds the lock. Left registered AND left eligible, so
-				// the next pass tries again — a momentary reader clears within a
-				// pass or two. A genuinely long borrow still outlives all
-				// [maxSweepPasses] and is skipped and counted, which is correct:
-				// memory being actively read must not be unmapped underneath the
-				// reader.
+			_, isOwed := owed[e]
+			outcome, err := e.tryReleaseMapping()
+			switch outcome {
+			case tryHeld:
+				// Left registered AND left eligible. Waited for if owed;
+				// otherwise counted if still held when the sweep stops.
+				held = held || isOwed
 				continue
+			case tryContended:
+				contended = contended || isOwed
+				continue
+			case tryReleased:
 			}
 
 			// Return the Allocator reservation on the same terms Destroy uses:
@@ -607,10 +857,14 @@ func WipeAll() (int, error) {
 			}
 
 			deregister(e)
+			// A release that found the enclave already released (a racing
+			// Destroy won) also lands here, and still counts: the entry left
+			// the ledger, which is all progress has to mean for the bound.
+			progressed = progressed || isOwed
 		}
 
 		// Orphans have no lock and no reader: nothing but this sweep touches a
-		// record once it is adopted, and sweepMu makes this sweep the only one.
+		// record once it is adopted, and the sweep slot makes this sweep the only one.
 		// Each is retried on every pass, exactly like an enclave whose release
 		// was refused, and reported on the same terms.
 		for _, o := range strays {
@@ -621,6 +875,51 @@ func WipeAll() (int, error) {
 			if released && errors.Is(err, ErrReleasedWithoutWipe) {
 				unwiped++
 			}
+			if released {
+				_, isOwed := owed[o]
+				progressed = progressed || isOwed
+			}
+		}
+
+		// Reclaiming an owed entry earns an immediate pass, and that is the
+		// only retry that does not consult ctx: it is FINITE, paid for by an
+		// owed entry leaving the ledger, which happens once per entry.
+		if progressed {
+			continue
+		}
+		if !held && !contended {
+			break
+		}
+
+		// Every other retry is gated on ctx, the contention retry included
+		// (Codex on #95). Contention is not paid for by anything: a TryLock
+		// can keep failing with the holder count at zero for as long as
+		// readers keep arriving and leaving between the sweep's two reads, so
+		// an ungated retry would be a loop around the caller's deadline. A nil
+		// ctx never retries contention and never waits, so it is bounded to
+		// the passes reclamation pays for.
+		//
+		// Checked before waiting, too, so an already-done ctx stops here even
+		// when a wake-up is also pending — select would pick between the two
+		// at random, and the documented behavior is "never waits", not
+		// "usually".
+		if !mayWait || ctx.Err() != nil {
+			break
+		}
+		if contended {
+			// Nobody is there to wake us, so retry at once rather than wait.
+			continue
+		}
+		if sweepWaitingForTest != nil {
+			sweepWaitingForTest()
+		}
+		// No timer anywhere: the sweep wakes because a holder let go, or
+		// because the caller's ctx ended. context.Background's done channel
+		// is nil, so for it only a wake-up can end the wait.
+		select {
+		case <-sweepWake:
+		case <-done:
+			break sweep
 		}
 	}
 
@@ -638,25 +937,11 @@ func WipeAll() (int, error) {
 	remaining := len(live) + len(orphans)
 	registryMu.Unlock()
 
-	// Both conditions are reported, and both can hold at once. An unwiped
-	// release never appears in the count -- its pages went back -- and a
-	// corrupt one does only when its release was also refused, which is the
-	// whole reason each needs a return value rather than being inferred from a
-	// number.
-	var errs []error
-	if corrupt := len(corrupted); corrupt > 0 {
-		// One error however many were corrupt, carrying the count. Joining N
-		// copies of a sentinel that has no per-enclave identity would repeat the
-		// same sentence N times and say less than the number does.
-		errs = append(errs, fmt.Errorf("enclave: %d of the swept enclaves failed canary verification: %w",
-			corrupt, ErrEnclaveCorrupted))
-	}
-	if unwiped > 0 {
-		errs = append(errs, fmt.Errorf("enclave: %d of the swept enclaves were unmapped without an in-process wipe because mprotect was denied: %w",
-			unwiped, ErrReleasedWithoutWipe))
-	}
-	if len(errs) > 0 {
-		return remaining, errors.Join(errs...)
+	// One error however many were corrupt, carrying the counts. Joining N
+	// copies of a sentinel that has no per-enclave identity would repeat the
+	// same sentence N times and say less than the number does.
+	if len(corrupted) > 0 || unwiped > 0 {
+		return remaining, &SweepError{Corrupt: len(corrupted), Unwiped: unwiped}
 	}
 	return remaining, nil
 }

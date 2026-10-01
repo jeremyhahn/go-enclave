@@ -137,7 +137,7 @@ func sealedWriteChild(t *testing.T) {
 // behind it, frozen after construction rather than during it.
 //
 // Three things are asserted, and the middle one is the point: the condition is
-// REPORTED through DestroyErr, the pages are actually GONE from the process's
+// REPORTED through Destroy, the pages are actually GONE from the process's
 // mappings, and the locked-memory accounting comes back — a fallback that
 // unmapped without the kernel dropping the mlock charge would leak a locked page
 // per teardown under a seccomp policy, which is exactly the environment where
@@ -183,14 +183,14 @@ func TestMemoryEnclave_FrozenDestroyFallsBackToUnmap(t *testing.T) {
 	t.Cleanup(func() { protectMemory = prev })
 	protectMemory = func([]byte, protection) error { return denied }
 
-	derr := e.DestroyErr()
+	derr := e.Destroy()
 
 	if !errors.Is(derr, ErrReleasedWithoutWipe) {
-		t.Fatalf("DestroyErr = %v, want ErrReleasedWithoutWipe: a frozen sized enclave whose release "+
+		t.Fatalf("Destroy = %v, want ErrReleasedWithoutWipe: a frozen sized enclave whose release "+
 			"mprotect is denied must take the unmap fallback and say so", derr)
 	}
 	if !errors.Is(derr, denied) {
-		t.Errorf("DestroyErr = %v, want the underlying refusal reachable through errors.Is", derr)
+		t.Errorf("Destroy = %v, want the underlying refusal reachable through errors.Is", derr)
 	}
 	if mappedAt(t, addr) {
 		t.Fatal("the region is STILL MAPPED after the teardown: a frozen sized enclave's material " +
