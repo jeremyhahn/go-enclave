@@ -15,10 +15,11 @@
 # closed on either. Gitea has no cancel API and does not honour `concurrency:`
 # (devops §9b), so ordering is the only fail-fast there is.
 #
-# Long-horizon checks — FIPS-strict test runs and `trivy fs` — live in
+# Long-horizon checks — the FIPS-strict UNIT test run and `trivy fs` — live in
 # nightly.yml rather than on the push path (devops §8a: alpha phase), so a slow
 # job cannot burn runner time per push to tell us something a nightly run
-# already does. release.yml runs everything, trivy included, on a tag.
+# already does. The integration suite's FIPS run is the exception: it is on the
+# push path, in `integration`. release.yml runs everything, trivy included, on a tag.
 #
 # Things here that are the result of being burned, and are worth understanding
 # before editing:
@@ -98,6 +99,13 @@ jobs:
 
       - name: staticcheck
         run: make staticcheck
+
+      # The integration suite is `//go:build integration`, so the two steps
+      # above never open it — an analyser not given the tag reports clean over
+      # files it did not read (devops §8). Same pinned tools, with the tag, after
+      # proving the tag selects the suite's files and nothing builds without it.
+      - name: Lint the integration suite (with its build tag)
+        run: make lint-integration
 
       # THE PIN GATE (#70). Every `uses:` in every workflow must name a 40-hex
       # commit, not a tag and never a branch.
@@ -302,6 +310,64 @@ jobs:
   # --exit-code 1` BEFORE any push to either registry. Never
   # image-scan the devcontainer into code scanning.
 
+  # THE INTEGRATION SUITE (#91), in the project devcontainer
+  # (build/docker/devcontainer), never on the runner itself — exactly the two
+  # `make` targets a developer runs. The suite drives the public API against
+  # the real kernel: admission under a real RLIMIT_MEMLOCK ceiling, core-dump
+  # exclusion and mlock read back from /proc/self/smaps, plaintext residue swept
+  # from /proc/self/mem, sealing in both modes, and the shutdown sweep.
+  #
+  # Docker is a HARD requirement and is never skipped around: the targets fail,
+  # naming what is missing, when `docker`, Compose v2 or a reachable daemon is
+  # absent, and the suite's TestMain refuses to run in a container whose
+  # capabilities, memlock/core limits or FIPS state differ from what
+  # compose.yaml declares. A gate that passed without running would gate
+  # nothing.
+  #
+  # On our Gitea runners `docker compose` reaches the HOST daemon through the
+  # socket act_runner mounts into job containers (docker-outside-of-docker). The
+  # devcontainer therefore bakes the source into its image — the build context
+  # is sent by the client — and bind-mounts nothing from the job's filesystem,
+  # which on a runner would resolve on the host, where the checkout does not
+  # exist. Each run is its own compose project (unique name: time, pid, random
+  # bytes) and is torn down with its volume and image on exit, so concurrent
+  # jobs on one host cannot collide (integration-testing §7).
+  #
+  # Both FIPS configurations run here, one after the other: the default, and
+  # FIPS 140-3 strict (GOFIPS140=latest, GODEBUG=fips140=only), which the suite
+  # verifies actually took effect (crypto/fips140.Enabled/Enforced).
+  integration:
+    name: Integration
+    runs-on: ubuntu-latest
+    # STAGED FAIL-FAST, like test: the devcontainer build and two suite runs
+    # are spent only on a push that lints and builds.
+    needs: [lint, build]
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      # The Makefile resolves the module's toolchain at parse time (`go env
+      # GOVERSION`); the suite itself runs on the devcontainer's Go.
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      # Each run trivy-scans the image it builds; trivy is not baked into the
+      # runner image, so it is installed from the pinned release tarball,
+      # verified against the Makefile's SHA-256 (as for `trivy fs`).
+      - name: Integration suite (devcontainer)
+        env:
+          TOOL_INSTALL: "1"
+        run: make integration-test
+
+      # Each run trivy-scans the image it builds; trivy is not baked into the
+      # runner image, so it is installed from the pinned release tarball,
+      # verified against the Makefile's SHA-256 (as for `trivy fs`).
+      - name: Integration suite, FIPS 140-3 strict (devcontainer)
+        env:
+          TOOL_INSTALL: "1"
+        run: make integration-test-fips
+
   # The single required check. Every job above must appear in
   # BOTH the needs list and the results check — a gate that can pass vacuously
   # is worse than no gate. Do not use join(needs.*.result); it evaluates empty
@@ -310,9 +376,10 @@ jobs:
     name: CI Gate
     runs-on: ubuntu-latest
     if: always()
-    # trivy and fips live in nightly.yml, off the push path; they gate
-    # nothing here.
-    needs: [lint, security, build, test]
+    # trivy and the UNIT-test FIPS run live in nightly.yml, off the push
+    # path; they gate nothing here. The integration suite's FIPS run is part
+    # of `integration` and gates.
+    needs: [lint, security, build, test, integration]
     steps:
       - name: Fail closed on any non-success
         run: |
@@ -329,4 +396,5 @@ jobs:
           check security "${{ needs.security.result }}"
           check build    "${{ needs.build.result }}"
           check test     "${{ needs.test.result }}"
+          check integration "${{ needs.integration.result }}"
           exit $BAD

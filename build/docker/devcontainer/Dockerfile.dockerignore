@@ -1,0 +1,21 @@
+# ALLOWLIST for the devcontainer build context (BuildKit reads
+# <Dockerfile>.dockerignore in preference to a root .dockerignore).
+#
+# Everything is excluded, then exactly what the integration suite compiles is
+# re-admitted: the module files, the root package's and providertest's
+# non-test sources, and the integration suite itself. The image therefore
+# cannot carry .git, local.mk, a stray credentials file, the repository-local
+# tool cache (bin/) or a coverage profile — whatever lands in the checkout
+# tomorrow, it is excluded until someone admits it here on purpose.
+*
+!go.mod
+!go.sum
+!*.go
+!providertest/*.go
+!test/integration/**/*.go
+!build/docker/devcontainer/run-integration-tests.sh
+# The root package's and providertest's own unit tests are not part of this
+# suite and are not compiled by it.
+*_test.go
+providertest/*_test.go
+!test/integration/**/*_test.go

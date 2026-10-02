@@ -1,0 +1,453 @@
+// Copyright (c) 2025 Jeremy Hahn
+// Copyright (c) 2025 Automate The Things, LLC
+//
+// SPDX-License-Identifier: MIT
+//
+// This file is part of go-enclave. Use of this source code is governed by the
+// MIT license that can be found in the LICENSE file.
+
+//go:build integration
+
+package enclave_test
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"strconv"
+	"strings"
+	"testing"
+
+	"golang.org/x/sys/unix"
+
+	enclave "github.com/jeremyhahn/go-enclave"
+
+	"github.com/jeremyhahn/go-enclave/test/integration/internal/devcontainer"
+)
+
+// Covers mapping.go and dontdump_linux.go: what every enclave's pages look
+// like to the KERNEL — locked, excluded from core dumps, fenced by
+// inaccessible guard pages, read-only once final — and the process-wide
+// RLIMIT_CORE hardening.
+//
+// And mapping.go's RECOVERY PATHS, against the real kernel. Each Refused/Denied
+// test runs in its own child process with the seccomp fault injector
+// (seccomp_test.go) installed, makes the kernel refuse one of go-enclave's
+// memory syscalls, and checks what the library does about it through the
+// public API only: what it returns, what it still holds, what it charges, and
+// that lifting the refusal lets a later Destroy or WipeAll finish the job.
+// Every one first requires that the injector actually refused something, so
+// none can pass by never faulting.
+
+// TestEnclaveMappingsAreLockedUndumpableAndGuarded creates an enclave by every
+// public route a consumer has — the three constructors, the sized constructor
+// before and after Freeze, both Allocator constructors, a large multi-page
+// enclave, and the enclave SealedEnclave.Open returns — and reads each one's
+// mapping back from /proc/self/smaps:
+//
+//   - VmFlags has "lo" (VM_LOCKED: mlock'd, never paged to swap) and "dd"
+//     (VM_DONTDUMP: MADV_DONTDUMP, skipped by the kernel's core writer, which
+//     a core_pattern pipe does not bypass);
+//   - the mapping is exactly LockedSize(n) bytes, so VmLck is what the
+//     documentation says an enclave costs;
+//   - its permissions are r--p once the material is final and rw-p only for a
+//     sized enclave that has not been frozen yet;
+//   - the mappings immediately below and above it are inaccessible (---p) and
+//     not locked: the guard pages, which cost address space but no locked
+//     memory.
+//
+// It then checks the claim for EVERY locked mapping in the process, including
+// the sealer's root and KEK enclaves that no consumer can address: each one is
+// "dd", and together they account for all of VmLck. And after WipeAll, no
+// locked mapping and no locked byte remains.
+func TestEnclaveMappingsAreLockedUndumpableAndGuarded(t *testing.T) {
+	isolated(t, childOpts{}, func(t *testing.T) {
+		ctx := context.Background()
+		page := int(enclave.LockedSize(1))
+
+		alloc, err := enclave.NewAllocator(64 * int64(page))
+		if err != nil {
+			t.Fatalf("NewAllocator: %v", err)
+		}
+		sealer, err := enclave.NewSealer()
+		if err != nil {
+			t.Fatalf("NewSealer: %v", err)
+		}
+
+		type subject struct {
+			name     string
+			e        *enclave.MemoryEnclave
+			size     int
+			writable bool
+		}
+		var subjects []subject
+		add := func(name string, size int, writable bool, e *enclave.MemoryEnclave, err error) {
+			t.Helper()
+			if err != nil {
+				t.Fatalf("%s: %v", name, err)
+			}
+			subjects = append(subjects, subject{name: name, e: e, size: size, writable: writable})
+		}
+
+		material := func(n int) []byte { b := make([]byte, n); b[0] = 1; return b }
+		e, err := enclave.NewMemoryEnclave(material(32))
+		add("NewMemoryEnclave", 32, false, e, err)
+		e, err = enclave.NewMemoryEnclaveCopy(material(48))
+		add("NewMemoryEnclaveCopy", 48, false, e, err)
+		e, err = enclave.NewMemoryEnclaveFromString("integration-suite-material")
+		add("NewMemoryEnclaveFromString", len("integration-suite-material"), false, e, err)
+		e, err = enclave.NewMemoryEnclaveSized(64)
+		add("NewMemoryEnclaveSized (unfrozen)", 64, true, e, err)
+		e, err = enclave.NewMemoryEnclaveSized(64)
+		if err == nil {
+			err = e.Freeze()
+		}
+		add("NewMemoryEnclaveSized + Freeze", 64, false, e, err)
+		large := 3*page + 1
+		e, err = enclave.NewMemoryEnclave(material(large))
+		add("NewMemoryEnclave (multi-page)", large, false, e, err)
+		e, err = alloc.New(material(16))
+		add("Allocator.New", 16, false, e, err)
+		e, err = alloc.NewSized(16)
+		add("Allocator.NewSized (unfrozen)", 16, true, e, err)
+
+		sealed, err := sealer.Seal(ctx, material(40))
+		if err != nil {
+			t.Fatalf("Seal: %v", err)
+		}
+		// The plaintext an open returns is final, so like every other route
+		// whose material is final it comes back READ-ONLY: decrypted into a
+		// sized destination that is frozen before Open returns.
+		e, err = sealed.Open(ctx)
+		add("SealedEnclave.Open", 40, false, e, err)
+		e, err = sealed.OpenWith(ctx, alloc)
+		add("SealedEnclave.OpenWith", 40, false, e, err)
+
+		maps := readSmaps(t)
+		var accounted int64
+		for _, s := range subjects {
+			addr := dataAddr(t, s.e)
+			v, i, ok := vmaAt(maps, addr)
+			if !ok {
+				t.Errorf("%s: data address %#x is in no mapping", s.name, addr)
+				continue
+			}
+			if !v.flags["lo"] {
+				t.Errorf("%s: mapping is not locked (no VM_LOCKED \"lo\"): %s", s.name, v)
+			}
+			if !v.flags["dd"] {
+				t.Errorf("%s: mapping is not excluded from core dumps (no VM_DONTDUMP \"dd\"): %s", s.name, v)
+			}
+			if want := enclave.LockedSize(s.size); v.size() != want {
+				t.Errorf("%s: mapping is %d bytes, want LockedSize(%d) = %d: %s", s.name, v.size(), s.size, want, v)
+			}
+			wantPerms := "r--p"
+			if s.writable {
+				wantPerms = "rw-p"
+			}
+			if v.perms != wantPerms {
+				t.Errorf("%s: permissions %s, want %s: %s", s.name, v.perms, wantPerms, v)
+			}
+			// The guard pages. Adjacent PROT_NONE mappings may be merged by the
+			// kernel, so a guard VMA can be larger than one page; what matters is
+			// that the bytes immediately either side are inaccessible and are
+			// not charged as locked memory.
+			if i == 0 || i == len(maps)-1 {
+				t.Errorf("%s: mapping has no neighbor on one side, so no guard page", s.name)
+				continue
+			}
+			for _, g := range []struct {
+				side string
+				v    vma
+				ok   bool
+			}{
+				{"below", maps[i-1], maps[i-1].hi == v.lo},
+				{"above", maps[i+1], maps[i+1].lo == v.hi},
+			} {
+				if !g.ok {
+					t.Errorf("%s: no mapping immediately %s the data (gap): %s", s.name, g.side, v)
+					continue
+				}
+				if g.v.perms != "---p" {
+					t.Errorf("%s: the mapping immediately %s is %s, want an inaccessible ---p guard: %s", s.name, g.side, g.v.perms, g.v)
+				}
+				if g.v.flags["lo"] {
+					t.Errorf("%s: the guard %s is locked; guard pages must cost no locked memory: %s", s.name, g.side, g.v)
+				}
+			}
+			accounted += v.size()
+		}
+
+		// Every locked mapping in the process, whoever made it — the sealer's
+		// root and KEK enclaves included — is excluded from core dumps, and the
+		// locked mappings are the whole of what the kernel counts as locked.
+		locked := lockedVMAs(maps)
+		var lockedBytes int64
+		for _, v := range locked {
+			lockedBytes += v.size()
+			if !v.flags["dd"] {
+				t.Errorf("locked mapping without VM_DONTDUMP: %s", v)
+			}
+		}
+		if got := vmLck(t); got != lockedBytes {
+			t.Errorf("VmLck = %d, but the VM_LOCKED mappings sum to %d: something is locked that smaps does not attribute", got, lockedBytes)
+		}
+		if lockedBytes <= accounted {
+			t.Errorf("locked mappings total %d bytes, no more than the %d of the consumer's own enclaves: the sealer's key hierarchy is not among them, so this check did not cover it",
+				lockedBytes, accounted)
+		}
+		t.Logf("%d consumer enclaves (%d bytes) and %d locked mappings in all (%d bytes, = VmLck), every one VM_LOCKED|VM_DONTDUMP",
+			len(subjects), accounted, len(locked), lockedBytes)
+
+		n, err := enclave.WipeAll(ctx)
+		if n != 0 || err != nil {
+			t.Fatalf("WipeAll = (%d, %v), want (0, nil)", n, err)
+		}
+		if got := lockedVMAs(readSmaps(t)); len(got) != 0 {
+			t.Errorf("after WipeAll %d locked mapping(s) remain, first: %s", len(got), got[0])
+		}
+		if got := vmLck(t); got != 0 {
+			t.Errorf("after WipeAll VmLck = %d, want 0", got)
+		}
+		for _, s := range subjects {
+			if s.e.IsAlive() {
+				t.Errorf("%s: still alive after WipeAll", s.name)
+			}
+		}
+	})
+}
+
+// TestCoreDumpLimitLoweredOnImport checks the process-wide half of core-dump
+// hardening from the kernel: importing go-enclave lowers RLIMIT_CORE to 0
+// soft AND hard, CoreDumpsDisabled reports that it took, and the process can
+// no longer raise it.
+//
+// It is non-vacuous only because the devcontainer starts processes with a
+// NON-ZERO core limit (compose.yaml ulimits.core): the parent of this test
+// binary is the `go` command, which does not import go-enclave, so its limit
+// is the container's — and the test requires that to be the declared non-zero
+// figure. A container that started at zero would make "the library lowered
+// it" unfalsifiable, and fails here instead.
+//
+// It runs in the top-level test process (not a child) precisely so that its
+// parent is `go`; it only reads limits and makes one raise attempt the kernel
+// refuses, so it changes no state.
+func TestCoreDumpLimitLoweredOnImport(t *testing.T) {
+	if isChild() {
+		t.Fatalf("must run in the top-level test process, whose parent is the go command")
+	}
+	want, err := devcontainer.EnvInt64(devcontainer.EnvCoreBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	soft, hard, err := procLimit(fmt.Sprintf("/proc/%d/limits", os.Getppid()), "Max core file size")
+	if err != nil {
+		t.Fatalf("reading the parent's core limit: %v", err)
+	}
+	if soft != strconv.FormatInt(want, 10) || hard != strconv.FormatInt(want, 10) {
+		t.Fatalf("the parent process (pid %d, the go command) has core limit %s/%s, want %d/%d from compose.yaml: without a non-zero starting limit this test cannot tell whether go-enclave lowered anything",
+			os.Getppid(), soft, hard, want, want)
+	}
+
+	var rl unix.Rlimit
+	if err := unix.Getrlimit(unix.RLIMIT_CORE, &rl); err != nil {
+		t.Fatalf("getrlimit(RLIMIT_CORE): %v", err)
+	}
+	if rl.Cur != 0 || rl.Max != 0 {
+		t.Errorf("RLIMIT_CORE = %d/%d after importing go-enclave, want 0/0 (parent started at %d)", rl.Cur, rl.Max, want)
+	}
+	if err := enclave.CoreDumpsDisabled(); err != nil {
+		t.Errorf("CoreDumpsDisabled() = %v, want nil: the lowering is in place, so the report must say so", err)
+	}
+	// The hard limit is 0 and this process holds no CAP_SYS_RESOURCE, so the
+	// lowering cannot be undone from inside it.
+	err = unix.Setrlimit(unix.RLIMIT_CORE, &unix.Rlimit{Cur: uint64(want), Max: uint64(want)})
+	if !errors.Is(err, unix.EPERM) {
+		t.Errorf("raising RLIMIT_CORE back to %d: err = %v, want EPERM", want, err)
+	}
+	t.Logf("core limit: parent (go command) %s/%s, this process %d/%d; raise refused: %v", soft, hard, rl.Cur, rl.Max, err)
+}
+
+// procLimit returns the soft and hard columns of one /proc/<pid>/limits row.
+func procLimit(path, row string) (soft, hard string, err error) {
+	raw, err := os.ReadFile(path) //#nosec G304 -- a /proc path built by the caller
+	if err != nil {
+		return "", "", err
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		if rest, ok := strings.CutPrefix(line, row); ok {
+			f := strings.Fields(rest)
+			if len(f) < 2 {
+				return "", "", fmt.Errorf("%s: malformed %q row: %q", path, row, line)
+			}
+			return f[0], f[1], nil
+		}
+	}
+	return "", "", fmt.Errorf("%s: no %q row", path, row)
+}
+
+// TestRefusedMlockRollsBackConstruction: the kernel refuses the lock, every
+// constructor fails with ErrLockedMemoryUnavailable, an admitted allocation
+// refunds its charge in full (nothing was locked), nothing is left on the
+// ledger, and the next allocation after the refusal lifts succeeds.
+func TestRefusedMlockRollsBackConstruction(t *testing.T) {
+	isolated(t, childOpts{}, func(t *testing.T) {
+		f := installFaultInjector(t, 0)
+		a, err := enclave.NewAllocator(16 * enclave.LockedSize(1))
+		if err != nil {
+			t.Fatalf("NewAllocator: %v", err)
+		}
+
+		f.refuse(unix.SYS_MLOCK, unix.ENOMEM, 0)
+		if _, err := enclave.NewMemoryEnclave([]byte("refused")); !errors.Is(err, enclave.ErrLockedMemoryUnavailable) {
+			t.Errorf("NewMemoryEnclave with mlock refused = %v, want ErrLockedMemoryUnavailable", err)
+		}
+		if _, err := a.NewSized(32); !errors.Is(err, enclave.ErrLockedMemoryUnavailable) {
+			t.Errorf("Allocator.NewSized with mlock refused = %v, want ErrLockedMemoryUnavailable", err)
+		}
+		var lme *enclave.LockedMemoryError
+		if _, err := a.New([]byte("refused")); !errors.As(err, &lme) || !errors.Is(err, unix.ENOMEM) {
+			t.Errorf("Allocator.New with mlock refused = %v, want a *LockedMemoryError carrying ENOMEM", err)
+		} else if msg := lme.Error(); !strings.Contains(msg, "locked memory") || !strings.Contains(msg, unix.ENOMEM.Error()) {
+			t.Errorf("LockedMemoryError message %q names neither the condition nor the errno", msg)
+		}
+		requireRefused(t, f, unix.SYS_MLOCK)
+		if used := a.InUse(); used != 0 {
+			t.Errorf("InUse = %d after constructions whose lock was refused, want 0 (nothing was locked)", used)
+		}
+		if n, err := enclave.WipeAll(context.Background()); n != 0 || err != nil {
+			t.Errorf("WipeAll = (%d, %v): a refused construction left something on the ledger", n, err)
+		}
+
+		f.allow(unix.SYS_MLOCK)
+		e, err := a.NewSized(32)
+		if err != nil {
+			t.Fatalf("NewSized after the refusal lifted: %v", err)
+		}
+		if err := e.Destroy(); err != nil {
+			t.Fatalf("Destroy: %v", err)
+		}
+	})
+}
+
+// TestRefusedUnmapKeepsTheEnclaveForARetry: Destroy whose unmap the kernel
+// refuses returns the refusal — not a panic, not nil — keeps the mapping and
+// its ledger entry, and the next Destroy after the refusal lifts finishes.
+func TestRefusedUnmapKeepsTheEnclaveForARetry(t *testing.T) {
+	const n = 48
+	isolated(t, childOpts{}, func(t *testing.T) {
+		f := installFaultInjector(t, mappingLen(n))
+		e, err := enclave.NewMemoryEnclaveSized(n)
+		if err != nil {
+			t.Fatalf("NewMemoryEnclaveSized: %v", err)
+		}
+
+		f.refuse(unix.SYS_MUNMAP, unix.ENOMEM, 0)
+		err = e.Destroy()
+		requireRefused(t, f, unix.SYS_MUNMAP)
+		if !errors.Is(err, enclave.ErrLockedMemoryUnavailable) || errors.Is(err, enclave.ErrReleasedWithoutWipe) {
+			t.Fatalf("Destroy with munmap refused = %v, want ErrLockedMemoryUnavailable (pages still held)", err)
+		}
+		if c, err := enclave.WipeAll(context.Background()); c != 1 || err != nil {
+			t.Errorf("WipeAll with the unmap still refused = (%d, %v), want (1, nil)", c, err)
+		}
+
+		f.allow(unix.SYS_MUNMAP)
+		if err := e.Destroy(); err != nil {
+			t.Fatalf("Destroy after the refusal lifted = %v, want nil", err)
+		}
+		if c, err := enclave.WipeAll(context.Background()); c != 0 || err != nil {
+			t.Errorf("WipeAll = (%d, %v), want (0, nil)", c, err)
+		}
+	})
+}
+
+// TestDeniedMprotectReleasesUnwiped: a frozen enclave cannot be made writable
+// for its wipe when the kernel denies mprotect, so the library unmaps it
+// UNWIPED and says so — ErrReleasedWithoutWipe from Destroy, Unwiped in the
+// sweep's SweepError — never claiming the pages are still held.
+func TestDeniedMprotectReleasesUnwiped(t *testing.T) {
+	isolated(t, childOpts{}, func(t *testing.T) {
+		f := installFaultInjector(t, 0)
+		viaDestroy, err := enclave.NewMemoryEnclave([]byte("frozen at construction"))
+		if err != nil {
+			t.Fatalf("NewMemoryEnclave: %v", err)
+		}
+		viaSweep, err := enclave.NewMemoryEnclave([]byte("frozen, reclaimed by the sweep"))
+		if err != nil {
+			t.Fatalf("NewMemoryEnclave: %v", err)
+		}
+
+		f.refuseProt(unix.SYS_MPROTECT, unix.EPERM, unix.PROT_READ|unix.PROT_WRITE)
+		err = viaDestroy.Destroy()
+		requireRefused(t, f, unix.SYS_MPROTECT)
+		if !errors.Is(err, enclave.ErrReleasedWithoutWipe) {
+			t.Fatalf("Destroy with mprotect denied = %v, want ErrReleasedWithoutWipe", err)
+		}
+		var ure *enclave.UnwipedReleaseError
+		if !errors.As(err, &ure) || !errors.Is(err, unix.EPERM) {
+			t.Errorf("Destroy = %v, want an *UnwipedReleaseError carrying the EPERM", err)
+		} else if msg := ure.Error(); !strings.Contains(msg, "without") || !strings.Contains(msg, unix.EPERM.Error()) {
+			t.Errorf("UnwipedReleaseError message %q names neither the unwiped release nor the errno", msg)
+		}
+		if viaDestroy.IsAlive() {
+			t.Error("the enclave reports itself alive after an unwiped release")
+		}
+
+		c, err := enclave.WipeAll(context.Background())
+		var se *enclave.SweepError
+		if c != 0 || !errors.As(err, &se) || se.Unwiped != 1 || !errors.Is(err, enclave.ErrReleasedWithoutWipe) {
+			t.Fatalf("WipeAll with mprotect denied = (%d, %v), want (0, a SweepError with Unwiped=1)", c, err)
+		}
+		if msg := se.Error(); !strings.Contains(msg, "1") || !strings.Contains(msg, "without") {
+			t.Errorf("SweepError message %q does not report the one unwiped release", msg)
+		}
+		if viaSweep.IsAlive() {
+			t.Error("the swept enclave reports itself alive")
+		}
+	})
+}
+
+// TestRefusedGuardPageRollsBackALockedMapping: the lock succeeds but setting
+// up a guard page is refused, so construction is abandoned AFTER the pages
+// were locked. With the rollback's munlock and unmap refused too, the mapping
+// is kept as a still-locked orphan — counted, charged — and reclaimed once the
+// kernel relents.
+func TestRefusedGuardPageRollsBackALockedMapping(t *testing.T) {
+	const n = 40
+	isolated(t, childOpts{}, func(t *testing.T) {
+		f := installFaultInjector(t, mappingLen(n))
+		page := enclave.LockedSize(n)
+		a, err := enclave.NewAllocator(16 * page)
+		if err != nil {
+			t.Fatalf("NewAllocator: %v", err)
+		}
+
+		f.refuseProt(unix.SYS_MPROTECT, unix.EPERM, unix.PROT_NONE)
+		f.refuse(unix.SYS_MUNLOCK, unix.EPERM, 0)
+		f.refuse(unix.SYS_MUNMAP, unix.ENOMEM, 0)
+		if _, err := a.NewSized(n); !errors.Is(err, enclave.ErrLockedMemoryUnavailable) {
+			t.Fatalf("NewSized with the guard page refused = %v, want ErrLockedMemoryUnavailable", err)
+		}
+		requireRefused(t, f, unix.SYS_MPROTECT)
+		requireRefused(t, f, unix.SYS_MUNLOCK)
+		requireRefused(t, f, unix.SYS_MUNMAP)
+		if used := a.InUse(); used != page {
+			t.Errorf("InUse = %d with a locked orphan, want %d", used, page)
+		}
+		if c, err := enclave.WipeAll(context.Background()); c != 1 || err != nil {
+			t.Errorf("WipeAll with the refusals standing = (%d, %v), want (1, nil)", c, err)
+		}
+
+		f.allow(unix.SYS_MPROTECT)
+		f.allow(unix.SYS_MUNLOCK)
+		f.allow(unix.SYS_MUNMAP)
+		if c, err := enclave.WipeAll(context.Background()); c != 0 || err != nil {
+			t.Fatalf("WipeAll once the refusals lifted = (%d, %v), want (0, nil)", c, err)
+		}
+		if used := a.InUse(); used != 0 {
+			t.Errorf("InUse = %d after reclaim, want 0", used)
+		}
+	})
+}

@@ -1,0 +1,123 @@
+# go-enclave devcontainer. `make integration-test` (and -fips) is the entry
+# point; it runs this file under a UNIQUE project name per run and tears it
+# down with `down --volumes --rmi local` on every exit.
+#
+# Per-run isolation (handbook integration-testing §7): no container_name, no
+# image: tag (compose names the image <project>-devcontainer, so it is unique
+# per run), no published ports, and the only volume is per-project. Two runs on
+# one host — two agents, a push and a re-run — cannot claim each other's
+# containers, images or caches.
+#
+# SECURITY POSTURE, every setting justified. The suite exercises locked memory,
+# core-dump exclusion and process-memory residue; NONE of that needs a
+# privilege, and holding one would make the suite measure the wrong thing.
+#
+#   cap_drop: [ALL], and NO cap_add. Each capability the suite might seem to
+#     want, and why it is absent:
+#       - CAP_IPC_LOCK: mlock below RLIMIT_MEMLOCK needs no capability (Linux
+#         2.6.9+). Holding it would make the kernel IGNORE RLIMIT_MEMLOCK, so
+#         every admission test would run against a ceiling that does not bind
+#         and pass vacuously. The suite asserts it is absent (CapEff, and the
+#         library's own LimitRLimit classification) and fails if it is not.
+#       - CAP_SYS_RESOURCE: lowering an rlimit needs none; RAISING a hard one
+#         does. Without it a lowered RLIMIT_MEMLOCK/RLIMIT_CORE is a ceiling the
+#         process cannot lift — the suite asserts exactly that refusal.
+#       - CAP_SYS_PTRACE: the suite reads only its OWN /proc/self/mem and
+#         /proc/self/smaps (same-thread-group access, which ptrace_may_access
+#         grants unconditionally) and its parent's world-readable
+#         /proc/<ppid>/limits.
+#       - Docker's default set (CHOWN, DAC_OVERRIDE, SETUID, NET_RAW, ...):
+#         a test run writes only to its own tmpfs and cache volume as its own
+#         user, binds nothing and changes no identity.
+#   security_opt no-new-privileges: nothing in the container can gain
+#     privilege through a setuid binary or file capabilities.
+#   Docker's default seccomp and AppArmor profiles stay ON (nothing here says
+#     unconfined): mmap, mlock, madvise, mprotect, setrlimit and /proc reads
+#     are all permitted by the default profile.
+#   user 10001: the image's unprivileged user. Not root, so a test that
+#     "passes" only because root bypasses a check cannot exist here.
+#   read_only: the root filesystem, the baked source and the baked module
+#     cache cannot be written. The only writable paths are /tmp (tmpfs, where
+#     `go test` links and executes the test binary, hence `exec`) and the
+#     per-run build-cache volume.
+#   network_mode: none: the run needs no network. Modules are baked into the
+#     image and verified against go.sum at build time, and GOPROXY=off makes
+#     any attempt to fetch one fail instead of reaching out.
+#   init: true: a real PID 1 (docker-init) reaps the suite's re-exec'd child
+#     processes and forwards signals, so an interrupted run stops cleanly.
+#   pids_limit / mem_limit / memswap_limit / cpus: bounds, so a runaway test
+#     cannot starve a shared runner host. memswap_limit == mem_limit: no swap
+#     for this container at all. (Enclave pages are mlock'd regardless; this
+#     keeps the rest of the test process's memory off disk too.)
+#
+# ULIMITS, both finite and both load-bearing:
+#
+#   memlock 16 MiB soft = hard. RLIMIT_MEMLOCK is the ceiling the admission
+#     tests run against, so it must be FINITE (RLIM_INFINITY makes
+#     DiscoverLockedMemoryLimit report LimitUnlimited and NewAllocatorWithin-
+#     RLimit refuse nothing) and identical on every host (Docker's own default
+#     varies with the daemon: 8 MiB here, 64 KiB elsewhere, unlimited on some
+#     runners). soft = hard so nothing in the run can raise it. Tests that need
+#     a TIGHTER ceiling lower it further in a child process of their own; this
+#     figure only has to exceed what any single test locks. The suite reads it
+#     back and fails unless it equals GO_ENCLAVE_IT_MEMLOCK_BYTES below — keep
+#     the two in step.
+#   core 1 MiB soft = hard, deliberately NON-ZERO. go-enclave lowers
+#     RLIMIT_CORE to 0/0 when it is imported; a container that already started
+#     at 0 would let that test pass without the library doing anything. The
+#     suite checks the limit of its parent (`go`, which does not import the
+#     library) is this non-zero figure, and its own is 0/0.
+#   nofile: explicit rather than inherited from whatever the daemon defaults.
+
+services:
+  devcontainer:
+    build:
+      context: ../../..
+      dockerfile: build/docker/devcontainer/Dockerfile
+    user: "10001:10001"
+    working_dir: /src
+    init: true
+    read_only: true
+    network_mode: none
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 1024
+    mem_limit: 4g
+    memswap_limit: 4g
+    cpus: 4
+    ulimits:
+      memlock:
+        soft: 16777216
+        hard: 16777216
+      core:
+        soft: 1048576
+        hard: 1048576
+      nofile:
+        soft: 4096
+        hard: 4096
+    tmpfs:
+      - /tmp:rw,exec,nosuid,nodev,size=1g,mode=1777
+    volumes:
+      - gocache:/home/dev/.cache/go-build
+    environment:
+      GOTOOLCHAIN: local
+      GOFLAGS: -mod=readonly
+      GOPROXY: "off"
+      # The FIPS 140-3 configuration of the run. `make integration-test` runs
+      # with these defaults; `make integration-test-fips` overrides all three
+      # with `docker compose run -e` (GOFIPS140=latest, GODEBUG=fips140=only,
+      # GO_ENCLAVE_IT_FIPS_MODE=only). The suite asserts that the runtime
+      # matches GO_ENCLAVE_IT_FIPS_MODE in BOTH directions, so a FIPS run that
+      # silently lost its environment fails rather than passing as non-FIPS.
+      # GODEBUG is deliberately not set here: the default run uses Go's
+      # defaults.
+      GOFIPS140: "off"
+      GO_ENCLAVE_IT_FIPS_MODE: "off"
+      # Must equal ulimits.memlock above (see there).
+      GO_ENCLAVE_IT_MEMLOCK_BYTES: "16777216"
+      GO_ENCLAVE_IT_CORE_BYTES: "1048576"
+
+volumes:
+  gocache:

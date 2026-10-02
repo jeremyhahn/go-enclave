@@ -330,7 +330,7 @@ lint-actions:
 .PHONY: lint-scripts
 lint-scripts:
 	@sc=$$($(TOOL) shellcheck $(SHELLCHECK_VERSION)) && \
-	echo "shellcheck $(SHELLCHECK_VERSION) --shell=sh scripts/*.sh" && "$$sc" --shell=sh scripts/*.sh
+	echo "shellcheck $(SHELLCHECK_VERSION) --shell=sh scripts/*.sh build/docker/devcontainer/*.sh" && "$$sc" --shell=sh scripts/*.sh build/docker/devcontainer/*.sh
 
 ## staticcheck: honnef.co staticcheck (pinned)
 .PHONY: staticcheck
@@ -548,24 +548,101 @@ $(addprefix bench-,$(PACKAGES)): bench-%:
 # INTEGRATION SUITE (integration-testing §3-§4). Each package's suite lives in
 # test/integration/<pkg>/ and runs in the project devcontainer, NEVER on the
 # host: a suite that passes only on a workstation measures the workstation.
+# The suite's TestMain enforces that too, and refuses to run in a container
+# whose capabilities, limits or FIPS state differ from what compose.yaml
+# declares.
 #
-# The contract the suite (#91) must meet, stated here because this is where it
-# is enforced: build/docker/devcontainer/compose.yaml defines a service named
-# `devcontainer` whose working directory is the repository root, so that
-# `go test ./test/integration/<pkg>/...` runs inside it. Each run gets its own
-# compose project (integration-testing §7: two runs on one host must not claim
-# each other's containers, networks or volumes) and is torn down with its
-# volumes on any exit.
+# The devcontainer (build/docker/devcontainer/) BAKES the source into its
+# image rather than bind-mounting the checkout: on our runners `docker compose`
+# talks to the HOST daemon through the job's socket, where a bind-mount source
+# path does not exist and is silently replaced by an empty directory (measured
+# on the CI runners, 2026-08-14). The build context is sent by the client, so it is right
+# on a laptop and on a runner alike. `--build` rebuilds the image on every run;
+# BuildKit's layer cache makes that a source-layer copy when only the source
+# changed, and the run itself has no network (compose.yaml: network_mode: none).
 #
-# Every precondition FAILS rather than skips. Until the suite and the
-# devcontainer land, these targets fail saying so: a target that passes with
+# Each run gets its own compose project (integration-testing §7: two runs on
+# one host must not claim each other's containers, images or volumes): the
+# name carries the time, this shell's pid AND random bytes, because two job
+# containers on one runner host can share a pid and a second. It is torn down
+# — container, per-run cache volume and per-run image — on every exit, and a
+# teardown that fails says so rather than leaking silently.
+#
+# The tag is part of the flags: the suite's files carry `//go:build
+# integration`, so without -tags=integration `go test` would compile nothing.
+# The package is named EXACTLY (no `/...`): an explicit directory whose files
+# are all excluded is an error ("build constraints exclude all Go files"),
+# whereas a `/...` pattern matching nothing exits 0 — a vacuous green.
+# -race is the suite's concurrency oracle (the sweep's waits on live borrows,
+# the admission CAS under contention); -v puts every test's name and its
+# kernel-side evidence in the CI log.
+#
+# Every precondition FAILS rather than skips: a target that passes with
 # nothing to run reports a suite that never ran as green, and such a target is
 # then wired into CI as a gate that gates nothing.
-INTEGRATION_PACKAGES  := enclave
+INTEGRATION_PACKAGES  := enclave providertest
 DEVCONTAINER_COMPOSE  := build/docker/devcontainer/compose.yaml
 DEVCONTAINER_SERVICE  := devcontainer
-INTEGRATION_TESTFLAGS := -race -count=1 -timeout=1800s
+INTEGRATION_TESTFLAGS := -tags=integration -race -count=1 -v -timeout=1800s
+
+# GO_ENCLAVE_IT_PROFILE_OUT: where the devcontainer writes the merged
+# integration profile ("-" prints it between marker lines; see
+# run-integration-tests.sh). A caller-supplied path, so raw-bound and read as
+# "$$GO_ENCLAVE_IT_PROFILE_OUT", never spliced into the recipe.
+GO_ENCLAVE_IT_PROFILE_OUT ?=
+$(call raw_bind,GO_ENCLAVE_IT_PROFILE_OUT)
+# Integration coverage (testing-guidelines: every package >= 90%). Measured
+# over the LIBRARY packages the suite exercises, from the parent and every
+# re-executed child, by build/docker/devcontainer/run-integration-tests.sh,
+# against the same COVERAGE_THRESHOLD floor as unit coverage (read in the
+# recipe as the exported "$$COVERAGE_THRESHOLD", never pasted in).
+# Each suite is gated on the package it is the integration suite FOR
+# (integration-testing §3: test/integration/<package>/), so one suite's reach
+# into another package cannot carry that package over the floor.
+INTEGRATION_COVERPKG_enclave      := github.com/jeremyhahn/go-enclave
+INTEGRATION_COVERPKG_providertest := github.com/jeremyhahn/go-enclave/providertest
+# The FIPS 140-3 strict run (security-review §6): the same suite, flags and
+# container, with Go's native FIPS module selected at build (GOFIPS140=latest)
+# and non-approved cryptography made fatal at run time (GODEBUG=fips140=only —
+# STRICT, never `on`; test-fips above says why). GO_ENCLAVE_IT_FIPS_MODE tells
+# the suite which mode it was promised, and it fails unless the runtime
+# reports exactly that (crypto/fips140.Enabled and Enforced), so a FIPS run
+# that lost its environment cannot pass as one. The default run passes the
+# compose.yaml defaults (GOFIPS140=off, mode "off") and is checked the same way.
+INTEGRATION_FIPS_ENV  := -e GOFIPS140=latest -e GODEBUG=fips140=only -e GO_ENCLAVE_IT_FIPS_MODE=only
 $(call raw_bind,DEVCONTAINER_COMPOSE DEVCONTAINER_SERVICE)
+
+# run_integration PKG, EXTRA_RUN_FLAGS: the one recipe both variants share.
+define run_integration
+	@test -n "$(INTEGRATION_COVERPKG_$(1))" || { echo "ERROR: no INTEGRATION_COVERPKG_$(1): every integration suite names the package its coverage floor applies to"; exit 1; }
+	@test -d test/integration/$(1) || { echo "ERROR: test/integration/$(1) does not exist. Refusing to report a suite that did not run as passed."; exit 1; }
+	@ls test/integration/$(1)/*_test.go >/dev/null 2>&1 || { echo "ERROR: test/integration/$(1) holds no _test.go files; refusing to pass with nothing to run."; exit 1; }
+	@test -f "$$DEVCONTAINER_COMPOSE" || { echo "ERROR: $$DEVCONTAINER_COMPOSE not found. Integration tests run in the project devcontainer, never on the host (integration-testing §4)."; exit 1; }
+	@command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1 || { echo "ERROR: 'docker compose' (Compose v2) is required to run the integration suite in the devcontainer."; exit 1; }
+	@docker version --format '{{.Server.Version}}' >/dev/null 2>&1 || { echo "ERROR: the Docker daemon is not reachable (docker version cannot read the server). The integration suite runs in the devcontainer and cannot run without it."; exit 1; }
+	@trivy=$$($(TOOL) trivy $(TRIVY_VERSION)) || exit 1; \
+	project="go-enclave-it-$(1)-$$(date +%s)-$$$$-$$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n')"; \
+	echo "compose project: $$project"; \
+	cleanup() { \
+	  rc=$$?; \
+	  if ! docker compose -f "$$DEVCONTAINER_COMPOSE" -p "$$project" down --volumes --remove-orphans --rmi local >/dev/null 2>&1; then \
+	    echo "ERROR: teardown of compose project $$project failed; remove it with: docker compose -f '$$DEVCONTAINER_COMPOSE' -p '$$project' down --volumes --remove-orphans --rmi local" >&2; \
+	    [ "$$rc" -ne 0 ] || rc=1; \
+	  fi; \
+	  exit $$rc; \
+	}; \
+	trap cleanup EXIT; trap 'exit 130' INT; trap 'exit 143' TERM; \
+	docker compose -f "$$DEVCONTAINER_COMPOSE" -p "$$project" build "$$DEVCONTAINER_SERVICE" || exit 1; \
+	echo "trivy image $$project-$$DEVCONTAINER_SERVICE (CRITICAL,HIGH, fixable only — devops §8)"; \
+	"$$trivy" image --scanners vuln --severity CRITICAL,HIGH --ignore-unfixed --exit-code 1 \
+	  --ignorefile .trivyignore --skip-version-check --format table "$$project-$$DEVCONTAINER_SERVICE" || exit 1; \
+	docker compose -f "$$DEVCONTAINER_COMPOSE" -p "$$project" run --rm \
+	  -e GO_ENCLAVE_IT_TESTFLAGS="$(INTEGRATION_TESTFLAGS)" \
+	  -e GO_ENCLAVE_IT_COVERAGE_FLOOR="$$COVERAGE_THRESHOLD" \
+	  -e GO_ENCLAVE_IT_COVERPKG="$(INTEGRATION_COVERPKG_$(1))" \
+	  -e GO_ENCLAVE_IT_PROFILE_OUT="$$GO_ENCLAVE_IT_PROFILE_OUT" \
+	  $(2) "$$DEVCONTAINER_SERVICE" sh build/docker/devcontainer/run-integration-tests.sh $(1)
+endef
 
 ## integration-test: every integration suite, in the devcontainer
 .PHONY: integration-test
@@ -574,14 +651,35 @@ integration-test: $(addprefix integration-test-,$(INTEGRATION_PACKAGES))
 ## integration-test-<pkg>: one package's integration suite, in the devcontainer (enclave)
 .PHONY: $(addprefix integration-test-,$(INTEGRATION_PACKAGES))
 $(addprefix integration-test-,$(INTEGRATION_PACKAGES)): integration-test-%:
-	@test -d test/integration/$* || { echo "ERROR: test/integration/$* does not exist: the $* integration suite has not landed (#91). Refusing to report a suite that did not run as passed."; exit 1; }
-	@ls test/integration/$*/*_test.go >/dev/null 2>&1 || { echo "ERROR: test/integration/$* holds no _test.go files; refusing to pass with nothing to run."; exit 1; }
-	@test -f "$$DEVCONTAINER_COMPOSE" || { echo "ERROR: $$DEVCONTAINER_COMPOSE not found. Integration tests run in the project devcontainer, never on the host (integration-testing §4)."; exit 1; }
-	@command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1 || { echo "ERROR: 'docker compose' is required to run the integration suite in the devcontainer."; exit 1; }
-	@project="go-enclave-it-$*-$$(date +%s)-$$$$"; \
-	trap 'docker compose -f "$$DEVCONTAINER_COMPOSE" -p "$$project" down --volumes --remove-orphans >/dev/null 2>&1' EXIT INT TERM; \
-	docker compose -f "$$DEVCONTAINER_COMPOSE" -p "$$project" run --rm --build "$$DEVCONTAINER_SERVICE" \
-	  go test $(INTEGRATION_TESTFLAGS) ./test/integration/$*/...
+	$(call run_integration,$*,)
+
+## integration-test-fips: every integration suite under FIPS 140-3 strict mode, in the devcontainer
+.PHONY: integration-test-fips
+integration-test-fips: $(addprefix integration-test-fips-,$(INTEGRATION_PACKAGES))
+
+## integration-test-fips-<pkg>: one package's integration suite under FIPS 140-3 strict mode (enclave)
+.PHONY: $(addprefix integration-test-fips-,$(INTEGRATION_PACKAGES))
+$(addprefix integration-test-fips-,$(INTEGRATION_PACKAGES)): integration-test-fips-%:
+	$(call run_integration,$*,$(INTEGRATION_FIPS_ENV))
+
+## lint-integration: vet, golangci-lint and staticcheck over the integration suite, WITH its build tag
+# The suite is `//go:build integration`, so `make lint` — which runs without
+# the tag — never opens it: every analyser would report clean over files it
+# never read (devops §8: "an analyser not given the repo's build tags does not
+# fail"). This runs the same pinned analysers with the tag, and first proves
+# the tag is the one the files carry: `go list` must select test files WITH it
+# and none WITHOUT it, so a misspelled tag fails here instead of vanishing.
+.PHONY: lint-integration
+lint-integration:
+	@for p in $(INTEGRATION_PACKAGES); do \
+	  with=$$("$$GOCMD" list -tags=integration -f '{{len .TestGoFiles}}{{len .XTestGoFiles}}' ./test/integration/$$p) || exit 1; \
+	  without=$$("$$GOCMD" list -e -f '{{len .TestGoFiles}}{{len .XTestGoFiles}}' ./test/integration/$$p 2>/dev/null); \
+	  case "$$with" in 00|'') echo "ERROR: -tags=integration selects no test files in test/integration/$$p"; exit 1;; esac; \
+	  case "$$without" in 00|'') ;; *) echo "ERROR: test/integration/$$p has test files that build WITHOUT the integration tag ($$without)"; exit 1;; esac; \
+	done
+	"$$GOCMD" vet -tags=integration ./test/integration/...
+	@bin=$$($(TOOL) golangci-lint $(GOLANGCI_VERSION)) && "$$bin" run --allow-serial-runners --timeout=5m --build-tags=integration ./test/integration/...
+	@bin=$$($(TOOL) staticcheck $(STATICCHECK_VERSION)) && "$$bin" -tags=integration ./test/integration/...
 
 ## build: compile all packages
 .PHONY: build
@@ -638,16 +736,17 @@ check-scripts:
 	@cd test/buildgates && "$$GOCMD" vet $(PKG) && "$$GOCMD" test -count=1 -run '^TestScripts' $(PKG)
 
 ## ci-fast: everything `ci` runs that does not need Docker (devops §4)
-# Today that is all of it — nothing in the gate needs Docker — so the two are
-# the same set. `integration-test` joins `ci`, and only `ci`, when the
-# devcontainer suite lands (#91).
+# lint-integration is here, not in `ci` only: it analyses the integration
+# suite's source and needs no container.
 .PHONY: ci-fast
-ci-fast: tidy-check lint check-action-pins check-releasability check-changelog-assembly check-scripts staticcheck security coverage test-runtimesecret build cross-build
+ci-fast: tidy-check lint lint-integration check-action-pins check-releasability check-changelog-assembly check-scripts staticcheck security coverage test-runtimesecret build cross-build
 	@echo "ci-fast completed successfully"
 
 ## ci: the full local gate — what a PR must pass, security included (devops §4)
+# ci-fast plus the integration suite (#91), both variants, in the devcontainer.
+# Docker is required; without it these targets fail, they do not skip.
 .PHONY: ci
-ci: ci-fast
+ci: ci-fast integration-test integration-test-fips
 	@echo "CI pipeline completed successfully"
 
 ## deps-latest: bump internal dependencies to their latest tags (none today)
