@@ -169,7 +169,7 @@ func TestActionRefsArePinnedToCommitShas(t *testing.T) {
 // regression tests below, in every spelling, without a workflow file on disk.
 func validateRef(r actionRef) error {
 	// A value the parser produced but we could not reduce to a ref. Fail —
-	// never skip. An unrecognised shape is the one case where we genuinely do
+	// never skip. An unrecognized shape is the one case where we genuinely do
 	// not know whether the ref is pinned, and "don't know" must read as "no".
 	if r.err != nil {
 		return fmt.Errorf("could not resolve the `uses:` value at %s:%d: %w\n\n"+
@@ -374,7 +374,7 @@ const maxAliasDepth = 10
 // resolveRef reduces a `uses:` value node to the string Actions would see.
 //
 // Every shape that carries a scalar is handled, and everything else returns an
-// error rather than an empty string, so an unrecognised value fails the gate
+// error rather than an empty string, so an unrecognized value fails the gate
 // loudly instead of vanishing from its results. That asymmetry is the whole
 // lesson of review round 1: a parser used carelessly drops refs just as
 // silently as a regex misses them.

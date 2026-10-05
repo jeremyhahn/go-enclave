@@ -61,10 +61,16 @@ done
 offenders=$(printf '%s\n' "$list" | NEW=$new awk '
 function strip(v) { sub(/^v/, "", v); sub(/\+.*/, "", v); return v }
 function isnum(s) { return s ~ /^[0-9]+$/ }
+# Every comparison goes through cmpstr: split() yields strnums, which AWK
+# compares as doubles ("1e10" vs "1e2", numerics past 2^53).
+function cmpstr(a, b) {
+  a = a ""; b = b ""
+  return a < b ? -1 : (a > b ? 1 : 0)
+}
 # cmpnum compares two decimal strings without leading zeros, of any length.
 function cmpnum(a, b) {
   if (length(a) != length(b)) return length(a) < length(b) ? -1 : 1
-  return a < b ? -1 : (a > b ? 1 : 0)
+  return cmpstr(a, b)
 }
 function cmp(a, b,    pa, pb, ca, cb, na, nb, ia, ib, i, n, c) {
   a = strip(a); b = strip(b)
@@ -81,7 +87,7 @@ function cmp(a, b,    pa, pb, ca, cb, na, nb, ia, ib, i, n, c) {
     if (isnum(ia[i]) && isnum(ib[i])) { if ((c = cmpnum(ia[i], ib[i])) != 0) return c; continue }
     if (isnum(ia[i])) return -1
     if (isnum(ib[i])) return 1
-    if (ia[i] != ib[i]) return ia[i] < ib[i] ? -1 : 1
+    if ((c = cmpstr(ia[i], ib[i])) != 0) return c
   }
   return n < m ? -1 : (n > m ? 1 : 0)
 }

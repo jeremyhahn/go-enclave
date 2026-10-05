@@ -1,0 +1,5 @@
+# Gitea CODEOWNERS: each pattern is a Go regular expression, anchored at both
+# ends, matched against the changed file's path.
+\.github/.* @jeremyhahn
+Makefile @jeremyhahn
+scripts/.* @jeremyhahn

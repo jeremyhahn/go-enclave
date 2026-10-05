@@ -126,7 +126,8 @@ reference is on [pkg.go.dev](https://pkg.go.dev/github.com/jeremyhahn/go-enclave
 | `make test` | Unit tests with `-race` across `-cpu=1,2,8` |
 | `make coverage` | The same run with coverage; fails below 90% (`make coverage-report` for HTML) |
 | `make test-fips` | Build and test under `GOFIPS140=latest GODEBUG=fips140=only`: strict-mode compatibility, not validation ([details](docs/sealing/engineering.md#fips-140-3)) |
-| `make lint` / `make staticcheck` / `make security` | gofmt, vet, golangci-lint, actionlint, shellcheck / staticcheck / gosec, govulncheck, module verification, trivy |
+| `make lint` / `make staticcheck` / `make security` | gofmt, vet, golangci-lint, actionlint, shellcheck / staticcheck / gosec, govulncheck, module verification, trivy. golangci-lint, staticcheck and govulncheck also analyze the `test/buildgates` module |
+| `make vuln` | Alias for `make govulncheck` |
 | `make cross-build` | Build and vet the configured `CROSS_TARGETS` matrix (Linux, the BSDs, darwin, illumos, Solaris, AIX, Windows; Android and iOS are not in it) |
 | `make bench` | Benchmarks with allocation counts |
 | `make check-releasability` | Fails if a tracked file names private hosts, addresses or workstation paths |

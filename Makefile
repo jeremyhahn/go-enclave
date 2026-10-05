@@ -312,9 +312,12 @@ lint: fmt-check vet lint-go lint-actions lint-scripts
 # FAILS ("parallel golangci-lint is running") when another run holds it — on
 # a machine with several worktrees, an unrelated lint elsewhere turned this
 # gate red. It now waits for the lock instead; the result is unchanged.
+# test/buildgates is its own module, so `./...` from the root never reaches it;
+# lint-go, staticcheck and govulncheck run there too.
 .PHONY: lint-go
 lint-go:
-	@bin=$$($(TOOL) golangci-lint $(GOLANGCI_VERSION)) && "$$bin" run --allow-serial-runners --timeout=5m $(PKG)
+	@bin=$$($(TOOL) golangci-lint $(GOLANGCI_VERSION)) && "$$bin" run --allow-serial-runners --timeout=5m $(PKG) && \
+	cd test/buildgates && "$$bin" run --allow-serial-runners --timeout=5m $(PKG)
 
 ## lint-actions: actionlint (pinned) over .github/workflows, with the pinned shellcheck on every run: block
 # actionlint runs shellcheck over the shell in each step only when it finds
@@ -335,7 +338,8 @@ lint-scripts:
 ## staticcheck: honnef.co staticcheck (pinned)
 .PHONY: staticcheck
 staticcheck:
-	@bin=$$($(TOOL) staticcheck $(STATICCHECK_VERSION)) && "$$bin" $(PKG)
+	@bin=$$($(TOOL) staticcheck $(STATICCHECK_VERSION)) && "$$bin" $(PKG) && \
+	cd test/buildgates && "$$bin" $(PKG)
 
 ## gosec: security static analysis (pinned; writes gosec.sarif)
 # A scanner killed by a signal exits 128+N — 137 for the OOM killer — which in
@@ -357,9 +361,14 @@ gosec:
 govulncheck:
 	@bin=$$($(TOOL) govulncheck $(GOVULNCHECK_VERSION)) || exit 1; \
 	rc=0; "$$bin" $(PKG) || rc=$$?; \
+	if [ $$rc -eq 0 ]; then (cd test/buildgates && "$$bin" $(PKG)) || rc=$$?; fi; \
 	if [ $$rc -gt 128 ]; then \
 	  echo "govulncheck was KILLED by signal $$((rc - 128)) - this is NOT a vulnerability finding. Memory pressure, not a CVE; confirm with an uncapped run."; \
 	fi; exit $$rc
+
+## vuln: alias for govulncheck
+.PHONY: vuln
+vuln: govulncheck
 
 ## modverify: verify module integrity
 .PHONY: modverify

@@ -53,7 +53,7 @@ name: CI
 
 on:
   push:
-    branches: [main]                    # trunk-based: main is the ONLY trunk
+    branches: [main]                    # GitHub Flow: main is the only long-lived branch
   pull_request:
     branches: [main]
   workflow_dispatch:                  # re-fire the workflow by hand; also

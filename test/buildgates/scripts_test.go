@@ -15,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/goccy/go-yaml"
 )
 
 // Tests for the release and tooling scripts (#89): scripts/release-notes.sh,
@@ -1258,6 +1260,18 @@ func TestScriptsReleaseVersionCheck_RequiresStrictlyGreaterThanVersionAndEveryTa
 		{"lower numeric identifier", "1.0.0-alpha.2", []string{"v1.0.0-alpha.2"}, "v1.0.0-alpha.1", false, "VERSION"},
 		{"release above its pre-releases", "1.0.0-alpha.2", []string{"v1.0.0-alpha.2"}, "v1.0.0", true, ""},
 		{"multi-digit components numerically", "0.9.0", []string{"v0.9.0"}, "v0.10.0", true, ""},
+		// Identifiers are compared as strings, never as AWK numbers: "1e10"
+		// is alphanumeric and sorts below "1e2" in ASCII, and numerics past
+		// 2^53 must not collapse to the same double.
+		{"exponent-shaped alphanumerics in ASCII order", "1.0.0-1e2", nil, "v1.0.0-1e10", false, "VERSION (v1.0.0-1e2)"},
+		{"exponent-shaped alphanumerics, upward", "1.0.0-1e10", nil, "v1.0.0-1e2", true, ""},
+		{"numerically equal alphanumerics differ", "1.0.0-10e1", nil, "v1.0.0-1e2", true, ""},
+		{"pre-release numerics beyond 2^53", "1.0.0-alpha.9007199254740992", nil, "v1.0.0-alpha.9007199254740993", true, ""},
+		{"pre-release numerics beyond 2^53, downward", "1.0.0-alpha.9007199254740993", nil, "v1.0.0-alpha.9007199254740992", false, "VERSION"},
+		{"core numerics beyond 2^53", "9007199254740992.0.0", nil, "v9007199254740993.0.0", true, ""},
+		{"numeric below an exponent-shaped alphanumeric", "1.0.0-rc.100", nil, "v1.0.0-rc.1e2", true, ""},
+		{"exponent-shaped alphanumeric above a numeric", "1.0.0-rc.1e2", nil, "v1.0.0-rc.100", false, "VERSION"},
+		{"mixed alphanumeric above a larger numeric", "1.0.0-alpha.10", nil, "v1.0.0-alpha.9a", true, ""},
 		{"build metadata is ignored", "0.2.0", []string{"v0.2.0"}, "v0.2.0+build.5", false, "VERSION"},
 		// Refusals of what cannot be ordered.
 		{"a tag that is not SemVer", "0.2.0", []string{"v0.2.0", "vnext"}, "v0.3.0", false, "tag 'vnext' is not SemVer"},
@@ -1305,6 +1319,40 @@ func TestScriptsReleaseAlpha_ChecksTheVersionBeforeWritingAnything(t *testing.T)
 		if at < check {
 			t.Fatalf("release-alpha runs %q before the version check:\n%s", write, recipe)
 		}
+	}
+}
+
+// TestScriptsMakefile_AnalysersCoverTheBuildGatesModule requires the Go
+// analysers to also run inside test/buildgates, which `./...` from the root
+// never reaches (it is its own module), and `vuln` to be govulncheck.
+func TestScriptsMakefile_AnalysersCoverTheBuildGatesModule(t *testing.T) {
+	root := repoRoot(t)
+	dryRun := func(target string) string {
+		t.Helper()
+		cmd := exec.Command("make", "-n", "--no-print-directory", target)
+		cmd.Dir = root
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("make -n %s: %v\n%s", target, err, out)
+		}
+		return string(out)
+	}
+	for _, target := range []string{"lint-go", "staticcheck", "govulncheck", "vuln"} {
+		if recipe := dryRun(target); !strings.Contains(recipe, "cd test/buildgates") {
+			t.Errorf("make %s does not analyze the test/buildgates module:\n%s", target, recipe)
+		}
+	}
+	if vuln, gov := dryRun("vuln"), dryRun("govulncheck"); vuln != gov {
+		t.Errorf("make vuln is not govulncheck:\nvuln:\n%s\ngovulncheck:\n%s", vuln, gov)
+	}
+	cmd := exec.Command("make", "--no-print-directory", "help")
+	cmd.Dir = root
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("make help: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "vuln:") {
+		t.Errorf("make help does not list vuln:\n%s", out)
 	}
 }
 
@@ -1676,5 +1724,57 @@ func TestScriptsMakefile_CleanToolsRefusesWhatItMustNotDelete(t *testing.T) {
 		if b, _ := os.ReadFile(log); len(b) != 0 {
 			t.Fatalf("%s: clean-tools ran rm before refusing:\n%s", name, b)
 		}
+	}
+}
+
+// TestScriptsReleaseWorkflow_PublishWaitsForTheErasingBuild requires release.yml
+// to run `make test-runtimesecret` on the tag in a job that publish needs and
+// checks by name, so a regression confined to that build cannot ship.
+func TestScriptsReleaseWorkflow_PublishWaitsForTheErasingBuild(t *testing.T) {
+	type step struct {
+		Run string `yaml:"run"`
+	}
+	type job struct {
+		Needs []string `yaml:"needs"`
+		Steps []step   `yaml:"steps"`
+	}
+	var wf struct {
+		Jobs map[string]job `yaml:"jobs"`
+	}
+	raw, err := os.ReadFile(filepath.Join(repoRoot(t), ".github", "workflows", "release.yml"))
+	if err != nil {
+		t.Fatalf("read release.yml: %v", err)
+	}
+	if err := yaml.Unmarshal(raw, &wf); err != nil {
+		t.Fatalf("parse release.yml: %v", err)
+	}
+	publish, ok := wf.Jobs["publish"]
+	if !ok {
+		t.Fatal("release.yml has no publish job")
+	}
+	var gate string
+	for name, j := range wf.Jobs {
+		for _, s := range j.Steps {
+			if strings.TrimSpace(s.Run) == "make test-runtimesecret" {
+				gate = name
+			}
+		}
+	}
+	if gate == "" {
+		t.Fatal("no release.yml job runs `make test-runtimesecret`")
+	}
+	needed := false
+	for _, n := range publish.Needs {
+		needed = needed || n == gate
+	}
+	if !needed {
+		t.Fatalf("publish does not need %q, the job that runs make test-runtimesecret (needs: %v)", gate, publish.Needs)
+	}
+	var checks string
+	for _, s := range publish.Steps {
+		checks += s.Run
+	}
+	if !strings.Contains(checks, "needs."+gate+".result") {
+		t.Fatalf("publish does not check needs.%s.result before publishing", gate)
 	}
 }

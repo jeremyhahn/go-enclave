@@ -197,6 +197,11 @@ jobs:
       - name: Tests under FIPS 140-3 strict mode
         run: make test-fips
 
+      # The erasing build's AES path and its erasure test exist only with
+      # GOEXPERIMENT=runtimesecret; ci.yml's Test job runs the same target.
+      - name: Unit tests with key-schedule erasure (GOEXPERIMENT=runtimesecret)
+        run: make test-runtimesecret
+
   # The integration suite (#91), both FIPS configurations, in the project
   # devcontainer on the TAGGED commit — the same two targets ci.yml's
   # Integration job runs, so a tag is held to at least the PR gate. Docker is a

@@ -1,12 +1,12 @@
-# automerge v4: a PR merges itself once CI is green; a `code-review` PR also
-# needs one approval from the reviewer list.
+# automerge v5: a PR merges itself once CI is green; a `code-review` PR also
+# needs one approval from the reviewer list, by someone other than its author.
 #
 # Owner rulings (automatethethings#200, #203):
-#   2026-10-02 "all projects should follow the same automerge convention.
-#    automatically merge to main when CI is green and the PR doesnt have a
-#    code-review label. If it has a code-review label, then we need at least 1
-#    approver, which should be one of - claude, codex, opencode, jeremyhahn,
-#    agent-company or agent-software."
+#   2026-10-04 "instead of using review-bypass, lets use the existing
+#    code-review label. if the label is there, then we require the
+#    review/approval, otherwise it can automerge."
+#   2026-10-02 the approvers: claude, codex, opencode, jeremyhahn,
+#    agent-company, agent-software.
 #   2026-10-01 "quicbaas is going to be responsible for running the code review
 #    agents instead of gitea. we only want standard actions in gitea"
 #   2026-10-01 "make sure that the automerge squashes and deletes the remote
@@ -14,9 +14,22 @@
 #
 #   no `code-review` label -> merge when every required CI check is green
 #   `code-review` label    -> merge when CI is green AND, on the current head,
-#                             at least one APPROVED review (not stale, not
-#                             dismissed) by one of APPROVERS, and no reviewer's
-#                             latest review is REQUEST_CHANGES
+#                             one APPROVED review (not stale, not dismissed) by
+#                             one of APPROVERS other than the PR's author, and
+#                             no reviewer's latest review is REQUEST_CHANGES
+#
+# BASE-DEFINED ONLY. AGENT_TOKEN reaches only runs whose definition Gitea takes
+# from the base branch: pull_request_target, workflow_run and schedule. A
+# `pull_request` or `pull_request_review` run is defined by the PR head, so a PR
+# could rewrite the merge decision; neither is a trigger here. Reviews have no
+# base-defined event on Gitea, so the schedule sweeps open PRs for them.
+#
+# RESIDUAL RISK. "Green" is the required statuses, and ci.yml (which posts
+# them) runs from the PR head, so an unlabelled PR that rewrites ci.yml can
+# post its own green; `code-review` is the control for such a PR. Gitea also hands repository secrets to same-repo
+# `pull_request` runs, so anyone who can push a branch can read AGENT_TOKEN
+# through a new workflow; closing that needs the token held outside repository
+# secrets.
 #
 # Branch protection requires 0 approvals: Gitea cannot make an approval
 # conditional on a label, so this workflow is that gate. QuicBaaS posts the
@@ -27,10 +40,11 @@
 # workflow merges IMMEDIATELY, only at a moment it has just checked everything:
 #   - CI finishing (workflow_run on the CI or Docs workflow);
 #   - a PR event (opened, push, label change, ready) once CI is already green;
-#   - a review being submitted or dismissed.
-# The label is read first on every run (cancelling any merge a legacy workflow
-# armed) and again immediately before the merge call. Squash, then delete the
-# head branch; the merge is pinned to the head commit whose checks were read.
+#   - the schedule's sweep, which picks up reviews submitted or dismissed.
+# Every run cancels any merge a legacy workflow armed, then reads the label
+# and the reviews after CI is confirmed green, immediately before the merge
+# call. Squash, then delete the head branch; the merge is
+# pinned to the head commit whose checks were read.
 #
 # FAIL CLOSED: nothing merges unless the base branch REQUIRES at least one
 # status check and every required context is `success` on the PR head.
@@ -45,19 +59,21 @@
 name: Auto Merge
 
 on:
-  pull_request:
+  # Never `pull_request` or `pull_request_review`: see BASE-DEFINED ONLY. This
+  # job never checks out the PR.
+  pull_request_target:
     types: [opened, reopened, synchronize, ready_for_review, labeled, unlabeled]
-  pull_request_review:
-    types: [submitted, edited, dismissed]
   workflow_run:
     # The repository's CI workflow; the documentation repos call theirs Docs.
     workflows: [CI, Docs]
     types: [completed]
+  schedule:
+    - cron: '*/10 * * * *'
 
 # One decision per PR (or per head commit for a CI completion) at a time; the
 # newest event wins.
 concurrency:
-  group: automerge-${{ github.event.pull_request.number || github.event.workflow_run.head_sha }}
+  group: automerge-${{ github.event.pull_request.number || github.event.workflow_run.head_sha || 'sweep' }}
   cancel-in-progress: true
 
 jobs:
@@ -72,6 +88,7 @@ jobs:
         env:
           BOT: ${{ secrets.AGENT_TOKEN }}
           REPO_API: ${{ github.server_url }}/api/v1/repos/${{ github.repository }}
+          EVENT: ${{ github.event_name }}
           PR_FROM_EVENT: ${{ github.event.pull_request.number }}
           RUN_SHA: ${{ github.event.workflow_run.head_sha }}
           # The reviewers whose approval releases a `code-review` PR (owner,
@@ -90,135 +107,168 @@ jobs:
               -H "Authorization: token $BOT" -H 'Content-Type: application/json' \
               ${3:+-d "$3"} "$REPO_API$2"
           }
-          has_label() { # -> 0 when the PR carries code-review
+          paged() { # path out -> every page of a JSON-array endpoint, concatenated
+            echo '[]' > "$2"
+            local page=1 sep='?'
+            case $1 in *\?*) sep='&' ;; esac
+            while :; do
+              code=$(api GET "$1${sep}limit=50&page=$page")
+              [ "$code" = "200" ] || { echo "::error::cannot read $1 (HTTP $code)" >&2; exit 1; }
+              [ "$(jq 'length' /tmp/api.json)" -gt 0 ] || break
+              jq -s '.[0] + .[1]' "$2" /tmp/api.json > "$2.next"
+              mv "$2.next" "$2"
+              page=$((page + 1))
+            done
+          }
+          has_label() { # -> 0 when the PR carries code-review (one response, not paged)
             code=$(api GET "/issues/$pr/labels")
             [ "$code" = "200" ] || { echo "::error::cannot read the labels of PR $pr (HTTP $code)"; exit 1; }
             jq -e 'any(.[]; .name == "code-review")' /tmp/api.json >/dev/null
           }
+          review_verdict() { # -> "approved <logins>" | changes | waiting, for $head
+            paged "/pulls/$pr/reviews" /tmp/reviews.json
+            # Only reviews ON THIS HEAD count, not stale and not dismissed; each
+            # reviewer's latest decisive review is theirs. Any REQUEST_CHANGES
+            # blocks; one APPROVED from APPROVERS, not the author, releases.
+            jq -r --arg h "$head" --arg author "$author" --argjson ok "$APPROVERS" '
+                [ .[] | select(.commit_id == $h and (.stale | not) and (.dismissed | not)
+                               and (.state == "APPROVED" or .state == "REQUEST_CHANGES")) ]
+                | group_by(.user.login) | map(max_by(.id))
+                | [ .[] | select(.state == "APPROVED" and (.user.login | ascii_downcase) != $author
+                                 and (.user.login as $u | $ok | index($u))) | .user.login ] as $by
+                | ($by | join(", ")) as $names
+                | if any(.[]; .state == "REQUEST_CHANGES") then "changes"
+                  elif ($by | length) > 0 then "approved \($names)"
+                  else "waiting" end' /tmp/reviews.json
+          }
 
-          # Which PR. A CI completion names a commit; find the open PR whose
-          # head it is, on any page (none: a push to main -- nothing to do).
-          pr="${PR_FROM_EVENT:-}"
-          page=1
-          while [ -z "$pr" ]; do
-            code=$(api GET "/pulls?state=open&limit=50&page=$page")
-            [ "$code" = "200" ] || { echo "::error::cannot list open PRs (HTTP $code)"; exit 1; }
-            [ "$(jq 'length' /tmp/api.json)" -gt 0 ] || { echo "no open PR has head $RUN_SHA; nothing to merge"; exit 0; }
-            pr=$(jq -r --arg s "$RUN_SHA" '[.[] | select(.head.sha == $s)][0].number // empty' /tmp/api.json)
-            page=$((page + 1))
-          done
+          # One PR's decision. Runs in a subshell: `exit 0` is "not now",
+          # non-zero is an error for that PR.
+          decide() {
+            pr=$1
+            code=$(api GET "/pulls/$pr")
+            [ "$code" = "200" ] || { echo "::error::cannot read PR $pr (HTTP $code)"; exit 1; }
+            cp /tmp/api.json /tmp/pr.json
+            [ "$(jq -r '.state' /tmp/pr.json)" = "open" ] || { echo "PR $pr is not open"; exit 0; }
+            [ "$(jq -r '.draft' /tmp/pr.json)" != "true" ] || { echo "PR $pr is a draft; not merging"; exit 0; }
+            head=$(jq -r '.head.sha' /tmp/pr.json)
+            base=$(jq -r '.base.ref' /tmp/pr.json)
+            author=$(jq -r '.user.login | ascii_downcase' /tmp/pr.json)
 
-          code=$(api GET "/pulls/$pr")
-          [ "$code" = "200" ] || { echo "::error::cannot read PR $pr (HTTP $code)"; exit 1; }
-          cp /tmp/api.json /tmp/pr.json
-          [ "$(jq -r '.state' /tmp/pr.json)" = "open" ] || { echo "PR $pr is not open"; exit 0; }
-          [ "$(jq -r '.draft' /tmp/pr.json)" != "true" ] || { echo "PR $pr is a draft; not merging"; exit 0; }
-          head=$(jq -r '.head.sha' /tmp/pr.json)
-          base=$(jq -r '.base.ref' /tmp/pr.json)
+            # Required checks on the base branch -- fail closed without one.
+            code=$(api GET "/branch_protections/$base")
+            if [ "$code" != "200" ] || ! jq -e '.enable_status_check == true and ((.status_check_contexts // []) | length > 0)' /tmp/api.json >/dev/null; then
+              echo "::error::$base requires no status checks, so nothing would wait for CI. Not merging."
+              exit 1
+            fi
+            jq -c '.status_check_contexts' /tmp/api.json > /tmp/required.json
 
-          # Required checks on the base branch -- fail closed without one.
-          code=$(api GET "/branch_protections/$base")
-          if [ "$code" != "200" ] || ! jq -e '.enable_status_check == true and ((.status_check_contexts // []) | length > 0)' /tmp/api.json >/dev/null; then
-            echo "::error::$base requires no status checks, so nothing would wait for CI. Not merging."
-            exit 1
-          fi
-          jq -c '.status_check_contexts' /tmp/api.json > /tmp/required.json
-
-          # The label first, on every run. A merge armed by the pre-2026-10-01
-          # workflow (or a legacy copy still on an old PR head) must not
-          # outlive it: 204 cancelled one, 404 there was none.
-          held=0
-          if has_label; then
-            held=1
+            # A merge armed by a legacy workflow (or a legacy copy still on an
+            # old PR head) must not outlive it: 204 cancelled one, 404 there
+            # was none.
             code=$(api DELETE "/pulls/$pr/merge")
             case "$code" in
               204) echo "cancelled a merge armed earlier by a legacy workflow" ;;
               404) ;;
-              *)   echo "::error::PR $pr carries code-review but an armed merge could not be cancelled (HTTP $code): $(cat /tmp/api.json)"; exit 1 ;;
+              *)   echo "::error::an armed merge on PR $pr could not be cancelled (HTTP $code): $(cat /tmp/api.json)"; exit 1 ;;
             esac
-          fi
 
-          # Every required context green on the PR head? The combined status
-          # carries the LATEST status per context; page it to total_count.
-          echo '[]' > /tmp/latest.json
-          page=1
-          while :; do
-            code=$(api GET "/commits/$head/status?limit=50&page=$page")
-            [ "$code" = "200" ] || { echo "::error::cannot read the status of $head (HTTP $code)"; exit 1; }
-            jq -s '.[0] + (.[1].statuses // [])' /tmp/latest.json /tmp/api.json > /tmp/latest.next
-            mv /tmp/latest.next /tmp/latest.json
-            total=$(jq -r '.total_count // 0' /tmp/api.json)
-            got=$(jq 'length' /tmp/latest.json)
-            { [ "$(jq '.statuses // [] | length' /tmp/api.json)" -gt 0 ] && [ "$got" -lt "$total" ]; } || break
-            page=$((page + 1))
-          done
-          if ! jq -e --slurpfile req /tmp/required.json '
-                . as $latest | $req[0] | all(. as $c | any($latest[]; .context == $c and .status == "success"))
-              ' /tmp/latest.json >/dev/null; then
-            echo "CI is not green on $head yet; CI finishing will run this again."
-            exit 0
-          fi
-
-          # A `code-review` PR also needs an approval. Only reviews ON THIS HEAD
-          # count, not stale and not dismissed; each reviewer's latest decisive
-          # review (APPROVED or REQUEST_CHANGES) is theirs. Any REQUEST_CHANGES
-          # blocks; one APPROVED from APPROVERS releases.
-          if [ "$held" = "1" ]; then
-            echo '[]' > /tmp/reviews.json
+            # Every required context green on the PR head? The combined status
+            # carries the LATEST status per context; page it to total_count.
+            echo '[]' > /tmp/latest.json
             page=1
             while :; do
-              code=$(api GET "/pulls/$pr/reviews?limit=50&page=$page")
-              [ "$code" = "200" ] || { echo "::error::cannot read the reviews of PR $pr (HTTP $code)"; exit 1; }
-              [ "$(jq 'length' /tmp/api.json)" -gt 0 ] || break
-              jq -s '.[0] + .[1]' /tmp/reviews.json /tmp/api.json > /tmp/reviews.next
-              mv /tmp/reviews.next /tmp/reviews.json
+              code=$(api GET "/commits/$head/status?limit=50&page=$page")
+              [ "$code" = "200" ] || { echo "::error::cannot read the status of $head (HTTP $code)"; exit 1; }
+              jq -s '.[0] + (.[1].statuses // [])' /tmp/latest.json /tmp/api.json > /tmp/latest.next
+              mv /tmp/latest.next /tmp/latest.json
+              total=$(jq -r '.total_count // 0' /tmp/api.json)
+              got=$(jq 'length' /tmp/latest.json)
+              { [ "$(jq '.statuses // [] | length' /tmp/api.json)" -gt 0 ] && [ "$got" -lt "$total" ]; } || break
               page=$((page + 1))
             done
-            verdict=$(jq -r --arg h "$head" --argjson ok "$APPROVERS" '
-                [ .[] | select(.commit_id == $h and (.stale | not) and (.dismissed | not)
-                               and (.state == "APPROVED" or .state == "REQUEST_CHANGES")) ]
-                | group_by(.user.login) | map(max_by(.id)) as $latest
-                | if any($latest[]; .state == "REQUEST_CHANGES") then "changes"
-                  elif any($latest[]; .state == "APPROVED" and (.user.login as $u | $ok | index($u))) then "approved"
-                  else "waiting" end' /tmp/reviews.json)
-            case "$verdict" in
-              approved) echo "code-review: approved on $head by $(jq -r --arg h "$head" --argjson ok "$APPROVERS" '[.[] | select(.commit_id == $h and .state == "APPROVED" and (.stale | not) and (.dismissed | not) and (.user.login as $u | $ok | index($u))) | .user.login] | unique | join(", ")' /tmp/reviews.json)" ;;
-              changes)  echo "code-review: changes requested on $head; not merging."; exit 0 ;;
-              *)        echo "code-review: CI is green; waiting for an approval from one of $(jq -r 'join(", ")' <<<"$APPROVERS") on $head."; exit 0 ;;
+            if ! jq -e --slurpfile req /tmp/required.json '
+                  . as $latest | $req[0] | all(. as $c | any($latest[]; .context == $c and .status == "success"))
+                ' /tmp/latest.json >/dev/null; then
+              echo "CI is not green on $head yet; CI finishing will run this again."
+              exit 0
+            fi
+
+            # Read now, after CI, so neither the label nor the reviews can
+            # change between the check and the merge call unseen.
+            held=0
+            if has_label; then
+              held=1
+              verdict=$(review_verdict)
+              case "$verdict" in
+                approved*) echo "code-review: approved on $head by ${verdict#approved }" ;;
+                changes)   echo "code-review: changes requested on $head; not merging."; exit 0 ;;
+                *)         echo "code-review: CI is green; waiting for an approval from one of $(jq -r 'join(", ")' <<<"$APPROVERS") other than $author on $head."; exit 0 ;;
+              esac
+            fi
+
+            # Merge now: squash, delete the head branch, and only if the head
+            # is still the commit whose checks (and approval) were just read.
+            body=$(jq -nc --arg h "$head" '{Do: "squash", delete_branch_after_merge: true, head_commit_id: $h}')
+            code=$(api POST "/pulls/$pr/merge" "$body")
+            case "$code" in
+              200|201|204) echo "merged PR $pr ($head) into $base; branch deleted" ;;
+              *)
+                # A PR must carry the latest main (owner, 2026-09-24:
+                # block_on_outdated_branch), so every merge to main leaves the
+                # other open PRs behind. Bring main in the way that rule
+                # prescribes -- a merge, never a rebase -- through Gitea's
+                # update-branch call; CI re-runs on the new head and its
+                # completion runs this again. A conflict needs a human/agent.
+                if [ "$code" = "405" ] && grep -q 'behind the base branch' /tmp/api.json; then
+                  code=$(api POST "/pulls/$pr/update?style=merge")
+                  case "$code" in
+                    200)
+                      note=""
+                      [ "$held" = "1" ] && note=" (a code-review PR needs its approval again on the new head)"
+                      echo "PR $pr was behind $base: merged $base into it; CI re-runs on the new head and merges it when green$note." ;;
+                    *)   echo "::error::PR $pr is behind $base and $base could not be merged into it (HTTP $code): $(cat /tmp/api.json) -- merge $base into the branch by hand."; exit 1 ;;
+                  esac
+                  exit 0
+                fi
+                echo "::error::PR $pr is ready but did not merge (HTTP $code): $(cat /tmp/api.json)"; exit 1 ;;
             esac
-          fi
+          }
 
-          # Last look at the label, one call before the merge: a label added
-          # while the checks were read means the approval rule applies, and the
-          # labeled event re-runs this with it.
-          if [ "$held" = "0" ] && has_label; then
-            echo "code-review label added just now; its own run decides."
-            exit 0
-          fi
-
-          # Merge now: squash, delete the head branch, and only if the head is
-          # still the commit whose checks (and approval) were just read.
-          body=$(jq -nc --arg h "$head" '{Do: "squash", delete_branch_after_merge: true, head_commit_id: $h}')
-          code=$(api POST "/pulls/$pr/merge" "$body")
-          case "$code" in
-            200|201|204) echo "merged PR $pr ($head) into $base; branch deleted" ;;
-            *)
-              # A PR must carry the latest main (owner, 2026-09-24:
-              # block_on_outdated_branch), so every merge to main leaves the
-              # other open PRs behind. Bring main in the way that rule
-              # prescribes -- a merge, never a rebase -- through Gitea's
-              # update-branch call; CI re-runs on the new head and its
-              # completion runs this again. A conflict needs a human/agent.
-              if [ "$code" = "405" ] && grep -q 'behind the base branch' /tmp/api.json; then
-                code=$(api POST "/pulls/$pr/update?style=merge")
-                case "$code" in
-                  200)
-                    note=""
-                    [ "$held" = "1" ] && note=" (a code-review PR needs its approval again on the new head)"
-                    echo "PR $pr was behind $base: merged $base into it; CI re-runs on the new head and merges it when green$note." ;;
-                  *)   echo "::error::PR $pr is behind $base and $base could not be merged into it (HTTP $code): $(cat /tmp/api.json) -- merge $base into the branch by hand."; exit 1 ;;
-                esac
-                exit 0
-              fi
-              echo "::error::PR $pr is ready but did not merge (HTTP $code): $(cat /tmp/api.json)"; exit 1 ;;
+          # Which PRs. A PR event names one; a CI completion names a commit
+          # (the open PR whose head it is, on any page; none: a push to main);
+          # the schedule sweeps every open PR.
+          prs=""
+          case "$EVENT" in
+            pull_request_target) prs=$PR_FROM_EVENT ;;
+            workflow_run|schedule)
+              page=1
+              while :; do
+                code=$(api GET "/pulls?state=open&limit=50&page=$page")
+                [ "$code" = "200" ] || { echo "::error::cannot list open PRs (HTTP $code)"; exit 1; }
+                [ "$(jq 'length' /tmp/api.json)" -gt 0 ] || break
+                if [ "$EVENT" = "schedule" ]; then
+                  prs="$prs $(jq -r '[.[].number] | join(" ")' /tmp/api.json)"
+                else
+                  prs=$(jq -r --arg s "$RUN_SHA" '[.[] | select(.head.sha == $s)][0].number // empty' /tmp/api.json)
+                  [ -z "$prs" ] || break
+                fi
+                page=$((page + 1))
+              done ;;
+            *) echo "::error::unexpected event $EVENT"; exit 1 ;;
           esac
+          [ -n "${prs// /}" ] || { echo "no open PR to decide; nothing to merge"; exit 0; }
+
+          # Not `( decide ) || ...`: bash ignores errexit inside a subshell
+          # run in a condition.
+          failed=0
+          for n in $prs; do
+            echo "::group::PR $n"
+            set +e
+            ( set -e; decide "$n" )
+            rc=$?
+            set -e
+            [ "$rc" = "0" ] || failed=1
+            echo "::endgroup::"
+          done
+          exit "$failed"
