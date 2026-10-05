@@ -6,8 +6,6 @@
 // This file is part of go-enclave. Use of this source code is governed by the
 // MIT license that can be found in the LICENSE file.
 
-//go:build linux
-
 package enclave
 
 import (
@@ -29,9 +27,7 @@ const (
 	sealKeyRefused = "NewSealed reported a typed error when its keys could not be locked"
 
 	// sealOpenRefused is logged once the child has seen Open refuse with a
-	// typed error because a locked destination could not be allocated. This
-	// is the half the original issue names: the round trip must fail as an
-	// error, not as an abort.
+	// typed error because a locked destination could not be allocated.
 	sealOpenRefused = "Open reported a typed error when the destination could not be locked"
 
 	// sealSurvivedRefusal is logged once the child has confirmed the sealed
@@ -40,19 +36,10 @@ const (
 	sealSurvivedRefusal = "the sealed value survived the refusals and opened once the ceiling lifted"
 )
 
-// TestSealedEnclave_LockedMemoryExhausted is the evidence #15 asked for and
-// #22 inherits: a sealed round trip under a deliberately low RLIMIT_MEMLOCK
-// reports ErrLockedMemoryUnavailable rather than aborting the process.
-//
-// Sealing needs locked memory in more places under the #22 envelope than it
-// did before — the hierarchy's root and KEK at first seal, a transient DEK
-// enclave per operation, and the plaintext destination per Open — and all of
-// them are covered by the same contract: the kernel refusing pages is a typed
-// error, never an abort.
-//
-// The last part is the one that matters most to a consumer holding a
-// credential: the sealed value must SURVIVE a failed Open intact, so a
-// transient ceiling is a retryable condition and not a lost credential.
+// TestSealedEnclave_LockedMemoryExhausted pins that a sealed round trip under
+// a low RLIMIT_MEMLOCK reports ErrLockedMemoryUnavailable rather than aborting,
+// wherever locked memory is needed (root, KEK, transient DEK, destination),
+// and that the sealed value survives a failed Open intact.
 //
 // It runs in a subprocess because the fault is injected process-wide.
 func TestSealedEnclave_LockedMemoryExhausted(t *testing.T) {
@@ -79,9 +66,8 @@ func sealLimitChild(t *testing.T) {
 
 	setCeiling, original := injectMemlockCeiling(t)
 
-	// Zero locked bytes allowed, so no key enclave — not the provider root,
-	// not the hierarchy, not a DEK — can be created at all. This runs FIRST,
-	// before anything has caused any of them to exist.
+	// Zero locked bytes allowed, so no key enclave can be created. This runs
+	// first, before any of them exists.
 	setCeiling(0)
 
 	s, err := NewSealed(t.Context(), append([]byte(nil), material...))
@@ -95,9 +81,8 @@ func sealLimitChild(t *testing.T) {
 	}
 	t.Log(sealKeyRefused)
 
-	// Lift the ceiling far enough to seal, then seal for real. This also
-	// exercises the retry-not-memoize contract on the hierarchy: the failed
-	// first seal must not have latched the failure.
+	// Lift the ceiling and seal for real; the failed first seal must not have
+	// latched the failure.
 	setCeiling(original.Cur)
 	s, err = NewSealed(t.Context(), append([]byte(nil), material...))
 	if err != nil {
@@ -105,9 +90,8 @@ func sealLimitChild(t *testing.T) {
 			"its failure)", err)
 	}
 
-	// Now drop it again. The hierarchy's keys are already locked and stay
-	// locked — lowering the soft limit does not unlock existing pages — so
-	// what fails is Open's attempt to allocate fresh pages for the DEK and
+	// Drop it again. The hierarchy's pages stay locked (lowering the soft limit
+	// does not unlock them), so what fails is Open's allocation of the DEK and
 	// the destination.
 	setCeiling(uint64(os.Getpagesize()))
 
@@ -118,9 +102,8 @@ func sealLimitChild(t *testing.T) {
 			openErr = oerr
 			break
 		}
-		// Deliberately NOT destroyed: each surviving open holds a locked
-		// page, which is how the ceiling is reached if the first attempts
-		// squeeze under it.
+		// Deliberately not destroyed: each surviving open holds a locked page,
+		// so the ceiling is reached even if the first attempts squeeze under it.
 		_ = e
 	}
 	if openErr == nil {
@@ -132,8 +115,7 @@ func sealLimitChild(t *testing.T) {
 	}
 	t.Log(sealOpenRefused)
 
-	// The refusals must have cost the sealed value nothing. This is what
-	// makes a transient ceiling retryable rather than a lost credential.
+	// The refusals must have cost the sealed value nothing.
 	if !s.IsAlive() {
 		t.Fatal("the sealed value was destroyed by a failed Open")
 	}
@@ -149,19 +131,10 @@ func sealLimitChild(t *testing.T) {
 	t.Log(sealSurvivedRefusal)
 }
 
-// TestSealedEnclave_OpenedPlaintextIsLocked closes the loop on the claim that
-// Open decrypts into locked memory and nowhere else.
-//
-// The round-trip tests prove the plaintext ends up in the enclave, and the
-// production check in openWithKeyInto proves the AEAD wrote it there in place
-// rather than allocating. What neither shows is that those pages are
-// genuinely mlock'd — so this asks the kernel, using VmLck as the yardstick
-// rather than anything this package computes.
-//
-// The measurement is taken across a completed Open, which also pins a #22
-// property in passing: the transient DEK enclave every Open creates is
-// destroyed before Open returns, so the steady-state cost of an open value is
-// exactly the plaintext's page, not the DEK's too.
+// TestSealedEnclave_OpenedPlaintextIsLocked pins, using the kernel's VmLck,
+// that Open's destination is genuinely mlock'd, and that the transient DEK is
+// released before Open returns, so an open value costs exactly the
+// plaintext's page.
 func TestSealedEnclave_OpenedPlaintextIsLocked(t *testing.T) {
 	freshProcessSealer(t)
 
@@ -206,31 +179,14 @@ func TestSealedEnclave_OpenedPlaintextIsLocked(t *testing.T) {
 	}
 }
 
-// TestSealedEnclave_NoPlaintextInProcessMemory is the residency claim taken
-// past the envelope itself: no copy of the material survives anywhere in the
-// process's memory once nothing is open.
+// TestSealedEnclave_NoPlaintextInProcessMemory pins that no copy of the
+// material survives anywhere in process memory once nothing is open.
 //
-// # The first version of this test was VACUOUS, and the way it failed is the
-// # reason it is written like this now
-//
-// It skipped every NAMED mapping to avoid matching the test binary's own
-// rodata. But the Go runtime NAMES its heap: `[anon: Go: heap]`. Measured,
-// that left 1 unnamed-anonymous mapping swept and 30 kernel-named ones
-// skipped — so the sweep read the locked enclave and essentially nothing
-// else. A mutant retaining the plaintext on the heap forever survived it
-// (reviewer-enclave-9, phase 1 on PR #16).
-//
-// The non-vacuity control did not save it, and that is the instructive part:
-// the control proved the needle was findable SOMEWHERE, and it was — in the
-// locked enclave. It never proved the sweep could see the place a leak would
-// actually be. A control has to exercise the path the assertion depends on,
-// not merely return the answer the assertion wants.
-//
-// So: file-backed mappings are excluded (the binary's rodata), every
-// anonymous mapping is swept whether the kernel named it or not, the needle
-// is generated into locked memory and never exists as a heap value, and the
-// comparison runs INSIDE a borrow so the test cannot match a copy of its own
-// making.
+// Every anonymous mapping is swept, named or not (the Go runtime names its heap
+// "[anon: Go: heap]"); file-backed mappings are excluded. The needle is
+// generated into locked memory and compared inside a borrow, so the test never
+// matches a copy of its own making. The control must find a match outside the
+// needle's own mapping, proving the sweep can see where a leak would be.
 func TestSealedEnclave_NoPlaintextInProcessMemory(t *testing.T) {
 	freshProcessSealer(t)
 	// The needle is generated straight into locked memory. A []byte literal
@@ -248,11 +204,9 @@ func TestSealedEnclave_NoPlaintextInProcessMemory(t *testing.T) {
 		t.Fatalf("generating the needle: %v", err)
 	}
 
-	// NewSealed takes ownership of its input and wipes it, so the input is
-	// handed over from a LOCKED transfer enclave rather than a heap copy:
-	// the plaintext never exists on the ordinary heap, and the wipe NewSealed
-	// performs lands in locked pages. That wipe is part of what this test
-	// checks — if it did not happen, the sweep finds the remains.
+	// The input is handed over from a locked transfer enclave, so the plaintext
+	// never exists on the heap and the wipe NewSealed performs is part of what
+	// the sweep checks.
 	s := sealFromEnclave(t, needleEnclave)
 	defer s.Destroy()
 
@@ -267,10 +221,8 @@ func TestSealedEnclave_NoPlaintextInProcessMemory(t *testing.T) {
 		t.Fatalf("needle address: %v", err)
 	}
 
-	// Control FIRST, and a real one: with an enclave open there must be a
-	// match OUTSIDE the needle's own mapping — the opened plaintext. That
-	// proves the sweep can see a second place, which is exactly what the old
-	// version never established.
+	// Control first: with an enclave open there must be a match outside the
+	// needle's own mapping, the opened plaintext.
 	open, err := s.Open(t.Context())
 	if err != nil {
 		t.Fatalf("Open: %v", err)
@@ -288,8 +240,7 @@ func TestSealedEnclave_NoPlaintextInProcessMemory(t *testing.T) {
 	}
 	open.Destroy()
 
-	// The assertion: nothing open, so the only match may be the needle
-	// itself.
+	// Nothing is open, so the only match may be the needle itself.
 	closed, err := findNeedle(needleEnclave)
 	if err != nil {
 		t.Fatalf("cannot sweep process memory: %v", err)
@@ -316,19 +267,10 @@ func findNeedle(probe *MemoryEnclave) ([]string, error) {
 }
 
 // TestSealedEnclave_FailedOpenLeaksNoLockedMemory pins the cleanup on Open's
-// failure path (reviewer-enclave-9, phase 1 on PR #16, mutant SM8 — inherited
-// here with a second allocation to cover).
-//
-// Open allocates its DEK enclave and its destination BEFORE it can know
-// whether the envelope authenticates, so every failed Open has locked pages
-// to give back. Dropping either Destroy leaks them permanently: a
-// MemoryEnclave has no finalizer, so nothing reclaims it, and a caller
-// retrying a failing Open in a loop — which is what a service does when a
-// credential looks corrupt — walks straight into RLIMIT_MEMLOCK and takes
-// every other allocation in the process down with it.
-//
-// The yardstick is VmLck, so it measures what the kernel charged rather than
-// what this package believes it released.
+// failure path. Open allocates its DEK and destination before it knows whether
+// the envelope authenticates, and a MemoryEnclave has no finalizer, so a
+// dropped Destroy would leak locked pages on every retried open. VmLck is the
+// yardstick, so it measures what the kernel charged.
 func TestSealedEnclave_FailedOpenLeaksNoLockedMemory(t *testing.T) {
 	freshProcessSealer(t)
 
@@ -338,9 +280,8 @@ func TestSealedEnclave_FailedOpenLeaksNoLockedMemory(t *testing.T) {
 	}
 	defer s.Destroy()
 
-	// Prove the measurement can see a page at all before trusting it to show
-	// none: a SUCCESSFUL open must move VmLck. Without this the assertion
-	// below passes on any host where mlock is not accounted.
+	// A successful open must move VmLck first; otherwise the assertion below
+	// passes on any host where mlock is not accounted.
 	base, err := vmLckBytes()
 	if err != nil {
 		t.Fatalf("VmLck: %v", err)
@@ -394,26 +335,14 @@ func TestSealedEnclave_FailedOpenLeaksNoLockedMemory(t *testing.T) {
 }
 
 // TestSealedEnclave_SizeMismatchDoesNotDecryptOntoTheHeap is the residency
-// half of TestSealedEnclave_SizeMismatchIsRejected, and it is the half that
-// matters.
-//
-// Open sizes its locked destination from the recorded plaintext length, and
-// the destination's capacity is EXACT. So a recorded length SMALLER than the
-// real plaintext would make the AEAD's append reallocate, and crypto/cipher
-// would write the whole opened plaintext into an ordinary heap buffer. Open
-// would then return an error and the caller would see a clean refusal, while
-// the material it was refusing to hand over sat in unlocked, swappable,
-// dumpable memory.
-//
-// Returning the right error is therefore not the property to test. The
-// property is that the plaintext never exists outside locked memory, which is
-// what this type is for, and only a sweep can show it. (The pre-#22 code had
-// exactly this defect before the length check moved ahead of the decryption;
-// the sweep below is what caught it.)
+// half of TestSealedEnclave_SizeMismatchIsRejected. A recorded length smaller
+// than the real plaintext would make the AEAD's append reallocate and write
+// the plaintext to the heap while Open still returned an error. Only a memory
+// sweep can show that it does not.
 func TestSealedEnclave_SizeMismatchDoesNotDecryptOntoTheHeap(t *testing.T) {
 	freshProcessSealer(t)
-	// Generated straight into locked memory: a literal would put the test's
-	// own constant on the heap and the sweep would match it every run.
+	// Generated into locked memory: a literal would put the test's own constant
+	// on the heap.
 	needleEnclave, err := NewMemoryEnclaveSized(64)
 	if err != nil {
 		t.Fatalf("NewMemoryEnclaveSized: %v", err)
@@ -457,10 +386,8 @@ func TestSealedEnclave_SizeMismatchDoesNotDecryptOntoTheHeap(t *testing.T) {
 	}
 	open.Destroy()
 
-	// Now the corruption: the recorded length is one byte SHORT of the real
-	// plaintext, which is the direction that forces the reallocation. A
-	// longer recorded length makes the destination too big, which is refused
-	// without putting anything anywhere.
+	// The recorded length is one byte short, the direction that would force the
+	// reallocation; a longer one is refused without writing anything.
 	s.mu.Lock()
 	s.size--
 	s.mu.Unlock()
@@ -493,10 +420,9 @@ func TestSealedEnclave_SizeMismatchDoesNotDecryptOntoTheHeap(t *testing.T) {
 	}
 }
 
-// sealFromEnclave seals a copy of src's material without the plaintext ever
-// touching the ordinary heap: the copy is made into a locked transfer enclave
-// and NewSealed is called on that borrow, so the input NewSealed takes
-// ownership of — and wipes — is locked memory (security-review §6).
+// sealFromEnclave seals a copy of src's material without the plaintext
+// touching the ordinary heap: NewSealed is called on a borrow of a locked
+// transfer enclave, so the input it wipes is locked memory.
 func sealFromEnclave(t *testing.T, src *MemoryEnclave) *SealedEnclave {
 	t.Helper()
 	transfer, err := NewMemoryEnclaveSized(src.Size())
@@ -514,10 +440,8 @@ func sealFromEnclave(t *testing.T, src *MemoryEnclave) *SealedEnclave {
 		if serr != nil {
 			return serr
 		}
-		// NewSealed takes ownership of its input and must wipe it. Checked
-		// HERE, inside the borrow, because the transfer enclave is destroyed
-		// below and its destruction would erase the evidence before any
-		// later memory sweep could see it.
+		// NewSealed must wipe its input. Checked inside the borrow, because
+		// destroying the transfer enclave below would erase the evidence.
 		for _, c := range dst {
 			if c != 0 {
 				return errors.New("NewSealed left its input unwiped")

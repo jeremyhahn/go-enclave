@@ -6,18 +6,14 @@
 // This file is part of go-enclave. Use of this source code is governed by the
 // MIT license that can be found in the LICENSE file.
 
-// Package enclave provides locked, zeroized memory for sensitive material —
-// private keys, credentials, passphrases and tokens.
+// Package enclave provides locked, zeroized memory for sensitive material such
+// as private keys, credentials, passphrases and tokens.
 //
-// [MemoryEnclave] holds plaintext for its whole lifetime on pages this package
-// maps itself: mlock'd so they are kept out of swap, fenced by inaccessible guard
-// pages so an overflow faults, preceded by a random canary so an underflow is
-// detected on release, excluded from core dumps where the kernel allows, and
-// wiped before they go back to the kernel — unless the environment denies the
-// mprotect that makes a frozen enclave writable, in which case the pages are
-// unmapped unwiped and [ErrReleasedWithoutWipe] says so. Every mapping failure is a returned
-// error, and no failure anywhere in the process can touch an enclave it does
-// not own.
+// [MemoryEnclave] holds plaintext on pages the package maps itself: locked out
+// of swap, fenced by guard pages, checked by a canary, excluded from core dumps
+// where the kernel allows, and wiped before release ([ErrReleasedWithoutWipe]
+// reports the rare release that could not wipe). Failures are returned as
+// errors; nothing in the package panics.
 //
 //	e, err := enclave.NewMemoryEnclave(keyPEM) // keyPEM is wiped
 //	if err != nil {
@@ -30,72 +26,24 @@
 //		return err
 //	})
 //
-// Material that is about to be generated should go straight into locked pages
-// with [NewMemoryEnclaveSized], filled inside [MemoryEnclave.WithBytes] and then
-// made read-only with [MemoryEnclave.Freeze]. [MemoryEnclave.Open] returns a
-// slice no lock protects; prefer WithBytes.
-//
-// # Corruption
-//
-// [MemoryEnclave.Destroy] verifies a canary ahead of the material and returns
-// [ErrEnclaveCorrupted] when it does not match, after wiping the material and,
-// unless the kernel refuses, releasing the pages. Nothing in this package
-// panics. The next [WipeAll] reports every such detection again in its
-// [SweepError], so a discarded Destroy error does not lose it.
-//
-// # Budgets
-//
-// RLIMIT_MEMLOCK is one ceiling for the whole process. [Allocator] admits
-// enclaves against a budget in locked bytes ([LockedSize]) and refuses with
-// [ErrBudgetExhausted] before any memory is requested. The binary sizes one
-// budget and installs it with [SetAllocator]; libraries allocate through
-// [ProcessAllocator] and never install or construct their own.
-//
-// # Sealing
+// [Allocator] admits enclaves against a budget of locked bytes and refuses
+// with [ErrBudgetExhausted] before requesting memory. The binary installs one
+// with [SetAllocator]; libraries allocate through [ProcessAllocator].
 //
 // [SealedEnclave] holds material encrypted at rest with AES-256-GCM and
-// decrypts it into a new MemoryEnclave only when [SealedEnclave.Open] is
-// called. The keys are protected by a [Sealer] through the [KeyProtector] or
-// [RootUnsealer] provider seam; go-enclave ships only the pure-software
-// [SoftwareProvider], and TPM, HSM or KMS providers are injected from above with
-// [NewSealer] or [SetSealer]. Every call that can reach a provider takes a
-// [context.Context], and no mutex of a Sealer's is held across a provider call.
-// Plaintext is decrypted only into locked pages, but keys are not: with the
-// software default a reader of this process's memory can recover the sealing
-// keys, and each seal and open leaves AES key schedules on the ordinary heap —
-// the value's DEK in every mode, and in [ModeRootKey] the KEK that opens its
-// whole generation — unwiped, and so reachable through swap or a core dump,
-// unless the build erases them ([KeyScheduleErasure]). Read [Mode] before
-// choosing. [Sealer.Destroy] releases a sealer's keys. Sealing uses only a
-// FIPS 140-3 approved algorithm (AES-256-GCM), and its tests pass in strict mode
-// (GODEBUG=fips140=only, a best-effort testing aid). That is compatibility
-// evidence, not validation: a validated deployment builds with GOFIPS140 set
-// to a certified module snapshot and runs as that module's security policy
-// requires. GOEXPERIMENT=boringcrypto builds cannot seal, by design.
+// decrypts it into a new MemoryEnclave on [SealedEnclave.Open]. A [Sealer]
+// protects the keys through a provider: the built-in [SoftwareProvider], or a
+// TPM, HSM or KMS provider implementing [KeyProtector] or [RootUnsealer] and
+// injected with [NewSealer] or [SetSealer]. Read [Mode] before choosing one.
 //
-// # Shutdown
+// [WipeAll] destroys every enclave the package still holds, including
+// in-process sealing keys. It belongs to the program that owns the process,
+// never to a library.
 //
-// [WipeAll] destroys the enclaves the package still holds — including in-process
-// sealing keys — waiting for in-progress borrows for as long as its context
-// allows; an enclave still borrowed when the context ends is left mapped and
-// counted. It belongs to the program that owns the process, never to a library.
+// The package supports Linux, Android, the BSDs, darwin, iOS, illumos,
+// Solaris, AIX and Windows; core-dump exclusion and other protections vary by
+// platform, and other GOOS values fail to compile. Design, invariants, error semantics, the platform matrix and
+// upgrade notes are in the [documentation index].
 //
-// # Documentation
-//
-// The design, invariants, error semantics, platform support and a guide to
-// upgrading from v0.6 are in the repository's docs directory:
-//
-//   - [Locked-memory enclaves]
-//   - [Budgets and admission control]
-//   - [Sealing and the provider seam]
-//   - [Shutdown sweep]
-//   - [Provider conformance] (package providertest)
-//   - [Upgrading from v0.6]
-//
-// [Locked-memory enclaves]: https://github.com/jeremyhahn/go-enclave/blob/main/docs/locked-memory/user.md
-// [Budgets and admission control]: https://github.com/jeremyhahn/go-enclave/blob/main/docs/locked-memory-budget/user.md
-// [Sealing and the provider seam]: https://github.com/jeremyhahn/go-enclave/blob/main/docs/sealing/user.md
-// [Shutdown sweep]: https://github.com/jeremyhahn/go-enclave/blob/main/docs/shutdown-sweep/user.md
-// [Provider conformance]: https://github.com/jeremyhahn/go-enclave/blob/main/docs/provider-conformance/user.md
-// [Upgrading from v0.6]: https://github.com/jeremyhahn/go-enclave/blob/main/docs/README.md
+// [documentation index]: https://github.com/jeremyhahn/go-enclave/blob/main/docs/README.md
 package enclave

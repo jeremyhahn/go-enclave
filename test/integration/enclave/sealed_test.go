@@ -19,9 +19,8 @@ import (
 	enclave "github.com/jeremyhahn/go-enclave"
 )
 
-// Covers sealed.go: the promise that distinguishes a SealedEnclave from a
-// MemoryEnclave — between opens, the process holds CIPHERTEXT only — measured
-// by sweeping process memory, and OpenWith's admission against a budget.
+// Covers sealed.go: between opens the process holds only ciphertext, measured
+// by sweeping process memory; and OpenWith's admission against a budget.
 
 // TestSealedValueHoldsNoPlaintextBetweenOpens follows one secret through a
 // sealed value's life, in both modes, sweeping every readable mapping at each

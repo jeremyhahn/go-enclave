@@ -24,9 +24,7 @@ import (
 // and a destroyed sealer or provider fails closed.
 
 // TestDestroyedSealersReturnTheirLockedMemory creates, uses and destroys many
-// sealers of each shape and requires VmLck back at its baseline: before
-// Destroy existed every retired sealer kept its keys locked until
-// RLIMIT_MEMLOCK ran out.
+// sealers of each shape and requires VmLck back at its baseline.
 func TestDestroyedSealersReturnTheirLockedMemory(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		ctx := context.Background()

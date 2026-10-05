@@ -14,85 +14,44 @@ import (
 	"sync"
 )
 
-// ErrProviderMessageLimit reports that a [SoftwareProvider] has performed as
-// many Protect operations as its single root key may safely encrypt, and is
-// refusing further ones.
-//
-// It exists because the software provider deliberately has NO rotation
-// machinery: in [ModeRootKey] — its intended mode, and the process default —
-// Protect is never called at all (the Sealer's KEK hierarchy owns rotation,
-// and the root wraps one blob per KEK generation), so rotation here would be
-// dead weight guarding a bound that cannot be approached. In
-// [ModePerOperation] each seal costs a Protect, so a process that runs the
-// software provider per-operation at extreme volume CAN approach the AES-GCM
-// per-key message bound, and the safe answer is a typed refusal rather than a
-// silent nonce-collision risk. A caller that hits this is holding the
-// pure-software provider in the mode built for hardware; the fix is
-// [ModeRootKey], which rotates, or a hardware [KeyProtector], which owns its
-// own bounds.
+// ErrProviderMessageLimit reports that a [SoftwareProvider] in
+// [ModePerOperation] has performed as many Protect operations (2^31) as its
+// single root key may safely encrypt, and refuses further ones. The provider
+// does not rotate; use [ModeRootKey], which does, or a hardware
+// [KeyProtector].
 var ErrProviderMessageLimit = errors.New("enclave: software provider reached its per-key message bound; use ModeRootKey or a hardware provider")
 
-// softwareProtectLimit is the Protect budget of the software provider's one
-// root key: half of crypto/cipher's documented 2^32-message ceiling for a key
-// under NewGCMWithRandomNonce, the same margin [kekMessageLimit] takes and
-// for the same reason — the birthday bound on the random nonce is all that
-// prevents a repeat, and a repeated GCM nonce is a break.
+// softwareProtectLimit is half of crypto/cipher's 2^32-message bound for one
+// key under NewGCMWithRandomNonce, the same margin as kekMessageLimit.
 const softwareProtectLimit = 1 << 31
 
-// SoftwareProvider is the pure-software crypto provider, and the only one
-// go-enclave ships. It satisfies BOTH seam interfaces so that either [Mode]
-// works with no hardware and no configuration:
+// SoftwareProvider is the pure-software provider, and the only one go-enclave
+// ships. It implements [RootUnsealer] (the default for [ModeRootKey]),
+// [KeyProtector] (AES-GCM under the same root, for tests and development of
+// [ModePerOperation]) and [HealthReporter]. Its root is generated into a
+// locked [MemoryEnclave] at first use.
 //
-//   - [RootUnsealer]: UnsealRoot yields a root key generated into a
-//     [MemoryEnclave] at first use. This makes [ModeRootKey] the
-//     out-of-the-box behavior — plain software sealing, hardware nowhere.
-//   - [KeyProtector]: Protect/Unprotect are AES-GCM under that same root,
-//     which makes [ModePerOperation] exercisable without a device. That is
-//     for tests and development shape-parity, not a security posture: with a
-//     software provider the "device" is this process, so per-operation mode
-//     buys none of the boundedness it exists for.
+// Because the root lives in this process, a reader of this process's live
+// memory can recover it, and AES key schedules reach the heap as described on
+// [Mode] and [KeyScheduleErasure]. Plaintext never reaches the heap, and the
+// root is never in a dump or swap.
 //
-// # The honest limitation, in the same breath as the capability
-//
-// The root is generated in this process and lives in a locked, undumpable
-// enclave here — so unlike a hardware provider, an adversary who can read
-// this process's live memory obtains the key that opens everything. Nor are
-// swap and core dumps fully closed: each seal and open leaves AES key
-// schedules on the ordinary heap — the value's DEK, and the KEK (in
-// [ModeRootKey]) or this root (in [ModePerOperation]) that wraps it — unwiped
-// unless the build erases them (see [KeyScheduleErasure] and [withAEAD]).
-// What sealing under this provider DOES buy: plaintext is never on the heap,
-// the root itself is never in a dump or swap, and [SoftwareProvider.Destroy]
-// or a shutdown [WipeAll] destroys the root and with it every sealed value at
-// once. Callers whose threat model includes a live-memory adversary need a
-// hardware provider; that is the entire reason the seam exists.
-//
-// After a shutdown sweep destroys the root, every method fails closed with
+// After a shutdown sweep destroys the root every method fails with
 // [ErrSealerWiped], and after [SoftwareProvider.Destroy] with
-// [ErrSealerDestroyed] — never a silent fresh root; see [ErrSealerWiped] for
-// why.
+// [ErrSealerDestroyed]; it never generates a fresh root. Every method refuses
+// a context already ended with ctx.Err() before the root is touched or
+// generated; no method blocks beyond a short critical section.
 //
-// Every method honors its context the way the seam requires (see
-// [RootUnsealer]): one that has ended at entry is refused with ctx.Err()
-// before the root is touched — and before one is generated, so a canceled
-// first call costs no locked memory. Nothing in this provider blocks beyond
-// its own short critical section, so there is no mid-call cancellation to
-// observe; the entry check is the whole of what honoring it means here.
-//
-// The zero value is NOT usable; construct with [NewSoftwareProvider]. A
+// The zero value is not usable; construct with [NewSoftwareProvider]. A
 // SoftwareProvider is safe for concurrent use.
 type SoftwareProvider struct {
 	mu sync.Mutex
-	// root is created on first use and retried on failure rather than
-	// memoized: the first attempt can fail at the RLIMIT_MEMLOCK ceiling, and
-	// a ceiling is a condition that lifts. Non-nil-but-dead means a shutdown
-	// sweep destroyed it, which is the one state that must NOT regenerate.
+	// root is created on first use and retried on failure, since a
+	// RLIMIT_MEMLOCK refusal can lift. Non-nil but dead means a sweep
+	// destroyed it, and it must not be regenerated.
 	root *MemoryEnclave
-	// protects counts Protect operations charged to the root, incremented
-	// before each attempt so a failed one still consumes budget —
-	// over-counting refuses slightly early, the safe direction to be wrong
-	// in. UnsealRoot and Unprotect are not counted: the bound is on
-	// encryptions.
+	// protects counts Protect attempts, charged before each so a failed one
+	// still counts; only encryptions count against the bound.
 	protects uint64
 	// destroyed is set by Destroy and never cleared.
 	destroyed bool
@@ -134,13 +93,8 @@ func (p *SoftwareProvider) rootLocked() (*MemoryEnclave, error) {
 
 // Health implements [HealthReporter]: it reports [ErrSealerDestroyed] after
 // Destroy, [ErrSealerWiped] once a shutdown sweep has destroyed this
-// provider's root, and nil otherwise.
-//
-// It uses rootLocked's dead-root predicate but NOT rootLocked itself, because
-// asking whether a value can be opened must not generate a root that did not
-// exist — that would turn a diagnostic into an allocation of locked memory
-// and a call to the CSPRNG. A nil root therefore reports nil: nothing was
-// sealed through this provider, so nothing it holds is unopenable.
+// provider's root, and nil otherwise, including when no root exists yet. It
+// never generates a root.
 func (p *SoftwareProvider) Health() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -154,10 +108,8 @@ func (p *SoftwareProvider) Health() error {
 	return nil
 }
 
-// swept translates an [ErrEnclaveDestroyed] surfacing from a use of the root
-// enclave. Only [WipeAll] can destroy it — this provider never does — so the
-// honest report is [ErrSealerWiped], for the same misattribution reason
-// documented on that error.
+// swept translates [ErrEnclaveDestroyed] from a use of the root into
+// [ErrSealerWiped]: only [WipeAll] can destroy the root.
 func swept(err error) error {
 	if errors.Is(err, ErrEnclaveDestroyed) {
 		return ErrSealerWiped
@@ -189,9 +141,7 @@ func (p *SoftwareProvider) Protect(ctx context.Context, key []byte) ([]byte, err
 	}
 	p.protects++
 
-	// The generation field of the frame is zero: this provider has exactly
-	// one root for its lifetime, which is what the message bound above is
-	// protecting.
+	// The frame's generation field is zero: this provider has one root.
 	header := blobHeader(blobKindProvider, 0)
 	body, err := sealWithKey(root, key, header)
 	if err != nil {
@@ -201,11 +151,10 @@ func (p *SoftwareProvider) Protect(ctx context.Context, key []byte) ([]byte, err
 }
 
 // Unprotect implements [KeyProtector]: it recovers a Protect-produced blob
-// into key, refusing — with [ErrSealedAuthentication], per the contract —
-// anything its own Protect did not produce: tampered, truncated, misframed,
-// or wrapped by a different provider instance. A context that has already
-// ended is refused with ctx.Err() before the blob is examined, so a canceled
-// call writes nothing into key.
+// into key, refusing with [ErrSealedAuthentication] anything its own Protect
+// did not produce: tampered, truncated, misframed, or wrapped by a different
+// provider instance. A context already ended is refused with ctx.Err()
+// before the blob is examined.
 func (p *SoftwareProvider) Unprotect(ctx context.Context, blob, key []byte) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -233,17 +182,12 @@ func (p *SoftwareProvider) Unprotect(ctx context.Context, blob, key []byte) erro
 	return swept(openWithKeyInto(p.root, body, blob[:blobHeaderLen], key))
 }
 
-// UnsealRoot implements [RootUnsealer]: it copies the provider root —
-// generated at first use — into dst, which must be exactly [RootKeyBytes]
-// long; any other length is [ErrInvalidSize], a programming mistake rather
-// than a runtime condition. A context that has already ended is refused with
-// ctx.Err() before the root is generated or copied.
-//
-// The copy means the root then exists in TWO locked enclaves: the provider's
-// and the Sealer's. That is the seam working as designed — the Sealer treats
-// every provider identically and owns the copy it uses — and both copies are
-// registered, so a shutdown sweep destroys both and the fail-closed contract
-// holds from either side.
+// UnsealRoot implements [RootUnsealer]: it copies the provider root,
+// generated at first use, into dst, which must be exactly [RootKeyBytes]
+// long; any other length is [ErrInvalidSize]. A context already ended is
+// refused with ctx.Err() before the root is generated or copied. The root
+// then exists in two locked enclaves, the provider's and the Sealer's, and a
+// shutdown sweep destroys both.
 func (p *SoftwareProvider) UnsealRoot(ctx context.Context, dst []byte) error {
 	if len(dst) != RootKeyBytes {
 		return ErrInvalidSize

@@ -39,20 +39,15 @@ func providerOption(p any, m enclave.Mode) enclave.SealerOption {
 
 // device is a provider a consumer injects through WithKeyProtector or
 // WithRootUnsealer: the shipped SoftwareProvider doing all of the
-// cryptography, behind the seam exactly as a hardware provider would sit. It adds two things a real device has and the
-// software provider does not:
+// cryptography, behind the seam as a hardware provider would sit. It adds two
+// things a real device has:
 //
-//   - it can STALL. A context carrying a stall request makes the call block
-//     until that context ends and then return ctx.Err() — what the seam's
-//     contract requires of a device that is slow or unreachable. This is the
-//     only way to observe, through the public API, that a caller's deadline
-//     actually reaches the provider and that no Sealer lock is held across the
-//     call (#87). The third-party endpoint is the one thing this suite is
-//     allowed to stand in for (testing-guidelines: mock only third-party
-//     endpoints); the cryptography is never faked.
-//   - it COUNTS, so a test can assert how often the Sealer reached it — "the
-//     root is unsealed at most once" is a property of the Sealer, observable
-//     only from the provider's side.
+//   - it can stall. A context carrying a stall request makes the call block
+//     until that context ends and then return ctx.Err(), which shows through
+//     the public API that a caller's deadline reaches the provider and that no
+//     Sealer lock is held across the call. Only the endpoint is stood in for;
+//     the cryptography is never faked.
+//   - it counts, so a test can assert how often the Sealer reached it.
 type device struct {
 	soft *enclave.SoftwareProvider
 
@@ -146,13 +141,11 @@ func (r rootOnly) UnsealRoot(ctx context.Context, dst []byte) error {
 
 // TestSoftwareProviderConformance runs providertest.TestProvider against the
 // shipped SoftwareProvider for both modes it serves, and requires the residue
-// sweep — the check that needs Linux and /proc/self/mem, which is why it is
-// worth running here — to have actually run rather than been noted as skipped.
+// sweep (which needs Linux and /proc/self/mem) to have run rather than been
+// skipped.
 //
-// The control: the same suite, told the provider serves ModeRootKey ONLY, must
-// FAIL, because the provider also satisfies ModePerOperation and the suite's
-// mode-pairing check exists to catch exactly that unclaimed capability. A
-// conformance run that could not fail would be a green light wired to nothing.
+// Control: told the provider serves ModeRootKey only, the suite must fail,
+// because the provider also satisfies ModePerOperation.
 func TestSoftwareProviderConformance(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		ctx := context.Background()

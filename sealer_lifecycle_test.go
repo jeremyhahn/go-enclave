@@ -136,9 +136,9 @@ func TestSealer_DestroyReleasesEverythingAndFailsClosed(t *testing.T) {
 	}
 }
 
-// TestSealer_RepeatedSealersDoNotAccumulateLockedMemory is the leak the
-// missing Destroy caused: every retired sealer kept its root, KEK and
-// provider root registered until RLIMIT_MEMLOCK ran out.
+// TestSealer_RepeatedSealersDoNotAccumulateLockedMemory pins that a destroyed
+// sealer unregisters its root, KEK and provider root, so creating and
+// destroying many sealers does not exhaust RLIMIT_MEMLOCK.
 func TestSealer_RepeatedSealersDoNotAccumulateLockedMemory(t *testing.T) {
 	ctx := t.Context()
 	a, err := NewAllocator(openBudget(1))

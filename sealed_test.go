@@ -34,14 +34,10 @@ import (
 // one.
 var sealedMaterial = []byte("private-key-material-that-must-never-be-resident-between-opens")
 
-// freshProcessSealer makes a test hermetic against the package-level process
-// sealer: whatever earlier tests installed or swept, this test starts with no
-// sealer — its first NewSealed installs a fresh software default — and leaves
-// none behind. Without this the suite is ORDER-DEPENDENT: a WipeAll in any
-// earlier test bricks the shared default (correctly — that is the production
-// contract), and under -shuffle or -count>1 a NewSealed-using test then fails
-// with ErrSealerWiped. Measured: -count=25 failed 24/24 iterations after the
-// first, every failure the sweep-order artifact and none of them the code.
+// freshProcessSealer starts the test with no process sealer and leaves none
+// behind. The process sealer is one-shot and a WipeAll in an earlier test
+// bricks it, so without this a later NewSealed fails with ErrSealerWiped under
+// -shuffle or -count>1.
 func freshProcessSealer(t *testing.T) {
 	t.Helper()
 	resetProcessSealerForTest()
@@ -87,15 +83,9 @@ func TestSealedEnclave_RoundTrip(t *testing.T) {
 	}
 }
 
-// TestSealedEnclave_NoPlaintextAtRest is the property this type exists for,
-// and the one that distinguishes it from MemoryEnclave: between Opens the
-// material is not readable at all.
-//
-// Searching BOTH envelope halves for the plaintext is the whole assertion,
-// and it is a real one — skip the encrypt step and store the plaintext
-// instead, and this finds it immediately. It also checks progressively
-// shorter prefixes, so a partial or truncated leak is caught rather than only
-// a whole-value one.
+// TestSealedEnclave_NoPlaintextAtRest pins that between Opens the material is
+// not readable: neither envelope half contains the plaintext or any long
+// prefix of it.
 func TestSealedEnclave_NoPlaintextAtRest(t *testing.T) {
 	freshProcessSealer(t)
 	src := append([]byte(nil), sealedMaterial...)
@@ -125,14 +115,9 @@ func TestSealedEnclave_NoPlaintextAtRest(t *testing.T) {
 	}
 }
 
-// TestSealedEnclave_SealIsNonDeterministic pins the nonce. Sealing the same
-// material twice must produce different bytes; identical output would mean a
-// fixed or reused nonce, which for GCM is not a weakness but a break — it
-// leaks the XOR of the two plaintexts and destroys the authentication
-// guarantee.
-//
-// A mutant that hands Seal a zeroed nonce passes every other test in this
-// file.
+// TestSealedEnclave_SealIsNonDeterministic pins the nonce: sealing the same
+// material twice must produce different bytes, since a repeated GCM nonce is a
+// break. A zeroed-nonce mutant passes every other test in this file.
 func TestSealedEnclave_SealIsNonDeterministic(t *testing.T) {
 	freshProcessSealer(t)
 	first, err := NewSealed(t.Context(), append([]byte(nil), sealedMaterial...))
@@ -246,10 +231,8 @@ func TestSealedEnclave_TruncationIsRejected(t *testing.T) {
 
 	fullSealed := append([]byte(nil), s.sealed...)
 	for _, n := range []int{0, 1, 11, 12, 13, len(fullSealed) - 1} {
-		// fullSealed[:n:n], not append(nil, ...): appending nothing to a nil
-		// slice yields nil, which Open correctly reports as DESTROYED rather
-		// than as a short value, and the test would then be asserting the
-		// wrong contract at n = 0.
+		// fullSealed[:n:n], not append(nil, ...): at n = 0 the latter is nil, which
+		// Open reports as destroyed rather than short.
 		s.sealed = fullSealed[:n:n]
 		e, err := s.Open(t.Context())
 		if !errors.Is(err, ErrSealedAuthentication) {
@@ -377,9 +360,7 @@ func TestSealedEnclave_Lifecycle(t *testing.T) {
 	if _, err := nilSealed.Open(t.Context()); !errors.Is(err, ErrEnclaveDestroyed) {
 		t.Errorf("Open on nil = %v, want ErrEnclaveDestroyed", err)
 	}
-	// Asserted as a substring rather than the whole literal so the string
-	// does not reach goconst's three-occurrence threshold. The yardstick
-	// stays independent of the code under test either way.
+	// A substring keeps the literal below goconst's threshold.
 	if got := nilSealed.String(); !strings.Contains(got, "destroyed") {
 		t.Errorf("String on nil = %q, want it to report the enclave as destroyed", got)
 	}
@@ -428,13 +409,8 @@ func TestSealedEnclave_Sizes(t *testing.T) {
 			if !holds(e, want) {
 				t.Errorf("round trip failed at %d bytes", n)
 			}
-			// Only search for needles long enough that a chance match is
-			// negligible. A one-byte plaintext is present in 28 bytes of
-			// random nonce and tag with near-certainty, and reporting that as
-			// a leak would be a false positive that trains the reader to
-			// ignore this assertion. The residency property itself is
-			// asserted properly by TestSealedEnclave_NoPlaintextAtRest
-			// against a 62-byte value.
+			// Skip needles short enough to occur by chance in the 28 bytes of nonce
+			// and tag; TestSealedEnclave_NoPlaintextAtRest covers residency.
 			if n >= 8 && bytes.Contains(s.sealed, want) {
 				t.Errorf("plaintext of %d bytes found in the sealed value", n)
 			}
@@ -443,13 +419,9 @@ func TestSealedEnclave_Sizes(t *testing.T) {
 }
 
 // TestSealedEnclave_Concurrent runs Opens, reads and Destroys against one
-// sealed value from many goroutines. Under -race this catches an access that
-// escapes the lock; without it, it still catches an Open that reads a cleared
-// envelope.
-//
-// It also exercises the nested-borrow path under contention: every Open
-// borrows hierarchy keys and, inside those borrows, allocates and borrows
-// further enclaves. That shape deadlocked before v0.3.0-alpha.
+// sealed value from many goroutines. Under -race it catches an access that
+// escapes the lock; without it, an Open that reads a cleared envelope. It also
+// exercises nested borrows under contention.
 func TestSealedEnclave_Concurrent(t *testing.T) {
 	freshProcessSealer(t)
 	const goroutines, iterations = 16, 50
@@ -494,19 +466,9 @@ func TestSealedEnclave_Concurrent(t *testing.T) {
 	}
 }
 
-// TestSealedEnclave_SizeMismatchIsRejected covers the consistency guard
-// between the recorded plaintext length and what the AEAD actually produces.
-//
-// The two are written at different times — size at Seal, the plaintext at
-// Open — so nothing structural keeps them in step, and a mismatch means the
-// destination enclave is the wrong size for the material about to fill it.
-// Left unchecked, a size LARGER than the truth would hand back an enclave
-// whose tail is uninitialised while reporting success, and Size() would lie
-// about what the caller is holding.
-//
-// It is reachable only by corrupting the field directly, which is what this
-// does; in normal use the two cannot diverge. That is the point of a guard on
-// an invariant rather than on an input.
+// TestSealedEnclave_SizeMismatchIsRejected pins the guard between the
+// recorded plaintext length and what the AEAD produces. The two cannot diverge
+// in normal use, so the test corrupts the field directly.
 func TestSealedEnclave_SizeMismatchIsRejected(t *testing.T) {
 	freshProcessSealer(t)
 	for _, delta := range []int{+1, +64, -1} {
@@ -530,27 +492,17 @@ func TestSealedEnclave_SizeMismatchIsRejected(t *testing.T) {
 	}
 }
 
-// TestSealedEnclave_OversizedMaterialIsRefusedNotPanicked covers the bound
-// AES-GCM places on one message: (2^32-2) blocks of 16 bytes, about 64 GiB.
-//
-// crypto/cipher enforces it by PANICKING. That is defensible for a primitive
-// whose caller is expected to know the construction, and wrong for a
-// constructor that documents every other failure as a typed error — a library
-// handed a legal slice of a large length should not take the process down.
-//
-// The check is exercised through sealableLength rather than by allocating 64
-// GiB, which is the reason that helper takes a length instead of a slice.
-// This reads production code's own bound; it is not a fault-injection seam,
-// because the bound has to exist for the guard to work at all.
+// TestSealedEnclave_OversizedMaterialIsRefusedNotPanicked pins that AES-GCM's
+// per-message bound, which crypto/cipher enforces by panicking, arrives as
+// ErrMaterialTooLarge. It passes lengths to sealableLength rather than
+// allocating 64 GiB.
 func TestSealedEnclave_OversizedMaterialIsRefusedNotPanicked(t *testing.T) {
 	if maxSealedPlaintext != (1<<32-2)*16 {
 		t.Fatalf("maxSealedPlaintext = %d, want (2^32-2)*16 = %d: the guard no longer matches the bound "+
 			"crypto/internal/fips140/aes/gcm panics on", maxSealedPlaintext, uint64((1<<32-2)*16))
 	}
 
-	// At the ceiling is legal; one byte past it is not. Lengths only —
-	// nothing of this size is allocated, which is the whole reason the guard
-	// takes a number instead of a slice.
+	// At the ceiling is legal; one byte past it is not.
 	if err := sealableLength(maxSealedPlaintext); err != nil {
 		t.Errorf("sealableLength(the exact ceiling) = %v, want nil: the bound is inclusive", err)
 	}
@@ -564,9 +516,8 @@ func TestSealedEnclave_OversizedMaterialIsRefusedNotPanicked(t *testing.T) {
 		t.Errorf("sealableLength(%d) = %v, want nil", len(sealedMaterial), err)
 	}
 
-	// On a 32-bit platform no slice can reach the ceiling, so NewSealed can
-	// never trip the guard there; the helper is still exercised above, which
-	// is why the check is on a length rather than in the constructor.
+	// On a 32-bit platform no slice can reach the ceiling; the helper is still
+	// covered above.
 	if strconv.IntSize < 64 {
 		t.Logf("int is %d bits: no slice can reach the %d-byte ceiling, so the guard is unreachable "+
 			"through NewSealed here", strconv.IntSize, maxSealedPlaintext)
@@ -613,32 +564,12 @@ func TestSealedEnclave_AADRefusesMismatch(t *testing.T) {
 // away; it is never read.
 var aesCipherSink cipher.Block
 
-// TestSealedEnclave_KeyScheduleReachesTheHeapAsDocumented pins the
-// measurement that [withAEAD]'s threat model rests on, so the documentation
-// is auditable by running the suite rather than by trusting its prose.
-//
-// The claim being pinned is the load-bearing one: no key used through
-// withAEAD stays in locked memory, because crypto/aes.NewCipher expands it
-// into a heap allocation and for AES the FIRST ROUND KEY IS THE MASTER KEY.
-// Everything the documentation concedes — swap exposure, cold-boot exposure,
-// a core dump on a host that refused the RLIMIT_CORE lowering — follows from
-// that one fact, and the honest boundary drawn around sealing is worth
-// nothing if the fact is wrong or silently stops holding.
-//
-// It is a DOCUMENTATION TEST. It fails if the key stops appearing in the
-// schedule, or if NewCipher stops allocating — and a failure means the
-// comment has gone stale and the security claim needs re-measuring, NOT that
-// the package is broken. Failing loudly at that moment is the entire point: a
-// stale threat model reads exactly like a current one.
-//
-// Two forms are accepted because the two code paths store the key
-// differently, and both recover it outright: the hardware path (AES-NI, Armv8
-// crypto extensions), which is also the path taken under
-// GODEBUG=fips140=only, copies the key in byte-exact; the generic path stores
-// it as big-endian uint32 words, which on a little-endian host is the same
-// bytes swapped within each four-byte group. Neither the offset nor the
-// struct layout is asserted — those vary with word size, and the exposure
-// does not.
+// TestSealedEnclave_KeyScheduleReachesTheHeapAsDocumented pins the exposure
+// documented in docs/sealing/engineering.md, "Key-schedule heap exposure":
+// aes.NewCipher allocates on the heap, and its schedule holds the key either
+// byte-exact (hardware path, including fips140=only) or as big-endian uint32
+// words (generic path). Offset and layout are not asserted. A failure means
+// the documentation needs re-measuring, not that the package is broken.
 func TestSealedEnclave_KeyScheduleReachesTheHeapAsDocumented(t *testing.T) {
 	key := make([]byte, dekBytes)
 	for i := range key {
@@ -650,13 +581,10 @@ func TestSealedEnclave_KeyScheduleReachesTheHeapAsDocumented(t *testing.T) {
 		t.Fatalf("aes.NewCipher: %v", err)
 	}
 
-	// A build whose crypto/aes hands back something other than a pointer to
-	// the expanded-schedule struct (a BoringCrypto toolchain, say) is one in
-	// which the documented threat model is UNMEASURED, and that fails rather
-	// than skips (#90): a documentation test that cannot see what it documents
-	// would otherwise report a stale claim as current. Every toolchain this
-	// repository builds with — the standard one, and GOFIPS140 with
-	// fips140=only (make test-fips) — returns the struct.
+	// A crypto/aes that does not return the expanded-schedule struct
+	// (BoringCrypto, say) leaves the documented exposure unmeasured, so this fails
+	// rather than skips. Every toolchain this repository builds with, including
+	// make test-fips, returns the struct.
 	v := reflect.ValueOf(block)
 	if v.Kind() != reflect.Pointer || v.Elem().Kind() != reflect.Struct {
 		t.Fatalf("crypto/aes returned %T, which is not the expanded-schedule struct this measurement reads: "+
@@ -665,9 +593,7 @@ func TestSealedEnclave_KeyScheduleReachesTheHeapAsDocumented(t *testing.T) {
 	}
 	expanded := v.Elem()
 
-	// Read the expanded schedule as raw bytes. Reaching into another
-	// package's internals is exactly what a documentation test of this kind
-	// has to do: the claim is ABOUT those internals.
+	// The claim is about crypto/aes internals, so the test reads them.
 	raw := unsafe.Slice((*byte)(unsafe.Pointer(expanded.UnsafeAddr())), expanded.Type().Size())
 
 	swapped := make([]byte, len(key))
@@ -704,19 +630,10 @@ func TestSealedEnclave_KeyScheduleReachesTheHeapAsDocumented(t *testing.T) {
 	}
 }
 
-// TestSealedEnclave_WipeAllFailsClosed pins the RULED post-sweep contract
-// (#22 §14): a shutdown sweep destroys the process sealer's keys, and from
-// that point the sealer FAILS CLOSED with the DISTINCT ErrSealerWiped — it
-// never silently re-keys, and never reports the lifecycle event as an
-// authentication failure.
-//
-// The distinct error is the load-bearing part. The regeneration mutant —
-// restore the pre-#22 behavior of minting a fresh key on the next seal — made
-// the next NewSealed SUCCEED, so nothing was wrong at the point of the
-// mistake, and only previously sealed values failed, with an error whose
-// documented gloss is "tampered, or sealed under a different key". A
-// lifecycle bug presenting as a security incident is the expensive shape,
-// and this test exists to keep it impossible.
+// TestSealedEnclave_WipeAllFailsClosed pins the post-sweep contract: a
+// shutdown sweep destroys the process sealer's keys, and from then on the
+// sealer fails with the distinct ErrSealerWiped. It never re-keys, which would
+// let new seals succeed while old values failed as ErrSealedAuthentication.
 func TestSealedEnclave_WipeAllFailsClosed(t *testing.T) {
 	freshProcessSealer(t)
 
@@ -741,14 +658,11 @@ func TestSealedEnclave_WipeAllFailsClosed(t *testing.T) {
 		t.Fatalf("the sweep left %d enclave(s) on the ledger; this test needs a clean sweep to attribute what follows", remaining)
 	}
 
-	// The sealed value is NOT on the ledger, so the sweep did not reach it:
-	// the handle stays alive because IsAlive reports on the CIPHERTEXT, which
-	// the sweep does not touch. Not covering this type is the #33 decision,
-	// and the apparent contradiction is resolved by Openable rather than by
-	// extending the sweep; see TestSealedEnclave_OpenableReportsTheSweep.
+	// The sweep does not touch sealed values, so IsAlive (which reports on the
+	// ciphertext) stays true; Openable reports the sweep instead.
 	if !s.IsAlive() {
 		t.Error("WipeAll destroyed the SealedEnclave; the ledger holds MemoryEnclaves and this type is not one. " +
-			"If that changed deliberately, WipeAll's contract, SealedEnclave's documentation and the #33 decision all need updating")
+			"If that changed deliberately, WipeAll's contract, SealedEnclave's documentation and the decision not to sweep sealed values all need updating")
 	}
 	if err := s.Openable(); !errors.Is(err, ErrSealerWiped) {
 		t.Errorf("Openable after the sweep = %v, want ErrSealerWiped: the openability question is "+
@@ -798,12 +712,9 @@ func TestSealedEnclave_WipeAllFailsClosed(t *testing.T) {
 	e.Destroy()
 }
 
-// TestSealedEnclave_KeysAreDrawnFromTheCSPRNG pins newKeyEnclave's one job
-// beyond allocation: consulting the CSPRNG. No black-box test can see a DEK,
-// so a mutant filling keys with a constant survives every envelope test —
-// the random nonce keeps sealed bytes non-deterministic even under identical
-// keys, which would quietly turn every value in the process onto ONE key
-// with the per-key message bound unenforced.
+// TestSealedEnclave_KeysAreDrawnFromTheCSPRNG pins that newKeyEnclave fills
+// keys from the CSPRNG. A constant-key mutant survives every envelope test,
+// because the random nonce keeps sealed bytes non-deterministic.
 func TestSealedEnclave_KeysAreDrawnFromTheCSPRNG(t *testing.T) {
 	a, err := newKeyEnclave(dekBytes)
 	if err != nil {
@@ -829,36 +740,17 @@ func TestSealedEnclave_KeysAreDrawnFromTheCSPRNG(t *testing.T) {
 	}
 }
 
-// sweepForOpenableTest runs a [WipeAll] the way an Openable test needs it:
-// hermetic against the PROCESS sealer.
-//
-// A sweep is process-wide, so it destroys the lazily installed process sealer
-// along with everything else — and that sealer is one-shot, so every later
-// test calling [NewSealed] would get ErrSealerWiped from a sweep it never ran.
-// Measured: without this, eleven tests in sealed_test.go fail, because the
-// files here sort ahead of it.
-//
-// It composes [freshProcessSealer] rather than reaching for
-// resetProcessSealerForTest itself. That helper is the package's ONE answer to
-// process-sealer contamination, and a second spelling of it is how the two
-// drift: the next refinement to hermeticity would land in one of them.
+// sweepForOpenableTest runs a [WipeAll] inside freshProcessSealer, so later
+// tests calling [NewSealed] do not inherit a swept one-shot process sealer.
 func sweepForOpenableTest(t *testing.T) {
 	t.Helper()
 	freshProcessSealer(t)
 	sweep(t)
 }
 
-// TestSealedEnclave_OpenableReportsTheSweep is the resolution of #33: the
-// sweep is NOT extended to sealed values, and what it leaves behind is
-// reported by a question of its own instead.
-//
-// The defect it closes is a name collision, not a missing feature. #40 made
-// [MemoryEnclave.IsAlive] report false once material is wiped, so across this
-// package IsAlive now reads as "you can actually use this" — while
-// SealedEnclave.IsAlive tests ciphertext presence, which a sweep does not
-// touch. A swept value therefore reads alive and yields nothing usable, the
-// exact shape #13 was about, and a doc comment is a weak fix for a name that
-// means something else next door.
+// TestSealedEnclave_OpenableReportsTheSweep pins that a sweep leaves a sealed
+// value reporting IsAlive (its ciphertext is untouched) while Openable reports
+// ErrSealerWiped, in agreement with Open.
 func TestSealedEnclave_OpenableReportsTheSweep(t *testing.T) {
 	s, err := NewSealer() // software provider, ModeRootKey
 	if err != nil {
@@ -883,13 +775,11 @@ func TestSealedEnclave_OpenableReportsTheSweep(t *testing.T) {
 
 	sweepForOpenableTest(t)
 
-	// IsAlive is UNCHANGED and that is deliberate: it reports on the
-	// ciphertext, which is still here. Changing it would cost its cheap local
-	// meaning and its lock profile to answer a different question.
+	// IsAlive is unchanged: it reports on the ciphertext, which is still here.
 	if !v.IsAlive() {
 		t.Error("the sweep destroyed the SealedEnclave; the ledger holds MemoryEnclaves and this " +
 			"type is not one. If that changed deliberately, WipeAll's contract, SealedEnclave's " +
-			"documentation and the #33 decision all need updating")
+			"documentation and the decision not to sweep sealed values all need updating")
 	}
 
 	// And Openable is the one that moved.
@@ -905,13 +795,9 @@ func TestSealedEnclave_OpenableReportsTheSweep(t *testing.T) {
 	}
 }
 
-// TestSealedEnclave_OpenableSeparatesASweepFromADestroy pins the third ground
-// for not sweeping sealed values: it would REGRESS diagnostics.
-//
-// A swept value that had been destroyed by the sweep would report
-// ErrEnclaveDestroyed — "you destroyed this" — and send an operator hunting a
-// lifecycle bug in their own code that does not exist. The two errors go to
-// two different pieces of code, so they have to stay distinguishable.
+// TestSealedEnclave_OpenableSeparatesASweepFromADestroy pins that a swept
+// value reports ErrSealerWiped, distinguishable from a destroyed value's
+// ErrEnclaveDestroyed.
 func TestSealedEnclave_OpenableSeparatesASweepFromADestroy(t *testing.T) {
 	s, err := NewSealer()
 	if err != nil {
@@ -975,26 +861,14 @@ func TestSealedEnclave_OpenableOnDestroyedAndNilValues(t *testing.T) {
 	}
 }
 
-// TestSealedEnclave_OpenableSplitsByMode is the second ground for not
-// sweeping: sweeping sealed values would be WRONG, not merely costly.
-//
-// A [ModePerOperation] value backed by a device stays legitimately openable
-// after a sweep — the device holds the key, and this process's memory never
-// protected it — so destroying it on a sweep would destroy recoverable
-// application data, under a call documented for sweep-and-keep-running
-// callers. Openable has to report that honestly, which means nil.
-//
-// The software subtest is what stops that nil from being vacuous: the same
-// mode with an in-process root DOES report the sweep, so the nil above is a
-// judgment about where the key lives rather than a method that never fails.
+// TestSealedEnclave_OpenableSplitsByMode pins Openable in ModePerOperation
+// after a sweep: nil for a provider whose key lives outside the process (the
+// value really opens), ErrSealerWiped for the software provider, whose root is
+// an in-process enclave.
 func TestSealedEnclave_OpenableSplitsByMode(t *testing.T) {
 	t.Run("deviceHeldKeySurvivesTheSweep", func(t *testing.T) {
-		// The provider REPORTS its health, so its answer is authoritative and
-		// the sweep-generation fallback must not override it. Without
-		// HealthReporter this same value now reports
-		// ErrOpenabilityUnknown — see reportsNothingAfterASweep below — and
-		// the difference between the two subtests is the whole of what
-		// opting in buys.
+		// The provider reports its health, so its answer overrides the
+		// sweep-generation fallback; compare reportsNothingAfterASweep below.
 		s, err := NewSealer(
 			WithKeyProtector(healthyProtector{newMapKeyProtector(t)}),
 		)
@@ -1043,10 +917,8 @@ func TestSealedEnclave_OpenableSplitsByMode(t *testing.T) {
 
 		sweepForOpenableTest(t)
 
-		// The software provider's root IS an in-process enclave, so this mode's
-		// usual "the device survives" does not apply and Openable must not
-		// claim it does. This is the assertion that would go red if the
-		// provider were consulted only when it is hardware — or not at all.
+		// The software provider's root is an in-process enclave, so Openable must
+		// report the sweep.
 		if err := v.Openable(); !errors.Is(err, ErrSealerWiped) {
 			t.Errorf("Openable after the sweep = %v, want ErrSealerWiped: the software provider's "+
 				"root is an in-process enclave and the sweep destroyed it", err)
@@ -1057,10 +929,9 @@ func TestSealedEnclave_OpenableSplitsByMode(t *testing.T) {
 	})
 }
 
-// TestSoftwareProvider_OpenableDoesNotGenerateARoot pins that asking the
-// question is free of side effects. rootLocked generates on first use, and
-// reusing it here would turn a diagnostic into a locked-memory allocation and
-// a CSPRNG draw — for a provider that had sealed nothing.
+// TestSoftwareProvider_OpenableDoesNotGenerateARoot pins that Openable has no
+// side effects: it does not generate a root for a provider that sealed
+// nothing.
 func TestSoftwareProvider_OpenableDoesNotGenerateARoot(t *testing.T) {
 	p := NewSoftwareProvider()
 
@@ -1078,14 +949,8 @@ func TestSoftwareProvider_OpenableDoesNotGenerateARoot(t *testing.T) {
 	}
 }
 
-// TestWipeAll_DoesNotSweepSealedEnclaves pins the FIRST ground for the #33
-// decision, at the place the decision is actually observable: the count.
-//
-// WipeAll's count means "still holding locked memory," and that invariant is
-// the whole value of the number. A SealedEnclave holds none — its envelope is
-// heap ciphertext — so covering it would either corrupt the count or require a
-// second one. This test is what a change extending the sweep would have to
-// come past.
+// TestWipeAll_DoesNotSweepSealedEnclaves pins that WipeAll's count excludes
+// sealed values: they hold no locked memory; the sealer's keys do.
 func TestWipeAll_DoesNotSweepSealedEnclaves(t *testing.T) {
 	s, err := NewSealer()
 	if err != nil {
@@ -1112,10 +977,7 @@ func TestWipeAll_DoesNotSweepSealedEnclaves(t *testing.T) {
 			"sweep to attribute the count below", remaining)
 	}
 
-	// A second sweep with n sealed values still live reports zero. If sealed
-	// values were ever put on the ledger, this is the number that would break:
-	// they hold no locked memory, so counting them would make the count mean
-	// something else.
+	// A second sweep with sealed values still live reports zero.
 	if remaining := sweep(t); remaining != 0 {
 		t.Errorf("with %d live sealed values the sweep counts %d, want 0: the count means "+
 			"'still holding locked memory' and a SealedEnclave holds none", n, remaining)
@@ -1134,10 +996,9 @@ func TestWipeAll_DoesNotSweepSealedEnclaves(t *testing.T) {
 	}
 }
 
-// enclaveBackedProtector is the provider shape that made the opt-in necessary:
-// an OUT-OF-PACKAGE KeyProtector keeping its key in this process's locked
-// memory. It deliberately does not implement [HealthReporter], so it stands
-// in for a third-party provider that reports nothing.
+// enclaveBackedProtector is a KeyProtector that keeps its key in this
+// process's locked memory and does not implement [HealthReporter], standing in
+// for a third-party provider that reports nothing.
 type enclaveBackedProtector struct{ key *MemoryEnclave }
 
 func newEnclaveBackedProtector(t *testing.T) *enclaveBackedProtector {
@@ -1173,20 +1034,13 @@ type healthyProtector struct{ KeyProtector }
 
 func (healthyProtector) Health() error { return nil }
 
-// TestSealedEnclave_OpenableClosesTheExternalProviderFailOpen is the
-// regression this pair of changes exists for.
-//
-// Before it, an external provider keeping its key in this process's memory got
-// a confident nil from Openable after a WipeAll destroyed that key — a
-// fail-open in a health API. Worse, the caller's actual Open then failed with
-// ErrEnclaveDestroyed rather than ErrSealerWiped, which is the exact
-// diagnostic misattribution this issue's own reasoning argues against.
+// TestSealedEnclave_OpenableClosesTheExternalProviderFailOpen pins that a
+// provider without HealthReporter, whose in-process key a sweep destroyed,
+// gets ErrOpenabilityUnknown from Openable rather than nil.
 func TestSealedEnclave_OpenableClosesTheExternalProviderFailOpen(t *testing.T) {
 	p := newEnclaveBackedProtector(t)
 
-	// The premise, asserted rather than assumed: this provider is invisible to
-	// the in-package health seam. If it ever stops being so, this test is
-	// measuring something else and must be rewritten, not deleted.
+	// Premise: this provider reports no health.
 	if _, ok := interface{}(p).(HealthReporter); ok {
 		t.Fatal("provider satisfies HealthReporter; it no longer stands in for one that reports nothing")
 	}
@@ -1209,9 +1063,8 @@ func TestSealedEnclave_OpenableClosesTheExternalProviderFailOpen(t *testing.T) {
 
 	sweepForOpenableTest(t)
 
-	// The value genuinely cannot be opened now — the provider's key was on the
-	// ledger and the sweep took it. Established first so the Openable
-	// assertion is about a real condition.
+	// The value genuinely cannot be opened now; the sweep took the provider's
+	// key.
 	if _, err := v.Open(t.Context()); err == nil {
 		t.Fatal("Open succeeded after the sweep; this provider's key was supposed to be swept, " +
 			"so the fail-open this test guards cannot arise and the test proves nothing")
@@ -1228,14 +1081,9 @@ func TestSealedEnclave_OpenableClosesTheExternalProviderFailOpen(t *testing.T) {
 	}
 }
 
-// TestSealedEnclave_OpenableBelievesAProviderThatReports pins the precedence:
-// an explicit answer is authoritative and TERMINAL, and the sweep-generation
-// fallback does not get to override it.
-//
-// If the fallback applied on top, a provider supplying a health report could
-// never return nil after a sweep — its considered "the device still holds this
-// key" would be overwritten with "I cannot tell", which is the one thing the
-// report exists to say.
+// TestSealedEnclave_OpenableBelievesAProviderThatReports pins that a
+// HealthReporter answer is terminal: the sweep-generation fallback does not
+// override it, so a provider can still report nil after a sweep.
 func TestSealedEnclave_OpenableBelievesAProviderThatReports(t *testing.T) {
 	t.Run("reportsHealthyAfterASweep", func(t *testing.T) {
 		s, err := NewSealer(
@@ -1298,12 +1146,9 @@ func TestSealedEnclave_OpenableBelievesAProviderThatReports(t *testing.T) {
 	})
 }
 
-// TestSealedEnclave_OpenableUnknownOnlyAfterASweep pins the half of the design
-// that distinguishes it from simply refusing to answer.
-//
-// A permanent "unknown" would be no better than the fail-open it replaces: it
-// would read the same before and after a sweep, and so could never report the
-// one event it exists to report.
+// TestSealedEnclave_OpenableUnknownOnlyAfterASweep pins that
+// ErrOpenabilityUnknown appears only after a sweep; before one, Openable
+// returns nil.
 func TestSealedEnclave_OpenableUnknownOnlyAfterASweep(t *testing.T) {
 	p := newEnclaveBackedProtector(t)
 	s, err := NewSealer(WithKeyProtector(p))
@@ -1357,13 +1202,9 @@ func TestSealedEnclave_OpenableGenerationDoesNotAffectModeRootKey(t *testing.T) 
 	}
 	defer v.Destroy()
 
-	// TWO, not one: the sequence's parity is an invariant of the whole process
-	// — even means quiescent — and a real sweep bumps twice. Adding one here
-	// would leave it permanently odd and mark every value sealed by every
-	// LATER test as having overlapped a sweep. Measured: it did exactly that,
-	// and was caught by the parity control in
-	// TestSealedEnclave_OpenableSuspectsASealThatOverlappedASweep rather than
-	// by this test, which passed either way.
+	// Two, not one: an even sequence means quiescent and a real sweep bumps
+	// twice. An odd value would mark every later test's seals as overlapping a
+	// sweep.
 	sweepGen.Add(2) // a completed sweep elsewhere; this sealer's hierarchy is untouched
 
 	if got := sweepGeneration(); got == v.sealedAtGen {
@@ -1376,18 +1217,10 @@ func TestSealedEnclave_OpenableGenerationDoesNotAffectModeRootKey(t *testing.T) 
 	}
 }
 
-// TestWipeAll_BumpsTheGenerationBeforeDestroying is the ordering test.
-//
-// The statement order in WipeAll is load-bearing and invisible: bump then
-// destroy leaves at worst a brief false "unknown" while a sweep is in flight,
-// which is safe; destroy then bump leaves a window in which the keys are gone
-// and the generation still reads old, so Openable returns nil about a value
-// that can no longer be opened — the fail-open, narrowed to a race that only
-// appears under load.
-//
-// Reading the source cannot prove the order survives a later edit, so this
-// PARKS inside the window and observes it from outside, the same way the
-// allocator's retune test parks the withdrawal.
+// TestWipeAll_BumpsTheGenerationBeforeDestroying pins WipeAll's order: bump
+// the generation, then destroy. The reverse opens a window in which the keys
+// are gone but the generation reads old, so Openable fails open. The test parks
+// inside the window and observes it.
 func TestWipeAll_BumpsTheGenerationBeforeDestroying(t *testing.T) {
 	freshProcessSealer(t)
 
@@ -1458,14 +1291,10 @@ func TestWipeAll_GenerationIsMonotonicAcrossSweeps(t *testing.T) {
 	}
 }
 
-// TestSealedEnclave_OpenableSuspectsASealThatOverlappedASweep closes the race a
-// plain counter cannot see, found by review of the first implementation.
-//
-// A Seal that runs while WipeAll is midway through would, with a counter read
-// after the seal, record the already-bumped number, later compare equal to it,
-// and report nil about material the rest of that same sweep went on to destroy.
-// The sequence's PARITY is what carries "a sweep was in flight when this was
-// sealed", and this test seals inside the window to prove it.
+// TestSealedEnclave_OpenableSuspectsASealThatOverlappedASweep pins that a
+// seal made while WipeAll is between its bump and its destruction is reported
+// as unknown. The odd sequence parity records the sweep in flight, which a
+// plain count cannot.
 func TestSealedEnclave_OpenableSuspectsASealThatOverlappedASweep(t *testing.T) {
 	freshProcessSealer(t)
 
@@ -1492,12 +1321,8 @@ func TestSealedEnclave_OpenableSuspectsASealThatOverlappedASweep(t *testing.T) {
 		genAtSeal = sweepGeneration()
 		v, sealErr = s.Seal(t.Context(), append([]byte(nil), sealedMaterial...))
 
-		// Asked INSIDE the window, which is the only place the parity is
-		// load-bearing. Out here the count still reads equal to what the seal
-		// just recorded — the balancing bump has not happened yet — so a
-		// count comparison alone answers "nothing has changed, it is fine"
-		// about a value whose key this very sweep is about to destroy. Only
-		// the odd generation records that a sweep was underway.
+		// Asked inside the window: the count still equals what the seal
+		// recorded, so only the odd generation shows a sweep was underway.
 		if sealErr == nil {
 			openableInWindow = v.Openable()
 		}
@@ -1590,18 +1415,10 @@ func TestSealer_ProviderHealthIsIgnoredInRootKeyMode(t *testing.T) {
 	e.Destroy()
 }
 
-// TestWipeAll_ConcurrentSweepsKeepTheParityInvariant pins the SINGLE-WRITER
-// requirement the sequence's parity depends on.
-//
-// The odd/even reading is a sequence lock, and a sequence lock is only valid
-// with one writer. Two concurrent sweeps break it outright: the second one's
-// opening bump takes the sequence from odd back to EVEN while both are still
-// running, so a value sealed in that window records an even sequence, reads "no
-// sweep was in flight", and can be reported openable after one of those sweeps
-// has already destroyed the provider's key.
-//
-// The invariant asserted here is the one that must hold for the whole design:
-// whenever a sweep is inside its own window, the sequence is ODD.
+// TestWipeAll_ConcurrentSweepsKeepTheParityInvariant pins the single-writer
+// requirement of the sweep sequence lock: whenever a sweep is inside its
+// window, the sequence is odd. A second concurrent sweep would flip it back to
+// even.
 func TestWipeAll_ConcurrentSweepsKeepTheParityInvariant(t *testing.T) {
 	freshProcessSealer(t)
 
@@ -1675,15 +1492,9 @@ func sealForBudgetTest(t *testing.T) *SealedEnclave {
 	return v
 }
 
-// TestSealedEnclave_OpenWithAdmitsTheDestination is the whole of #17: the
-// enclave OpenWith hands back was reserved from the supplied Allocator, so a
-// caller that bounds locked memory bounds what opening a credential costs.
-//
-// The assertion is on InUse, not on success. An OpenWith that ignored the
-// Allocator entirely and called the unadmitted constructor would return a
-// perfectly good enclave holding perfectly good material, and every
-// correctness assertion in this file would still pass — which is exactly why
-// the budget has to be READ rather than merely provided.
+// TestSealedEnclave_OpenWithAdmitsTheDestination pins that OpenWith's result
+// is reserved from the supplied Allocator. The assertion is on InUse: an
+// OpenWith that ignored the Allocator would pass every correctness check.
 func TestSealedEnclave_OpenWithAdmitsTheDestination(t *testing.T) {
 	v := sealForBudgetTest(t)
 
@@ -1706,11 +1517,8 @@ func TestSealedEnclave_OpenWithAdmitsTheDestination(t *testing.T) {
 		t.Error("OpenWith returned the wrong material")
 	}
 
-	// EXACTLY the destination, which is two assertions in one number: zero
-	// would mean OpenWith ignored the Allocator and used the unadmitted
-	// constructor (the defect #17 names), and more than this would mean a
-	// transient reservation taken during the open — the DEK's — was never
-	// returned.
+	// Exactly the destination: zero would mean the unadmitted constructor was
+	// used; more would mean a transient reservation was never returned.
 	want := LockedSize(len(sealedMaterial))
 	if got := a.InUse(); got != want {
 		t.Errorf("after OpenWith the Allocator reports %d bytes in use, want %d "+
@@ -1718,10 +1526,9 @@ func TestSealedEnclave_OpenWithAdmitsTheDestination(t *testing.T) {
 	}
 }
 
-// TestSealedEnclave_OpenWithReturnsTheReservationOnDestroy pins the other half
-// of "admitted against that budget": a reservation that is never returned is
-// not a budget, it is a slow leak with a counter on it. Open-per-connection is
-// the shape #17 is about, so this is the assertion that matters at scale.
+// TestSealedEnclave_OpenWithReturnsTheReservationOnDestroy pins that
+// destroying the result returns its reservation, so repeated opens do not leak
+// budget.
 func TestSealedEnclave_OpenWithReturnsTheReservationOnDestroy(t *testing.T) {
 	v := sealForBudgetTest(t)
 
@@ -1750,13 +1557,8 @@ func TestSealedEnclave_OpenWithReturnsTheReservationOnDestroy(t *testing.T) {
 	}
 }
 
-// TestSealedEnclave_OpenWithRefusesANilAllocator pins the documented answer to
-// the question the issue insisted not be left to chance.
-//
-// A nil Allocator REFUSES. The alternative — treat nil as "no budget" and
-// allocate anyway — would hand the caller precisely the unbudgeted allocation
-// they called this method to avoid, on a path that keeps working and keeps
-// looking bounded, which is the worst available combination.
+// TestSealedEnclave_OpenWithRefusesANilAllocator pins that a nil Allocator
+// is refused with ErrNilAllocator rather than treated as no budget.
 func TestSealedEnclave_OpenWithRefusesANilAllocator(t *testing.T) {
 	v := sealForBudgetTest(t)
 
@@ -1794,13 +1596,8 @@ func TestSealedEnclave_OpenWithRefusesANilAllocator(t *testing.T) {
 	o.Destroy()
 }
 
-// TestSealedEnclave_OpenAllocatesOutsideAnyBudget pins the deliberate
-// asymmetry, which is a contract and not an oversight: Open keeps working for
-// callers that do not budget, and it does so by allocating unadmitted.
-//
-// It is here so that a future change routing Open through some ambient
-// allocator has to come past a test that names the behavior, rather than
-// quietly altering what Open's documentation promises.
+// TestSealedEnclave_OpenAllocatesOutsideAnyBudget pins that Open allocates
+// unadmitted, as documented, for callers that do not budget.
 func TestSealedEnclave_OpenAllocatesOutsideAnyBudget(t *testing.T) {
 	v := sealForBudgetTest(t)
 
@@ -1827,10 +1624,8 @@ func TestSealedEnclave_OpenAllocatesOutsideAnyBudget(t *testing.T) {
 func TestSealedEnclave_OpenWithRefusesWhatTheBudgetCannotCover(t *testing.T) {
 	v := sealForBudgetTest(t)
 
-	// A sub-page budget: it constructs successfully and admits nothing, since
-	// every enclave costs a whole page. That is the documented behavior of a
-	// budget sized in the sizes of things rather than in pages, and it is the
-	// cheapest way to reach the refusal without depending on a page size.
+	// A sub-page budget constructs but admits nothing, reaching the refusal
+	// without depending on the page size.
 	a, err := NewAllocator(1)
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
@@ -1887,20 +1682,11 @@ func TestSealedEnclave_OpenWithRefusesWhatTheBudgetCannotCover(t *testing.T) {
 	e2.Destroy()
 }
 
-// TestSealedEnclave_OpenWithGatesOnTheDestination pins the ORDER, which is
-// what bounds the locked memory the budget does not itself charge.
-//
-// The destination is the one admitted allocation and it is taken FIRST, so an
-// open the budget refuses has allocated no locked memory and has not touched a
-// key. If the DEK were allocated first — the order this path had before
-// budgets existed — a flood of opens would each take an unadmitted locked page
-// BEFORE meeting the budget, which is the unbounded consumption an Allocator
-// exists to stop.
-//
-// The instrument is the provider's Unprotect count, because the DEK's
-// allocation is not observable after the fact but the key work that FOLLOWS it
-// is: the DEK is allocated immediately before unprotect and nowhere else, so
-// zero unprotects on a refused open means the refusal came first.
+// TestSealedEnclave_OpenWithGatesOnTheDestination pins that the destination
+// is reserved before any other work, so a refused open allocates no locked
+// memory and touches no key. The instrument is the provider's Unprotect count:
+// the DEK is allocated immediately before Unprotect, so zero calls means the
+// refusal came first.
 func TestSealedEnclave_OpenWithGatesOnTheDestination(t *testing.T) {
 	kp := newMapKeyProtector(t)
 	s, err := NewSealer(WithKeyProtector(kp))
@@ -1976,16 +1762,10 @@ func TestSealedEnclave_OpenWithGatesOnTheDestination(t *testing.T) {
 	admitted.Destroy()
 }
 
-// TestSealedEnclave_OpenWithConcurrentCallersDoNotStarveEachOther is the
-// regression test for the design this method does NOT use.
-//
-// An earlier revision charged the transient key page as a SECOND reservation.
-// It was more accurate and it broke under exactly the load an Allocator exists
-// for: two callers sharing a budget sized for one open could each take a key
-// page and then both be refused for the destination — a budget that could
-// serve one open serving none. Here, many goroutines share a budget sized for
-// ONE open, and the property is that somebody wins. Under two reservations per
-// open this test fails intermittently; under one it cannot fail at all.
+// TestSealedEnclave_OpenWithConcurrentCallersDoNotStarveEachOther pins that
+// goroutines sharing a budget sized for one open let exactly one succeed.
+// Charging the transient key page as a second reservation would let callers
+// fragment the budget so none succeeds.
 func TestSealedEnclave_OpenWithConcurrentCallersDoNotStarveEachOther(t *testing.T) {
 	v := sealForBudgetTest(t)
 
@@ -2109,11 +1889,9 @@ func TestSealedEnclave_OpenWithOnARetiredGeneration(t *testing.T) {
 	}
 }
 
-// TestSealedEnclave_OpenWithIsConcurrencySafe runs the admitted open from many
-// goroutines against one budget. Under -race it is the oracle for the new
-// parameter threaded through the sealer's open path; without it, it still
-// proves the accounting balances — every reservation taken is returned, so the
-// budget lands back at zero rather than drifting up by a page per open.
+// TestSealedEnclave_OpenWithIsConcurrencySafe runs admitted opens from many
+// goroutines against one budget: under -race it checks the open path, and the
+// budget returns to zero afterwards.
 func TestSealedEnclave_OpenWithIsConcurrencySafe(t *testing.T) {
 	v := sealForBudgetTest(t)
 
@@ -2210,31 +1988,12 @@ func TestSealedEnclave_OpenWithPerOperationMode(t *testing.T) {
 	}
 }
 
-// TestSealedEnclave_NoForeignBytesConstructor makes the no-foreign-sealed-
-// bytes invariant EXECUTABLE. The invariant is the absence of an API — no
-// exported way to turn caller-supplied bytes into an openable *SealedEnclave
-// except the sanctioned plaintext constructors — and an absence is exactly
-// what a well-meaning future change erodes: someone adds a reasonable-looking
-// UnmarshalBinary for a cache, and the property is gone with no test failing.
-//
-// # Why the guard exists NOW — read before "fixing" a failure
-//
-// This invariant used to be a security necessity: #21's confidentiality-only
-// design was safe ONLY because no entry point existed through which a forged
-// envelope could arrive. That rationale is OBSOLETE — #22 requires every
-// provider to authenticate, so a forged envelope now fails Unprotect — and a
-// guard citing it would be worse than no guard, because the next engineer
-// would observe the providers authenticate, conclude the guard is stale, and
-// delete it.
-//
-// The rationale that holds today is a FORMAT CONTRACT, not forgery: this
-// package makes no persistence promise. The envelope layout is internal and
-// unversioned across releases, and every sealed value is keyed to a Sealer
-// whose keys live and die with this process. An unmarshaller would make that
-// format accidentally permanent — commitments (versioning, migration, format
-// stability) acquired by API accretion instead of by decision. If persistence
-// or transport is ever wanted, it is designed as a requirement then, and THIS
-// TEST is amended as part of that design, not deleted to make a PR compile.
+// TestSealedEnclave_NoForeignBytesConstructor pins that no exported API turns
+// caller-supplied bytes into an openable *SealedEnclave besides the plaintext
+// constructors. The envelope format is internal, unversioned and keyed to a
+// process-lifetime Sealer; an unmarshaller would make it accidentally
+// permanent. If persistence is ever designed, amend this test as part of that
+// design.
 func TestSealedEnclave_NoForeignBytesConstructor(t *testing.T) {
 	// The sanctioned constructors: both take PLAINTEXT and produce a sealed
 	// value, which is the direction the contract permits. Nothing else may

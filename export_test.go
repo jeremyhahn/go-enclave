@@ -15,3 +15,11 @@ func resetProcessAllocatorForTest() {
 	processAllocatorInstance = nil
 	processAllocatorMu.Unlock()
 }
+
+// resetProcessSealerForTest clears the process sealer so tests can exercise
+// installation, the lazy default and the post-sweep state.
+func resetProcessSealerForTest() {
+	processSealerMu.Lock()
+	processSealerInstance = nil
+	processSealerMu.Unlock()
+}

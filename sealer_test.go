@@ -20,13 +20,9 @@ import (
 	"unsafe"
 )
 
-// mapKeyProtector is a working KeyProtector whose "device" is a map of locked
-// mappings outside the package ledger: Protect files a copy of the key under a
-// fresh opaque blob, Unprotect looks it up. It stands in for a hardware
-// provider in tests, with two properties no real provider offers: its key
-// store survives a WipeAll untouched (which is exactly what a device-held key
-// does, and what the mode-asymmetry test needs), and the test can reach into
-// it to mint alias blobs (which the envelope-binding test needs).
+// mapKeyProtector is a KeyProtector whose "device" is a map of locked
+// mappings outside the package ledger. Its key store survives a WipeAll, as a
+// device-held key does, and a test can mint alias blobs in it.
 type mapKeyProtector struct {
 	mu         sync.Mutex
 	n          int
@@ -87,11 +83,9 @@ func (m *mapKeyProtector) unprotectCount() int {
 	return m.unprotects
 }
 
-// alias registers a SECOND valid blob for the key already filed under
-// existing, so a test can build an envelope whose blob authenticates and
-// recovers the right DEK while differing from the blob the value was sealed
-// with. That is the one configuration where the AAD binding — and nothing
-// else — stands between a re-paired envelope and a successful Open.
+// alias registers a second valid blob for the key filed under existing, so a
+// test can build an envelope whose blob recovers the right DEK yet differs
+// from the blob the value was sealed with.
 func (m *mapKeyProtector) alias(existing, alias []byte) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -103,19 +97,9 @@ func (m *mapKeyProtector) alias(existing, alias []byte) bool {
 	return true
 }
 
-// deviceCopy files a copy of key — which the sealer lends from locked memory —
-// the way a hardware device would hold it: in memory that is locked and
-// guard-paged, but OUTSIDE this package's ledger. That is the point of a
-// device-held key: WipeAll reclaims what the process holds and must not reach
-// the device, so the fixture's store cannot be a registered enclave (a sweep
-// would destroy it). A raw mapping is exactly that, and it keeps key material
-// off the ordinary heap (security-review §6). Deliberately LEAKING fixtures,
-// whose heap copy is the negative control a test asserts on, keep theirs.
-// releaseDeviceStore releases every DISTINCT mapping of a fake device's key
-// store at the end of its test. WipeAll cannot reach these by design and the
-// garbage collector never unmaps, so without this every Protect would keep a
-// locked page — and its key — for the life of the test binary. Aliases share
-// a mapping, so each is released once.
+// releaseDeviceStore releases every distinct mapping of a fake device's key
+// store. WipeAll cannot reach these and the garbage collector never unmaps
+// them; aliases share a mapping, so each is released once.
 func releaseDeviceStore(t testing.TB, store map[string]*mapping) {
 	t.Helper()
 	seen := make(map[*mapping]struct{}, len(store))
@@ -131,6 +115,8 @@ func releaseDeviceStore(t testing.TB, store map[string]*mapping) {
 	}
 }
 
+// deviceCopy files a copy of key in a raw locked mapping outside the package
+// ledger, as a device would hold it, so a sweep cannot reach it.
 func deviceCopy(key []byte) (*mapping, error) {
 	m, err := newMapping(len(key))
 	if err != nil {
@@ -223,11 +209,9 @@ func TestSealer_ProviderOptionSelectsTheMode(t *testing.T) {
 	}
 }
 
-// TestSealer_DefaultIsSoftwareRootKey pins the out-of-the-box shape: no
-// options means the pure-software provider in ModeRootKey, and it round
-// trips. The process default NewSealed installs must match, or a consumer
-// that later configures a provider explicitly would be changing more than the
-// provider.
+// TestSealer_DefaultIsSoftwareRootKey pins that no options means the
+// pure-software provider in ModeRootKey, that it round trips, and that the
+// process default NewSealed installs has the same shape.
 func TestSealer_DefaultIsSoftwareRootKey(t *testing.T) {
 	freshProcessSealer(t)
 	s, err := NewSealer()
@@ -264,9 +248,8 @@ func TestSealer_DefaultIsSoftwareRootKey(t *testing.T) {
 }
 
 // TestSealer_PerOperationRoundTrip runs both modes against the software
-// provider through an explicit Sealer, so mode parity is a tested property
-// rather than an assumption. The per-operation path is the one the process
-// default never exercises.
+// provider through an explicit Sealer; the process default never exercises
+// the per-operation path.
 func TestSealer_PerOperationRoundTrip(t *testing.T) {
 	for _, m := range []Mode{ModePerOperation, ModeRootKey} {
 		t.Run(m.String(), func(t *testing.T) {
@@ -292,11 +275,10 @@ func TestSealer_PerOperationRoundTrip(t *testing.T) {
 	}
 }
 
-// TestSealer_RefusesForeignProvider pins the cross-provider property: a value
-// sealed under one provider must not open under another, in either mode. The
-// envelope is rebuilt against the second sealer directly — in normal use
-// there is no path by which a value reaches a foreign sealer, which is
-// exactly why the property has to be tested by constructing the misuse.
+// TestSealer_RefusesForeignProvider pins that a value sealed under one
+// provider does not open under another, in either mode. The envelope is
+// rebuilt against the second sealer directly, since normal use has no path
+// for that misuse.
 func TestSealer_RefusesForeignProvider(t *testing.T) {
 	build := func(t *testing.T, m Mode) (*Sealer, *Sealer) {
 		t.Helper()
@@ -322,9 +304,8 @@ func TestSealer_RefusesForeignProvider(t *testing.T) {
 			}
 			defer v.Destroy()
 
-			// Ensure B has a live hierarchy/root of its own, so the refusal
-			// below is a key mismatch and not merely "B never sealed
-			// anything" — the stricter of the two conditions.
+			// Give B a live hierarchy of its own, so the refusal below is a key
+			// mismatch and not "B never sealed anything".
 			warm, err := b.Seal(t.Context(), []byte("warm-up"))
 			if err != nil {
 				t.Fatalf("warm-up Seal: %v", err)
@@ -352,20 +333,10 @@ func TestSealer_RefusesForeignProvider(t *testing.T) {
 	}
 }
 
-// TestSealer_EnvelopeBindsBlobToCiphertext pins the AAD binding END TO END,
-// in the one configuration where nothing else would catch a re-paired
-// envelope.
-//
-// Ordinarily a substituted blob dies twice — the DEK unwrap refuses the
-// foreign blob, and even a recovered wrong DEK fails the bulk tag — so a
-// mutant that drops the AAD binding passes every ordinary test. This test
-// removes both other defenses ON THE PROVIDER SIDE, legitimately: the map
-// provider files an ALIAS blob that authenticates and recovers the exact DEK
-// the value was sealed with. The envelope then differs from the sealed one in
-// exactly one way — the blob is not the bytes the ciphertext was bound to —
-// and Open must still refuse. Drop the AAD from either half of the envelope
-// construction and this opens successfully; that is the mutation this test
-// exists to catch.
+// TestSealer_EnvelopeBindsBlobToCiphertext pins the AAD binding end to end.
+// The map provider files an alias blob that recovers the exact DEK the value
+// was sealed with, so the envelope differs only in the blob bytes; without
+// the AAD binding it would open.
 func TestSealer_EnvelopeBindsBlobToCiphertext(t *testing.T) {
 	kp := newMapKeyProtector(t)
 	s, err := NewSealer(WithKeyProtector(kp))
@@ -385,12 +356,9 @@ func TestSealer_EnvelopeBindsBlobToCiphertext(t *testing.T) {
 		t.Fatal("could not alias the sealed value's blob; the fake provider does not hold it")
 	}
 
-	// Sanity of the setup, not of the code under test: the alias must
-	// actually recover the same DEK, or the refusal below would be a key
-	// mismatch and the test would pass with the AAD binding deleted.
-	// Recovered into LOCKED destinations and compared inside their borrows:
-	// these are generated DEKs, and a correctness control must not copy them
-	// onto the ordinary heap (security-review §6).
+	// Setup sanity: the alias must recover the same DEK, or the refusal below
+	// would be a key mismatch. Compared inside locked borrows, never copied to
+	// the heap.
 	dekA, err := NewMemoryEnclaveSized(dekBytes)
 	if err != nil {
 		t.Fatalf("allocating dekA: %v", err)
@@ -440,23 +408,10 @@ func TestSealer_EnvelopeBindsBlobToCiphertext(t *testing.T) {
 	e.Destroy()
 }
 
-// TestSealer_KEKRotatesAtTheMessageLimit covers the bound crypto/cipher
-// states as a MUST NOT: "A given key MUST NOT be used to encrypt more than
-// 2^32 messages." In ModeRootKey the KEK is the one key that approaches it —
-// it wraps one DEK per sealed value — so the rotation machinery lives on the
-// KEK and nowhere else.
-//
-// The counter is driven directly rather than by performing two billion
-// seals. That is reading and writing this package's own state from an
-// in-package test, not a fault-injection seam in production code: kekUsed has
-// to exist for the limit to work at all.
-//
-// The second half is the half that matters. Rotation is only correct if a
-// value sealed under the RETIRED generation still opens — otherwise the bound
-// would be enforced by silently destroying every credential in flight — and
-// if the retired generation's LIVE enclave is destroyed, since retention as a
-// root-wrapped heap blob rather than a locked page is the design's stated
-// cost model.
+// TestSealer_KEKRotatesAtTheMessageLimit pins rotation at the KEK's GCM
+// message bound, driving kekUsed directly instead of sealing 2^31 times, and
+// that values sealed under the retired generation still open while its live
+// enclave is destroyed.
 func TestSealer_KEKRotatesAtTheMessageLimit(t *testing.T) {
 	s, err := NewSealer() // software provider, ModeRootKey
 	if err != nil {
@@ -592,13 +547,10 @@ func TestSealer_ConcurrentSealsAcrossRotation(t *testing.T) {
 	}
 }
 
-// TestSealer_ProviderRootReachesTheHierarchy proves the injected provider's
-// root is what the hierarchy actually runs on, rather than the sealer quietly
-// generating its own: a KEK blob minted by a sealer over a deterministic
-// RootUnsealer unwraps under a root built independently from that provider's
-// known output — and does not unwrap under any other root, and does not
-// unwrap with its generation frame rewritten, which pins the KEK blob's AAD
-// binding at the same time.
+// TestSealer_ProviderRootReachesTheHierarchy pins that the hierarchy runs on
+// the injected provider's root: a KEK blob from a sealer over a deterministic
+// RootUnsealer unwraps under the wrapping key derived from that root, not
+// under any other root, and not with its generation frame rewritten.
 func TestSealer_ProviderRootReachesTheHierarchy(t *testing.T) {
 	salts := recordWrapSalts(t)
 	s, err := NewSealer(WithRootUnsealer(&fixedRootUnsealer{fill: 0x5A}))
@@ -630,8 +582,7 @@ func TestSealer_ProviderRootReachesTheHierarchy(t *testing.T) {
 		return root
 	}
 
-	// The unwrapped KEK is the sealer's generated key: it lands in LOCKED
-	// memory, never an ordinary buffer (security-review §6).
+	// The unwrapped KEK lands in locked memory, never an ordinary buffer.
 	kekEnclave, err := NewMemoryEnclaveSized(kekBytes)
 	if err != nil {
 		t.Fatalf("allocating the KEK destination: %v", err)
@@ -680,19 +631,16 @@ func TestSealer_ProviderRootReachesTheHierarchy(t *testing.T) {
 	}
 }
 
-// TestSealer_WipedFailsClosedPerMode pins #22 §14's mode asymmetry around a
-// shutdown sweep, explicitly, because it is exactly the sort of thing a
-// reader will assume away:
+// TestSealer_WipedFailsClosedPerMode pins the mode asymmetry around a
+// shutdown sweep:
 //
-//   - ModeRootKey: the hierarchy's enclaves are swept; the sealer reports
-//     ErrSealerWiped for both new seals and existing values, and never
-//     re-keys.
-//   - ModePerOperation over an in-process software provider: same, from the
-//     provider's side.
-//   - ModePerOperation over a device-held key (the map provider): a sweep
-//     destroys nothing the values depend on — sealing and opening keep
-//     working. The sweep is a statement about this process's memory, and in
-//     this mode the material never depended on it.
+//   - ModeRootKey: the hierarchy is swept; new seals and existing values
+//     report ErrSealerWiped, and the sealer never re-keys.
+//   - ModePerOperation over the in-process software provider: the same, from
+//     the provider's side.
+//   - ModePerOperation over a device-held key (the map provider): the sweep
+//     destroys nothing the values depend on, so sealing and opening keep
+//     working.
 func TestSealer_WipedFailsClosedPerMode(t *testing.T) {
 	material := []byte("mode-asymmetry-material")
 
@@ -751,9 +699,8 @@ func TestSealer_WipedFailsClosedPerMode(t *testing.T) {
 
 		sweep(t)
 
-		// The device still holds the keys: existing values open and new
-		// seals work. This is the asymmetry, and it is the correct behavior,
-		// not a hole — nothing in this process's memory protected the DEKs.
+		// The device still holds the keys: existing values open and new seals
+		// work, because nothing in this process's memory protected the DEKs.
 		e, err := v.Open(t.Context())
 		if err != nil {
 			t.Fatalf("Open after sweep with a device-held key = %v; "+
@@ -772,12 +719,10 @@ func TestSealer_WipedFailsClosedPerMode(t *testing.T) {
 	})
 }
 
-// TestSealer_ProviderErrorsSurfaceHonestly pins the error-shaping contract on
-// both paths: a provider's own failure must NOT be dressed as an
-// authentication failure on open — the misattribution #22 §14 warns about,
-// aimed at providers this time — and surfaces under ErrSealFailed on seal and
-// ErrOpenFailed on open, where "could not" is the honest summary, with the
-// cause still reachable.
+// TestSealer_ProviderErrorsSurfaceHonestly pins the error shaping on both
+// paths: a provider's own failure surfaces under ErrSealFailed on seal and
+// ErrOpenFailed on open, with the cause reachable, and is never reported as
+// an authentication failure.
 func TestSealer_ProviderErrorsSurfaceHonestly(t *testing.T) {
 	deviceDown := errors.New("device unreachable: session pool exhausted")
 	s, err := NewSealer(WithKeyProtector(&erroringProvider{err: deviceDown}))
@@ -835,10 +780,9 @@ func TestSealer_ProviderErrorsSurfaceHonestly(t *testing.T) {
 	}
 }
 
-// TestSealer_SetSealerIsOneShot pins the installation contract from #21
-// §11.4, carried into #22 §8: one installer, first write wins, the lazy
-// default counts as a write, and the routing actually changes — proven by
-// counting the installed provider's operations rather than inferring.
+// TestSealer_SetSealerIsOneShot pins the installation contract: the first
+// install wins, the lazy default counts as an install, and NewSealed routes
+// through the installed sealer (counted by its provider's operations).
 func TestSealer_SetSealerIsOneShot(t *testing.T) {
 	resetProcessSealerForTest()
 	t.Cleanup(resetProcessSealerForTest)
@@ -983,10 +927,7 @@ func TestSoftwareProvider_ProtectUnprotect(t *testing.T) {
 }
 
 // TestSoftwareProvider_MessageLimit pins the provider's refusal at its
-// per-key encryption budget — the alternative to rotation machinery it
-// deliberately does not have; see ErrProviderMessageLimit for why. The
-// counter is driven directly, exactly as the KEK rotation test drives its
-// own.
+// per-key encryption budget, driving the counter directly.
 func TestSoftwareProvider_MessageLimit(t *testing.T) {
 	p := NewSoftwareProvider()
 	key := make([]byte, RootKeyBytes)
@@ -1026,9 +967,8 @@ func TestSoftwareProvider_UnsealRoot(t *testing.T) {
 		t.Errorf("UnsealRoot(long dst) = %v, want ErrInvalidSize", err)
 	}
 
-	// The root is generated key material: unsealed into LOCKED destinations
-	// and compared inside their borrows, never copied onto the heap
-	// (security-review §6).
+	// Generated key material: unsealed into locked destinations and compared
+	// inside their borrows, never copied onto the heap.
 	a, err := NewMemoryEnclaveSized(RootKeyBytes)
 	if err != nil {
 		t.Fatalf("allocating a: %v", err)
@@ -1081,12 +1021,9 @@ func (f *flakyRootUnsealer) UnsealRoot(ctx context.Context, dst []byte) error {
 	return f.inner.UnsealRoot(ctx, dst)
 }
 
-// TestSealer_RootUnsealFailureSurfacesAndRetries covers ModeRootKey against
-// an unhealthy provider: the first seal fails with the provider's cause
-// preserved under ErrSealFailed — and, the half that matters, the NEXT seal
-// retries the unseal rather than replaying a memoized failure. A sync.Once
-// here would turn one busy device into a sealer that never works; see
-// initHierarchy for the design note this pins.
+// TestSealer_RootUnsealFailureSurfacesAndRetries pins that a failed root
+// unseal surfaces under ErrSealFailed with the provider's cause, and that the
+// next seal retries the unseal instead of replaying a memoized failure.
 func TestSealer_RootUnsealFailureSurfacesAndRetries(t *testing.T) {
 	flaky := &flakyRootUnsealer{failures: 1, inner: fixedRootUnsealer{fill: 0x33}}
 	s, err := NewSealer(WithRootUnsealer(flaky))
@@ -1133,16 +1070,11 @@ func TestSealer_RootUnsealFailureSurfacesAndRetries(t *testing.T) {
 	}
 }
 
-// TestSealer_SweptTranslation pins the two translation helpers directly.
-// They exist for a race window — a WipeAll destroying keys between an op's
-// liveness check and its borrow — that no unit test can hold open
-// deterministically, so the translation itself is pinned as a pure function.
-//
-// hierarchyFailure distinguishes the two things a destroyed enclave can mean
-// (#98): a dead HIERARCHY key reports the sealer wiped; a destroyed PER-CALL
-// enclave with the hierarchy intact stays ErrEnclaveDestroyed, because the
-// sealer is not wiped and saying so would tell an operator their keys are gone
-// when they are not. Every other error passes through untouched.
+// TestSealer_SweptTranslation pins hierarchyFailure as a pure function, since
+// the race it serves (a WipeAll between an operation's liveness check and its
+// borrow) cannot be held open deterministically. A dead hierarchy key reports
+// ErrSealerWiped; a destroyed per-call enclave with the hierarchy intact stays
+// ErrEnclaveDestroyed; every other error passes through.
 func TestSealer_SweptTranslation(t *testing.T) {
 	other := errors.New("unrelated failure")
 
@@ -1182,19 +1114,10 @@ func TestSealer_SweptTranslation(t *testing.T) {
 	}
 }
 
-// TestSealer_PerCallLossDuringRotationIsNotAWipe pins how a wrap failure is
-// classified while the KEK rotates on every wrap: a seal whose own DEK is
-// lost mid-wrap — the per-call case — reports ErrEnclaveDestroyed, never
-// ErrSealerWiped, however rotation interleaves.
-//
-// What it cannot pin is WHERE the translation runs. protectRootKeyInner
-// translates before releasing s.mu because rotation, under the write lock,
-// destroys the outgoing KEK before publishing the next, so a check after the
-// unlock could see a retired generation dead and call it a sweep. That window
-// is a few instructions wide with no seam to hold it open, and the atomic
-// kekUsed accounting orders the goroutines enough that the race detector does
-// not see the unlocked read either (measured against the pre-fix code); the
-// placement is held by review and by the comment at the call site.
+// TestSealer_PerCallLossDuringRotationIsNotAWipe pins that a seal whose own
+// DEK is lost mid-wrap reports ErrEnclaveDestroyed, never ErrSealerWiped,
+// however rotation interleaves. It cannot pin that protectRootKeyInner
+// translates before releasing s.mu; no seam holds that window open.
 func TestSealer_PerCallLossDuringRotationIsNotAWipe(t *testing.T) {
 	ctx := t.Context()
 	s, err := NewSealer(WithKEKRotationLimit(1))
@@ -1247,17 +1170,11 @@ func TestSealer_PerCallLossDuringRotationIsNotAWipe(t *testing.T) {
 	wg.Wait()
 }
 
-// TestSealer_WipedDoesNotReconsultAWillingProvider is the sealer-level half
-// of the fail-closed ruling, and it exists because mutation testing showed
-// the other post-sweep tests do not pin it: with the SOFTWARE provider, a
-// sealer that wrongly re-initialized after a sweep would still fail — the
-// provider itself refuses — so a regeneration mutant in the SEALER survived
-// every test. The masking is defense in depth working, but the ruling is on
-// the sealer: it must not re-key even when its provider WOULD cheerfully
-// re-supply a root, because with a hardware RootUnsealer that re-supply is
-// exactly what turns a sweep into silently re-minted keys. So the provider
-// here is one that always answers, and the refusal below can only come from
-// the sealer.
+// TestSealer_WipedDoesNotReconsultAWillingProvider pins that a swept sealer
+// does not re-key even when its provider would re-supply a root. With the
+// software provider, the provider's own refusal would mask a sealer that
+// re-initializes, so this provider always answers and the refusal can only
+// come from the sealer.
 func TestSealer_WipedDoesNotReconsultAWillingProvider(t *testing.T) {
 	willing := &flakyRootUnsealer{failures: 0, inner: fixedRootUnsealer{fill: 0x66}}
 	s, err := NewSealer(WithRootUnsealer(willing))
@@ -1281,19 +1198,15 @@ func TestSealer_WipedDoesNotReconsultAWillingProvider(t *testing.T) {
 	if _, err := v.Open(t.Context()); !errors.Is(err, ErrSealerWiped) {
 		t.Errorf("Open after sweep = %v, want ErrSealerWiped", err)
 	}
-	// The sharpest assertion: the provider was never asked again. A sealer
-	// that consults it here has decided to re-key and merely happens to be
-	// interruptible; the ruling is that the decision itself is never made.
+	// The provider was never asked again.
 	if willing.calls != 1 {
 		t.Errorf("UnsealRoot was called %d times, want 1: the sealer reconsulted its provider after a sweep", willing.calls)
 	}
 }
 
-// TestSealer_NilProvidersAreRefusedAtConstruction pins the typed-nil trap:
-// (*SoftwareProvider)(nil) is a NON-nil interface value, so without a
-// value-level check NewSealer would succeed and the first Seal would panic.
-// Untyped nil is refused too rather than defaulted: silently substituting the
-// software provider for the hardware one somebody meant to pass is fail-open.
+// TestSealer_NilProvidersAreRefusedAtConstruction pins that a typed nil (a
+// non-nil interface value that would panic at the first Seal) and an untyped
+// nil are both refused rather than defaulted to the software provider.
 func TestSealer_NilProvidersAreRefusedAtConstruction(t *testing.T) {
 	providers := map[string]any{
 		"untyped nil":            nil,
@@ -1354,12 +1267,10 @@ func failNextLock(t *testing.T) {
 	}
 }
 
-// TestSealer_RotationOverlappingASweepLeavesTheSealerWiped is the regression
-// for #102. Rotation mints the next KEK generation while borrowing the root
-// and the new KEK; a WipeAll landing in that window destroyed the old current
-// KEK, skipped the borrowed pair, and rotation then published the new
-// generation — a working sealer after a sweep. The sweep is injected from
-// inside the new KEK's mlock, which is mid-rotation by construction, with an
+// TestSealer_RotationOverlappingASweepLeavesTheSealerWiped pins that a
+// WipeAll landing while rotation borrows the root (so it destroys only the
+// old KEK) leaves the sealer wiped instead of publishing the new generation.
+// The sweep is injected from inside the new KEK's mlock, with an
 // already-ended context so it never waits on a borrow.
 func TestSealer_RotationOverlappingASweepLeavesTheSealerWiped(t *testing.T) {
 	s, err := NewSealer() // software provider, ModeRootKey
@@ -1382,12 +1293,9 @@ func TestSealer_RotationOverlappingASweepLeavesTheSealerWiped(t *testing.T) {
 	}
 	registryMu.Unlock()
 
-	// The sweep must land while the ROOT is borrowed — that is the window in
-	// which WipeAll skips the root yet reclaims the old current KEK. In
-	// production the borrower is the rotation's own wrap; here the test holds
-	// the borrow across the sweep and lets go before the mint goes on, which
-	// leaves exactly the state the defect needs: old KEK gone, root standing,
-	// a new generation about to be published.
+	// The sweep must land while the root is borrowed: the window in which
+	// WipeAll skips the root but reclaims the old KEK. The test holds that borrow
+	// across the sweep and releases it before the mint continues.
 	s.mu.RLock()
 	root := s.root
 	s.mu.RUnlock()
@@ -1457,13 +1365,11 @@ func TestSealer_RotationOverlappingASweepLeavesTheSealerWiped(t *testing.T) {
 	}
 }
 
-// TestSealer_RotationCleanupReportsAndRetriesARefusedRelease covers the
-// cleanup half of #102: when the kernel refuses the unmap of the keys a sweep
-// overlapped, rotation must REPORT it (not return a clean ErrSealerWiped). The
-// sealer then retries the keys it still references — the published root and
-// KEK — at the seal/open boundary until the kernel allows it; the discarded,
-// never-published generation is owned by the WipeAll ledger, which reclaims
-// it on the next sweep.
+// TestSealer_RotationCleanupReportsAndRetriesARefusedRelease pins that when
+// the kernel refuses to unmap keys a sweep overlapped, rotation reports it.
+// The sealer retries its published root and KEK at the seal/open boundary
+// until allowed; the never-published generation is left to the WipeAll
+// ledger.
 func TestSealer_RotationCleanupReportsAndRetriesARefusedRelease(t *testing.T) {
 	s, err := NewSealer()
 	if err != nil {
@@ -1548,12 +1454,10 @@ func TestSealer_RotationCleanupReportsAndRetriesARefusedRelease(t *testing.T) {
 	}
 }
 
-// TestSealer_RotationKeepsAFailedMintsRefusedKEK covers the mint-FAILURE half
-// of #102's cleanup: the sweep reclaims the root itself mid-mint, so wrapping
-// fails, and the kernel then refuses to release the half-made KEK. The refusal
-// must be REPORTED with the failure — never silently dropped — and the KEK,
-// never published, is owned by the WipeAll ledger, which reclaims it once the
-// refusal lifts.
+// TestSealer_RotationKeepsAFailedMintsRefusedKEK pins the mint-failure case:
+// a sweep reclaims the root mid-mint, the wrap fails, and the kernel refuses
+// to release the half-made KEK. The refusal is reported with the failure, and
+// the WipeAll ledger reclaims the KEK once it lifts.
 func TestSealer_RotationKeepsAFailedMintsRefusedKEK(t *testing.T) {
 	s, err := NewSealer()
 	if err != nil {
@@ -1617,12 +1521,10 @@ func TestSealer_RotationKeepsAFailedMintsRefusedKEK(t *testing.T) {
 }
 
 // TestSealer_InitializationReportsAFailedMintsRefusedRelease is the
-// initialization counterpart of the failed-mint case (#102): the first KEK is
-// being minted under a root just unsealed, a sweep reclaims that root, the
-// wrap fails, and the kernel refuses to release the half-made KEK. The first
-// seal must report the refusal along with ErrSealerWiped — not let the sweep's
-// verdict replace it — and the ledger must own the KEK, reclaiming it once the
-// refusal lifts.
+// initialization counterpart: a sweep reclaims the just-unsealed root, the
+// first KEK's wrap fails, and the kernel refuses to release that KEK. The
+// first seal reports the refusal with ErrSealerWiped, and the ledger reclaims
+// the KEK once the refusal lifts.
 func TestSealer_InitializationReportsAFailedMintsRefusedRelease(t *testing.T) {
 	s, err := NewSealer() // ModeRootKey: the first seal initializes
 	if err != nil {
@@ -1668,13 +1570,10 @@ func TestSealer_InitializationReportsAFailedMintsRefusedRelease(t *testing.T) {
 	}
 }
 
-// TestSealer_DeadHierarchyCleanupRunsAtTheBoundary pins where #102's cleanup
-// lives: at the seal/open boundary, for EVERY path that reports ErrSealerWiped
-// while the published hierarchy is dead — not only the liveness check, but a
-// wait for initialization that found the hierarchy already swept, or a
-// retired-generation unwrap whose root a sweep destroyed mid-call. Driving the
-// boundary directly with the bare sentinel stands in for all of them: a
-// refused release of the dead keys is reported, and released once allowed.
+// TestSealer_DeadHierarchyCleanupRunsAtTheBoundary pins that the seal/open
+// boundary retries the release of a dead hierarchy's keys for every path
+// that reports ErrSealerWiped; driving it with the bare sentinel stands in
+// for all of them. A refused release is reported, and released once allowed.
 func TestSealer_DeadHierarchyCleanupRunsAtTheBoundary(t *testing.T) {
 	s, err := NewSealer()
 	if err != nil {
@@ -1728,9 +1627,8 @@ func TestSealer_DeadHierarchyCleanupRunsAtTheBoundary(t *testing.T) {
 	}
 }
 
-// TestSealer_WithKEKRotationLimitIsValidated pins the option's bounds (#99):
-// a crypto-period of zero, one above the package's safe bound, or one given
-// for ModePerOperation (which has no KEK) is a configuration mistake refused at
+// TestSealer_WithKEKRotationLimitIsValidated pins the option's bounds: zero,
+// one above 2^31, or any value for ModePerOperation is refused at
 // construction; the bounds themselves are accepted.
 func TestSealer_WithKEKRotationLimitIsValidated(t *testing.T) {
 	for _, tc := range []struct {
@@ -1760,9 +1658,8 @@ func TestSealer_WithKEKRotationLimitIsValidated(t *testing.T) {
 }
 
 // TestSealer_RotatesAtTheConfiguredLimit drives rotation through the public
-// API (#99): with a crypto-period of three wraps, ten seals span four KEK
-// generations, every retired generation's blob is retained, and every value —
-// whichever generation sealed it — still opens to its material.
+// API: with a crypto-period of three wraps, ten seals span four KEK
+// generations, every retired blob is retained, and every value opens.
 func TestSealer_RotatesAtTheConfiguredLimit(t *testing.T) {
 	s, err := NewSealer(WithKEKRotationLimit(3))
 	if err != nil {
@@ -1803,13 +1700,10 @@ func TestSealer_RotatesAtTheConfiguredLimit(t *testing.T) {
 	}
 }
 
-// TestSealedEnclave_OpenReturnsAFrozenEnclave pins #99: the plaintext an open
-// returns is final, so it is read-only like every other complete constructor's
-// material; and a refused freeze fails the open closed — no enclave, no
-// reservation kept — rather than handing back writable plaintext.
-//
-// It seals through a sealer of its own rather than the process sealer, so its
-// outcome does not depend on which test installed that one or swept it.
+// TestSealedEnclave_OpenReturnsAFrozenEnclave pins that Open returns a
+// read-only enclave, and that a refused freeze fails the open closed with no
+// enclave and no reservation kept. It uses its own sealer, independent of the
+// process sealer's state.
 func TestSealedEnclave_OpenReturnsAFrozenEnclave(t *testing.T) {
 	ctx := t.Context()
 	s, err := NewSealer()
@@ -1866,12 +1760,9 @@ func TestSealedEnclave_OpenReturnsAFrozenEnclave(t *testing.T) {
 }
 
 // TestSealedEnclave_OpenWithKeepsTheChargeWhenARefusedFreezeCannotRelease
-// covers the corner of the fail-closed open the refund cannot reach: the
-// freeze is refused AND so is the release of the destination. The open still
-// fails closed with no enclave, and the destination was wiped before the
-// unmap was attempted, but the kernel still holds its pages, so OpenWith's
-// reservation stays charged until the WipeAll ledger reclaims them — returning
-// it early would let the allocator admit memory the process cannot lock.
+// pins that when both the freeze and the destination's release are refused,
+// the open fails closed and OpenWith's reservation stays charged until the
+// WipeAll ledger reclaims the pages.
 func TestSealedEnclave_OpenWithKeepsTheChargeWhenARefusedFreezeCannotRelease(t *testing.T) {
 	ctx := t.Context()
 	s, err := NewSealer()
@@ -1999,13 +1890,9 @@ func TestSealer_ConcurrentSealsRotateWithoutLosingAValue(t *testing.T) {
 	}
 }
 
-// TestSealer_SealersSharingARootWrapUnderDistinctKeys pins why the
-// generation ceiling bounds a real key: two sealers over the same provider —
-// as two sealers in one process, or one sealer on each boot of a hardware
-// root, get — must not wrap under the same key, or each would bring its own
-// allowance of random-nonce GCM messages under it. Each derives its wrapping
-// key from the root under its own salt, so neither's KEK blob unwraps under
-// the other's wrapping key.
+// TestSealer_SealersSharingARootWrapUnderDistinctKeys pins that two sealers
+// over the same provider derive distinct wrapping keys (a per-sealer salt),
+// so neither's KEK blob unwraps under the other's.
 func TestSealer_SealersSharingARootWrapUnderDistinctKeys(t *testing.T) {
 	ctx := t.Context()
 	p := &fixedRootUnsealer{fill: 0x5A}
@@ -2122,16 +2009,10 @@ func TestSealer_RefusesAGenerationPastTheRootCeiling(t *testing.T) {
 	}
 }
 
-// TestSealer_KEKFailureDoesNotReunsealTheRoot is the regression for the
-// root-unseal finding in #83.
-//
-// initHierarchy unsealed the root, then minted the first KEK; when the MINT
-// failed — memlock exhausted, the case the retry exists for — it destroyed the
-// successfully unsealed root, and the next seal called UnsealRoot AGAIN. The
-// RootUnsealer contract says a Sealer calls it at most once, retrying only if
-// that call failed, and a one-shot root provider (a consumed unseal handle;
-// providertest's Config.SingleUseRoot) cannot answer twice. The retry must
-// re-attempt only the step that failed.
+// TestSealer_KEKFailureDoesNotReunsealTheRoot pins that a failed first KEK
+// mint after a successful unseal retries only the mint: UnsealRoot is called
+// at most once unless it failed, and a one-shot root provider cannot answer
+// twice.
 func TestSealer_KEKFailureDoesNotReunsealTheRoot(t *testing.T) {
 	ru := &countingRootUnsealer{inner: fixedRootUnsealer{fill: 0x5A}}
 	// The root's pages are already locked when UnsealRoot runs, so the next
@@ -2223,12 +2104,10 @@ func TestSealer_SweptPendingRootIsWipedNotReunsealed(t *testing.T) {
 	}
 }
 
-// These tests pin #87: every path that can reach a provider takes the
-// caller's context and honors it, and no lock of a Sealer's or a
-// SealedEnclave's is held across a provider call. Nothing here sleeps or
-// races a clock. A provider that "takes a while" is one blocked on a channel
-// the test closes, and a deadline that "expires" is a manualContext the test
-// expires — so each test decides its interleaving instead of hoping for it.
+// The tests below pin context handling: every provider-reaching path honors
+// the caller's context, and no Sealer or SealedEnclave lock is held across a
+// provider call. Nothing sleeps or races a clock: providers block on channels
+// the test closes, and deadlines are manualContexts the test expires.
 
 // manualContext is a context the test ends by hand, with the error of its
 // choosing, and that REPORTS when somebody first waits on it.
@@ -2631,10 +2510,9 @@ func TestSealer_ContextEndingDuringASuccessfulCallIsHonoured(t *testing.T) {
 	})
 }
 
-// TestSealer_BlockedUnsealDoesNotStallOthers is the headline of #87. A
-// provider stuck inside UnsealRoot — one that IGNORES its context, the worst
-// case — must stall only callers that need the hierarchy it is producing, and
-// each of those only until its own context ends:
+// TestSealer_BlockedUnsealDoesNotStallOthers pins that a provider stuck in
+// UnsealRoot, ignoring its context, stalls only callers that need its
+// hierarchy, each until its own context ends:
 //
 //   - another, initialized Sealer seals and opens normally;
 //   - a second Seal on the SAME Sealer, queued for the init slot, returns
@@ -2707,11 +2585,10 @@ func TestSealer_BlockedUnsealDoesNotStallOthers(t *testing.T) {
 	}
 }
 
-// TestSealer_UnsealRootAtMostOnceUnderConcurrentFirstUse pins the #83
-// guarantee across the #87 restructuring: many callers arriving at a fresh
-// Sealer together cause exactly ONE UnsealRoot, and all of them seal. Every
-// caller is held at the init slot (observed, not assumed) before the one
-// inside the provider is released, so the interleaving is the contended one.
+// TestSealer_UnsealRootAtMostOnceUnderConcurrentFirstUse pins that many
+// callers arriving at a fresh Sealer together cause exactly one UnsealRoot
+// and all seal. Every caller is observed queued at the init slot before the
+// provider is released.
 func TestSealer_UnsealRootAtMostOnceUnderConcurrentFirstUse(t *testing.T) {
 	const callers = 8
 	p := newBlockingProvider()
@@ -3161,13 +3038,10 @@ func (u *gatedRootUnsealer) callCount() int {
 	return u.calls
 }
 
-// TestSealer_SweepOverlapIsCheckedBeforeTheMint is the regression for the
-// first #87 review finding. A sweep completes while UnsealRoot holds the
-// root's borrow, so the root survives it; the unseal then succeeds and the KEK
-// mint FAILS. The overlap must be caught before the mint — not only at
-// publication, which a failed mint never reaches — so the root is destroyed,
-// the sealer is wiped, and continued allocation failures cannot keep it
-// resident behind an allocation error.
+// TestSealer_SweepOverlapIsCheckedBeforeTheMint pins that a sweep completing
+// while UnsealRoot holds the root's borrow is caught before the mint, not
+// only at publication, which a failed mint never reaches: the root is
+// destroyed and the sealer is wiped despite continued allocation failures.
 func TestSealer_SweepOverlapIsCheckedBeforeTheMint(t *testing.T) {
 	u := &gatedRootUnsealer{entered: make(chan struct{}, 1), release: make(chan struct{})}
 	s, err := NewSealer(WithRootUnsealer(u))
@@ -3236,10 +3110,9 @@ func TestSealer_SweepDuringAFailedMintIsWiped(t *testing.T) {
 	}
 }
 
-// TestSealer_CancellationShapesAFailedMint is the regression for the third
-// review finding: the caller's context ends during a SUCCESSFUL unseal and
-// the mint after it fails. The root is kept (at-most-once), and the error
-// carries the cancellation AND the mint failure, under ErrSealFailed.
+// TestSealer_CancellationShapesAFailedMint pins that when the context ends
+// during a successful unseal and the mint fails, the root is kept and the
+// error carries the cancellation and the mint failure under ErrSealFailed.
 func TestSealer_CancellationShapesAFailedMint(t *testing.T) {
 	ctx, cancel := context.WithCancelCause(t.Context())
 	why := errors.New("request abandoned")
@@ -3274,10 +3147,9 @@ func TestSealer_CancellationShapesAFailedMint(t *testing.T) {
 	}
 }
 
-// TestNewSealed_EndedContextInstallsNothing is the regression for the second
-// review finding: NewSealed with an ended context must not lazily install the
-// software default on its way to refusing, because installation is one-shot
-// and the deployment's own SetSealer would then fail with ErrSealerInstalled.
+// TestNewSealed_EndedContextInstallsNothing pins that NewSealed with an ended
+// context does not lazily install the software default, which would make the
+// deployment's own SetSealer fail with ErrSealerInstalled.
 func TestNewSealed_EndedContextInstallsNothing(t *testing.T) {
 	for name, ec := range endedContexts(t) {
 		t.Run(name, func(t *testing.T) {
@@ -3301,8 +3173,8 @@ func TestNewSealed_EndedContextInstallsNothing(t *testing.T) {
 	}
 }
 
-// authThenCancelProtector refuses every Unprotect as a forgery, and ends the
-// caller's context before returning — the race the fifth review finding named.
+// authThenCancelProtector refuses every Unprotect as a forgery and ends the
+// caller's context before returning.
 type authThenCancelProtector struct {
 	inner  *SoftwareProvider
 	cancel context.CancelFunc
@@ -3369,12 +3241,10 @@ func (p *parkingProtector) Unprotect(ctx context.Context, blob, key []byte) erro
 	return p.inner.Unprotect(ctx, blob, key)
 }
 
-// TestSealedEnclave_OnlyTheLastOpenOutWipes is the sixth review finding: with
-// ONE open in flight, "the last open wipes" and "any open wipes" are the same
-// observation. Two opens are parked here, Destroy runs, and they are released
-// one at a time — the first succeeding, the second leaving through a
-// cancellation. The envelope must survive the first exit, because the second
-// open is still reading it, and be wiped by the second.
+// TestSealedEnclave_OnlyTheLastOpenOutWipes parks two opens, runs Destroy,
+// and releases them one at a time (the first succeeding, the second
+// canceled): the envelope must survive the first exit and be wiped by the
+// second.
 func TestSealedEnclave_OnlyTheLastOpenOutWipes(t *testing.T) {
 	p := &parkingProtector{inner: NewSoftwareProvider(), arrivals: make(chan chan error)}
 	s, err := NewSealer(WithKeyProtector(p))
@@ -3425,9 +3295,9 @@ func TestSealedEnclave_OnlyTheLastOpenOutWipes(t *testing.T) {
 	}
 }
 
-// errorThenCancelProtector returns a chosen error from Protect or Unprotect —
-// a sentinel this package normally passes through untouched — and ends the
-// caller's context before returning: the window Codex N8 named.
+// errorThenCancelProtector returns a chosen error from Protect or Unprotect,
+// a sentinel normally passed through untouched, and ends the caller's
+// context before returning.
 type errorThenCancelProtector struct {
 	inner      *SoftwareProvider
 	cancel     context.CancelFunc
@@ -3448,13 +3318,12 @@ func (p *errorThenCancelProtector) Unprotect(_ context.Context, _, _ []byte) err
 	return p.openErr
 }
 
-// TestSealer_PassThroughSentinelsAreJoinedWhenTheContextEnds pins the
-// qualification on the pass-through rule (Codex N8): a sentinel the provider
-// returns — ErrSealerWiped, ErrLockedMemoryUnavailable, ErrProviderMessageLimit
-// — normally reaches the caller untouched, but when the caller's context has
-// ended by the time the provider returns, the error is the CANCELLATION
-// joined with that sentinel: it matches the operation's sentinel, the
-// context's error and the provider's sentinel, all three.
+// TestSealer_PassThroughSentinelsAreJoinedWhenTheContextEnds pins that a
+// pass-through sentinel the provider returns (ErrSealerWiped,
+// ErrLockedMemoryUnavailable, ErrProviderMessageLimit) is joined with the
+// cancellation when the caller's context has ended by the time the provider
+// returns: it matches the operation's sentinel, the context's error and the
+// provider's sentinel.
 func TestSealer_PassThroughSentinelsAreJoinedWhenTheContextEnds(t *testing.T) {
 	for _, sentinel := range []error{ErrSealerWiped, ErrLockedMemoryUnavailable} {
 		t.Run("open/"+sentinel.Error(), func(t *testing.T) {
@@ -3578,13 +3447,11 @@ func regionContains(region []byte, addr uintptr) bool {
 	return addr >= lo && addr < lo+uintptr(len(region))
 }
 
-// TestSealer_RefusedReleaseOfADiscardedKEKIsRetried is Codex round 3 #1. A
-// sweep overlaps the initialization AFTER the root is unsealed — so the
-// pre-mint check passes — and the first KEK is minted; publication then sees
-// the overlap and destroys both. The kernel refuses the KEK's unmap. The
-// sealer must keep a reference to that KEK and retry its release on the next
-// attempt, alongside the root's — not report a clean ErrSealerWiped while the
-// KEK's mapping is still held.
+// TestSealer_RefusedReleaseOfADiscardedKEKIsRetried pins that when a sweep
+// overlaps initialization after the unseal, publication destroys the root
+// and the minted KEK, and the kernel refuses the KEK's unmap, the sealer
+// keeps a reference and retries the KEK's release with the root's on the
+// next attempt.
 //
 // The overlap is placed deterministically. The KEK's own mlock — the first
 // step of the mint — runs a sweep while the test holds a borrow on the root,

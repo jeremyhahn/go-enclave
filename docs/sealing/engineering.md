@@ -50,6 +50,12 @@
    consumes nothing a later call needs.
 6. **Infrastructure failures are the provider's own errors**, not
    `ErrSealedAuthentication`.
+7. **Concurrent calls.** The `Sealer` holds no lock of its own across a
+   provider call, so concurrent seals and opens call the provider
+   concurrently. A provider that ignores its context stalls only its own
+   caller.
+8. **`Health` does not block** and reports only in-process state; a provider
+   whose key lives in a device returns `nil` unconditionally.
 
 ## Invariants
 
@@ -63,7 +69,10 @@
    things do span one, by design: the init slot (a one-slot semaphore acquired
    in a `select` against `ctx.Done()`) spans `UnsealRoot`, and the read lock of
    the private, per-call enclave the provider reads from or writes into (the
-   DEK, or the root destination) spans every provider call.
+   DEK, or the root destination) spans every provider call. Lock order is
+   init slot, then the hierarchy mutex; the mutex is held only for
+   in-process work (reading, publishing, rotating), which is why rotation
+   may hold it across a mint: rotation never calls the provider.
 3. **At most one successful `UnsealRoot` per `Sealer`.** Success is the
    provider's result, not the caller's context: a call that returns an error
    (including one reporting the ended context) retains nothing, and a later
@@ -181,6 +190,11 @@ matches one of these sentinels, and is joined under `op` otherwise
 
 ### Where `ErrSealerWiped` comes from
 
+It is a distinct error, not a reuse of `ErrSealedAuthentication`: a sealer
+that silently re-keyed after a sweep would seal successfully and fail only on
+older values, as apparent tampering, sending an operator after an attacker
+who does not exist.
+
 Three paths produce it. Paths 1 and 2 are permanent for that sealer; path 3 is
 whatever the provider means by it:
 
@@ -286,9 +300,19 @@ heap. Per key class, and when its schedule reaches the heap:
 
 In `ModePerOperation` with a hardware provider, the long-lived key never enters
 the process, but DEK schedules still do: values sealed or opened recently remain
-recoverable until their schedules' memory is reused. This is accepted rather than replacing the standard library's AES (see [architecture.md](architecture.md#rejected-alternatives)); the full audit is
-on `withAEAD` in [sealed.go](../../sealed.go), and a test fails if the exposure
-stops appearing (so the audit is re-measured when it changes).
+recoverable until their schedules' memory is reused. This is accepted rather than replacing the standard library's AES (see [architecture.md](architecture.md#rejected-alternatives)).
+
+Measured on go1.27 linux/amd64: the `aes.NewCipher` block is 488 bytes (the
+512-byte size class), one per AES operation, with the key at offset 8 —
+byte-exact on the hardware path, as eight big-endian `uint32` words on the
+generic path (`GODEBUG=cpu.aes=off`). Size and offset follow the block layout
+and nothing depends on them; the key's presence is what matters.
+`withAEAD` ([sealed.go](../../sealed.go)) is the only place a key leaves locked
+memory. `TestSealedEnclave_KeyScheduleReachesTheHeapAsDocumented` fails if the
+key stops appearing in the schedule in either form, or `NewCipher` stops
+allocating; either means this section must be re-measured. Core-dump
+suppression does not close the window everywhere: `RLIMIT_CORE` may be
+refused, Windows has none, and a Linux `core_pattern` pipe ignores it.
 
 ### Erasure under `runtime/secret`
 
@@ -357,6 +381,17 @@ process-lifetime `Sealer` (an AST guard test keeps it that way).
   error, looks only for whole needles, and sees only the paths and moments the
   tests exercise. A test pins the documented key-schedule heap exposure.
 - Package-private `resetProcessSealerForTest` exercises the one-shot install.
+- Context and lock tests never sleep or race a clock: providers block on
+  channels the test closes, and deadlines are contexts the test expires by
+  hand, so each test fixes its interleaving.
+- Counters that would take 2^31 operations to reach (KEK messages,
+  generations, `SoftwareProvider`'s Protect budget) are positioned at the
+  boundary by in-package tests; the integration suite cannot reach them.
+- One placement has no deterministic test: the seal path translates a wrap
+  failure with `hierarchyFailure` before releasing the hierarchy's read lock,
+  because a rotation waiting on the write lock destroys the outgoing KEK and
+  a later check would read that retirement as a sweep. No seam holds that
+  window open.
 - Provider behavior is checked by [provider-conformance](../provider-conformance/engineering.md),
   which `SoftwareProvider` passes in this repository's own tests.
 - `make test-fips` runs the suite in FIPS strict mode (`GOFIPS140=latest`; see [FIPS 140-3](#fips-140-3)).

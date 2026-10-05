@@ -29,13 +29,9 @@ import (
 // rotation through WithKEKRotationLimit; locked memory refused at each step of
 // the hierarchy; and what a shutdown sweep does to a sealer's keys.
 //
-// WHAT THIS SUITE CANNOT REACH, stated rather than implied: the CEILINGS. A
-// ModeRootKey sealer refuses a generation past 2^31 (ErrSealerExhausted), and
-// the software provider's own Protect budget is 2^31. Neither is configurable
-// — deliberately, they are the GCM random-nonce margin — and reaching one
-// means 2^31 locked-memory operations, most of a day of wall time in this
-// devcontainer. The in-package unit tests (sealer_test.go) position the
-// counters at the boundary directly.
+// The 2^31 ceilings (ErrSealerExhausted, and the software provider's Protect
+// budget) are not configurable and take 2^31 locked-memory operations to
+// reach; the in-package unit tests position those counters at the boundary.
 
 var sealerModes = []enclave.Mode{enclave.ModeRootKey, enclave.ModePerOperation}
 
@@ -150,18 +146,12 @@ func TestSealerRoundTripsManyValuesInBothModes(t *testing.T) {
 					t.Errorf("Openable after Destroy: %v, want ErrEnclaveDestroyed", err)
 				}
 
-				// A shutdown sweep destroys the sealer's in-process keys — in
-				// ModeRootKey the root/KEK hierarchy, in ModePerOperation the root
-				// of the SoftwareProvider behind the device. The sealed values keep
-				// their ciphertext and say so; none can be opened any more; and the
-				// sealer fails closed rather than minting new keys.
-				//
-				// What Openable can KNOW differs by mode, and the difference is the
-				// contract: in ModeRootKey the sealer owns the keys and answers
-				// ErrSealerWiped; in ModePerOperation the keys are the provider's,
-				// this provider implements no HealthReporter, so
-				// the honest answer is ErrOpenabilityUnknown — and never nil, which
-				// would be the fail-open.
+				// A shutdown sweep destroys the sealer's in-process keys: in
+				// ModeRootKey the hierarchy, in ModePerOperation the
+				// SoftwareProvider's root behind the device. The values keep their
+				// ciphertext, none opens, and the sealer fails closed. Openable
+				// answers ErrSealerWiped in ModeRootKey and, with no HealthReporter,
+				// ErrOpenabilityUnknown (never nil) in ModePerOperation.
 				if n, err := enclave.WipeAll(ctx); n != 0 || err != nil {
 					t.Fatalf("WipeAll = (%d, %v), want (0, nil)", n, err)
 				}
@@ -200,7 +190,7 @@ func TestSealerRoundTripsManyValuesInBothModes(t *testing.T) {
 //   - a DEADLINE reaches a stalled provider: the seal and the open return
 //     ErrSealFailed/ErrOpenFailed matching context.DeadlineExceeded, and the
 //     value is intact;
-//   - no Sealer or SealedEnclave lock is held across a provider call (#87):
+//   - no Sealer or SealedEnclave lock is held across a provider call:
 //     while one seal and one open are stalled inside the provider, a second
 //     seal and open on the SAME sealer complete, and Destroy of the value
 //     being opened returns without waiting for that open.
@@ -290,7 +280,7 @@ func TestSealerContextReachesTheProvider(t *testing.T) {
 		other := sealNeedle(t, live, s, m) // same sealer, while a seal is parked in the provider
 		requireOpensTo(t, live, other, m)
 		requireOpensTo(t, live, v, n) // same value, while an open of it is parked in the provider
-		v.Destroy()                   // must not wait for the parked open (#87)
+		v.Destroy()                   // must not wait for the parked open
 
 		cancelSeal()
 		cancelOpen()
