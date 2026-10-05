@@ -11,6 +11,7 @@
 package providertest
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -18,9 +19,9 @@ import (
 
 // TestResidueSweepReportsItselfNotRunOffLinux is the non-Linux half of the
 // retention-by-copy control. Off Linux there is no residue sweep, so a provider
-// that retains a copy cannot be caught — and the suite must SAY so through
-// Logf, in the words a reader of a green run will search for, rather than
-// return nil as if the property had been measured. The Linux half, where the
+// that retains a copy cannot be caught — and the suite must return
+// ErrNotMeasured, and say so through Logf, rather than return nil as if the
+// property had been measured. The Linux half, where the
 // same provider must be caught, is TestSuiteCatchesAProviderThatRetainsACopy
 // in residue_linux_test.go (#90: a build constraint, never a runtime skip).
 func TestResidueSweepReportsItselfNotRunOffLinux(t *testing.T) {
@@ -31,8 +32,18 @@ func TestResidueSweepReportsItselfNotRunOffLinux(t *testing.T) {
 	cfg := perOp(func() (any, error) { return &retainingProtector{inner: software()}, nil })
 	cfg.Logf = func(format string, args ...any) { fmt.Fprintf(&log, format+"\n", args...) }
 
+	err := TestProvider(t.Context(), cfg)
+	var nm *NotMeasuredError
+	if !errors.Is(err, ErrNotMeasured) || !errors.As(err, &nm) || !strings.Contains(nm.Reason, sweepUnsupportedReason) {
+		t.Fatalf("TestProvider = %v; want only an error matching ErrNotMeasured naming %q", err, sweepUnsupportedReason)
+	}
+	var pe *PropertyError
+	if errors.As(err, &pe) {
+		t.Fatalf("with no sweep available the retaining provider conforms in every measured way: %v", pe)
+	}
+	cfg.SkipResidueSweep = "no sweep on this platform; accepted for the test"
 	if err := TestProvider(t.Context(), cfg); err != nil {
-		t.Fatalf("with no sweep available the retaining provider conforms in every measured way: %v", err)
+		t.Fatalf("with SkipResidueSweep set the unmeasured sweep is accepted, got %v", err)
 	}
 	if !strings.Contains(log.String(), "residue sweep not run") ||
 		!strings.Contains(log.String(), sweepUnsupportedReason) {

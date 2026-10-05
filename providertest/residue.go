@@ -61,8 +61,8 @@ func checkNoResidueAfterUnprotect(r *report, cfg Config) {
 		return
 	}
 	if !sweepSupported {
-		r.note("providertest: residue sweep not run: %s. Retention by copy is unmeasured on this platform; "+
-			"run the suite on Linux to measure it", sweepUnsupportedReason)
+		r.unmeasured(property, "residue sweep not run: %s. Retention by copy is unmeasured on this platform; "+
+			"run the suite on Linux to measure it, or accept that with Config.SkipResidueSweep", sweepUnsupportedReason)
 		return
 	}
 
@@ -77,7 +77,7 @@ func checkNoResidueAfterUnprotect(r *report, cfg Config) {
 	// suite's own doing in every run.
 	needle, err := enclave.NewMemoryEnclaveSized(keyBytes)
 	if err != nil {
-		r.note("providertest: residue sweep not run: locked memory is unavailable (%v). Retention by copy "+
+		r.unmeasured(property, "residue sweep not run: locked memory is unavailable (%v). Retention by copy "+
 			"is unmeasured", err)
 		return
 	}
@@ -117,7 +117,8 @@ func checkNoResidueAfterUnprotect(r *report, cfg Config) {
 	// non-vacuity control below.
 	dst, err := enclave.NewMemoryEnclaveSized(keyBytes)
 	if err != nil {
-		r.note("providertest: residue sweep not run: a second locked allocation failed (%v)", err)
+		r.unmeasured(property, "residue sweep not run: a second locked allocation failed (%v). Retention "+
+			"by copy is unmeasured", err)
 		return
 	}
 	destroyed := false
@@ -160,13 +161,13 @@ func checkNoResidueAfterUnprotect(r *report, cfg Config) {
 	// on the heap forever went unnoticed by the one test written to catch it.
 	control, err := sweepOutsideHome(needle, home)
 	if err != nil {
-		r.note("providertest: residue sweep not run: %v. Retention by copy is unmeasured", err)
+		r.unmeasured(property, "residue sweep not run: %v. Retention by copy is unmeasured", err)
 		return
 	}
 	if len(control) == 0 {
-		r.note("providertest: residue sweep not run: with the key deliberately resident in a second locked " +
-			"mapping the sweep still found no match outside the needle's own mapping, so it cannot see the " +
-			"mappings a leak would live in and a negative result would be vacuous. Retention by copy is " +
+		r.unmeasured(property, "residue sweep not run: with the key deliberately resident in a second locked "+
+			"mapping the sweep still found no match outside the needle's own mapping, so it cannot see the "+
+			"mappings a leak would live in and a negative result would be vacuous. Retention by copy is "+
 			"unmeasured")
 		return
 	}
@@ -187,7 +188,8 @@ func checkNoResidueAfterUnprotect(r *report, cfg Config) {
 
 	after, err := sweepOutsideHome(needle, home)
 	if err != nil {
-		r.fail(property, "sweeping process memory: %v", err)
+		r.unmeasured(property, "residue sweep failed after its control succeeded: %v. Retention by copy is "+
+			"unmeasured", err)
 		return
 	}
 	if len(after) > 0 {
@@ -201,6 +203,9 @@ func checkNoResidueAfterUnprotect(r *report, cfg Config) {
 		"%d after it was wiped and unmapped", len(control), len(after))
 }
 
+// sweepProcess is the platform sweep; a variable so a test can blind it.
+var sweepProcess = residueMappings
+
 // sweepOutsideHome returns the mappings, other than the one containing home,
 // in which the material held in probe is byte-exact resident. The needle is
 // read from inside a borrow so it never exists as a heap value the sweep could
@@ -209,7 +214,7 @@ func sweepOutsideHome(probe *enclave.MemoryEnclave, home uintptr) ([]string, err
 	var hits []string
 	var scanErr error
 	if err := probe.WithBytes(func(needle []byte) error {
-		hits, scanErr = residueMappings(needle, home)
+		hits, scanErr = sweepProcess(needle, home)
 		return nil
 	}); err != nil {
 		return nil, &stepError{step: "borrowing the needle", err: err}
@@ -242,7 +247,7 @@ func addrOf(b []byte) (uintptr, error) {
 	}
 	var addr uint64
 	if _, err := fmt.Sscanf(fmt.Sprintf("%p", b), "0x%x", &addr); err != nil {
-		return 0, &stepError{step: "providertest: parsing slice address", err: err}
+		return 0, &stepError{step: "parsing slice address", err: err}
 	}
 	return uintptr(addr), nil
 }

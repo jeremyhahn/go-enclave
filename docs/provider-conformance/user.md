@@ -1,6 +1,6 @@
 # Provider conformance — user guide
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-01
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-04
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 For authors of a `KeyProtector` and/or `RootUnsealer` — a TPM, HSM or cloud-KMS
@@ -44,10 +44,11 @@ func TestConformance(t *testing.T) {
 }
 ```
 
-Run it on Linux at least once: that is the only platform where the residue
-sweep (the only check that can see a retained **copy**) runs. Always pass
-`Logf` and read it with `go test -v` — it is where skipped and unmeasurable
-checks are reported.
+Run it on Linux: that is the only platform where the residue sweep (the only
+check that can see a retained **copy**) runs. Elsewhere the run returns an
+error matching `ErrNotMeasured` unless you set `SkipResidueSweep` (for example
+only when `runtime.GOOS != "linux"`). Always pass `Logf` and read it with
+`go test -v` — it is where skipped checks are reported.
 
 ## Reading a failure
 
@@ -58,6 +59,9 @@ case errors.Is(err, providertest.ErrInvalidConfig):
 	// Your Config is wrong (New nil, Modes empty or invalid).
 case errors.Is(err, providertest.ErrAborted):
 	// The context ended first; the run is incomplete. Raise the deadline.
+case errors.Is(err, providertest.ErrNotMeasured):
+	// A property could not be measured on this host (e.g. the residue sweep
+	// off Linux). Run where it can be, or accept it via SkipResidueSweep.
 case errors.As(err, &pe):
 	// At least one assertion failed; err joins one *PropertyError per failed
 	// assertion (several can share a Property). errors.As returns the first.
@@ -69,7 +73,7 @@ case errors.As(err, &pe):
 
 | Field | When to set it | What you give up |
 |---|---|---|
-| `SkipResidueSweep: "<reason>"` | A transit you cannot wipe — e.g. a KMS whose plaintext arrives in an HTTP response body owned by `net/http` | Retention by **copy** is unmeasured; the reason is logged. |
+| `SkipResidueSweep: "<reason>"` | A transit you cannot wipe — e.g. a KMS whose plaintext arrives in an HTTP response body owned by `net/http` — or a host where the sweep cannot run (non-Linux) | Retention by **copy** is unmeasured; the reason is logged. Without it an unmeasurable sweep returns `ErrNotMeasured`. |
 | `SingleUseRoot: "<reason>"` | `UnsealRoot` consumes a one-shot handle or session on success | The full-width-write proof and the root-destination spy, which need a second call; the reason is logged. |
 
 Never set either to silence a failure you have not explained.
@@ -86,6 +90,7 @@ Never set either to silence a failure you have not explained.
 | no copy of the key is findable … after Unprotect returns | A decrypted transient was not wiped (or is retained). |
 | UnsealRoot writes a root across the whole destination | A placeholder root (all-zero or constant), or a partial write. |
 | Run reported aborted, no property failed | `ctx` deadline too short for your device, or a call that never returns. |
+| `ErrNotMeasured` — residue sweep not run | Not Linux, `RLIMIT_MEMLOCK` too low for two locked pages, or `/proc/self/mem` unreadable. Fix the host, or set `SkipResidueSweep` with the reason. |
 
 ## Migrating from v0.6
 

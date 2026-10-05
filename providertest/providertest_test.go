@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	enclave "github.com/jeremyhahn/go-enclave"
 )
@@ -169,6 +170,71 @@ func TestResidueSweepSkipIsRecordedNotSilent(t *testing.T) {
 		!strings.Contains(log.String(), "the KMS response body is owned by net/http") {
 		t.Errorf("the skip was not reported with its recorded reason; a reader of this green run would not "+
 			"know retention by copy went unmeasured. Log was:\n%s", log.String())
+	}
+}
+
+// TestAnUnmeasuredResidueSweepIsNotAPass pins fail-closed: a sweep that could
+// not measure returns an error matching ErrNotMeasured, never nil, unless the
+// caller accepted that through SkipResidueSweep.
+func TestAnUnmeasuredResidueSweepIsNotAPass(t *testing.T) {
+	const property = "no copy of the key is findable in the process after Unprotect returns"
+	tests := []struct {
+		name  string
+		sweep func([]byte, uintptr) ([]string, error)
+	}{
+		{"a blind control", func([]byte, uintptr) ([]string, error) { return nil, nil }},
+		{"a sweep that cannot read memory", func([]byte, uintptr) ([]string, error) {
+			return nil, errors.New("planted: /proc/self/mem unreadable")
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			orig := sweepProcess
+			sweepProcess = tc.sweep
+			t.Cleanup(func() { sweepProcess = orig })
+
+			cfg := Config{
+				New:   func() (any, error) { return software(), nil },
+				Modes: []enclave.Mode{enclave.ModeRootKey, enclave.ModePerOperation},
+				Logf:  t.Logf,
+			}
+			err := TestProvider(t.Context(), cfg)
+			if !errors.Is(err, ErrNotMeasured) {
+				t.Fatalf("TestProvider = %v, want an error matching ErrNotMeasured", err)
+			}
+			var nm *NotMeasuredError
+			if !errors.As(err, &nm) || nm.Property != property || nm.Reason == "" {
+				t.Errorf("the unmeasured property is not a populated *NotMeasuredError for %q: %#v", property, nm)
+			}
+			var pe *PropertyError
+			if errors.As(err, &pe) {
+				t.Errorf("an unmeasured property was charged to the provider: %v", pe)
+			}
+
+			cfg.SkipResidueSweep = "this host cannot sweep; accepted for the test"
+			if err := TestProvider(t.Context(), cfg); err != nil {
+				t.Errorf("with SkipResidueSweep set the unmeasured sweep is accepted, got %v", err)
+			}
+		})
+	}
+}
+
+// TestErrorMessagesNameThePackage pins the error-string prefix every error
+// this package returns carries, so a joined report says where it came from.
+func TestErrorMessagesNameThePackage(t *testing.T) {
+	for _, err := range []error{
+		&PropertyError{Property: "p", Detail: "d"},
+		&stepError{step: "s", err: errors.New("e")},
+		&NotMeasuredError{Property: "p", Reason: "r"},
+		ErrNotMeasured,
+	} {
+		if msg := err.Error(); !strings.HasPrefix(msg, "providertest: ") ||
+			strings.HasPrefix(msg, "providertest: providertest: ") {
+			t.Errorf("%T renders %q; want exactly one \"providertest: \" prefix", err, msg)
+		}
+	}
+	if _, err := addrOf(nil); err == nil || !strings.HasPrefix(err.Error(), "providertest: ") {
+		t.Errorf("addrOf(nil) = %v; want a providertest-prefixed error", err)
 	}
 }
 
@@ -1329,6 +1395,107 @@ func TestSuiteRequiresUnsealRootToRefuseAnEndedContext(t *testing.T) {
 	}
 }
 
+// rootKeepingUnsealer writes the root into every ended-context destination
+// and keeps the slice, so a test can read what the suite left in it. When
+// hold is set, an ended-context call blocks until release is closed.
+type rootKeepingUnsealer struct {
+	inner   *enclave.SoftwareProvider
+	accept  bool
+	hold    bool
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+	mu      sync.Mutex
+	kept    [][]byte
+}
+
+func (u *rootKeepingUnsealer) UnsealRoot(ctx context.Context, dst []byte) error {
+	if ctx.Err() == nil {
+		return u.inner.UnsealRoot(ctx, dst)
+	}
+	if err := u.inner.UnsealRoot(context.WithoutCancel(ctx), dst); err != nil {
+		return err
+	}
+	u.mu.Lock()
+	u.kept = append(u.kept, dst)
+	u.mu.Unlock()
+	if u.hold {
+		u.once.Do(func() { close(u.entered) })
+		<-u.release
+	}
+	if u.accept {
+		return nil
+	}
+	return ctx.Err()
+}
+
+// keptAllZero reports whether every destination u kept is all zero.
+func (u *rootKeepingUnsealer) keptAllZero() (n int, zero bool) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	for _, d := range u.kept {
+		if !allZero(d) {
+			return len(u.kept), false
+		}
+	}
+	return len(u.kept), true
+}
+
+// TestEndedContextRootDestinationsAreWiped pins that a destination handed to
+// an ended-context UnsealRoot never keeps root material on the heap once the
+// check is done with it, whether the provider refused, accepted, or was
+// abandoned mid-call.
+func TestEndedContextRootDestinationsAreWiped(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		accept bool
+	}{{"refused", false}, {"accepted", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			u := &rootKeepingUnsealer{inner: software(), accept: tc.accept}
+			cfg := rootOnly(func() (any, error) { return u, nil })
+			cfg.Logf = t.Logf
+			if err := TestProvider(t.Context(), cfg); err == nil {
+				t.Fatal("the suite passed a provider that writes the root on an ended context")
+			}
+			if n, zero := u.keptAllZero(); n == 0 || !zero {
+				t.Errorf("%d ended-context destination(s) kept; all wiped: %v", n, zero)
+			}
+		})
+	}
+
+	t.Run("abandoned", func(t *testing.T) {
+		u := &rootKeepingUnsealer{inner: software(), hold: true,
+			entered: make(chan struct{}), release: make(chan struct{})}
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		go func() {
+			<-u.entered
+			cancel()
+		}()
+		cfg := rootOnly(func() (any, error) { return u, nil })
+		cfg.Logf = t.Logf
+		if err := TestProvider(ctx, cfg); !errors.Is(err, ErrAborted) {
+			t.Fatalf("TestProvider = %v, want an abort", err)
+		}
+		if n, zero := u.keptAllZero(); n != 1 || zero {
+			t.Fatalf("before the abandoned call returned: %d kept, all zero %v; want 1 holding the root "+
+				"(nothing may touch a destination a provider is still running against)", n, zero)
+		}
+		wiped := make(chan struct{})
+		abandonedCleanupHook = func() { close(wiped) }
+		t.Cleanup(func() { abandonedCleanupHook = nil })
+		close(u.release)
+		select {
+		case <-wiped:
+		case <-time.After(10 * time.Second):
+			t.Fatal("the abandoned call returned and its worker never cleaned up")
+		}
+		if _, zero := u.keptAllZero(); !zero {
+			t.Error("the abandoned call returned, and its destination still holds the root")
+		}
+	})
+}
+
 // hangingOnEndedContext blocks, until released, on any call made with an
 // ended context — the worst way to ignore one. acceptProtect additionally
 // makes Protect COMPLETE an ended-context call, a violation the suite observes
@@ -1756,7 +1923,7 @@ func TestSuiteReportsAProviderThatCannotBeConstructed(t *testing.T) {
 		New:   func() (any, error) { return nil, errDeviceFault },
 		Modes: []enclave.Mode{enclave.ModeRootKey, enclave.ModePerOperation},
 	}
-	want := "Config.New: " + errDeviceFault.Error()
+	want := "providertest: Config.New: " + errDeviceFault.Error()
 	requireOnlyPropertyFailures(t, cfg,
 		"mode/interface pairing: "+want,
 		"Protect/Unprotect round trip: "+want,

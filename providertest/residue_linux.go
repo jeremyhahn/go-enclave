@@ -29,16 +29,14 @@ const sweepSupported = true
 // files present the same surface.
 const sweepUnsupportedReason = ""
 
-// residueMappings returns the /proc/self/maps lines of every ANONYMOUS mapping
-// that contains needle, excluding the one that contains home.
+// residueMappings returns the /proc/self/maps lines of every swept mapping
+// (see [sweptMapping]) that contains needle, excluding the one that contains
+// home.
 //
-// # Two corrections are baked into this, and both were measured
-//
-// File-backed mappings are excluded, because the binary's own rodata would
-// match a literal needle in every run. Anonymous mappings are swept WHETHER OR
-// NOT the kernel named them: the Go runtime labels its heap `[anon: Go: heap]`,
-// and skipping named mappings is what made the first version of this technique
-// blind to the only place a leak could be — one mapping swept, thirty skipped.
+// Anonymous mappings are swept WHETHER OR NOT the kernel named them: the Go
+// runtime labels its heap `[anon: Go: heap]`. So are memfd, /dev/shm,
+// /dev/zero, unlinked and every writable file-backed mapping, any of which a
+// provider can keep a key in.
 //
 // The scan buffer is wiped after EVERY mapping, not merely on return. Scanning
 // the needle's own legitimate mapping copies the needle into an ordinary heap
@@ -71,12 +69,7 @@ func residueMappings(needle []byte, home uintptr) ([]string, error) {
 		if len(fields) < 5 {
 			continue
 		}
-		if !strings.HasPrefix(fields[1], "r") {
-			continue
-		}
-		// File-backed only: a pathname starts with '/'. Kernel labels like
-		// [anon: Go: heap], [stack] and [heap] are anonymous and ARE swept.
-		if len(fields) > 5 && strings.HasPrefix(fields[5], "/") {
+		if !sweptMapping(fields[1], strings.Join(fields[5:], " ")) {
 			continue
 		}
 		lo, hi, ok := parseMapsHeader(line)
@@ -135,10 +128,7 @@ func mappingContains(mem io.ReaderAt, lo, hi uintptr, needle, buf []byte) bool {
 			// always false, which is the truth.
 			return false
 		}
-		n := len(buf)
-		if remaining := int(hi - off); remaining < n {
-			n = remaining
-		}
+		n := readLen(off, hi, len(buf))
 		used = max(used, n)
 		read, rerr := mem.ReadAt(buf[:n], int64(off))
 		if read > 0 && bytes.Contains(buf[:read], needle) {
@@ -153,6 +143,36 @@ func mappingContains(mem io.ReaderAt, lo, hi uintptr, needle, buf []byte) bool {
 		off += uintptr(read - overlap)
 	}
 	return false
+}
+
+// readLen is the length of one read of [off, hi) into a buffer of size max.
+// The span is compared as a uintptr: on a 32-bit target it can exceed
+// math.MaxInt32, and converted first it would go negative.
+func readLen(off, hi uintptr, max int) int {
+	if rem := hi - off; rem < uintptr(max) {
+		return int(rem)
+	}
+	return max
+}
+
+// sweptMapping reports whether a mapping with these /proc/self/maps
+// permissions and pathname can hold a runtime copy of key material, and so is
+// swept.
+func sweptMapping(perms, path string) bool {
+	if !strings.HasPrefix(perms, "r") {
+		return false // unreadable: /proc/self/mem refuses it
+	}
+	switch {
+	case path == "" || strings.HasPrefix(path, "["):
+		return true // anonymous, whether or not the kernel named it
+	case len(perms) > 1 && perms[1] == 'w':
+		return true // any writable mapping: private file copy, shared file, /dev/zero
+	case strings.HasPrefix(path, "/memfd:"), strings.HasPrefix(path, "/dev/shm/"),
+		strings.HasPrefix(path, "/SYSV"), strings.HasSuffix(path, " (deleted)"):
+		return true // memory-backed or unlinked: written through a descriptor, whatever this mapping's permissions
+	default:
+		return false // read-only view of a file on disk: program text and rodata, the file's own bytes
+	}
 }
 
 // parseMapsHeader recognizes a /proc/self/maps line ("7f0c…-7f0c… rw-p …") and

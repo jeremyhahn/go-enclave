@@ -1,6 +1,6 @@
 # Provider conformance — architecture
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-01
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-04
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Problem
@@ -53,12 +53,15 @@ at the next boundary once `ctx` ends.
 2. **The residue sweep (corroboration, Linux only).** The only instrument that
    can see a retained **copy**: it protects a needle that exists only in locked
    pages, recovers it into a second locked mapping, destroys that mapping, and
-   searches the readable anonymous mappings (via `/proc/self/maps` and
-   `/proc/self/mem`) for the whole needle outside its home; unreadable mappings
-   are skipped and a read error ends the scan of that mapping (limits:
+   searches every readable mapping that can hold a runtime copy — anonymous,
+   writable, memfd, `/dev/shm`, `/dev/zero` and unlinked (via `/proc/self/maps`
+   and `/proc/self/mem`) — for the whole needle outside its home; unreadable
+   mappings and read-only views of on-disk files are skipped and a read error
+   ends the scan of that mapping (limits:
    [engineering.md](engineering.md#contract-versus-evidence)). It first proves it *can* find the needle
    while the destination is alive, and wipes its own scan buffer after every
-   mapping so it cannot plant what it looks for.
+   mapping so it cannot plant what it looks for. A sweep that cannot run
+   returns `ErrNotMeasured` unless `SkipResidueSweep` accepted that.
 
 ## Rejected alternatives
 

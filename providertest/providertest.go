@@ -70,7 +70,8 @@
 // between the fill and the wipe strands the pre-wipe bytes on the freed old
 // stack, where no wipe reaches. Both were measured in this repository (#45).
 // The sweep here wipes its buffer after every mapping, refuses to report a
-// negative it has not first proven it could turn positive, and is skippable
+// negative it has not first proven it could turn positive — a sweep that
+// cannot measure fails the run with [ErrNotMeasured] — and is skippable
 // with a recorded reason for a provider whose transit genuinely cannot be
 // reached — an HTTP-backed KMS cannot wipe its client's read buffer.
 //
@@ -120,6 +121,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"sync"
 	"time"
 
 	enclave "github.com/jeremyhahn/go-enclave"
@@ -169,6 +171,11 @@ type Config struct {
 	// sweep is not run against this provider, and skips it. The string is not
 	// decoration: it is echoed through Logf and is the only account anyone
 	// reading a green run will have of what was not measured.
+	//
+	// It is also the only way to accept an unmeasured sweep. Left empty, a
+	// sweep that cannot run — off Linux, without locked memory, or blind on
+	// this host — makes [TestProvider] return an error matching
+	// [ErrNotMeasured] rather than nil.
 	//
 	// The legitimate reason is a transit the provider cannot reach — a cloud
 	// KMS backend receives its plaintext in an HTTP response body that
@@ -220,10 +227,11 @@ type Config struct {
 //
 // A returned error means the provider does not honor the seam, EXCEPT one
 // matching [ErrInvalidConfig] (a [*ConfigError]) — cfg itself could not be
-// run, and no provider was tested at all — or [ErrAborted], which means the
-// run is incomplete. A nil return means every property the suite could
-// MEASURE held; which ones it could not measure, and why, went to
-// [Config.Logf].
+// run, and no provider was tested at all — [ErrAborted], which means the
+// run is incomplete, or [ErrNotMeasured] (a [*NotMeasuredError]), which means
+// a property could not be measured on this host and cfg did not accept that.
+// A nil return means every property was measured and held, except those cfg
+// explicitly relaxed; what those were, and why, went to [Config.Logf].
 func TestProvider(ctx context.Context, cfg Config) error {
 	if cfg.New == nil {
 		return &ConfigError{Field: "New", Reason: "is nil; the suite has no provider to test"}
@@ -284,6 +292,19 @@ func (r *report) fail(property, format string, args ...any) {
 	r.failures = append(r.failures, &PropertyError{Property: property, Detail: fmt.Sprintf(format, args...)})
 }
 
+// unmeasured records a property this run could not measure. Like fail, it is
+// dropped once the run's context has ended, since the run is then aborted.
+//
+//nolint:unparam // only the residue sweep can be unmeasured today; the property still names which one was.
+func (r *report) unmeasured(property, format string, args ...any) {
+	reason := fmt.Sprintf(format, args...)
+	r.note("providertest: %s", reason)
+	if r.ctx.Err() != nil {
+		return
+	}
+	r.failures = append(r.failures, &NotMeasuredError{Property: property, Reason: reason})
+}
+
 // note records something a reader of a GREEN run needs to know — chiefly, what
 // was not measured.
 func (r *report) note(format string, args ...any) {
@@ -338,28 +359,49 @@ func (r *report) endedContexts() ([]endedContext, func()) {
 // nothing and stops the check, and the run is reported through err as
 // aborted, which a run whose context ended always is.
 //
-// If the run's context wins, the goroutine is left running: its only way out
-// is the provider returning, and nothing on this side can force that. Its
-// result channel is buffered, so it exits the moment the provider does, and
-// nothing it writes is read after this returns.
-func (r *report) bounded(call func() error) (err error, returned bool) {
+// Ownership of what call touches follows the outcome. Returned, the caller
+// owns it. Abandoned, the worker does: it runs cleanup (if non-nil) once the
+// provider returns, so nothing is wiped or freed under a running provider.
+func (r *report) bounded(call func() error, cleanup func()) (err error, returned bool) {
+	var (
+		mu                  sync.Mutex
+		finished, abandoned bool
+	)
 	done := make(chan error, 1)
-	go func() { done <- call() }()
+	go func() {
+		err := call()
+		mu.Lock()
+		finished = true
+		owned := abandoned
+		mu.Unlock()
+		if owned && cleanup != nil {
+			cleanup()
+			if abandonedCleanupHook != nil {
+				abandonedCleanupHook()
+			}
+		}
+		done <- err
+	}()
 
 	select {
 	case err := <-done:
 		return err, true
 	case <-r.ctx.Done():
-		// select picks at random among ready cases; a call that finished at
-		// the same moment did return, and is not reported as hung.
-		select {
-		case err := <-done:
-			return err, true
-		default:
-			return nil, false
+		mu.Lock()
+		defer mu.Unlock()
+		if finished {
+			// The call returned while this side was deciding; it is not
+			// abandoned, and its result is already on its way.
+			return <-done, true
 		}
+		abandoned = true
+		return nil, false
 	}
 }
+
+// abandonedCleanupHook, when set by a test, runs after an abandoned call's
+// cleanup.
+var abandonedCleanupHook func()
 
 // modeInterface names the seam interface a mode requires, so a pairing failure
 // says which method set made a Sealer accept a provider.
@@ -1228,7 +1270,7 @@ func checkKeyProtectorRefusesAnEndedContext(r *report, cfg Config) {
 		perr, returned := r.bounded(func() error {
 			_, err := p.Protect(ec.ctx, key)
 			return err
-		})
+		}, nil)
 		if !returned {
 			return // incomplete, not misconduct; see bounded
 		}
@@ -1239,7 +1281,7 @@ func checkKeyProtectorRefusesAnEndedContext(r *report, cfg Config) {
 
 		const canary = 0x5A
 		dst := bytes.Repeat([]byte{canary}, keyBytes)
-		uerr, returned := r.bounded(func() error { return p.Unprotect(ec.ctx, blob, dst) })
+		uerr, returned := r.bounded(func() error { return p.Unprotect(ec.ctx, blob, dst) }, nil)
 		if !returned {
 			return // incomplete, not misconduct; see bounded
 		}
@@ -1281,24 +1323,32 @@ func checkRootUnsealerRefusesAnEndedContext(r *report, cfg Config) {
 	ended, release := r.endedContexts()
 	defer release()
 
+	// These destinations are heap, not locked: an abandoned call keeps
+	// writing to its own after this check returns, and only the worker may
+	// release it. Each holds root material only if the provider broke the
+	// contract, and every one is wiped by whichever side owns it at the end.
 	const canary = 0xC3
-	refused := make([][]byte, 0, len(ended))
+	var completed, refused [][]byte
+	defer func() {
+		for _, d := range completed {
+			enclave.Wipe(d)
+		}
+	}()
 	for _, ec := range ended {
 		dst := bytes.Repeat([]byte{canary}, enclave.RootKeyBytes)
-		uerr, returned := r.bounded(func() error { return p.UnsealRoot(ec.ctx, dst) })
+		uerr, returned := r.bounded(func() error { return p.UnsealRoot(ec.ctx, dst) },
+			func() { enclave.Wipe(dst) })
 		if !returned {
 			return // incomplete, not misconduct; see bounded
 		}
+		completed = append(completed, dst)
 		checkRefusal(r, property, "UnsealRoot", ec, uerr)
 		if uerr != nil {
 			refused = append(refused, dst)
 		}
 	}
 
-	// The live control's root is LOCKED (see withLocked). The refused
-	// destinations above are not: a bounded call may be abandoned and outlive
-	// this check, and a locked buffer is unmapped when withLocked returns; they
-	// hold the caller's canary unless the provider broke the contract.
+	// The live control's root is LOCKED (see withLocked).
 	if err := withLocked(1, enclave.RootKeyBytes, func(bufs [][]byte) error {
 		root := bufs[0]
 		if err := p.UnsealRoot(r.ctx, root); err != nil {

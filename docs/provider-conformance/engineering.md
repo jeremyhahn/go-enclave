@@ -1,6 +1,6 @@
 # Provider conformance — engineering contract
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-01
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-04
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Exported surface
@@ -9,14 +9,15 @@ Package `providertest` (import path `github.com/jeremyhahn/go-enclave/providerte
 
 | Identifier | Contract |
 |---|---|
-| `TestProvider(ctx context.Context, cfg Config) error` | Runs the suite. `nil` = every property it could measure held. |
+| `TestProvider(ctx context.Context, cfg Config) error` | Runs the suite. `nil` = every property was measured and held, except those `cfg` explicitly relaxed. |
 | `Config.New func() (any, error)` | Returns a fresh provider. Called twice by the mode-pairing check (once per mode) and once by each other check that runs: up to 2 + 8 + 3 = 13 times when both modes are claimed. Nil or typed-nil results are failures. |
 | `Config.Modes []enclave.Mode` | The modes the provider **claims**. Must be non-empty and valid. Checked in both directions. |
-| `Config.SkipResidueSweep string` | Non-empty reason skips the residue sweep; echoed to `Logf`. |
+| `Config.SkipResidueSweep string` | Non-empty reason skips the residue sweep and accepts retention by copy as unmeasured; echoed to `Logf`. Empty, an unmeasurable sweep returns `ErrNotMeasured`. |
 | `Config.SingleUseRoot string` | Non-empty reason relaxes the two `RootUnsealer` checks that need a second `UnsealRoot` call; echoed to `Logf`. |
 | `Config.Logf func(format string, args ...any)` | Receives what was measured, skipped and why. Pass `t.Logf`. |
 | `ErrInvalidConfig` / `*ConfigError{Field, Reason}` | `cfg` cannot be run; no provider was tested. |
 | `ErrAborted` / `*AbortedError{Err}` | `ctx` ended before the run finished; unwraps to `ctx.Err()`. Never a pass. |
+| `ErrNotMeasured` / `*NotMeasuredError{Property, Reason}` | A property could not be measured on this host (residue sweep off Linux, without locked memory, or blind) and `cfg` did not accept that. Neither a pass nor a provider defect. |
 | `*PropertyError{Property, Detail}` | One failed assertion; several can share a `Property`. Walk them via the joined error's `Unwrap() []error`. |
 
 ## Properties checked
@@ -31,7 +32,7 @@ Package `providertest` (import path `github.com/jeremyhahn/go-enclave/providerte
 | a blob this provider did not produce is refused | per-operation | Nil, empty, truncated, extended, random and a sample of bit-flipped blobs must fail as `ErrSealedAuthentication`; the destination must hold no run of 8 consecutive key bytes afterwards. |
 | a destination of the wrong length is an authentication failure | per-operation | |
 | Protect and Unprotect refuse a context that has already ended | per-operation | Already-canceled and already-expired contexts; error must match that context's error, not `ErrSealedAuthentication`; the destination must hold no run of 8 consecutive key bytes; the next call still works. |
-| no copy of the key is findable in the process after Unprotect returns | per-operation | Residue sweep for the whole 32-byte key (Linux; skippable with a reason; limits below) |
+| no copy of the key is findable in the process after Unprotect returns | per-operation | Residue sweep for the whole 32-byte key (Linux; unmeasured is `ErrNotMeasured` unless skipped with a reason; limits below) |
 | UnsealRoot writes a root across the whole destination | root-key | Not a placeholder (not all-zero, not constant) |
 | UnsealRoot does not retain the caller's destination | root-key | Spy (needs a second call) |
 | UnsealRoot refuses a context that has already ended, and consumes nothing | root-key | Ended contexts must fail with that context's error; the destination must hold no run of 8 consecutive bytes of the root a later live call returns; that later call must succeed |
@@ -49,12 +50,16 @@ heuristic in places, so a pass is weaker than the contract:
   shorter fragments, or transformed key bytes, is not detected.
 - **Tamper refusal** is checked for a fixed set of malformed blobs and a bounded
   sample of single-bit flips, not every forgery.
-- **The residue sweep** searches, at one moment, the anonymous mappings that
-  `/proc/self/maps` lists as readable, for the **whole** 32-byte key, excluding
-  the needle's own mapping. It skips unreadable and file-backed mappings, stops
-  scanning a mapping at the first read error, and cannot see partial copies or
-  copies in another form. It runs only on Linux, and a skipped or inconclusive
-  sweep is logged, not reported as a pass.
+- **The residue sweep** searches, at one moment, every readable mapping in
+  `/proc/self/maps` that can hold a runtime copy, for the **whole** 32-byte key,
+  excluding the needle's own mapping: anonymous mappings (named or not), every
+  writable mapping (private or shared, file-backed or `/dev/zero`), and memfd,
+  `/dev/shm`, SysV and unlinked (`(deleted)`) mappings whatever their
+  permissions. It skips unreadable mappings and read-only views of files still
+  on disk (program text and rodata), stops scanning a mapping at the first read
+  error, and cannot see partial copies or copies in another form. It runs only
+  on Linux; a sweep that cannot run, or whose control shows it blind, returns
+  `ErrNotMeasured` unless `SkipResidueSweep` accepted that.
 - **Context handling** is checked only for contexts that ended before the call;
   cancellation arriving mid-call is not measured.
 
@@ -65,7 +70,9 @@ locked enclave, borrowed across each check's observation window and destroyed
 afterwards. The one exception is the destination of an ended-context call the
 run may abandon: it can outlive the check, so it is an ordinary buffer holding
 the caller's canary — root material appears there only if the provider broke
-the contract, which is what that check reports.
+the contract, which is what that check reports. It is wiped by whichever side
+owns it last: the check once the call has returned, or the abandoned call's
+own goroutine once the provider returns, never under a running provider.
 
 ## Invariants
 
@@ -78,17 +85,19 @@ the contract, which is what that check reports.
    unbounded `ctx` such a provider hangs the run; `go test -timeout` reports it.
 4. **No vacuous assertion.** Each spy check proves its setup first; the residue
    sweep proves it can see the needle before it reports a negative, and
-   otherwise logs "not run".
-5. **Platform honesty.** On non-Linux hosts the residue sweep logs that it did
-   not run; it never reports a pass for an unmeasured property.
+   otherwise returns `ErrNotMeasured`.
+5. **Fail closed when unmeasured.** A residue sweep that cannot run (non-Linux,
+   no locked memory, blind control) returns `ErrNotMeasured`, never `nil`,
+   unless `Config.SkipResidueSweep` records why that is accepted.
 
 ## Error semantics
 
 | Return | Meaning | Caller action |
 |---|---|---|
-| `nil` | Every measurable property held | Read `Logf` output for what was not measured. |
+| `nil` | Every property was measured and held, except those `cfg` relaxed | Read `Logf` output for what was relaxed. |
 | matches `ErrInvalidConfig` | `New` nil, `Modes` empty or invalid | Fix the test harness. |
 | matches `ErrAborted` | Run incomplete | Re-run with a longer deadline; inspect any joined `*PropertyError`. |
+| matches `ErrNotMeasured` | A property could not be measured on this host | Run on Linux with locked memory, or set `SkipResidueSweep` with the reason it is acceptable; inspect any joined `*PropertyError`. |
 | joined `*PropertyError`s | Provider violates the seam | Fix the provider. |
 
 ## Configuration and persistence

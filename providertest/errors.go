@@ -74,8 +74,31 @@ type PropertyError struct {
 	Detail string
 }
 
-// Error renders as "<Property>: <Detail>".
-func (e *PropertyError) Error() string { return e.Property + ": " + e.Detail }
+// Error renders as "providertest: <Property>: <Detail>".
+func (e *PropertyError) Error() string { return "providertest: " + e.Property + ": " + e.Detail }
+
+// ErrNotMeasured matches the error [TestProvider] returns when a property
+// could not be measured on this host and the [Config] did not accept that.
+// It is neither a pass nor a finding against the provider.
+var ErrNotMeasured = errors.New("providertest: property not measured")
+
+// NotMeasuredError is the concrete error behind [ErrNotMeasured]: which
+// property went unmeasured, and why. It matches ErrNotMeasured under
+// errors.Is.
+type NotMeasuredError struct {
+	// Property names the property, as [PropertyError.Property] does.
+	Property string
+	// Reason says why it could not be measured.
+	Reason string
+}
+
+// Error renders as "providertest: <Property>: not measured: <Reason>".
+func (e *NotMeasuredError) Error() string {
+	return "providertest: " + e.Property + ": not measured: " + e.Reason
+}
+
+// Is reports whether target is [ErrNotMeasured].
+func (e *NotMeasuredError) Is(target error) bool { return target == ErrNotMeasured }
 
 // stepError attaches the step that failed to an error the suite could not
 // proceed past, and keeps that error matchable.
@@ -84,7 +107,7 @@ type stepError struct {
 	err  error
 }
 
-func (e *stepError) Error() string { return e.step + ": " + e.err.Error() }
+func (e *stepError) Error() string { return "providertest: " + e.step + ": " + e.err.Error() }
 func (e *stepError) Unwrap() error { return e.err }
 
 // nilProviderError is a Config.New that returned nil or a typed nil; see

@@ -12,9 +12,18 @@ package providertest
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
+	"math"
+	"os"
+	"path/filepath"
+	"sync"
 	"testing"
+
+	"golang.org/x/sys/unix"
+
+	enclave "github.com/jeremyhahn/go-enclave"
 )
 
 // scratch returns a scan buffer of the shape residueMappings builds, small
@@ -289,5 +298,176 @@ func TestEqualBytes(t *testing.T) {
 				t.Errorf("equalBytes = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// mappedRetainer conforms in every visible way and copies every key it
+// recovers into a mapping it owns — the placements a sweep limited to
+// anonymous memory cannot see.
+type mappedRetainer struct {
+	inner  *enclave.SoftwareProvider
+	mu     sync.Mutex
+	region []byte // written through, when fd < 0
+	fd     int    // written through with pwrite, when >= 0
+	stored int
+}
+
+func (p *mappedRetainer) Protect(ctx context.Context, key []byte) ([]byte, error) {
+	return p.inner.Protect(ctx, key)
+}
+
+func (p *mappedRetainer) Unprotect(ctx context.Context, blob, key []byte) error {
+	if err := p.inner.Unprotect(ctx, blob, key); err != nil {
+		return err
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.fd >= 0 {
+		if _, err := unix.Pwrite(p.fd, key, 0); err != nil {
+			return err
+		}
+	} else {
+		copy(p.region, key)
+	}
+	p.stored++
+	return nil
+}
+
+// TestSuiteCatchesAKeyRetainedInAFileOrDeviceMapping plants the key in every
+// kind of mapping /proc/self/maps names with a path, and requires the sweep to
+// find it there.
+func TestSuiteCatchesAKeyRetainedInAFileOrDeviceMapping(t *testing.T) {
+	const property = "no copy of the key is findable in the process after Unprotect returns"
+	page := os.Getpagesize()
+
+	mapFd := func(t *testing.T, fd, prot, flags int) []byte {
+		t.Helper()
+		b, err := unix.Mmap(fd, 0, page, prot, flags)
+		if err != nil {
+			t.Fatalf("mmap: %v", err)
+		}
+		t.Cleanup(func() { _ = unix.Munmap(b) })
+		return b
+	}
+	openFile := func(t *testing.T, path string, flag int) int {
+		t.Helper()
+		fd, err := unix.Open(path, flag|unix.O_CLOEXEC, 0o600)
+		if err != nil {
+			t.Fatalf("open %s: %v", path, err)
+		}
+		t.Cleanup(func() { _ = unix.Close(fd) })
+		return fd
+	}
+	sizedFile := func(t *testing.T, fd int) {
+		t.Helper()
+		if err := unix.Ftruncate(fd, int64(page)); err != nil {
+			t.Fatalf("ftruncate: %v", err)
+		}
+	}
+	memfd := func(t *testing.T) int {
+		t.Helper()
+		fd, err := unix.MemfdCreate("providertest-retainer", unix.MFD_CLOEXEC)
+		if err != nil {
+			t.Fatalf("memfd_create: %v", err)
+		}
+		t.Cleanup(func() { _ = unix.Close(fd) })
+		sizedFile(t, fd)
+		return fd
+	}
+	tempFile := func(t *testing.T) int {
+		t.Helper()
+		fd := openFile(t, filepath.Join(t.TempDir(), "retained"), unix.O_RDWR|unix.O_CREAT)
+		sizedFile(t, fd)
+		return fd
+	}
+	rw := unix.PROT_READ | unix.PROT_WRITE
+
+	tests := []struct {
+		name  string
+		setup func(t *testing.T) *mappedRetainer
+	}{
+		{"private /dev/zero mapping", func(t *testing.T) *mappedRetainer {
+			return &mappedRetainer{fd: -1, region: mapFd(t, openFile(t, "/dev/zero", unix.O_RDWR), rw, unix.MAP_PRIVATE)}
+		}},
+		{"shared /dev/zero mapping", func(t *testing.T) *mappedRetainer {
+			return &mappedRetainer{fd: -1, region: mapFd(t, openFile(t, "/dev/zero", unix.O_RDWR), rw, unix.MAP_SHARED)}
+		}},
+		{"writable memfd mapping", func(t *testing.T) *mappedRetainer {
+			return &mappedRetainer{fd: -1, region: mapFd(t, memfd(t), rw, unix.MAP_SHARED)}
+		}},
+		{"read-only memfd mapping written through its descriptor", func(t *testing.T) *mappedRetainer {
+			fd := memfd(t)
+			mapFd(t, fd, unix.PROT_READ, unix.MAP_SHARED)
+			return &mappedRetainer{fd: fd}
+		}},
+		{"private writable file mapping", func(t *testing.T) *mappedRetainer {
+			return &mappedRetainer{fd: -1, region: mapFd(t, tempFile(t), rw, unix.MAP_PRIVATE)}
+		}},
+		{"shared writable file mapping", func(t *testing.T) *mappedRetainer {
+			return &mappedRetainer{fd: -1, region: mapFd(t, tempFile(t), rw, unix.MAP_SHARED)}
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			p := tc.setup(t)
+			p.inner = software()
+			wantFail(t, perOp(func() (any, error) { return p, nil }), property+": ", "RETAINED a copy")
+			if p.stored == 0 {
+				t.Fatal("the planted provider stored nothing; the control proved nothing")
+			}
+		})
+	}
+}
+
+// TestSweptMapping pins which /proc/self/maps entries the sweep reads. Every
+// exclusion is a place a provider could hide a key from the suite, so the
+// table names each one.
+func TestSweptMapping(t *testing.T) {
+	for _, tc := range []struct {
+		perms, path string
+		want        bool
+	}{
+		{"rw-p", "", true},
+		{"r--p", "", true},
+		{"rw-p", "[anon: Go: heap]", true},
+		{"rw-p", "[stack]", true},
+		{"rw-s", "/dev/zero (deleted)", true},
+		{"rw-p", "/dev/zero", true},
+		{"rw-s", "/memfd:secret (deleted)", true},
+		{"r--s", "/memfd:secret (deleted)", true},
+		{"r--s", "/dev/shm/secret", true},
+		{"r--p", "/SYSV00000000 (deleted)", true},
+		{"r--p", "/tmp/unlinked (deleted)", true},
+		{"rw-p", "/usr/lib/libc.so.6", true},
+		{"rw-s", "/var/tmp/shared", true},
+		{"r--p", "/usr/lib/libc.so.6", false},
+		{"r-xp", "/usr/bin/provider.test", false},
+		{"---p", "", false},
+		{"-w-p", "", false},
+	} {
+		if got := sweptMapping(tc.perms, tc.path); got != tc.want {
+			t.Errorf("sweptMapping(%q, %q) = %v, want %v", tc.perms, tc.path, got, tc.want)
+		}
+	}
+}
+
+// TestReadLen pins the per-read length against a remaining span wider than an
+// int: converted before the comparison, such a span goes negative on a 32-bit
+// target and the slice expression panics.
+func TestReadLen(t *testing.T) {
+	for _, tc := range []struct {
+		off, hi uintptr
+		max     int
+		want    int
+	}{
+		{0, 16, 2048, 16},
+		{0x1000, 0x1800, 2048, 2048},
+		{0, math.MaxInt32 + 1, 2048, 2048},
+		{0, ^uintptr(0), 1 << 20, 1 << 20},
+		{1, ^uintptr(0), 7, 7},
+	} {
+		if got := readLen(tc.off, tc.hi, tc.max); got != tc.want {
+			t.Errorf("readLen(%#x, %#x, %d) = %d, want %d", tc.off, tc.hi, tc.max, got, tc.want)
+		}
 	}
 }
