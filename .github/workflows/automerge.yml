@@ -2,19 +2,26 @@
 # needs one approval from the reviewer list, by someone other than its author.
 # PRs that are behind main land together as one merge-train PR.
 #
-# Owner rulings (automatethethings#200, #203; go-enclave#118, #122):
-#   2026-10-04 "keep merging its PRs by hand as agent-company and leave the
+# Owner rulings (automatethethings#200, #203, #211; handbook#99;
+# go-enclave#118, #122):
+#   2026-10-04/05 "keep merging its PRs by hand as agent-company and leave the
 #    block_on_outdated_branch turned on, we want to make sure we are requiring
 #    the latest from main in all branches before they get merged in" and
 #    "cant we have block_on_outdated_branch turned on for merging into main but
-#    have it off for the merge train?"
+#    have it off for the merge train?" (reaffirms 2026-09-24, "a PR must carry
+#    the latest main": the train is a PR built on main's tip, so the flag stays
+#    on everywhere)
 #   2026-10-04 "yes lets batch the merges. make sure we are doing things
 #    efficiently!" and "use merge trains where possible if that helps!"
 #   2026-10-04 "instead of using review-bypass, lets use the existing
 #    code-review label. if the label is there, then we require the
-#    review/approval, otherwise it can automerge."
-#   2026-10-02 the approvers: claude, codex, opencode, jeremyhahn,
-#    agent-company, agent-software.
+#    review/approval, otherwise it can automerge. one less label to maintain
+#    (review-bypass)"
+#   2026-10-02 "all projects should follow the same automerge convention.
+#    automatically merge to main when CI is green and the PR doesnt have a
+#    code-review label. If it has a code-review label, then we need at least 1
+#    approver, which should be one of - claude, codex, opencode, jeremyhahn,
+#    agent-company or agent-software."
 #   2026-10-01 "quicbaas is going to be responsible for running the code review
 #    agents instead of gitea. we only want standard actions in gitea"
 #   2026-10-01 "make sure that the automerge squashes and deletes the remote
@@ -37,7 +44,7 @@
 # post its own green; `code-review` is the control for such a PR. Gitea also
 # hands repository secrets to same-repo `pull_request` runs, so anyone who can
 # push a branch can read AGENT_TOKEN through a new workflow; closing that needs
-# the token held outside repository secrets.
+# the token held outside repository secrets (automatethethings#208).
 #
 # Branch protection requires 0 approvals: Gitea cannot make an approval
 # conditional on a label, so this workflow is that gate. QuicBaaS posts the
@@ -111,8 +118,9 @@ jobs:
           PR_FROM_EVENT: ${{ github.event.pull_request.number }}
           RUN_ID: ${{ github.run_id }}
           REPOSITORY: ${{ github.repository }}
-          # The repository agent is agent-<repo> (agent-git.sh's format); the
-          # token cannot read /user.
+          # The repository agent is agent-<repo> (agent-git.sh's format), except
+          # the company repo, whose AGENT_TOKEN is agent-company. The token
+          # cannot read /user; comment() fails loudly if this is wrong.
           AGENT_DOMAIN: example.internal
           TRAIN_BASE: main
           # A train with no CI result after this long is rebuilt.
@@ -132,7 +140,10 @@ jobs:
           [ -n "${BOT:-}" ] || {
             echo "::error::AGENT_TOKEN is not set on this repository; the merge is made as the project agent."
             exit 1; }
-          me="agent-${REPOSITORY#*/}"
+          case "$REPOSITORY" in
+            */automatethethings) me=agent-company ;;
+            *) me="agent-${REPOSITORY#*/}" ;;
+          esac
           me_email="$me@$AGENT_DOMAIN"
           api() { # method path [body] -> http code; body in /tmp/api.json
             curl -sS -o /tmp/api.json -w '%{http_code}' -X "$1" \
