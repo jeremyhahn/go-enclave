@@ -7,13 +7,10 @@
 # line, and a check cannot pass in one place and fail in the other because
 # the two were spelled differently.
 #
-# The pipeline is STAGED and fails fast by ordering rather than by
-# cancellation: a fast tier (lint + build) gates the expensive tier (security
-# and tests). A broken push reports in minutes and burns nothing downstream; a
-# green push pays one fast tier of extra latency. The final gate distinguishes
-# a SKIPPED stage (an upstream stage failed) from a FAILED one, and fails
-# closed on either. Gitea has no cancel API and does not honour `concurrency:`
-# (devops §9b), so ordering is the only fail-fast there is.
+# Every job starts at once, so a run takes as long as its slowest job. CI Gate,
+# the one required check, needs every job and fails closed on any result but
+# success. Pushes to merge-train/** are automerge.yml's merge trains: one run
+# on the combined tree of several ready PRs.
 #
 # Long-horizon checks — the FIPS-strict UNIT test run and `trivy fs` — live in
 # nightly.yml rather than on the push path (devops §8a: alpha phase), so a slow
@@ -53,7 +50,7 @@ name: CI
 
 on:
   push:
-    branches: [main]                    # GitHub Flow: main is the only long-lived branch
+    branches: [main, 'merge-train/**']  # GitHub Flow: main is the only long-lived branch
   pull_request:
     branches: [main]
   workflow_dispatch:                  # re-fire the workflow by hand; also
@@ -150,9 +147,6 @@ jobs:
   security:
     name: Security
     runs-on: ubuntu-latest
-    # STAGED FAIL-FAST: gated on the fast tier like test — a push that
-    # cannot lint or build should not spend a heavy gosec/govulncheck pass.
-    needs: [lint, build]
     # THE GO TOOLCHAIN IS CGROUP-UNAWARE. Inside a job container capped at
     # 16 GB, `nproc` still reports the host's core count and /proc/meminfo still
     # reports the host's memory, because both come from the HOST. Consequences,
@@ -240,16 +234,6 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
-    # STAGED FAIL-FAST: the expensive tier
-    # starts only when the fast tier (lint+build, ~minutes) is green, so a
-    # broken push reports in minutes and burns nothing downstream — Gitea has
-    # no cancel API, so fail-fast can only come from ordering.
-    # This supersedes an earlier lint-decoupling: that fix targeted a SILENT
-    # skip masquerading as test failure; the
-    # outage class is now closed at the source (linter pinned) and the gate
-    # below reports skipped-because-upstream-failed distinctly, so a blocked
-    # test run is loud, attributed, and fail-closed — not silent.
-    needs: [lint, build]
     timeout-minutes: 30       # give the suite honest headroom
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -339,9 +323,6 @@ jobs:
   integration:
     name: Integration
     runs-on: ubuntu-latest
-    # STAGED FAIL-FAST, like test: the devcontainer build and two suite runs
-    # are spent only on a push that lints and builds.
-    needs: [lint, build]
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -383,12 +364,11 @@ jobs:
     steps:
       - name: Fail closed on any non-success
         run: |
-          # skipped ≠ failed, but BOTH fail the gate: a skipped job means an
-          # upstream gate failed (staged fail-fast), and naming it prevents
-          # a red that looks like a test failure while tests never ran.
+          # skipped ≠ failed, but BOTH fail the gate: a job that never ran
+          # proved nothing.
           check() { case "$2" in
             success) echo "OK   $1";;
-            skipped) echo "SKIP $1 (upstream stage failed — see its job)"; BAD=1;;
+            skipped) echo "SKIP $1 (did not run — see its job)"; BAD=1;;
             *)       echo "FAIL $1 ($2)"; BAD=1;;
           esac; }
           BAD=0
