@@ -23,20 +23,13 @@ import (
 // errBorrowChanged reports material altered underneath a live borrow.
 var errBorrowChanged = errors.New("borrowed material changed underneath the borrow")
 
-// sweepHangBound is the deadline every test sweep runs under. It is a HANG
-// DETECTOR and nothing else: no passing test comes anywhere near it, because a
-// sweep that is not waiting for a borrow never consults its context, and the
-// tests that do hold a borrow across a sweep end it themselves. What it buys is
-// the failure mode. A regression that made the sweep wait for something that
-// never ends would otherwise hang until the go test timeout and die as a
-// goroutine dump; under this bound it returns a non-zero count that the
-// calling test names.
+// sweepHangBound is the deadline every test sweep runs under. It is a hang
+// detector only: a sweep that waits forever returns a non-zero count the test
+// names, instead of dying at the go test timeout.
 const sweepHangBound = 60 * time.Second
 
-// sweep runs WipeAll and fails the test if it reports corruption. No test but
-// the corruption ones should ever see a non-nil error, so routing every other
-// call through here turns an unexpected canary failure into a named failure
-// instead of an ignored second return value.
+// sweep runs WipeAll and fails the test on any error, so an unexpected canary
+// failure is named rather than ignored.
 func sweep(t *testing.T) int {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), sweepHangBound)
@@ -55,12 +48,8 @@ func liveCount() int {
 	return len(live)
 }
 
-// TestWipeAll_DestroysEveryLiveEnclave is the property a shutdown path needs:
-// after the sweep, nothing this package allocated is still holding material.
-//
-// It counts the ledger rather than trusting the return value alone, because a
-// WipeAll that returned 0 while leaving enclaves registered would satisfy the
-// return contract and none of the point.
+// TestWipeAll_DestroysEveryLiveEnclave pins that nothing this package allocated
+// survives a sweep. It counts the ledger rather than trusting the return value.
 func TestWipeAll_DestroysEveryLiveEnclave(t *testing.T) {
 	const n = 8
 	material := bytes.Repeat([]byte{0xC7}, 48)
@@ -128,9 +117,7 @@ func TestWipeAll_IsIdempotentAndEmptySafe(t *testing.T) {
 }
 
 // TestWipeAll_AlreadyDestroyedIsANoOp pins that Destroy takes its enclave off
-// the ledger. Without deregistration the map would grow for the life of the
-// process — every enclave ever created, retained by the registry, which is a
-// leak of exactly the kind this package exists to avoid.
+// the ledger, so the registry does not retain every enclave ever created.
 func TestWipeAll_AlreadyDestroyedIsANoOp(t *testing.T) {
 	before := liveCount()
 
@@ -152,23 +139,10 @@ func TestWipeAll_AlreadyDestroyedIsANoOp(t *testing.T) {
 	}
 }
 
-// TestWipeAll_ABorrowThatOutlastsCtxIsCountedNotUnmapped is the design
-// decision made visible, in the form #88 gave it.
-//
-// A borrow live at shutdown is a consumer ordering problem, and there are three
-// things WipeAll could do about it: block on the enclave's lock until it
-// returns, unmap underneath it, or wait for it to end as long as the caller
-// allows and then leave it alone and report. Blocking on the lock cannot be
-// abandoned when the caller's deadline passes. Unmapping underneath is what
-// memguard's purge did and what issue #2 removed — it faults the borrower. So
-// it waits for the borrow's end as an EVENT, bounded by ctx, and when ctx wins
-// it skips and counts.
-//
-// The context is canceled from inside the sweep at the moment it starts to
-// wait, through sweepWaitingForTest, so the test exercises the wait's ctx
-// branch rather than the check before it — and needs no clock to get there.
-// The un-borrowed enclave must still be reclaimed: one live borrow must not
-// stop the whole sweep.
+// TestWipeAll_ABorrowThatOutlastsCtxIsCountedNotUnmapped pins that a borrow
+// outlasting ctx is skipped and counted, never unmapped, while the un-borrowed
+// enclave is still reclaimed. ctx is canceled through sweepWaitingForTest, so
+// the wait's ctx branch is exercised without a clock.
 func TestWipeAll_ABorrowThatOutlastsCtxIsCountedNotUnmapped(t *testing.T) {
 	material := bytes.Repeat([]byte{0x3C}, 40)
 
@@ -216,7 +190,7 @@ func TestWipeAll_ABorrowThatOutlastsCtxIsCountedNotUnmapped(t *testing.T) {
 	case <-time.After(sweepHangBound):
 		// Not t.Fatal with the borrow still parked: Destroy would block on it.
 		t.Fatal("WipeAll did not return after its context was canceled with a borrow in flight: " +
-			"the wait is not bounded by ctx, which is the shutdown hang #88 exists to prevent")
+			"the wait is not bounded by ctx; a stalled holder would hang shutdown")
 	}
 
 	if got := waits.Load(); got != 1 {
@@ -248,11 +222,8 @@ func TestWipeAll_ABorrowThatOutlastsCtxIsCountedNotUnmapped(t *testing.T) {
 	}
 }
 
-// TestWipeAll_ReturnsTheAllocatorReservations checks the sweep settles the
-// budget on the same terms Destroy does. An Allocator whose enclaves were wiped
-// by WipeAll but never credited back would report its budget permanently
-// consumed, which for a process that sweeps and continues is a slow leak of
-// admission capacity rather than of memory.
+// TestWipeAll_ReturnsTheAllocatorReservations pins that the sweep settles the
+// Allocator budget on the same terms Destroy does.
 func TestWipeAll_ReturnsTheAllocatorReservations(t *testing.T) {
 	a, err := NewAllocator(8 * pageSize)
 	if err != nil {
@@ -280,28 +251,12 @@ func TestWipeAll_ReturnsTheAllocatorReservations(t *testing.T) {
 }
 
 // TestWipeAll_ConcurrentWithConstructionAndDestruction runs the sweep against
-// live traffic. The registry is touched on every New and every Destroy, so it is
-// the one piece of shared state on the allocation path; under -race this is
-// where a missing lock shows.
+// live New and Destroy traffic for the race detector, and pins that it does not
+// deadlock against Destroy, which takes the same ledger lock. Whether a zero is
+// truthful is covered by TestWipeAll_DoesNotReturnZeroWhileAnEnclaveIsAlive.
 //
-// What it does NOT cover is whether a zero result was truthful — a sweep racing
-// construction could return zero while a late enclave was alive, and a test that
-// only sweeps again after the workers stop cannot see that (Codex, PR #20). That
-// property is covered deterministically by
-// TestWipeAll_DoesNotReturnZeroWhileAnEnclaveIsAlive, which injects the late
-// registration at the exact moment rather than hoping for an interleaving. This
-// test is for lock discipline under contention and nothing more.
-//
-// It pins the property that matters most about the registry's design: the
-// sweep must not deadlock against Destroy, which takes the SAME lock to
-// deregister. WipeAll snapshots the ledger and releases the lock before
-// destroying anything for exactly that reason — holding it across the sweep
-// self-deadlocks on the first enclave.
-//
-// The sweeper is deliberately NOT in the worker WaitGroup. It stops when the
-// workers finish, so waiting on a group containing it would wait for a goroutine
-// whose exit condition is that wait completing. (Measured: the first version of
-// this test did exactly that and hung.)
+// The sweeper is not in the worker WaitGroup: it stops when the workers finish,
+// so waiting on a group containing it would deadlock.
 func TestWipeAll_ConcurrentWithConstructionAndDestruction(t *testing.T) {
 	const goroutines, iterations = 50, 100
 
@@ -367,22 +322,10 @@ func TestWipeAll_ConcurrentWithConstructionAndDestruction(t *testing.T) {
 	}
 }
 
-// TestWipeAll_DoesNotReturnZeroWhileAnEnclaveIsAlive is the deterministic
-// version of the race Codex found on PR #20: an enclave registered AFTER the
-// sweep took its snapshot was never visited, and WipeAll could return zero while
-// it was mapped and holding material. Zero is the one thing this function
-// promises, so a false zero is a fail-open on the whole contract.
-//
-// The injection point is real rather than simulated, and needs no production
-// seam. An Allocator-backed enclave carries a release closure that WipeAll
-// invokes DURING the sweep, in the sweep's own goroutine, after the snapshot has
-// been taken. Setting that field from an in-package test puts arbitrary code at
-// exactly the moment the race requires — which is deterministic, unlike hoping a
-// concurrent goroutine interleaves the right way.
-//
-// It also re-proves the lock discipline for free: registering from inside the
-// sweep would deadlock instantly if WipeAll still held the registry lock while
-// destroying.
+// TestWipeAll_DoesNotReturnZeroWhileAnEnclaveIsAlive pins that an enclave
+// registered after the sweep's snapshot is either reclaimed or counted, never
+// reported as zero. The late registration runs from an Allocator release
+// closure, which WipeAll invokes inside the sweep after the snapshot.
 func TestWipeAll_DoesNotReturnZeroWhileAnEnclaveIsAlive(t *testing.T) {
 	requireCleanLedger(t)
 
@@ -434,58 +377,18 @@ func TestWipeAll_DoesNotReturnZeroWhileAnEnclaveIsAlive(t *testing.T) {
 	trigger.Destroy()
 }
 
-// TestWipeAll_ConcurrentWithAllocatorConstructionKeepsTheBudgetExact is the
-// second race Codex found on PR #20, and it is about PUBLICATION ORDER.
+// TestWipeAll_ConcurrentWithAllocatorConstructionKeepsTheBudgetExact pins
+// publication order: an enclave must not reach the ledger before its release
+// callback is installed, or a sweep races the assignment and destroys it with
+// the charge never returned. The race detector is the oracle for the race (CI
+// runs -race); the budget assertion checks every reservation is settled once.
 //
-// The constructors used to register the enclave themselves, which put it on the
-// ledger before Allocator.New had installed the reservation callback. A sweep
-// landing in that window read release while it was being assigned — a data race
-// — and destroyed the enclave with release still nil: the pages went back to the
-// kernel and the budget kept the charge. Nothing ever returns it, so an
-// Allocator that sweeps and keeps running loses admission capacity for good.
+// No sleeps. A KICK before every construction runs one sweep concurrently with
+// it; on every other iteration a SETTLE waits for a sweep that started after
+// New returned, so the sweep-destroys-it path is exercised deterministically.
 //
-// Two oracles, and they are NOT of equal strength — which is worth stating
-// rather than leaving for someone to discover when one of them goes quiet:
-//
-//   - THE RACE DETECTOR is what catches the defect, on the unsynchronized read
-//     of release against its assignment. The CI test job runs -race, so this
-//     is the oracle that guards the tree.
-//   - THE BUDGET assertion is an end-state check, not a second detector. It
-//     pins that every reservation is settled exactly once when enclaves are
-//     destroyed by two different parties — a real property, and the one the
-//     defect would have broken.
-//
-// # Every sweep is caused by an event, never by the clock (#90)
-//
-// Earlier revisions paced a free-running sweeper with time.Sleep and gave it
-// "a turn" with a second sleep in each worker. Both were passive waits marked
-// KNOWN WEAK: on a loaded host the sweeper could miss every window, and the
-// only defense was a "the sweep never won" guard turning that into a red
-// build. They are replaced by two events, each tied to what it is for:
-//
-//   - KICK, posted to a one-slot channel just BEFORE every construction, so
-//     the sweeper runs one WipeAll per construction, concurrently with it.
-//     That is the race-detector oracle's input: a sweep in flight while New
-//     publishes. It costs nothing between constructions, unlike a sweeper
-//     that spins or polls.
-//   - SETTLE, a reply channel handed to the sweeper AFTER New returns on every
-//     other iteration. The worker blocks until that sweep has finished, and
-//     the sweep started after the enclave was published, so it CERTAINLY
-//     destroyed it: the sweep-destroys-it branch — the one where a lost refund
-//     is permanent — is exercised deterministically, half the iterations,
-//     on any machine and any core count. The other half let the worker race
-//     a kicked sweep for its own enclave, so both parties destroy enclaves.
-//
-// Measured against the restored publication-order mutant (register before the
-// release callback is installed), -race, 20 runs at each of -cpu=1, 2 and 8:
-// the race detector reports the release read/write race in every run.
-//
-// # Environment
-//
-// Allocates one 4 KiB payload per worker at a time, so at most a few pages are
-// locked at once: the classic 64 KiB container RLIMIT_MEMLOCK is enough. A
-// refused lock is a FAILURE, not a skip — the runner must provide that much
-// locked memory (see the Test job in .github/workflows/ci.yml).
+// Needs only a few locked pages at once (64 KiB RLIMIT_MEMLOCK is enough); a
+// refused lock is a failure, not a skip.
 func TestWipeAll_ConcurrentWithAllocatorConstructionKeepsTheBudgetExact(t *testing.T) {
 	requireCleanLedger(t)
 
@@ -563,12 +466,8 @@ func TestWipeAll_ConcurrentWithAllocatorConstructionKeepsTheBudgetExact(t *testi
 				}
 
 				if i%2 == 0 {
-					// Deterministic: a sweep that STARTS after New returned
-					// finds the enclave on the ledger with nothing holding it,
-					// and destroys it. The worker does not touch it again —
-					// this is the shutdown pattern where WipeAll owns the
-					// reclamation, and the path on which a missing refund is
-					// permanent.
+					// A sweep that starts after New returned certainly destroys the
+					// enclave: the path on which a missing refund is permanent.
 					reply := make(chan struct{})
 					select {
 					case settle <- reply:
@@ -644,41 +543,14 @@ func TestWipeAll_ConcurrentWithAllocatorConstructionKeepsTheBudgetExact(t *testi
 	}
 }
 
-// TestWipeAll_RetriesAReaderRatherThanAbandoningIt is the regression guard for
-// the worst defect found on PR #20, and it is about the difference between
-// "not right now" and "never".
+// TestWipeAll_RetriesAReaderRatherThanAbandoningIt pins that every pass
+// reconsiders every registered enclave, so one whose write TryLock lost to a
+// momentary reader is retried rather than abandoned. The reader is released
+// from inside the sweep and the sweep waits for the read lock to drop.
 //
-// tryReleaseMapping takes the WRITE lock without waiting, so it loses to ANY
-// concurrent reader — IsAlive, Size, EqualTo, a health probe polling an enclave
-// during shutdown — not merely to a long WithBytes borrow. An earlier revision
-// marked every enclave as seen when it built the pass's batch, before trying to
-// release it, so one lost microsecond against a momentary reader took that
-// enclave out of the sweep permanently: no later pass reconsidered it, the
-// process exited with the material still mapped and locked, and WipeAll's own
-// documentation blamed the caller's shutdown ordering. That is precisely the
-// outcome this function exists to prevent, reached through its most ordinary
-// concurrent operation.
-//
-// The reader here is released from INSIDE the sweep, through the release-closure
-// injection point, and the sweep is made to WAIT until the read lock is actually
-// dropped. That makes the handover synchronous instead of hoping a goroutine is
-// scheduled inside a window of a few microseconds.
-//
-// THIS TEST IS HALF OF A PAIR — do not delete the other half. Its partner is
-// TestWipeAll_ABorrowEndingWakesTheSweep. This one proves every pass
-// reconsiders every still-registered enclave; that one proves the sweep WAITS
-// for a held enclave's release rather than giving up on it. The promise that a
-// momentary reader keeps its enclave needs BOTH, and neither test implies the
-// other: this test passes with the wait deleted (reclaiming the gate earns the
-// sweep its next pass, so it never has to wait), and its partner proves nothing
-// about a pass that has other entries to reconsider. See that test's comment
-// for the full decomposition.
-//
-// The scenario is repeated because ledger iteration is map-ordered: the defect
-// only manifests when the sweep reaches the held enclave BEFORE the gate that
-// frees it, which is a coin flip per trial. Over 16 trials the old behavior
-// survives with probability 2^-16, while the fixed behavior passes every trial
-// regardless of order.
+// Paired with TestWipeAll_ABorrowEndingWakesTheSweep; neither implies the
+// other. Repeated 16 times because ledger order is random and the defect needs
+// the held enclave reached before the gate.
 func TestWipeAll_RetriesAReaderRatherThanAbandoningIt(t *testing.T) {
 	requireCleanLedger(t)
 
@@ -726,13 +598,8 @@ func TestWipeAll_RetriesAReaderRatherThanAbandoningIt(t *testing.T) {
 			<-readerDone
 		}
 
-		// Bounded, because the regression this guards against second-hardest is a
-		// HANG: if tryReleaseMapping ever waited for the lock instead of trying
-		// for it, WipeAll would block here forever behind the reader — and the
-		// reader is only released from inside WipeAll, so nothing would ever break
-		// the cycle. Without this the suite dies on the go test timeout with a
-		// goroutine dump instead of a sentence. (Measured: a blocking-lock mutant
-		// hung the whole package.)
+		// Bounded: a tryReleaseMapping that blocked on the lock would deadlock here,
+		// since the reader is released only from inside WipeAll.
 		swept := make(chan int, 1)
 		go func() { n, _ := WipeAll(context.Background()); swept <- n }()
 
@@ -763,26 +630,10 @@ func TestWipeAll_RetriesAReaderRatherThanAbandoningIt(t *testing.T) {
 	}
 }
 
-// TestWipeAll_DoesNotPanicOnACorruptCanaryAndFinishesTheSweep pins the guarantee
-// WipeAll's documentation makes most prominently and that nothing tested:
-// it NEVER panics, including on an enclave whose canary fails.
-//
-// The guarantee is load-bearing in a specific way. A sweep is not one
-// enclave: a panic partway through
-// leaves every enclave the sweep had not reached yet mapped and holding
-// material, which at process exit is the exact outcome WipeAll exists to
-// prevent. So the corruption is counted and the sweep goes on.
-//
-// The corrupt enclave is placed in the middle of the batch, and the batch is
-// checked in full: if the sweep aborted at the failure, the enclaves it had not
-// reached would still be alive. (Ledger iteration is map-ordered, so "middle" is
-// not a guarantee — checking all five is what makes the abort detectable
-// regardless of the order the sweep happens to take.)
-//
-// A reservation is held too, because a corrupt canary must still settle the
-// budget: the region WAS wiped and unmapped, and the error is a report about
-// what already happened, so ErrEnclaveCorrupted counts as released on the same
-// terms Destroy uses.
+// TestWipeAll_DoesNotPanicOnACorruptCanaryAndFinishesTheSweep pins that a
+// failed canary neither panics nor stops the sweep: all five enclaves are
+// checked, since ledger order is random, and the corrupt one still returns its
+// reservation because its region was wiped and unmapped.
 func TestWipeAll_DoesNotPanicOnACorruptCanaryAndFinishesTheSweep(t *testing.T) {
 	requireCleanLedger(t)
 
@@ -795,10 +646,8 @@ func TestWipeAll_DoesNotPanicOnACorruptCanaryAndFinishesTheSweep(t *testing.T) {
 
 	held := make([]*MemoryEnclave, 0, count)
 	for i := 0; i < count; i++ {
-		// SIZED, so the pages stay writable and the canary can be corrupted from
-		// here. A move-constructed enclave is frozen read-only and the write
-		// below would fault instead — which is the freeze doing its job, and why
-		// this hazard is documented as specific to sized enclaves.
+		// Sized, so the pages stay writable; a frozen enclave would fault on the
+		// canary write below.
 		e, err := a.NewSized(64)
 		if err != nil {
 			t.Fatalf("NewSized: %v", err)
@@ -845,10 +694,7 @@ func TestWipeAll_DoesNotPanicOnACorruptCanaryAndFinishesTheSweep(t *testing.T) {
 				"sweep aborting at the failure instead of counting it and going on", i, corruptAt)
 		}
 	}
-	// The corruption must be REPORTED. Non-fatal was the right call for a sweep;
-	// invisible was not. Before this was a second return value, the one fact that
-	// something wrote into memory it did not own vanished at exit behind a zero
-	// that looked like success (Codex, PR #20).
+	// The corruption must be reported, not just survived.
 	if sweepErr == nil {
 		t.Error("WipeAll returned a nil error after detecting a corrupt canary: the memory was reclaimed " +
 			"but the corruption was never reported, so a shutdown caller cannot tell a clean wipe from " +
@@ -859,9 +705,7 @@ func TestWipeAll_DoesNotPanicOnACorruptCanaryAndFinishesTheSweep(t *testing.T) {
 			"exactly as they do on Destroy's error", sweepErr)
 	}
 
-	// And the corrupt enclave is NOT part of the count: its pages went back like
-	// any other, so it is not still held. That is precisely why the corruption
-	// needs a return value of its own.
+	// The corrupt enclave's pages went back, so it is not in the count.
 	if remaining != 0 {
 		t.Errorf("WipeAll = %d, want 0: a detected corruption still counts as released — the region was "+
 			"wiped and unmapped", remaining)
@@ -882,13 +726,8 @@ func TestWipeAll_DoesNotPanicOnACorruptCanaryAndFinishesTheSweep(t *testing.T) {
 	}
 }
 
-// TestWipeAll_ReportsHowManyEnclavesWereCorrupt pins the other half of the
-// corruption contract: the error carries the NUMBER, not merely the fact.
-//
-// One error is returned however many enclaves were corrupt. Joining N copies of
-// a sentinel that has no per-enclave identity would repeat one sentence N times
-// and tell an operator less than the count does — "3 of the swept enclaves
-// failed canary verification" is the actionable form.
+// TestWipeAll_ReportsHowManyEnclavesWereCorrupt pins that one error carries
+// the number of corrupt enclaves rather than one joined sentinel per enclave.
 func TestWipeAll_ReportsHowManyEnclavesWereCorrupt(t *testing.T) {
 	requireCleanLedger(t)
 
@@ -920,21 +759,10 @@ func TestWipeAll_ReportsHowManyEnclavesWereCorrupt(t *testing.T) {
 	}
 }
 
-// TestWipeAll_ReportsCorruptionWhoseReleaseWasRefused pins the case where
-// detecting corruption and reclaiming the pages are different attempts (#83).
-// The sweep finds a failed canary, wipes, and is then refused the munmap: the
-// enclave stays mapped, so it belongs in the count — and it is still corrupt,
-// which the count cannot say. Before #83 the sweep only tallied corruption on
-// the pass that reclaimed the pages, so a refusal that persisted for the whole
-// sweep reported a clean nil.
-//
-// The figure in the message also pins that one enclave is counted once rather
-// than once per attempt, and that needs a sweep that attempts it TWICE. Since
-// #88 a sweep re-runs only when it reclaimed something it owed, so a companion
-// enclave whose release is NOT refused rides along: whichever order the ledger
-// is iterated in, reclaiming it earns a second pass, and the second pass
-// retries the corrupt one — under strict unlock semantics, so that retry must
-// also skip the unlock its predecessor already did (#83).
+// TestWipeAll_ReportsCorruptionWhoseReleaseWasRefused pins that a corrupt
+// enclave whose munmap is refused is both counted and reported, and reported
+// once although attempted twice. A companion enclave that releases normally
+// earns the second pass, whose retry must skip the already-done unlock.
 func TestWipeAll_ReportsCorruptionWhoseReleaseWasRefused(t *testing.T) {
 	requireCleanLedger(t)
 
@@ -996,10 +824,8 @@ func TestWipeAll_ReportsCorruptionWhoseReleaseWasRefused(t *testing.T) {
 	}
 }
 
-// TestWipeAll_ReportsNoErrorWhenNothingIsCorrupt is the control for the two
-// tests above. Without it they would pass against an implementation that
-// reported corruption unconditionally, which is the failure mode of every
-// assertion that only ever checks the interesting case.
+// TestWipeAll_ReportsNoErrorWhenNothingIsCorrupt is the control for the
+// corruption tests: a clean sweep reports nil.
 func TestWipeAll_ReportsNoErrorWhenNothingIsCorrupt(t *testing.T) {
 	requireCleanLedger(t)
 
@@ -1019,23 +845,10 @@ func TestWipeAll_ReportsNoErrorWhenNothingIsCorrupt(t *testing.T) {
 	}
 }
 
-// TestWipeAll_AFailedReleaseKeepsBothTheChargeAndTheLedgerEntry covers the one
-// path through WipeAll that nothing else reaches: an enclave whose release FAILS
-// for a reason that is not corruption — the kernel refusing the mprotect,
-// munlock or munmap.
-//
-// Two invariants meet on that path and neither is pinned without this:
-//
-//   - The Allocator charge must NOT be returned. The pages are still mapped, so
-//     handing the budget back would let the allocator admit allocations the
-//     process cannot satisfy — over-admission against a real RLIMIT_MEMLOCK.
-//   - The enclave must STAY on the ledger, so it is counted as still-held and a
-//     later sweep can retry it. Deregistering it would make WipeAll report zero
-//     while the material is still mapped and locked, which is a fail-open on the
-//     single guarantee the function makes.
-//
-// The failure is induced the way the release-path tests do it: the mprotect and
-// the unmap are refused through their seams, leaving the real pages mapped.
+// TestWipeAll_AFailedReleaseKeepsBothTheChargeAndTheLedgerEntry pins that an
+// enclave whose release the kernel refuses keeps its Allocator charge (the
+// pages are still locked) and stays on the ledger to be counted and retried.
+// The mprotect and unmap are refused through their seams.
 func TestWipeAll_AFailedReleaseKeepsBothTheChargeAndTheLedgerEntry(t *testing.T) {
 	if remaining, err := WipeAll(context.Background()); remaining != 0 || err != nil {
 		t.Fatalf("this test needs a clean ledger; WipeAll = %d, %v", remaining, err)
@@ -1073,12 +886,8 @@ func TestWipeAll_AFailedReleaseKeepsBothTheChargeAndTheLedgerEntry(t *testing.T)
 		t.Errorf("InUse = %d after a FAILED release, want the unchanged %d: the charge was returned "+
 			"while the kernel still holds the pages, so the allocator will over-admit", got, reserved)
 	}
-	// Still on the ledger and still charged -- both asserted directly, just
-	// above -- and NOT alive. Inverted deliberately, for the reason in the
-	// twin assertion in mapping_test.go: a.NewSized is mutable, so
-	// wipeAndVerify's early wipe destroyed the material before the unmap that
-	// failed. The retry the count is asking for still works, because it goes
-	// through the mapping rather than the wiped flag (#13).
+	// Not alive: NewSized is mutable, so the early wipe destroyed the material
+	// before the refused unmap. The retry still works through the mapping.
 	if e.IsAlive() {
 		t.Error("the enclave reports itself alive although its material was " +
 			"already wiped by the early wipe")
@@ -1098,36 +907,13 @@ func TestWipeAll_AFailedReleaseKeepsBothTheChargeAndTheLedgerEntry(t *testing.T)
 	}
 }
 
-// TestWipeAll_ABorrowEndingWakesTheSweep pins the mechanism #88 put in place of
-// the retry backoff: the end of a borrow WAKES a sweep that is waiting for it,
-// and the enclave is reclaimed by that same call.
+// TestWipeAll_ABorrowEndingWakesTheSweep pins that the end of a borrow wakes a
+// sweep waiting for it and that call reclaims the enclave. ctx is Background,
+// so only the wake-up can end the wait, and the borrow ends only once the sweep
+// is waiting (sweepWaitingForTest).
 //
-// The context is Background, deliberately. It never ends, so the only thing
-// that can release the sweep from its wait is the wake-up the borrow's release
-// posts. A sweep that missed it hangs, and the hang bound below turns that into
-// a sentence. That is also what "promptly" means here, measured without a
-// clock: the sweep waits exactly ONCE — it does not poll, and it does not need
-// a second event — and returns having reclaimed the enclave.
-//
-// The borrow is ended only once the sweep has started to wait
-// (sweepWaitingForTest), so this is the wake path and not the easier case of a
-// borrow that ended before the sweep looked.
-//
-// # THIS TEST IS HALF OF A PAIR — do not delete the other half
-//
-// Its partner is TestWipeAll_RetriesAReaderRatherThanAbandoningIt. The
-// user-facing promise — a momentary reader keeps its enclave — decomposes into
-// two properties, and NEITHER test covers both:
-//
-//	(1) a held enclave is waited for, and the release that frees it ends the
-//	    wait — this test
-//	(2) every pass reconsiders every still-registered enclave
-//	    — the partner, plus the visited-at-snapshot mutant
-//
-// Given both, a reader releasing at any point while ctx allows is reclaimed
-// deductively. The predecessor of this test measured elapsed time against a
-// fixed backoff budget; there is no budget left to measure, and an event is
-// what is asserted instead.
+// Paired with TestWipeAll_RetriesAReaderRatherThanAbandoningIt: this one pins
+// the wait, that one pins that every pass reconsiders every entry.
 func TestWipeAll_ABorrowEndingWakesTheSweep(t *testing.T) {
 	if remaining := sweep(t); remaining != 0 {
 		t.Fatalf("this test needs a clean ledger; WipeAll = %d", remaining)
@@ -1154,9 +940,8 @@ func TestWipeAll_ABorrowEndingWakesTheSweep(t *testing.T) {
 	var waits atomic.Int32
 	sweepWaitingForTest = func() {
 		if waits.Add(1) == 1 {
-			// The sweep has found the borrow held and is about to wait. End
-			// the borrow now, from inside that window: the wake-up it posts is
-			// the only thing that can end a Background wait.
+			// End the borrow inside the wait window: its wake-up is the only
+			// thing that can end a Background wait.
 			close(release)
 			<-borrowDone
 		}
@@ -1197,11 +982,9 @@ func TestWipeAll_ABorrowEndingWakesTheSweep(t *testing.T) {
 	}
 }
 
-// The tests from here on pin the lifecycle surface #88 introduced: WipeAll's
-// event-driven wait and its context bound, the termination guarantee against a
-// constructor that never stops, SweepError, and the holder handshake that makes
-// the wait impossible to miss. None of them sleeps; every ordering is made by a
-// channel or by a seam inside the sweep.
+// The tests below pin the event-driven wait, the ctx bound, termination
+// against endless construction, SweepError, and the holder handshake. None
+// sleeps; every ordering is made by a channel or a seam inside the sweep.
 
 // holdBorrow starts a WithBytes borrow on e in its own goroutine and returns
 // once it is inside the borrow. end finishes the borrow and waits for it to
@@ -1256,12 +1039,9 @@ func sweepAsync(t *testing.T, ctx context.Context, hang string) sweepResult {
 	}
 }
 
-// TestWipeAll_ACanceledCtxStillSweepsWhatIsFree pins what an already-done
-// context means: not a refusal, but "do not wait". Everything not currently
-// held is reclaimed exactly as it would be under any other context, the held
-// enclave is counted, and the sweep never enters its wait — the check before
-// the wait decides, not a coin flip in a select between a pending wake-up and
-// a closed done channel.
+// TestWipeAll_ACanceledCtxStillSweepsWhatIsFree pins that a done ctx means "do
+// not wait", not a refusal: everything free is reclaimed, the held enclave is
+// counted, and the sweep never enters its wait.
 func TestWipeAll_ACanceledCtxStillSweepsWhatIsFree(t *testing.T) {
 	requireCleanLedger(t)
 
@@ -1307,11 +1087,8 @@ func TestWipeAll_ACanceledCtxStillSweepsWhatIsFree(t *testing.T) {
 	}
 }
 
-// TestWipeAll_ANilCtxNeverWaitsAndNeverPanics pins the documented treatment of
-// a nil context: the same as an already-done one. A nil context in a shutdown
-// path is a programming error, and the two other choices are both worse —
-// dereferencing it breaks the never-panics promise, and treating it as
-// Background turns the mistake into a shutdown that can hang.
+// TestWipeAll_ANilCtxNeverWaitsAndNeverPanics pins that a nil ctx is treated
+// as an already-done one: no panic, no wait.
 func TestWipeAll_ANilCtxNeverWaitsAndNeverPanics(t *testing.T) {
 	requireCleanLedger(t)
 
@@ -1350,20 +1127,10 @@ func TestWipeAll_ANilCtxNeverWaitsAndNeverPanics(t *testing.T) {
 	}
 }
 
-// TestWipeAll_AConstructorThatNeverStopsCannotKeepTheSweepRunning is the
-// termination guarantee, made deterministic.
-//
-// Every enclave in the chain constructs its successor from inside its own
-// release, which WipeAll runs in the sweep's goroutine — so every reclamation
-// registers something new, for as long as the test lets it. That is a
-// constructor that never stops, racing the sweep at the worst possible moment,
-// with no scheduler involved. Under context.Background a sweep that re-ran
-// whenever it reclaimed anything would never return; the design's answer is
-// that only entries the sweep OWES — present at its first pass — earn another
-// pass, and late arrivals are tried but never extend it.
-//
-// The late link it leaves behind is counted, which is the truth: it is still
-// held. The bound is what is under test, not a zero.
+// TestWipeAll_AConstructorThatNeverStopsCannotKeepTheSweepRunning pins
+// termination under Background: each enclave constructs its successor from
+// its own release, inside the sweep, yet only entries owed at the first pass
+// earn another pass. The late link left behind is counted.
 func TestWipeAll_AConstructorThatNeverStopsCannotKeepTheSweepRunning(t *testing.T) {
 	requireCleanLedger(t)
 
@@ -1426,24 +1193,12 @@ func TestWipeAll_AConstructorThatNeverStopsCannotKeepTheSweepRunning(t *testing.
 	}
 }
 
-// TestWipeAll_TerminatesAgainstALiveConstructorUnderBackground is the same
-// guarantee against a real goroutine: one constructing and borrowing enclaves
-// in a loop, never destroying any, for the whole life of the sweep. Its
-// enclaves are owed by the sweep only if they existed at its first pass, and
-// the borrows on later ones are never waited for, so a context.Background
-// sweep returns while the goroutine is still going.
-//
-// It is not allowed to pass vacuously. Every construction must succeed — a
-// failure ends the goroutine and fails the test, since a constructor that
-// stopped proves nothing about one that does not — and the sweep starts only
-// after one has. A trigger enclave's release, which runs INSIDE the sweep after
-// its first snapshot, then REQUESTS a construction from the live goroutine and
-// waits for the acknowledgment the goroutine sends once that enclave is
-// registered. The request is issued after the snapshot and the registration
-// follows the request, so at least one registration provably lands after the
-// sweep's first snapshot: one the sweep does not owe. (A counter of finished
-// constructions cannot prove that: one registered before the snapshot and
-// borrowed after it would advance the counter just the same.)
+// TestWipeAll_TerminatesAgainstALiveConstructorUnderBackground pins the same
+// guarantee against a real goroutine that constructs and borrows in a loop. A
+// trigger enclave's release, inside the sweep after its first snapshot,
+// requests a construction and waits for it to register, so at least one
+// registration provably lands after the snapshot. Every construction must
+// succeed, or the test proves nothing.
 func TestWipeAll_TerminatesAgainstALiveConstructorUnderBackground(t *testing.T) {
 	requireCleanLedger(t)
 
@@ -1546,15 +1301,10 @@ func TestWipeAll_TerminatesAgainstALiveConstructorUnderBackground(t *testing.T) 
 	}
 }
 
-// TestWipeAll_ALateBorrowIsNeverWaitedFor pins the half of the termination rule
-// that is about borrows rather than passes. An enclave that registers during the
-// sweep and is borrowed is not owed, so even under context.Background the
-// sweep does not wait for it: it is counted, and left alone.
-//
-// The late enclave is constructed and its borrow STARTED from inside the sweep
-// (the first link's release), and the hook waits until the borrow is inside
-// its callback before the sweep continues. So the sweep's next pass is certain
-// to find it held.
+// TestWipeAll_ALateBorrowIsNeverWaitedFor pins that an enclave registered and
+// borrowed during the sweep is not owed, so even under Background it is counted
+// and left alone. The borrow starts from inside the sweep, so the next pass is
+// certain to find it held.
 func TestWipeAll_ALateBorrowIsNeverWaitedFor(t *testing.T) {
 	requireCleanLedger(t)
 
@@ -1611,15 +1361,9 @@ func TestWipeAll_ALateBorrowIsNeverWaitedFor(t *testing.T) {
 }
 
 // TestWipeAll_RetriesAContendedLockAtOnce pins the tryContended branch: a
-// TryLock that fails while the holder count reads zero has nobody to wake the
-// sweep later, so the sweep must retry at once rather than wait — waiting there
-// is exactly the lost wake-up the holder count exists to rule out.
-//
-// Production cannot produce a contended lock on demand: every acquisition is
-// counted, so this is a spurious TryLock failure or a holder that came and
-// went between two reads. The test produces it by taking the read lock
-// DIRECTLY, bypassing the count, and lets go from inside the sweep's second
-// pass — which only exists if the first pass retried instead of waiting.
+// TryLock that fails with a zero holder count has nobody to wake the sweep, so
+// it retries at once. The test takes the read lock directly, bypassing the
+// count, and lets go in the second pass, which exists only if the first retried.
 func TestWipeAll_RetriesAContendedLockAtOnce(t *testing.T) {
 	requireCleanLedger(t)
 
@@ -1772,11 +1516,9 @@ func TestHolders_TheLastReleaseWakesOnlyAnArmedSweep(t *testing.T) {
 }
 
 // TestHolders_EveryMethodLeavesTheCountBalanced pins that every acquisition on
-// MemoryEnclave is bracketed: a count left above zero would make every later
-// sweep think the enclave is held forever — under context.Background, a
-// shutdown that never finishes — and one below zero would let a sweep wait
-// with no holder left to wake it. A borrow whose callback panics is included,
-// because the release is deferred and must still run.
+// MemoryEnclave is bracketed, including a borrow whose callback panics: a count
+// stuck above zero makes a Background sweep wait forever, one below zero lets
+// it wait with no holder to wake it.
 func TestHolders_EveryMethodLeavesTheCountBalanced(t *testing.T) {
 	e, err := NewMemoryEnclaveSized(32)
 	if err != nil {
@@ -1898,10 +1640,8 @@ func TestSweepError_ContractTable(t *testing.T) {
 	}
 }
 
-// TestWipeAll_SweepErrorCountsAreReadableWithErrorsAs pins the error WipeAll
-// actually returns: a *SweepError, reachable with errors.As, carrying the
-// number of corrupt enclaves — and nothing in the field for a condition that
-// did not happen.
+// TestWipeAll_SweepErrorCountsAreReadableWithErrorsAs pins that WipeAll returns
+// a *SweepError reachable with errors.As, with zero in the unused field.
 func TestWipeAll_SweepErrorCountsAreReadableWithErrorsAs(t *testing.T) {
 	requireCleanLedger(t)
 
@@ -1963,14 +1703,10 @@ func parkSweepOnABorrow(t *testing.T, e *MemoryEnclave) (end func(), result <-ch
 	return end, out
 }
 
-// TestWipeAll_AParkedSweepDoesNotHoldASecondCallerHostage is the regression
-// for admission ignoring ctx (Codex on #95). Sweep A runs under
-// context.Background and parks on a borrow that has not ended. Sweep B arrives
-// with a context that is canceled, that is canceled while B waits for
-// admission, or that is nil. Each must return before the borrow ends,
-// reporting the ledger as it stands and ErrSweepInProgress, rather than
-// queueing behind A for as long as A waits. A must still finish its sweep once
-// the borrow ends.
+// TestWipeAll_AParkedSweepDoesNotHoldASecondCallerHostage pins that admission
+// honors the caller's ctx. Sweep A parks under Background on a live borrow;
+// sweep B with a canceled, later-canceled, or nil ctx must return the ledger
+// count and ErrSweepInProgress before the borrow ends. A still finishes.
 func TestWipeAll_AParkedSweepDoesNotHoldASecondCallerHostage(t *testing.T) {
 	requireCleanLedger(t)
 
@@ -2107,17 +1843,11 @@ func requireCleanLedger(t *testing.T) {
 }
 
 // denyProtect refuses every mprotect made through the protectMemory seam until
-// the returned func lifts it; t.Cleanup lifts it as well. Construction's
-// guard-page mprotects (protNoAccess) pass, so a constructor gets as far as
-// its freeze. The mapping keeps its
-// real slices throughout, so nothing but the refusal differs from production.
+// the returned func lifts it; t.Cleanup lifts it as well. Guard-page mprotects
+// (protNoAccess) pass, so a constructor gets as far as its freeze.
 //
-// Failures are injected ONLY through the seams. An earlier helper handed the
-// kernel a malformed range instead — the mapping's handle re-pointed at an
-// unaligned probe slice — on the assumption that mprotect must refuse it. That
-// holds for POSIX mprotect and not for VirtualProtect, which accepts a range
-// crossing page boundaries: on Windows the probe was made writable and the
-// release then touched the real mapping's still-inaccessible guard pages.
+// Failures are injected only through seams, never by handing the kernel a
+// malformed range: VirtualProtect accepts ranges POSIX mprotect refuses.
 func denyProtect(t *testing.T) (lift func()) {
 	t.Helper()
 	prev := protectMemory
@@ -2132,11 +1862,9 @@ func denyProtect(t *testing.T) (lift func()) {
 	return lift
 }
 
-// denyProtectAndUnmap is denyProtect with the unmap refused too, which is
-// every way release has of returning the pages: it cannot make the region
-// writable, so it was not wiped by the mprotect path, and the unmap it falls
-// back to is refused. The pages stay mapped AND locked. A copy constructor's
-// freeze fails under it and so does its cleanup.
+// denyProtectAndUnmap is denyProtect with the unmap refused too, so release
+// has no way to return the pages: they stay mapped and locked. A copy
+// constructor's freeze and its cleanup both fail under it.
 func denyProtectAndUnmap(t *testing.T) (lift func()) {
 	t.Helper()
 	liftProtect := denyProtect(t)
@@ -2147,19 +1875,10 @@ func denyProtectAndUnmap(t *testing.T) (lift func()) {
 	return func() { liftProtect(); liftUnmap() }
 }
 
-// TestAllocator_New_FailedConstructionIsReclaimedByWipeAll is the regression
-// for the dropped-handle finding in #83, on the path that kept the charge.
-//
-// A construction whose freeze was refused, and whose cleanup was refused too,
-// returned nil and an error and dropped the only reference to its mapping. The
-// pages never reached the ledger, so no WipeAll could ever reclaim them — even
-// after the refusal lifted — and the Allocator charge kept for those still-
-// locked pages was kept for the process lifetime with nothing to return it.
-//
-// Asserted end to end: the failed construction leaves an orphan; a sweep with
-// the refusal still in force counts it and keeps the charge; a sweep after the
-// refusal lifts reclaims it, counts zero and returns the charge; and a further
-// sweep returns nothing more, so the refund happened exactly once.
+// TestAllocator_New_FailedConstructionIsReclaimedByWipeAll pins that a
+// construction whose freeze and cleanup were both refused leaves an orphan: a
+// sweep under the refusal counts it and keeps the charge, a sweep after it
+// lifts reclaims it and refunds once, and a further sweep refunds nothing.
 func TestAllocator_New_FailedConstructionIsReclaimedByWipeAll(t *testing.T) {
 	requireCleanLedger(t)
 	a, err := NewAllocator(4 * pageSize)
@@ -2218,12 +1937,9 @@ func TestAllocator_New_FailedConstructionIsReclaimedByWipeAll(t *testing.T) {
 	}
 }
 
-// TestAllocator_NewSized_UnlockedOrphanIsReclaimedWithoutASecondRefund is the
-// other refund arm. An mlock refused at the ceiling leaves nothing locked, so
-// the constructor refunds at once — but when the unmap is refused the pages
-// are still MAPPED, and they must reach the orphan ledger with NO refund of
-// their own: a record carrying the charge as well would hand it back twice
-// and take the budget past its limit.
+// TestAllocator_NewSized_UnlockedOrphanIsReclaimedWithoutASecondRefund pins
+// the other refund arm: an mlock refused at the ceiling refunds at once, so the
+// still-mapped orphan must carry no refund of its own.
 func TestAllocator_NewSized_UnlockedOrphanIsReclaimedWithoutASecondRefund(t *testing.T) {
 	requireCleanLedger(t)
 	a, err := NewAllocator(4 * pageSize)
@@ -2263,10 +1979,8 @@ func TestAllocator_NewSized_UnlockedOrphanIsReclaimedWithoutASecondRefund(t *tes
 	}
 }
 
-// TestNewMemoryEnclaveCopy_FailedConstructionIsReclaimedByWipeAll is the
-// unadmitted constructors' half: no budget is involved, but the stranded pages
-// are locked memory all the same, and WipeAll's whole purpose is that none
-// outlive the process unreported.
+// TestNewMemoryEnclaveCopy_FailedConstructionIsReclaimedByWipeAll pins orphan
+// reclamation for the unadmitted constructors, where no budget is involved.
 func TestNewMemoryEnclaveCopy_FailedConstructionIsReclaimedByWipeAll(t *testing.T) {
 	requireCleanLedger(t)
 	t.Cleanup(func() { _, _ = WipeAll(context.Background()) })
@@ -2291,15 +2005,9 @@ func TestNewMemoryEnclaveCopy_FailedConstructionIsReclaimedByWipeAll(t *testing.
 	}
 }
 
-// TestWipeAll_ReclaimsALockedOrphanWhoseUnlockStaysRefused pins the retry for
-// an orphan that is still LOCKED (#83). A construction that locked its pages
-// and then failed is rolled back by abandon, which carries on to the unmap when
-// munlock is refused — munmap takes the lock with it. The sweep's retries must
-// do the same. Until they did, a release that met the refused munlock returned
-// before the unmap, so the orphan and the charge kept for it stayed held for
-// as long as munlock stayed refused, however available the unmap became.
-// TestAllocator_NewSized_UnlockedOrphanIsReclaimedWithoutASecondRefund cannot
-// see this: its orphan never locked.
+// TestWipeAll_ReclaimsALockedOrphanWhoseUnlockStaysRefused pins that a sweep's
+// retry of a locked orphan goes on to the unmap when munlock is refused, as
+// abandon does (munmap drops the lock with it).
 func TestWipeAll_ReclaimsALockedOrphanWhoseUnlockStaysRefused(t *testing.T) {
 	requireCleanLedger(t)
 	t.Cleanup(func() { _, _ = WipeAll(context.Background()) })
@@ -2339,27 +2047,14 @@ func TestWipeAll_ReclaimsALockedOrphanWhoseUnlockStaysRefused(t *testing.T) {
 }
 
 // TestWipeAll_ReclaimsOrphansAddedConcurrently runs failing constructions on
-// several goroutines while WipeAll sweeps, for the race detector. Constructors
-// add to the orphan ledger without the sweep slot; the sweep reads and drops records
-// and runs their refunds. Every refusal here is transient — a region's first
-// wipe-enabling mprotect is refused and its second allowed — so each orphan
-// is reclaimable by whichever sweep reaches it, and the final accounting must
-// come out exact.
+// several goroutines while WipeAll sweeps, for the race detector, and checks
+// the final accounting is exact. Each refusal is transient, so every orphan is
+// reclaimable by whichever sweep reaches it.
 //
-// It must not pass vacuously, which an earlier revision could: it counted
-// EVERY construction error, so a host whose real mlock refused first would
-// fail every construction, refund normally, adopt nothing, and still pass. So
-// each failure must be the orphan path's — locked pages held — and at least one
-// orphan must be reclaimed by the CONCURRENT sweeper, not the final drain. That
-// is made deterministic rather than hoped for: the first worker to strand a
-// mapping waits until the sweeper has reclaimed one, while the other workers
-// keep constructing.
-//
-// The wait is bounded by SWEEPS, not time, so a regression fails rather than
-// hangs. The sweeper offers a tick after every WipeAll, which only a waiting
-// worker can take; the second tick belongs to a sweep that STARTED after the
-// wait did, and so after the adoption, and that sweep must have reclaimed the
-// orphan. Three ticks without a reclaim is therefore a failure, not bad luck.
+// To not pass vacuously, every failure must be the orphan path's, and one
+// worker waits until the concurrent sweeper has reclaimed an orphan. The wait
+// is bounded by sweeps, not time: the second tick after the wait belongs to a
+// sweep that started after the adoption, so three ticks without a reclaim fail.
 func TestWipeAll_ReclaimsOrphansAddedConcurrently(t *testing.T) {
 	requireCleanLedger(t)
 	const workers, perWorker = 4, 16

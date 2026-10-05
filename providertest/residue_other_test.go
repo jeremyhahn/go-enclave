@@ -17,13 +17,11 @@ import (
 	"testing"
 )
 
-// TestResidueSweepReportsItselfNotRunOffLinux is the non-Linux half of the
-// retention-by-copy control. Off Linux there is no residue sweep, so a provider
-// that retains a copy cannot be caught — and the suite must return
-// ErrNotMeasured, and say so through Logf, rather than return nil as if the
-// property had been measured. The Linux half, where the
-// same provider must be caught, is TestSuiteCatchesAProviderThatRetainsACopy
-// in residue_linux_test.go (#90: a build constraint, never a runtime skip).
+// TestResidueSweepReportsItselfNotRunOffLinux pins that off Linux, where there
+// is no residue sweep, a provider that retains a copy makes the suite return
+// ErrNotMeasured and say so through Logf rather than return nil. The Linux
+// counterpart is TestSuiteCatchesAProviderThatRetainsACopy in
+// residue_linux_test.go.
 func TestResidueSweepReportsItselfNotRunOffLinux(t *testing.T) {
 	if sweepSupported {
 		t.Fatal("sweepSupported is true in a !linux build; residue_other.go is not the file in effect")
@@ -51,9 +49,7 @@ func TestResidueSweepReportsItselfNotRunOffLinux(t *testing.T) {
 			"retention by copy went unmeasured. Log was:\n%s", log.String())
 	}
 
-	// residueMappings exists off Linux only to keep the platform surfaces
-	// alike; it must refuse rather than report an empty — clean-looking —
-	// sweep.
+	// It must refuse rather than report an empty, clean-looking sweep.
 	if hits, err := residueMappings([]byte("needle"), 0); err == nil || hits != nil {
 		t.Errorf("residueMappings = %v, %v off Linux; want nil and an error", hits, err)
 	}

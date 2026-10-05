@@ -17,8 +17,7 @@ import (
 	enclave "github.com/jeremyhahn/go-enclave"
 )
 
-// Covers memlock.go's descriptive surface. Its behavior under the real
-// RLIMIT_MEMLOCK ceiling is exercised with the budget it bounds, in
+// Behavior under the real RLIMIT_MEMLOCK ceiling is covered in
 // admission_test.go.
 
 // TestLimitSourcesDescribeThemselves: every LimitSource an operator can see

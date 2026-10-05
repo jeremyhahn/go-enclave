@@ -19,14 +19,10 @@ import (
 )
 
 // testMemlockRequirement is the locked memory the unit suite needs at once:
-// measured at 1 MiB for this package (the suite fails at 512 KiB, passes at
-// 1 MiB, #90), doubled for headroom under the -cpu=8 run. Skip guards used to
-// hide a smaller ceiling as a run of quiet skips; it is now a stated
-// requirement, checked once here so a short environment fails with one
-// actionable message instead of dozens of allocation failures. An unbounded
-// limit (RLIMIT_MEMLOCK unlimited) satisfies it; so does CAP_IPC_LOCK, provided
-// the HARD limit also reaches the requirement, because the fault-injection
-// tests drop the capability and then raise the soft limit to at most the hard.
+// 1 MiB measured, doubled for headroom under -cpu=8. TestMain checks it once so
+// a short environment fails with one actionable message. CAP_IPC_LOCK satisfies
+// it only if the hard limit also reaches it, because the fault-injection tests
+// drop the capability and raise the soft limit to at most the hard.
 const testMemlockRequirement = 2 << 20
 
 func TestMain(m *testing.M) {
@@ -37,12 +33,9 @@ func TestMain(m *testing.M) {
 		os.Exit(2)
 	}
 	if lim.Source == LimitNotEnforced {
-		// CAP_IPC_LOCK exempts the process from the soft limit — but the
-		// fault-injection tests DROP that capability to make RLIMIT_MEMLOCK
-		// bind, and then the hard limit is the ceiling they can raise the
-		// soft one to. The requirement therefore has a second half that only
-		// this case exposes; checking it here keeps the promise of one
-		// startup diagnostic instead of a failure deep inside a child test.
+		// The fault-injection tests drop CAP_IPC_LOCK and then raise the soft
+		// limit to at most the hard one, so the hard limit must meet the
+		// requirement too.
 		if hard, ok := testMemlockHardLimit(); !ok {
 			fmt.Fprintf(os.Stderr, "go-enclave unit tests hold CAP_IPC_LOCK with a hard RLIMIT_MEMLOCK of %d bytes; the "+
 				"fault-injection tests drop the capability and then need at least %d. Raise the hard limit.\n",
@@ -76,10 +69,8 @@ func TestLimitSource_String(t *testing.T) {
 			t.Errorf("LimitSource(%d).String() = %q, want %q", tc.source, got, tc.want)
 		}
 	}
-	// Every named source must render differently: the whole point of the type
-	// is that an operator can tell "unlimited" from "we did not look", and two
-	// sources sharing a string would erase exactly that distinction in the one
-	// place it gets read — a log line.
+	// Every named source must render differently, so a log line tells
+	// "unlimited" from "we did not look".
 	seen := make(map[string]LimitSource, len(cases))
 	for _, tc := range cases[:4] {
 		if prev, dup := seen[tc.want]; dup {
@@ -89,10 +80,8 @@ func TestLimitSource_String(t *testing.T) {
 	}
 }
 
-// TestRLimitError_Distinguishable pins the property the issue asks for by name:
-// the refusal must be tellable apart from the three errors it neighbors. A
-// caller that cannot separate "this budget was never satisfiable" from "the
-// kernel refused a lock just now" cannot act on either.
+// TestRLimitError_Distinguishable pins that the refusal is distinct from the
+// three errors it neighbors, in both directions.
 func TestRLimitError_Distinguishable(t *testing.T) {
 	err := error(&RLimitError{
 		Requested: 1 << 20,
@@ -116,17 +105,14 @@ func TestRLimitError_Distinguishable(t *testing.T) {
 		}
 	}
 
-	// And the reverse direction: the neighbors must not match this sentinel
-	// either, or a caller switching on it would swallow unrelated failures.
+	// The neighbors must not match this sentinel either.
 	for _, other := range []error{ErrInvalidBudget, ErrBudgetExhausted, ErrLockedMemoryUnavailable} {
 		if errors.Is(other, ErrBudgetExceedsRLimit) {
 			t.Errorf("errors.Is(%v, ErrBudgetExceedsRLimit) = true, want false", other)
 		}
 	}
 
-	// Both figures must survive into the message. The reason to fail at startup
-	// is to tell an operator what to change, and a refusal that names neither
-	// the budget nor the ceiling does not.
+	// Both figures must survive into the message.
 	msg := err.Error()
 	for _, want := range []string{strconv.Itoa(1 << 20), "65536", "RLIMIT_MEMLOCK"} {
 		if !strings.Contains(msg, want) {
@@ -143,38 +129,18 @@ func TestRLimitError_Distinguishable(t *testing.T) {
 	}
 }
 
-// linuxRlimInfinity and bsdRlimInfinity are the two RLIM_INFINITY values in the
-// portfolio's target platforms, written out here so the classifier can be
-// tested against BOTH from a Linux runner. The BSD path has no CI of its own —
-// that is exactly why its classification is exercised here rather than left to
-// a host nobody runs the suite on.
+// linuxRlimInfinity and bsdRlimInfinity are the two RLIM_INFINITY values,
+// written out so the classifier is tested against both on a Linux runner.
 const (
 	linuxRlimInfinity = ^uint64(0)        // all bits set
 	bsdRlimInfinity   = uint64(1)<<63 - 1 // the largest positive int64
 )
 
-// TestClassifyRlimit exercises every reading of a raw RLIMIT_MEMLOCK value,
-// including the ones no unprivileged test process can make a kernel produce:
-// RLIM_INFINITY cannot be set when the hard limit is finite, and CAP_IPC_LOCK
-// cannot be acquired at all. Those readings are the ones most likely to be
-// wrong, so they are tested here rather than left to a host that happens to be
-// configured for them.
-//
-// Each case runs against both platforms' infinity sentinels, which pins the
-// property that made the sentinel an argument in the first place: a BSD value
-// read against the Linux sentinel classifies as a bounded ceiling of about nine
-// exabytes, and the Linux value read against the BSD sentinel as a bounded
-// ceiling of -1 — one refusing nothing, the other refusing everything.
-//
-// Measured while mutation-checking this table: removing the explicit
-// RLIM_INFINITY branch ALONE does not turn it red, because the representability
-// check below it catches all-bits-set too. Both have to be broken for the Linux
-// infinity case to fail, and the mutation run does exactly that. The redundancy
-// is deliberate — see classifyRlimit — but it is recorded here so the next
-// reader does not mistake this table for proof that the first branch is
-// load-bearing on its own. The BSD sentinel is a different matter: it is below
-// math.MaxInt64+1, so nothing else catches it, and disabling that branch alone
-// does turn the BSD half red.
+// TestClassifyRlimit covers every reading of a raw RLIMIT_MEMLOCK value,
+// including ones an unprivileged process cannot make a kernel produce, against
+// both platforms' infinity sentinels. Removing the explicit RLIM_INFINITY branch
+// alone does not fail the Linux half (the MaxInt64 check also catches
+// all-bits-set); it does fail the BSD half.
 func TestClassifyRlimit(t *testing.T) {
 	page := uint64(pageSize)
 
@@ -195,9 +161,7 @@ func TestClassifyRlimit(t *testing.T) {
 				want     LockedMemoryLimit
 			}{
 				{
-					// The case the issue calls out: the sentinel must not read
-					// as a number. The Linux one as an int64 is -1, which is
-					// BELOW every budget and would refuse them all.
+					// The Linux sentinel as an int64 is -1, below every budget.
 					name:     "infinity is unlimited, not -1 and not zero",
 					cur:      inf,
 					enforced: true,
@@ -210,19 +174,15 @@ func TestClassifyRlimit(t *testing.T) {
 					want:     LockedMemoryLimit{Bytes: 0, Bounded: false, Source: LimitUnlimited},
 				},
 				{
-					// Finite, but not representable as the int64 a budget is.
-					// Nothing to compare against, and truncating would invent a
-					// small ceiling out of an enormous one. This is also where a
-					// negative value from a BSD's signed rlimit field lands.
+					// Finite but not representable as an int64 budget; also where a
+					// negative BSD rlimit lands.
 					name:     "past int64 is unlimited",
 					cur:      uint64(math.MaxInt64) + 1,
 					enforced: true,
 					want:     LockedMemoryLimit{Bytes: 0, Bounded: false, Source: LimitUnlimited},
 				},
 				{
-					// Zero is a real answer — a process allowed to lock nothing
-					// — and must not be confused with the zero Bytes reported
-					// for unlimited.
+					// Zero is a real ceiling, distinct from the zero Bytes of unlimited.
 					name:     "zero is a bounded ceiling of zero",
 					cur:      0,
 					enforced: true,
@@ -235,9 +195,7 @@ func TestClassifyRlimit(t *testing.T) {
 					want:     LockedMemoryLimit{Bytes: int64(page), Bounded: true, Source: LimitRLimit},
 				},
 				{
-					// CAP_IPC_LOCK: the figure is real but the kernel will not
-					// hold the process to it, so it is reported and not
-					// enforced.
+					// CAP_IPC_LOCK: reported, not enforced.
 					name:     "unenforced keeps the figure but is not a ceiling",
 					cur:      page,
 					enforced: false,
@@ -245,8 +203,7 @@ func TestClassifyRlimit(t *testing.T) {
 				},
 			}
 			if inf != uint64(math.MaxInt64) {
-				// Only meaningful where the sentinel is not itself int64's
-				// maximum: on the BSDs that value IS infinity, tested above.
+				// On the BSDs MaxInt64 is infinity, tested above.
 				cases = append(cases, struct {
 					name     string
 					cur      uint64
@@ -272,13 +229,11 @@ func TestClassifyRlimit(t *testing.T) {
 	}
 }
 
-// TestClassifyRlimit_WrongSentinelIsCaught states the failure the sentinel
-// argument exists to prevent, so that a future refactor collapsing it back into
-// a package constant has to delete an assertion that says why.
+// TestClassifyRlimit_WrongSentinelIsCaught pins why the sentinel is an
+// argument: the BSD value read with the Linux sentinel is not a ceiling.
 func TestClassifyRlimit_WrongSentinelIsCaught(t *testing.T) {
-	// A BSD-unlimited value read with the Linux sentinel: a bounded ceiling of
-	// nine exabytes, which refuses nothing and reports a number that is not a
-	// ceiling.
+	// A BSD-unlimited value read with the Linux sentinel: a bounded ceiling
+	// of nine exabytes.
 	if got := classifyRlimit(bsdRlimInfinity, linuxRlimInfinity, true); !got.Bounded || got.Source != LimitRLimit {
 		t.Fatalf("expected the mismatched read to produce a bogus bounded ceiling, got %+v", got)
 	}
@@ -288,10 +243,8 @@ func TestClassifyRlimit_WrongSentinelIsCaught(t *testing.T) {
 	}
 }
 
-// TestClassifyRlimit_UnboundedRefusesNothing joins the classification to the
-// decision it drives. Reporting "unlimited" correctly is worth nothing if the
-// constructor then refuses against it anyway, and the two halves live in
-// different functions, so the join needs asserting somewhere.
+// TestClassifyRlimit_UnboundedRefusesNothing pins that an unbounded
+// classification is never refused by the constructor's decision.
 func TestClassifyRlimit_UnboundedRefusesNothing(t *testing.T) {
 	for _, tc := range []struct{ cur, inf uint64 }{
 		{linuxRlimInfinity, linuxRlimInfinity},
@@ -308,9 +261,8 @@ func TestClassifyRlimit_UnboundedRefusesNothing(t *testing.T) {
 	}
 }
 
-// TestLimitDiscoveryError_Distinguishable covers the error returned when the
-// ceiling cannot be READ. Nothing was compared, so it must not read as a
-// verdict on the budget or as a shortage of locked memory.
+// TestLimitDiscoveryError_Distinguishable pins that a failure to read the
+// ceiling matches neither a budget verdict nor a locked-memory shortage.
 func TestLimitDiscoveryError_Distinguishable(t *testing.T) {
 	cause := errors.New("getrlimit: operation not permitted")
 	err := error(&LimitDiscoveryError{Cause: cause})
@@ -329,8 +281,7 @@ func TestLimitDiscoveryError_Distinguishable(t *testing.T) {
 	if !strings.Contains(err.Error(), "operation not permitted") {
 		t.Errorf("Error() = %q, want it to carry the cause", err.Error())
 	}
-	// A nil cause must still render, since an error that panics while being
-	// logged is worse than the failure it reports.
+	// A nil cause must still render.
 	if got := (&LimitDiscoveryError{}).Error(); got != ErrLimitDiscoveryFailed.Error() {
 		t.Errorf("Error() with no cause = %q, want %q", got, ErrLimitDiscoveryFailed.Error())
 	}
@@ -339,18 +290,9 @@ func TestLimitDiscoveryError_Distinguishable(t *testing.T) {
 	}
 }
 
-// TestLockedMemoryLimit_Refuse exercises the decision NewAllocatorWithinRLimit
-// makes, against every kind of ceiling, on any host and with nothing injected.
-//
-// It exists because of what the subprocess test in memlock_linux_test.go cannot
-// promise. That test reaches the refusal through the real constructor, which
-// discovers its own ceiling — so on a host holding CAP_IPC_LOCK, where there is
-// no ceiling to inject, it asserts the privileged contract instead and the
-// refusal path goes unmeasured. Codex raised exactly that on this branch: a
-// privileged CI would not catch a regression in the primary path. This test
-// closes it. Measured: the mutants that break the comparison (removing it,
-// `>` to `>=`, inverting Bounded) die here as well as there, so the coverage
-// no longer depends on the runner's privileges.
+// TestLockedMemoryLimit_Refuse covers the decision NewAllocatorWithinRLimit
+// makes against every kind of ceiling, on any host with nothing injected, so
+// the refusal path is measured even on a runner holding CAP_IPC_LOCK.
 func TestLockedMemoryLimit_Refuse(t *testing.T) {
 	bounded := LockedMemoryLimit{Bytes: 65536, Bounded: true, Source: LimitRLimit}
 
@@ -361,16 +303,13 @@ func TestLockedMemoryLimit_Refuse(t *testing.T) {
 		wantErr bool
 	}{
 		{"well within a bounded ceiling", bounded, 4096, false},
-		// The boundary, from both sides. A `>=` refuses the first of these and
-		// a reversed comparison accepts the second.
+		// The boundary, from both sides.
 		{"exactly at a bounded ceiling", bounded, 65536, false},
 		{"one byte above a bounded ceiling", bounded, 65537, true},
 		{"far above a bounded ceiling", bounded, 1 << 40, true},
-		// A ceiling of zero bytes is a real ceiling: a process allowed to lock
-		// nothing refuses everything.
+		// A ceiling of zero bytes refuses everything.
 		{"any budget against a zero ceiling", LockedMemoryLimit{Bounded: true, Source: LimitRLimit}, 1, true},
-		// None of these bound anything, so none of them refuse anything — not
-		// even the largest budget expressible.
+		// Unbounded ceilings refuse nothing, not even MaxInt64.
 		{"unlimited refuses nothing", LockedMemoryLimit{Source: LimitUnlimited}, math.MaxInt64, false},
 		{"unenforced refuses nothing", LockedMemoryLimit{Bytes: 4096, Source: LimitNotEnforced}, math.MaxInt64, false},
 		{"unsupported refuses nothing", LockedMemoryLimit{Source: LimitUnsupported}, math.MaxInt64, false},
@@ -399,9 +338,8 @@ func TestLockedMemoryLimit_Refuse(t *testing.T) {
 	}
 }
 
-// TestNewAllocatorWithinRLimit_InvalidBudget checks that a nonsense budget is
-// reported as a caller mistake and never as a host-configuration problem, on
-// any platform and whatever the ceiling happens to be.
+// TestNewAllocatorWithinRLimit_InvalidBudget pins that a non-positive budget
+// is ErrInvalidBudget, never a host-configuration error.
 func TestNewAllocatorWithinRLimit_InvalidBudget(t *testing.T) {
 	for _, n := range []int64{0, -1, -4096, math.MinInt64} {
 		a, err := NewAllocatorWithinRLimit(n)
@@ -417,13 +355,9 @@ func TestNewAllocatorWithinRLimit_InvalidBudget(t *testing.T) {
 	}
 }
 
-// TestNewAllocatorWithinRLimit_AcceptsModestBudget is the CONTROL for the
-// refusal tests: an implementation that refused every budget, or that never
-// returned a working allocator, would pass those and fail this one.
-//
-// It runs against whatever ceiling the host actually has, with nothing injected
-// — a single page is below any RLIMIT_MEMLOCK a host running this suite can
-// have, since the rest of the suite locks pages too.
+// TestNewAllocatorWithinRLimit_AcceptsModestBudget is the control for the
+// refusal tests: a single page passes on any host that can run this suite, and
+// the allocator returned is usable.
 func TestNewAllocatorWithinRLimit_AcceptsModestBudget(t *testing.T) {
 	a, err := NewAllocatorWithinRLimit(pageSize)
 	if err != nil {
@@ -433,8 +367,6 @@ func TestNewAllocatorWithinRLimit_AcceptsModestBudget(t *testing.T) {
 		t.Errorf("Limit = %d, want %d — the budget must be the one asked for, not a clamped figure", a.Limit(), pageSize)
 	}
 
-	// The allocator has to be usable, not merely non-nil: this is the assertion
-	// that fails if the checked constructor ever returns a half-built one.
 	material := []byte("checked-allocator-material")
 	e, err := a.New(material)
 	if err != nil {
@@ -449,10 +381,8 @@ func TestNewAllocatorWithinRLimit_AcceptsModestBudget(t *testing.T) {
 	}
 }
 
-// TestDiscoverLockedMemoryLimit_SelfConsistent asserts the invariants the type's
-// documentation promises, against the real host. It cannot assert a particular
-// figure — that is the host's business — but it can assert that the figure and
-// the flags never disagree, which is what a caller reads.
+// TestDiscoverLockedMemoryLimit_SelfConsistent pins that the figure and
+// flags of the host's real ceiling never disagree.
 func TestDiscoverLockedMemoryLimit_SelfConsistent(t *testing.T) {
 	limit, err := DiscoverLockedMemoryLimit()
 	if err != nil {
@@ -475,16 +405,10 @@ func TestDiscoverLockedMemoryLimit_SelfConsistent(t *testing.T) {
 	t.Logf("host locked-memory ceiling: bytes=%d bounded=%v source=%s", limit.Bytes, limit.Bounded, limit.Source)
 }
 
-// hostCeiling reports what this host's locked-memory ceiling does to a very
-// large budget, so a test can assert the CONSISTENCY of two entry points
-// without knowing which verdict the host will produce.
-//
-// This is the portable half of the split #43 established: the subprocess test in
-// memlock_linux_test.go injects a known ceiling and asserts the figures,
-// and everything here has to hold on a bounded host, an unlimited one, a
-// privileged one holding CAP_IPC_LOCK, and one where discovery does not answer
-// at all. Nothing skips — a host that cannot exercise a refusal still has a
-// contract, and it is asserted rather than ducked.
+// hostCeiling reports what this host's ceiling does to a very large budget,
+// so a test can assert two entry points agree without knowing the verdict. It
+// holds on bounded, unlimited, privileged and discovery-failing hosts; the
+// subprocess test in memlock_linux_test.go asserts the figures.
 func hostCeiling(t *testing.T) (LockedMemoryLimit, error) {
 	t.Helper()
 	limit, err := DiscoverLockedMemoryLimit()
@@ -499,13 +423,9 @@ func hostCeiling(t *testing.T) (LockedMemoryLimit, error) {
 	return limit, err
 }
 
-// TestAllocator_RLimitContract_OptInIsRecorded is the flag's own test: the
-// contract has to be a property of the ALLOCATOR, because that is the only
-// thing that can outlive the constructor call.
-//
-// Dropping the flag on the way through NewAllocatorWithinRLimit, or setting it
-// for plain NewAllocator, is caught here before any of the behavioral tests
-// have to work out which host they are on.
+// TestAllocator_RLimitContract_OptInIsRecorded pins that the rlimit contract
+// is recorded on the allocator by NewAllocatorWithinRLimit and not by
+// NewAllocator.
 func TestAllocator_RLimitContract_OptInIsRecorded(t *testing.T) {
 	plain, err := NewAllocator(pageSize)
 	if err != nil {
@@ -514,7 +434,7 @@ func TestAllocator_RLimitContract_OptInIsRecorded(t *testing.T) {
 	if plain.rlimitBound {
 		t.Error("NewAllocator produced an allocator carrying the RLIMIT contract; the unchecked constructor must stay unchecked")
 	}
-	// An allocator that never opted in must not even LOOK at a ceiling.
+	// An allocator that never opted in must not look at a ceiling.
 	ceiling, err := plain.ceilingForRaise()
 	if err != nil {
 		t.Errorf("ceilingForRaise on an unbound allocator returned %v, want nil without consulting anything", err)
@@ -525,9 +445,7 @@ func TestAllocator_RLimitContract_OptInIsRecorded(t *testing.T) {
 
 	bound, err := NewAllocatorWithinRLimit(pageSize)
 	if err != nil {
-		// A host whose ceiling is under one page, or whose discovery failed.
-		// Either way there is no allocator to inspect, and the constructor's own
-		// contract is #43's to assert.
+		// Ceiling under one page, or discovery failed: no allocator to inspect.
 		t.Logf("NewAllocatorWithinRLimit(%d) refused on this host (%v); the flag assertion below cannot run", pageSize, err)
 		return
 	}
@@ -536,14 +454,9 @@ func TestAllocator_RLimitContract_OptInIsRecorded(t *testing.T) {
 	}
 }
 
-// TestAllocator_RLimitContract_UnboundIsNeverChecked pins the opt-in half of the
-// contract, and it holds on every host precisely because an unbound allocator
-// never consults a ceiling: raising to the largest budget an int64 can express
-// must succeed even on a host whose real ceiling is a few pages.
-//
-// This is the test that fails if the check is ever applied to every allocator
-// rather than to the ones that asked for it — the alternative #46 rejected,
-// which would break callers who deliberately chose the unchecked constructor.
+// TestAllocator_RLimitContract_UnboundIsNeverChecked pins that an allocator
+// from NewAllocator never consults a ceiling: raising to MaxInt64 succeeds on
+// any host.
 func TestAllocator_RLimitContract_UnboundIsNeverChecked(t *testing.T) {
 	hostCeiling(t)
 
@@ -575,24 +488,15 @@ func TestAllocator_RLimitContract_UnboundIsNeverChecked(t *testing.T) {
 	}
 }
 
-// TestAllocator_RLimitContract_EntryPointsAgree is the property #46 was filed
-// about, stated so it can be checked on any host: for one budget, a RAISE on a
-// bound allocator and the CONSTRUCTOR must reach the same verdict. Two entry
-// points to the same allocator disagreeing about whether the kernel ceiling
-// binds is the defect, whichever way the host happens to answer.
-//
-// It is a conditional, and that is why hostCeiling logs which branch ran. On a
-// bounded host both refuse and the refusal is compared; on an unlimited or
-// privileged host both accept, and the test asserts that agreement instead. The
-// figures and the exact boundary are the subprocess test's job, since only that
-// one knows what the ceiling is.
+// TestAllocator_RLimitContract_EntryPointsAgree pins that, for one budget, a
+// raise on a bound allocator and the constructor reach the same verdict. On a
+// bounded host both refuse; on an unlimited or privileged host both accept.
 func TestAllocator_RLimitContract_EntryPointsAgree(t *testing.T) {
 	hostCeiling(t)
 
 	a, err := NewAllocatorWithinRLimit(pageSize)
 	if err != nil {
-		// Whatever refused the small budget must refuse the large one too; that
-		// is the same agreement property, asserted from the other side.
+		// Whatever refused the small budget must refuse the large one too.
 		if _, big := NewAllocatorWithinRLimit(math.MaxInt64); !sameVerdictClass(err, big) {
 			t.Fatalf("constructor refused %d with %v but MaxInt64 with %v; the two disagree", pageSize, err, big)
 		}
@@ -609,8 +513,7 @@ func TestAllocator_RLimitContract_EntryPointsAgree(t *testing.T) {
 	}
 
 	if setErr == nil {
-		// Accepted: the raise must actually have happened, or "agreement" could
-		// be satisfied by a SetLimit that silently did nothing.
+		// Accepted: the raise must actually have happened.
 		if a.Limit() != math.MaxInt64 {
 			t.Errorf("SetLimit reported success but Limit = %d, want %d", a.Limit(), int64(math.MaxInt64))
 		}
@@ -625,14 +528,9 @@ func TestAllocator_RLimitContract_EntryPointsAgree(t *testing.T) {
 	}
 }
 
-// TestAllocator_RLimitContract_TransferAgreesWithSetLimit extends the same
-// agreement to the third entry point. A transfer is a raise on the receiving
-// side, so a destination that opted in must reach the same verdict a SetLimit to
-// the same figure would.
-//
-// Without this, a transfer is a door into exactly the state #46 is about: a
-// bound allocator holding a budget above the ceiling, arrived at through a
-// sibling instead of a setter.
+// TestAllocator_RLimitContract_TransferAgreesWithSetLimit pins that a
+// transfer into a bound allocator reaches the verdict SetLimit would for the
+// same resulting budget.
 func TestAllocator_RLimitContract_TransferAgreesWithSetLimit(t *testing.T) {
 	host, _ := hostCeiling(t)
 
@@ -641,14 +539,13 @@ func TestAllocator_RLimitContract_TransferAgreesWithSetLimit(t *testing.T) {
 		t.Logf("this host refuses a one-page checked budget (%v); the transfer comparison cannot run", err)
 		return
 	}
-	// A plain source, so the source side contributes no verdict of its own.
+	// A plain source contributes no verdict of its own.
 	src, err := NewAllocator(math.MaxInt64)
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
 
-	// The reference verdict: what a bound allocator would be told for this exact
-	// resulting budget.
+	// The reference verdict for this exact resulting budget.
 	reference, err := NewAllocatorWithinRLimit(pageSize)
 	if err != nil {
 		t.Fatalf("NewAllocatorWithinRLimit: %v", err)
@@ -671,15 +568,9 @@ func TestAllocator_RLimitContract_TransferAgreesWithSetLimit(t *testing.T) {
 		}
 	}
 
-	// CONTROL: a transfer that leaves the destination WITHIN the ceiling must
-	// succeed, or "refuses a destination over the ceiling" would be
-	// indistinguishable from "refuses every transfer into a bound allocator".
-	//
-	// The figures are taken from the DISCOVERED ceiling rather than assumed. Two
-	// pages looks like a safe constant and is not: a host whose ceiling is a
-	// single page would refuse this transfer entirely correctly, and the failure
-	// would read as a defect in the contract rather than as the contract
-	// working. Codex caught that assumption in review.
+	// Control: a transfer that leaves the destination within the ceiling
+	// must succeed. Figures come from the discovered ceiling, since a
+	// one-page host would correctly refuse a two-page transfer.
 	small, err := NewAllocatorWithinRLimit(pageSize)
 	if err != nil {
 		t.Logf("this host refuses a one-page checked budget (%v); the control cannot run", err)
@@ -691,10 +582,8 @@ func TestAllocator_RLimitContract_TransferAgreesWithSetLimit(t *testing.T) {
 	}
 
 	if host.Bounded && host.Bytes < 2*pageSize {
-		// No positive transfer can leave the destination within this ceiling, so
-		// there is no accepted control to demonstrate. Assert the contract's
-		// other half instead of skipping: the transfer must be refused, and for
-		// the ceiling rather than for anything else.
+		// No positive transfer fits this ceiling, so assert the refusal and
+		// its reason instead.
 		t.Logf("this host's ceiling is %d bytes, under two pages; asserting the refusal instead of an accepted control", host.Bytes)
 		if err := feeder.TransferTo(small, pageSize); !errors.Is(err, ErrBudgetExceedsRLimit) {
 			t.Errorf("TransferTo err = %v, want ErrBudgetExceedsRLimit on a sub-two-page ceiling", err)
@@ -713,14 +602,9 @@ func TestAllocator_RLimitContract_TransferAgreesWithSetLimit(t *testing.T) {
 	}
 }
 
-// TestAllocator_RLimitContract_ForceLimitOverrides pins the override, and it is
-// host-independent in the direction that matters: ForceLimit must accept a
-// budget of MaxInt64 on a bound allocator on EVERY host, because it does not
-// read a ceiling at all. On a bounded host that is a budget the ceiling would
-// have refused, which is the whole point.
-//
-// The override is deliberate and documented; this is what stops it from being
-// quietly removed, and equally what would catch it being extended to SetLimit.
+// TestAllocator_RLimitContract_ForceLimitOverrides pins that ForceLimit
+// accepts MaxInt64 on a bound allocator on every host, since it reads no
+// ceiling, while SetLimit still judges raises.
 func TestAllocator_RLimitContract_ForceLimitOverrides(t *testing.T) {
 	hostCeiling(t)
 
@@ -741,9 +625,7 @@ func TestAllocator_RLimitContract_ForceLimitOverrides(t *testing.T) {
 		t.Fatalf("Limit = %d, want the forced %d", a.Limit(), int64(math.MaxInt64))
 	}
 
-	// And now the other half of "only raises are checked": from a budget above
-	// any ceiling, a LOWERING that is still above it must succeed. An allocator
-	// must always be able to move back towards compliance.
+	// A lowering that is still above any ceiling must succeed.
 	if err := a.SetLimit(math.MaxInt64 - pageSize); err != nil {
 		t.Fatalf("SetLimit lowering from MaxInt64: %v (a lowering was checked against the ceiling)", err)
 	}
@@ -751,9 +633,7 @@ func TestAllocator_RLimitContract_ForceLimitOverrides(t *testing.T) {
 		t.Errorf("Limit = %d, want %d", a.Limit(), int64(math.MaxInt64)-pageSize)
 	}
 
-	// CONTROL: the allocator is still bound, so a RAISE from here is still
-	// judged. Without this the two assertions above would also pass on an
-	// implementation that simply cleared the flag on the first ForceLimit.
+	// Control: the allocator is still bound, so a raise is still judged.
 	_, ctorErr := NewAllocatorWithinRLimit(math.MaxInt64)
 	setErr := a.SetLimit(math.MaxInt64)
 	if !sameVerdictClass(ctorErr, setErr) {
@@ -761,11 +641,9 @@ func TestAllocator_RLimitContract_ForceLimitOverrides(t *testing.T) {
 	}
 }
 
-// sameVerdictClass reports whether two outcomes are the same ANSWER, rather than
-// the same error value: both accepted, both refused for the ceiling, or both
-// unable to read the ceiling. The figures inside a refusal differ legitimately
-// between two calls about different budgets, so comparing errors directly would
-// fail on hosts where the contract is being honored perfectly.
+// sameVerdictClass reports whether two outcomes are the same answer (both
+// accepted, both refused for the ceiling, or both discovery failures), since the
+// figures inside a refusal legitimately differ.
 func sameVerdictClass(a, b error) bool {
 	switch {
 	case a == nil || b == nil:
@@ -779,12 +657,8 @@ func sameVerdictClass(a, b error) bool {
 	}
 }
 
-// TestCheckRaise is the sticky contract's decision, tested directly. The
-// discovery-failure row is why this exists: getrlimit does not fail on a healthy
-// host, and the case that matters — a sandbox installed after construction, so
-// an allocator that opted in can no longer read the ceiling it opted into —
-// cannot be produced from inside the process. Reached here on any host, with no
-// privilege and nothing injected, exactly as #43 reached refuse.
+// TestCheckRaise tests the sticky contract's decision directly, including a
+// discovery failure after construction, which cannot be produced in-process.
 func TestCheckRaise(t *testing.T) {
 	bounded := LockedMemoryLimit{Bytes: 8 * pageSize, Bounded: true, Source: LimitRLimit}
 	unbounded := LockedMemoryLimit{Bytes: 8 * pageSize, Source: LimitNotEnforced}
@@ -823,16 +697,10 @@ func TestCheckRaise(t *testing.T) {
 	})
 }
 
-// TestAllocator_RLimitContract_FailedDiscoveryStillLowers is the property Codex
-// caught this branch getting wrong: the discovery failure was being returned
-// before the method knew whether it was looking at a raise, so a host that
-// stopped answering getrlimit could STRAND an over-ceiling allocator above the
-// ceiling — refusing the shrink that was the only way back to compliance, in the
-// name of a contract about raises.
-//
-// Reached through the unexported entry point, since a failed reading cannot be
-// produced from inside a healthy process; the exported method differs only in
-// taking the reading itself.
+// TestAllocator_RLimitContract_FailedDiscoveryStillLowers pins that a failed
+// ceiling read refuses raises but never a lowering, so an over-ceiling
+// allocator can always shrink. It uses the unexported entry point because a
+// failed read cannot be produced in a healthy process.
 func TestAllocator_RLimitContract_FailedDiscoveryStillLowers(t *testing.T) {
 	boom := errors.New("getrlimit refused by policy")
 
@@ -841,7 +709,7 @@ func TestAllocator_RLimitContract_FailedDiscoveryStillLowers(t *testing.T) {
 		t.Fatalf("NewAllocator: %v", err)
 	}
 
-	// A LOWERING must go through: the reading is irrelevant to it.
+	// A lowering must go through: the reading is irrelevant to it.
 	if err := a.setLimit(2*pageSize, LockedMemoryLimit{}, boom); err != nil {
 		t.Fatalf("a lowering was refused because the ceiling could not be read: %v", err)
 	}
@@ -849,10 +717,8 @@ func TestAllocator_RLimitContract_FailedDiscoveryStillLowers(t *testing.T) {
 		t.Errorf("Limit = %d, want the lowered %d", a.Limit(), 2*pageSize)
 	}
 
-	// CONTROL, and it is what stops the assertion above from being satisfied by
-	// an implementation that simply ignores cerr: a RAISE with the same failed
-	// reading must be refused, and must report the discovery failure rather
-	// than a budget verdict.
+	// Control: a raise with the same failed reading is refused, and reports
+	// the discovery failure.
 	err = a.setLimit(4*pageSize, LockedMemoryLimit{}, boom)
 	if !errors.Is(err, boom) {
 		t.Fatalf("a raise err = %v, want the discovery failure", err)
@@ -861,14 +727,13 @@ func TestAllocator_RLimitContract_FailedDiscoveryStillLowers(t *testing.T) {
 		t.Errorf("Limit = %d after a refused raise, want the unchanged %d", a.Limit(), 2*pageSize)
 	}
 
-	// Setting the same budget is neither, and must not be refused either.
+	// Setting the same budget is neither, and must not be refused.
 	if err := a.setLimit(2*pageSize, LockedMemoryLimit{}, boom); err != nil {
 		t.Errorf("a no-op SetLimit was refused because the ceiling could not be read: %v", err)
 	}
 
-	// A transfer IS always a raise on the receiving side, so there the failed
-	// reading always bites — the asymmetry is deliberate and is asserted, not
-	// assumed.
+	// A transfer is always a raise on the receiving side, so the failed
+	// reading always refuses it.
 	src, err := NewAllocator(8 * pageSize)
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)

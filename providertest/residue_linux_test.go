@@ -6,8 +6,6 @@
 // This file is part of go-enclave. Use of this source code is governed by the
 // MIT license that can be found in the LICENSE file.
 
-//go:build linux
-
 package providertest
 
 import (
@@ -32,17 +30,11 @@ func scratch(chunk, needleLen int) []byte {
 	return make([]byte, chunk+needleLen-1)
 }
 
-// TestMappingContainsWipesTheScanBuffer is the test the per-mapping wipe exists
-// for, and it exists because a mutant of that wipe SURVIVED the whole suite:
-// whether the hazard bites depends on the order the kernel lists mappings in,
-// so no end-to-end test can be relied on to catch it.
-//
-// The buffer ends a scan holding whatever it last read. Carried into the next
-// mapping — which is where the buffer itself lives, since it is an ordinary
-// heap allocation — the instrument finds its own copy of the needle and reports
-// a leak that exists nowhere but inside itself. The same self-contamination was
-// independently hit in a parent-scans-child probe during the PR #45 review,
-// where the counts climbed 2 -> 6 -> 10 across successive scans.
+// TestMappingContainsWipesTheScanBuffer pins the per-mapping wipe. The buffer
+// ends a scan holding whatever it last read; carried into the scan of the
+// mapping the buffer itself lives in, the sweep would find its own copy of the
+// needle and report a leak. Whether that bites depends on the order the kernel
+// lists mappings in, so no end-to-end test reliably catches it.
 func TestMappingContainsWipesTheScanBuffer(t *testing.T) {
 	needle := []byte("needle-that-must-not-ride-along-into-the-next-mapping")
 	region := make([]byte, 4096)
@@ -50,9 +42,8 @@ func TestMappingContainsWipesTheScanBuffer(t *testing.T) {
 
 	buf := scratch(2048, len(needle))
 
-	// CONTROL: the scan found it, so the buffer demonstrably held it. Without
-	// this an all-zero buffer afterwards would prove nothing — a scan that read
-	// nothing leaves a zero buffer too.
+	// Control: the scan found it, so the buffer held it. Otherwise an all-zero
+	// buffer afterwards would prove nothing.
 	if !mappingContains(bytes.NewReader(region), 0, uintptr(len(region)), needle, buf) {
 		t.Fatal("control: the scan did not find a needle that is there, so the wipe assertion below is vacuous")
 	}
@@ -64,9 +55,8 @@ func TestMappingContainsWipesTheScanBuffer(t *testing.T) {
 }
 
 // TestMappingContainsWipesTheScanBufferOnAMiss covers the other return path: a
-// mapping with no match still leaves the buffer full of that mapping's bytes,
-// and the needle can be among them when the needle's OWN mapping is the one
-// being excluded — which is the normal case, not an edge one.
+// mapping with no match still leaves its bytes in the buffer, and they can
+// include the needle when the excluded home mapping is the one scanned.
 func TestMappingContainsWipesTheScanBufferOnAMiss(t *testing.T) {
 	needle := []byte("a needle that is not in this region at all")
 	region := bytes.Repeat([]byte{0xAB}, 4096)
@@ -99,11 +89,8 @@ func (r *scratchingReader) ReadAt(p []byte, _ int64) (int, error) {
 }
 
 // TestMappingContainsWipesWhatTheReaderUsedAsScratch pins the bound of the
-// wipe. mappingContains wipes only the prefix it handed to ReadAt (#90), and
-// that prefix has to be the REQUEST, not the count ReadAt returned: a reader
-// may scribble over all of p and report one byte. A bound taken from the
-// returned count would leave the scribbled tail — a copy of whatever the
-// reader read — for the next mapping's scan to find.
+// wipe: it must cover the prefix requested from ReadAt, not the count ReadAt
+// returned, because a reader may scribble over all of p and report one byte.
 func TestMappingContainsWipesWhatTheReaderUsedAsScratch(t *testing.T) {
 	needle := []byte("not present")
 	buf := scratch(2048, len(needle))
@@ -113,9 +100,8 @@ func TestMappingContainsWipesWhatTheReaderUsedAsScratch(t *testing.T) {
 	if mappingContains(r, 0, regionLen, needle, buf) {
 		t.Fatal("reported a match the reader never produced")
 	}
-	// The reader must have run and been asked for the whole region — or the
-	// zero buffer below proves nothing: a mappingContains that returned
-	// before reading would leave it zero too.
+	// The reader must have been asked for the whole region, or the zero buffer
+	// below proves nothing.
 	if r.calls == 0 || r.requests[0] != regionLen {
 		t.Fatalf("mappingContains called the reader %d time(s) with requests %v; want a first request of %d bytes", r.calls, r.requests, regionLen)
 	}
@@ -125,19 +111,15 @@ func TestMappingContainsWipesWhatTheReaderUsedAsScratch(t *testing.T) {
 	}
 }
 
-// TestMappingContainsSpansChunkBoundaries pins the overlap. A fixed-window scan
-// misses a needle straddling a boundary, and a sweep that silently cannot see
-// half the possible placements is the vacuous-instrument failure this package
-// is built to avoid.
+// TestMappingContainsSpansChunkBoundaries pins the overlap: a needle
+// straddling a read boundary must be found.
 func TestMappingContainsSpansChunkBoundaries(t *testing.T) {
 	needle := []byte("straddle-me-across-the-boundary")
 	const chunk = 512
 	buf := scratch(chunk, len(needle))
-	// A read fills the WHOLE buffer, so the boundary a needle has to straddle
-	// is at a multiple of len(buf) — not of chunk. Getting that wrong is how
-	// the first version of this test passed with the overlap deleted: every
-	// placement it chose happened to land inside one read either way, so it
-	// asserted nothing about the overlap at all.
+	// A read fills the whole buffer, so the boundary a needle has to straddle
+	// is at a multiple of len(buf), not of chunk. Placements inside one read
+	// would pass with the overlap deleted.
 	read := len(buf)
 	region := make([]byte, 4*read)
 
@@ -157,15 +139,11 @@ func TestMappingContainsSpansChunkBoundaries(t *testing.T) {
 	}
 }
 
-// TestParseMapsHeader pins the line recognizer the home exclusion depends on:
-// a header that fails to parse is a mapping silently skipped, and a bad range
-// is a mapping wrongly excluded.
-//
-// The expected bounds are uint64 so the table compiles on 32-bit targets too.
-// There a 64-bit address does not fit a uintptr and must be REJECTED, not
-// narrowed into a different range, so a row's expected ok is its wantOK and
-// "the bound fits this platform's uintptr" — and the 32-bit row keeps every
-// platform asserting at least one successful parse.
+// TestParseMapsHeader pins the line recognizer the home exclusion depends on.
+// The expected bounds are uint64 so the table compiles on 32-bit targets, where
+// a 64-bit address must be rejected rather than narrowed; a row's expected ok
+// is its wantOK and "the bound fits this platform's uintptr". The 32-bit row
+// keeps every platform asserting at least one successful parse.
 func TestParseMapsHeader(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -216,20 +194,16 @@ func TestParseMapsHeader(t *testing.T) {
 
 // TestResidueMappingsFindsAndExcludesHome is the end-to-end check on the real
 // address space: a needle held in a live heap slice is findable, and passing
-// its own mapping as home excludes it. Without the exclusion every legitimate
-// copy would read as a leak, which is how the conformance suite's positive
-// control fails when it is removed.
+// its own mapping as home excludes it.
 func TestResidueMappingsFindsAndExcludesHome(t *testing.T) {
 	needle := bytes.Repeat([]byte{0x00}, 48)
 	for i := range needle {
 		needle[i] = byte(i*7 + 13)
 	}
 
-	// Both preconditions FAIL rather than skip (#90). Reading /proc/self/maps
-	// and /proc/self/mem of one's own process needs no privilege on Linux, so
-	// an error here means the runner's /proc is missing or filtered; and a
-	// sweep that cannot find a needle live in this very process cannot see
-	// anything, so the exclusion assertion below would be vacuous.
+	// Both preconditions fail rather than skip: reading one's own /proc/self
+	// needs no privilege on Linux, and a sweep that cannot find a live needle
+	// would make the exclusion assertion vacuous.
 	hits, err := residueMappings(needle, 0)
 	if err != nil {
 		t.Fatalf("cannot sweep process memory: %v (the runner must mount /proc and allow a process to read "+
@@ -259,14 +233,10 @@ func TestResidueMappingsFindsAndExcludesHome(t *testing.T) {
 	}
 }
 
-// TestSuiteCatchesAProviderThatRetainsACopy is the deliberate-leak control the
-// whole design is ranked around.
-//
-// It lives in the Linux file because the residue sweep is the only instrument
-// for retention by COPY and it exists only here; on every other platform the
-// suite reports the sweep as not run, which
-// TestResidueSweepReportsItselfNotRunOffLinux (residue_other_test.go) pins. A
-// build constraint, not a runtime skip (#90).
+// TestSuiteCatchesAProviderThatRetainsACopy is the deliberate-leak control
+// for retention by copy. It lives in the Linux file because the residue sweep
+// exists only on Linux; TestResidueSweepReportsItselfNotRunOffLinux
+// (residue_other_test.go) pins the behavior elsewhere.
 func TestSuiteCatchesAProviderThatRetainsACopy(t *testing.T) {
 	kept := &retainingProtector{inner: software()}
 	wantFail(t, perOp(func() (any, error) { return kept, nil }),
@@ -278,9 +248,8 @@ func TestSuiteCatchesAProviderThatRetainsACopy(t *testing.T) {
 	}
 }
 
-// TestEqualBytes pins the comparison the residue check's recovery control
-// rests on: a recovery of the wrong LENGTH is not the key, whatever its
-// prefix holds.
+// TestEqualBytes pins that a recovery of the wrong length is not the key,
+// whatever its prefix holds.
 func TestEqualBytes(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -302,8 +271,7 @@ func TestEqualBytes(t *testing.T) {
 }
 
 // mappedRetainer conforms in every visible way and copies every key it
-// recovers into a mapping it owns — the placements a sweep limited to
-// anonymous memory cannot see.
+// recovers into a mapping it owns, outside anonymous memory.
 type mappedRetainer struct {
 	inner  *enclave.SoftwareProvider
 	mu     sync.Mutex
@@ -420,8 +388,7 @@ func TestSuiteCatchesAKeyRetainedInAFileOrDeviceMapping(t *testing.T) {
 }
 
 // TestSweptMapping pins which /proc/self/maps entries the sweep reads. Every
-// exclusion is a place a provider could hide a key from the suite, so the
-// table names each one.
+// exclusion is a place a provider could hide a key, so the table names each.
 func TestSweptMapping(t *testing.T) {
 	for _, tc := range []struct {
 		perms, path string
@@ -452,8 +419,7 @@ func TestSweptMapping(t *testing.T) {
 }
 
 // TestReadLen pins the per-read length against a remaining span wider than an
-// int: converted before the comparison, such a span goes negative on a 32-bit
-// target and the slice expression panics.
+// int, which converted first would go negative on a 32-bit target.
 func TestReadLen(t *testing.T) {
 	for _, tc := range []struct {
 		off, hi uintptr

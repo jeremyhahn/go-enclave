@@ -26,42 +26,20 @@ import (
 	"github.com/jeremyhahn/go-enclave/test/integration/internal/devcontainer"
 )
 
-// Covers mapping.go and dontdump_linux.go: what every enclave's pages look
-// like to the KERNEL — locked, excluded from core dumps, fenced by
-// inaccessible guard pages, read-only once final — and the process-wide
-// RLIMIT_CORE hardening.
-//
-// And mapping.go's RECOVERY PATHS, against the real kernel. Each Refused/Denied
-// test runs in its own child process with the seccomp fault injector
-// (seccomp_test.go) installed, makes the kernel refuse one of go-enclave's
-// memory syscalls, and checks what the library does about it through the
-// public API only: what it returns, what it still holds, what it charges, and
-// that lifting the refusal lets a later Destroy or WipeAll finish the job.
-// Every one first requires that the injector actually refused something, so
-// none can pass by never faulting.
+// What every enclave's pages look like to the kernel (locked, undumpable,
+// guarded, read-only once final), the process-wide RLIMIT_CORE hardening, and
+// the recovery paths. Each Refused/Denied test runs in a child with the
+// seccomp fault injector (seccomp_test.go), makes the kernel refuse one memory
+// syscall, and checks the public outcome: what is returned, held and charged,
+// and that a later Destroy or WipeAll finishes once the refusal lifts. Each
+// first requires that the injector actually refused something.
 
 // TestEnclaveMappingsAreLockedUndumpableAndGuarded creates an enclave by every
-// public route a consumer has — the three constructors, the sized constructor
-// before and after Freeze, both Allocator constructors, a large multi-page
-// enclave, and the enclave SealedEnclave.Open returns — and reads each one's
-// mapping back from /proc/self/smaps:
-//
-//   - VmFlags has "lo" (VM_LOCKED: mlock'd, never paged to swap), "dd"
-//     (VM_DONTDUMP: MADV_DONTDUMP, skipped by the kernel's core writer, which
-//     a core_pattern pipe does not bypass) and "dc" (VM_DONTCOPY:
-//     MADV_DONTFORK, absent from a forked child);
-//   - the mapping is exactly LockedSize(n) bytes, so VmLck is what the
-//     documentation says an enclave costs;
-//   - its permissions are r--p once the material is final and rw-p only for a
-//     sized enclave that has not been frozen yet;
-//   - the mappings immediately below and above it are inaccessible (---p) and
-//     not locked: the guard pages, which cost address space but no locked
-//     memory.
-//
-// It then checks the claim for EVERY locked mapping in the process, including
-// the sealer's root and KEK enclaves that no consumer can address: each one is
-// "dd", and together they account for all of VmLck. And after WipeAll, no
-// locked mapping and no locked byte remains.
+// public route and reads each mapping back from /proc/self/smaps: VmFlags has
+// lo, dd and dc; the size is exactly LockedSize(n); permissions are r--p once
+// final (rw-p only for an unfrozen sized enclave); the neighbors are unlocked
+// ---p guard pages. Every locked mapping in the process, the sealer's
+// included, is dd and together they make up VmLck; after WipeAll none remain.
 func TestEnclaveMappingsAreLockedUndumpableAndGuarded(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		ctx := context.Background()
@@ -118,9 +96,7 @@ func TestEnclaveMappingsAreLockedUndumpableAndGuarded(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Seal: %v", err)
 		}
-		// The plaintext an open returns is final, so like every other route
-		// whose material is final it comes back READ-ONLY: decrypted into a
-		// sized destination that is frozen before Open returns.
+		// Open's plaintext is final, so it is frozen read-only before Open returns.
 		e, err = sealed.Open(ctx)
 		add("SealedEnclave.Open", 40, false, e, err)
 		e, err = sealed.OpenWith(ctx, alloc)
@@ -154,10 +130,8 @@ func TestEnclaveMappingsAreLockedUndumpableAndGuarded(t *testing.T) {
 			if v.perms != wantPerms {
 				t.Errorf("%s: permissions %s, want %s: %s", s.name, v.perms, wantPerms, v)
 			}
-			// The guard pages. Adjacent PROT_NONE mappings may be merged by the
-			// kernel, so a guard VMA can be larger than one page; what matters is
-			// that the bytes immediately either side are inaccessible and are
-			// not charged as locked memory.
+			// The kernel may merge adjacent PROT_NONE VMAs, so a guard VMA can
+			// exceed one page; only the immediate neighbors are checked.
 			if i == 0 || i == len(maps)-1 {
 				t.Errorf("%s: mapping has no neighbor on one side, so no guard page", s.name)
 				continue
@@ -187,9 +161,8 @@ func TestEnclaveMappingsAreLockedUndumpableAndGuarded(t *testing.T) {
 			accounted += v.size()
 		}
 
-		// Every locked mapping in the process, whoever made it — the sealer's
-		// root and KEK enclaves included — is excluded from core dumps, and the
-		// locked mappings are the whole of what the kernel counts as locked.
+		// Every locked mapping, the sealer's included, is dd, and together they
+		// account for all of VmLck.
 		locked := lockedVMAs(maps)
 		var lockedBytes int64
 		for _, v := range locked {
@@ -226,21 +199,13 @@ func TestEnclaveMappingsAreLockedUndumpableAndGuarded(t *testing.T) {
 	})
 }
 
-// TestCoreDumpLimitLoweredOnImport checks the process-wide half of core-dump
-// hardening from the kernel: importing go-enclave lowers RLIMIT_CORE to 0
-// soft AND hard, CoreDumpsDisabled reports that it took, and the process can
-// no longer raise it.
+// TestCoreDumpLimitLoweredOnImport pins that importing go-enclave lowers
+// RLIMIT_CORE to 0 soft and hard, CoreDumpsDisabled reports it, and the
+// process cannot raise it again.
 //
-// It is non-vacuous only because the devcontainer starts processes with a
-// NON-ZERO core limit (compose.yaml ulimits.core): the parent of this test
-// binary is the `go` command, which does not import go-enclave, so its limit
-// is the container's — and the test requires that to be the declared non-zero
-// figure. A container that started at zero would make "the library lowered
-// it" unfalsifiable, and fails here instead.
-//
-// It runs in the top-level test process (not a child) precisely so that its
-// parent is `go`; it only reads limits and makes one raise attempt the kernel
-// refuses, so it changes no state.
+// It runs in the top-level process so its parent is the `go` command, which
+// does not import go-enclave; the test requires that parent's limit to be the
+// non-zero figure compose.yaml declares, or "lowered" would be unfalsifiable.
 func TestCoreDumpLimitLoweredOnImport(t *testing.T) {
 	if isChild() {
 		t.Fatalf("must run in the top-level test process, whose parent is the go command")
@@ -268,8 +233,7 @@ func TestCoreDumpLimitLoweredOnImport(t *testing.T) {
 	if err := enclave.CoreDumpsDisabled(); err != nil {
 		t.Errorf("CoreDumpsDisabled() = %v, want nil: the lowering is in place, so the report must say so", err)
 	}
-	// The hard limit is 0 and this process holds no CAP_SYS_RESOURCE, so the
-	// lowering cannot be undone from inside it.
+	// Hard limit 0 without CAP_SYS_RESOURCE: cannot be raised.
 	err = unix.Setrlimit(unix.RLIMIT_CORE, &unix.Rlimit{Cur: uint64(want), Max: uint64(want)})
 	if !errors.Is(err, unix.EPERM) {
 		t.Errorf("raising RLIMIT_CORE back to %d: err = %v, want EPERM", want, err)
@@ -295,10 +259,9 @@ func procLimit(path, row string) (soft, hard string, err error) {
 	return "", "", fmt.Errorf("%s: no %q row", path, row)
 }
 
-// TestRefusedMlockRollsBackConstruction: the kernel refuses the lock, every
-// constructor fails with ErrLockedMemoryUnavailable, an admitted allocation
-// refunds its charge in full (nothing was locked), nothing is left on the
-// ledger, and the next allocation after the refusal lifts succeeds.
+// TestRefusedMlockRollsBackConstruction pins that a refused mlock fails every
+// constructor with ErrLockedMemoryUnavailable, refunds the Allocator charge in
+// full, leaves nothing on the ledger, and the next allocation succeeds.
 func TestRefusedMlockRollsBackConstruction(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		f := installFaultInjector(t, 0)
@@ -339,9 +302,9 @@ func TestRefusedMlockRollsBackConstruction(t *testing.T) {
 	})
 }
 
-// TestRefusedUnmapKeepsTheEnclaveForARetry: Destroy whose unmap the kernel
-// refuses returns the refusal — not a panic, not nil — keeps the mapping and
-// its ledger entry, and the next Destroy after the refusal lifts finishes.
+// TestRefusedUnmapKeepsTheEnclaveForARetry pins that a refused munmap makes
+// Destroy return the error, keeps the mapping and ledger entry, and a later
+// Destroy finishes.
 func TestRefusedUnmapKeepsTheEnclaveForARetry(t *testing.T) {
 	const n = 48
 	isolated(t, childOpts{}, func(t *testing.T) {
@@ -374,10 +337,9 @@ func TestRefusedUnmapKeepsTheEnclaveForARetry(t *testing.T) {
 	})
 }
 
-// TestDeniedMprotectReleasesUnwiped: a frozen enclave cannot be made writable
-// for its wipe when the kernel denies mprotect, so the library unmaps it
-// UNWIPED and says so — ErrReleasedWithoutWipe from Destroy, Unwiped in the
-// sweep's SweepError — never claiming the pages are still held.
+// TestDeniedMprotectReleasesUnwiped pins that when mprotect is denied a frozen
+// enclave is unmapped unwiped and reported as such: ErrReleasedWithoutWipe
+// from Destroy, Unwiped in WipeAll's SweepError.
 func TestDeniedMprotectReleasesUnwiped(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		f := installFaultInjector(t, 0)
@@ -420,11 +382,10 @@ func TestDeniedMprotectReleasesUnwiped(t *testing.T) {
 	})
 }
 
-// TestRefusedGuardPageRollsBackALockedMapping: the lock succeeds but setting
-// up a guard page is refused, so construction is abandoned AFTER the pages
-// were locked. With the rollback's munlock and unmap refused too, the mapping
-// is kept as a still-locked orphan — counted, charged — and reclaimed once the
-// kernel relents.
+// TestRefusedGuardPageRollsBackALockedMapping refuses the guard page after
+// the lock succeeded, and the rollback's munlock and munmap too: the mapping
+// stays a counted, charged, locked orphan and is reclaimed once the kernel
+// relents.
 func TestRefusedGuardPageRollsBackALockedMapping(t *testing.T) {
 	const n = 40
 	isolated(t, childOpts{}, func(t *testing.T) {
@@ -463,10 +424,9 @@ func TestRefusedGuardPageRollsBackALockedMapping(t *testing.T) {
 	})
 }
 
-// TestConstructionFailsClosedWhenAnExclusionIsRefused refuses, through a
-// seccomp filter, the madvise that excludes enclave pages from a fork or from
-// a core dump. Construction must fail with ErrLockedMemoryUnavailable carrying
-// the refusal, and leave nothing locked behind.
+// TestConstructionFailsClosedWhenAnExclusionIsRefused pins that a refused
+// MADV_DONTFORK or MADV_DONTDUMP fails construction with
+// ErrLockedMemoryUnavailable and leaves nothing locked.
 func TestConstructionFailsClosedWhenAnExclusionIsRefused(t *testing.T) {
 	for _, tc := range []struct {
 		name   string

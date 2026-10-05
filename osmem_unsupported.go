@@ -10,25 +10,10 @@
 
 package enclave
 
-// This GOOS has no way to lock memory that golang.org/x/sys exposes — js and
-// wasip1 have no virtual-memory interface at all, plan9 has no mlock — so
-// there is nothing an enclave could be built from. The package therefore
-// refuses to COMPILE here rather than compiling into something that fails at
-// run time, or into something that hands out unlocked memory and calls it an
-// enclave.
-//
-// The identifier on the last line is deliberately undefined: the compiler's
-// error names it, and its name is the message. The build constraint is the
-// complement of osmem_unix.go's and osmem_windows.go's, so exactly one of the
-// three applies to any GOOS, and a GOOS added to Go in future lands here until
-// someone has checked what x/sys provides for it.
-//
-// The variables declare the platform layer's names and nothing more — no
-// bodies, no behavior, and this file can never compile anyway. They are here
-// so that the deliberate error is the ONLY one: without them the type checker
-// reports every call into the missing layer first, up to its error limit, and
-// the line that explains why never makes it onto the screen (measured with
-// GOOS=js, GOOS=wasip1 and GOOS=plan9).
+// This GOOS has no memory locking that x/sys exposes (js, wasip1, plan9), so
+// the package refuses to compile: the undefined identifier on the last line is
+// the error message. The variables declare the platform layer's names only so
+// that this error is the one the compiler reports.
 var (
 	sysMap                       func(n int) ([]byte, error)
 	sysLock, sysUnlock, sysUnmap func(b []byte) error

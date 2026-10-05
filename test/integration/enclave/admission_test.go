@@ -80,25 +80,10 @@ func requireBudgetError(t *testing.T, what string, err error, requested, inUse, 
 }
 
 // TestAdmissionUnderRealMemlockCeiling drives one allocator through the whole
-// admission lifecycle against a 32-page kernel ceiling:
-//
-//   - a budget above the ceiling is refused at construction, naming both
-//     figures; one equal to it is accepted;
-//   - exactly ceiling/page one-byte enclaves are admitted — and the kernel
-//     agrees, VmLck reaching the ceiling exactly — and the next is refused by
-//     the BUDGET, before any syscall, with a BudgetError carrying the true
-//     figures;
-//   - an UNADMITTED allocation at that point is refused by the KERNEL (mlock
-//     at RLIMIT_MEMLOCK) as ErrLockedMemoryUnavailable, leaking nothing: the
-//     ceiling is real and the failure is an error, not a crash;
-//   - Destroy returns the reservation and the locked page, and the next
-//     allocation is admitted again;
-//   - SetLimit refuses to shrink below live reservations and refuses to rise
-//     above the ceiling (the sticky contract of NewAllocatorWithinRLimit);
-//     ForceLimit records a lower ceiling, reports the excess and admits
-//     nothing — with InUse above Limit and never negative — until enough
-//     drains; TransferTo moves headroom and refuses headroom it lacks;
-//   - at the end WipeAll finds nothing held and the kernel nothing locked.
+// admission lifecycle against a 32-page kernel ceiling: construction checks,
+// filling to the ceiling (VmLck agreeing) with the next refused by budget, an
+// unadmitted allocation refused by the kernel, release and re-admission,
+// SetLimit/ForceLimit/TransferTo at the ceiling, and nothing held at the end.
 func TestAdmissionUnderRealMemlockCeiling(t *testing.T) {
 	page := enclave.LockedSize(1)
 	ceiling := admissionPages * page
@@ -261,14 +246,9 @@ func TestAdmissionUnderRealMemlockCeiling(t *testing.T) {
 }
 
 // TestAdmissionHoldsTheKernelCeilingUnderContention admits and releases from
-// many goroutines at once while another retunes the budget, with the budget's
-// maximum set EXACTLY at the kernel ceiling and nothing else in the process
-// locking memory. Any over-admission — a reservation the accounting lost, a
-// lowering and an admission both winning the same bytes — therefore turns
-// into a real mlock failure, which the test treats as the defect it is. Every
-// refusal is a budget refusal whose InUse is never negative and never above
-// the budget in force; InUse and Available sampled throughout stay in range;
-// and when the workers stop, every byte is accounted back: InUse 0, VmLck 0.
+// many goroutines while another retunes a budget whose maximum is exactly the
+// kernel ceiling, so any over-admission becomes a real mlock failure. Refusals
+// and sampled figures stay in range, and everything is returned at the end.
 func TestAdmissionHoldsTheKernelCeilingUnderContention(t *testing.T) {
 	page := enclave.LockedSize(1)
 	ceiling := admissionPages * page
@@ -383,11 +363,9 @@ func TestAdmissionHoldsTheKernelCeilingUnderContention(t *testing.T) {
 	})
 }
 
-// TestProcessAllocatorDefaultsToTheKernelCeiling is the path a LIBRARY takes:
-// with nothing installed, ProcessAllocator installs a default whose budget is
-// the discovered ceiling — admitting exactly what the kernel would and
-// refusing the next by budget — keeps that ceiling for life (SetLimit cannot
-// raise past it), and the installation is one-shot.
+// TestProcessAllocatorDefaultsToTheKernelCeiling is the library path: the lazy
+// default's budget is the discovered ceiling, kept for life, and installation
+// is one-shot.
 func TestProcessAllocatorDefaultsToTheKernelCeiling(t *testing.T) {
 	page := enclave.LockedSize(1)
 	const pages = 8
@@ -438,10 +416,9 @@ func TestProcessAllocatorDefaultsToTheKernelCeiling(t *testing.T) {
 	})
 }
 
-// TestSetAllocatorIsTheBinarysOneShotDecision is the path a BINARY takes:
-// it sizes the process budget once, before anything allocates, and every
-// library calling ProcessAllocator then admits against that budget. A nil
-// allocator and a second installation are both refused.
+// TestSetAllocatorIsTheBinarysOneShotDecision is the binary path: the budget
+// installed once is what every ProcessAllocator caller admits against; nil and a
+// second installation are refused.
 func TestSetAllocatorIsTheBinarysOneShotDecision(t *testing.T) {
 	page := enclave.LockedSize(1)
 	ceiling := admissionPages * page
@@ -485,12 +462,9 @@ func TestSetAllocatorIsTheBinarysOneShotDecision(t *testing.T) {
 	})
 }
 
-// TestZeroMemlockCeilingFailsClosedEverywhere runs a process whose
-// RLIMIT_MEMLOCK is ZERO — the kernel will lock nothing — and checks that
-// every route to locked memory refuses with a typed error instead of crashing
-// or falling back to unlocked memory: the default process allocator has a
-// zero budget and refuses by budget; direct construction and sealing are
-// refused by the kernel as ErrLockedMemoryUnavailable; nothing is locked.
+// TestZeroMemlockCeilingFailsClosedEverywhere pins that under a zero
+// RLIMIT_MEMLOCK every route to locked memory refuses with a typed error: the
+// default allocator by budget, direct construction and sealing by the kernel.
 func TestZeroMemlockCeilingFailsClosedEverywhere(t *testing.T) {
 	isolated(t, childOpts{memlockZero: true}, func(t *testing.T) {
 		lim, err := enclave.DiscoverLockedMemoryLimit()
@@ -534,11 +508,8 @@ func TestZeroMemlockCeilingFailsClosedEverywhere(t *testing.T) {
 	})
 }
 
-// TestForceLimitReportsTheExcessItCreates retunes a budget with live
-// enclaves on it in every direction ForceLimit allows: raising frees
-// headroom, an unchanged limit is a no-op, and lowering below what is
-// reserved is applied anyway and reports the excess — which then refuses
-// admission until releases pay it back.
+// TestForceLimitReportsTheExcessItCreates pins ForceLimit's excess on raise,
+// no-op and lowering, and that the excess refuses admission until repaid.
 func TestForceLimitReportsTheExcessItCreates(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		page := enclave.LockedSize(1)

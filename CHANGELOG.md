@@ -11,476 +11,201 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.ht
 ### Fixed
 
 - **KEK rotation no longer re-keys a sealer after an overlapping `WipeAll`**
-  (#102). Rotation mints the next generation while borrowing the root and the
-  new KEK, and a sweep skips borrowed enclaves, so a `WipeAll` in that window
-  destroyed the old current KEK, left the root standing, and rotation then
-  published the new generation: the sealer kept working after a sweep — the
-  silent re-keying `ErrSealerWiped` exists to prevent. Rotation now records
-  the sweep sequence before it inspects anything and, on any overlap,
-  destroys the new KEK, the old KEK and the root and returns `ErrSealerWiped`,
-  as initialization already did.
+  (#102). A sweep that overlaps rotation now destroys the new KEK, the old KEK
+  and the root, and rotation returns `ErrSealerWiped`, as initialization
+  already did.
 - **A release refused while discarding a key is reported, never suppressed**
-  (#102) — in the rotation cleanup above, and when a KEK whose mint failed is
-  discarded in rotation or initialization. The sealer retries its published
-  root and KEK on every seal or open that finds the hierarchy dead; an
-  unpublished generation is owned by the `WipeAll` ledger, which retries every
-  refused release. Key bytes are wiped before any unmap is attempted, so a
-  refusal leaves locked pages, never key material.
-
-- **go-enclave builds on DragonFly** (#86). memcall v0.5.0 referenced
-  `unix.MADV_DONTDUMP`, which x/sys does not define for DragonFly, so the
-  package did not compile there; it is now built and vetted by
-  `make cross-build`.
-
-- **No mutex of a `Sealer`'s is held across a provider call** (#87). The
-  first-time `ModeRootKey` initialization held the sealer's mutex across
-  `UnsealRoot`. A provider stalled there stalled every `Seal`, `Open` and
-  `Openable` on that sealer, and none of them could give up. The unseal now
-  runs under a one-slot init semaphore whose acquisition selects on the
-  caller's context. The mutex is taken only to read the published hierarchy
-  and to publish it. The semaphore is the one lock that does span the
-  unseal, and a caller queued on it leaves when its own context ends.
-  At-most-once `UnsealRoot` (#83), the wiped-state
-  fail-closed contract and KEK rotation are unchanged. `SealedEnclave` no
-  longer holds its own lock across an open either.
+  (#102), in rotation cleanup and when a KEK whose mint failed is discarded.
+  Key bytes are wiped before any unmap, so a refusal leaves locked pages, never
+  key material.
+- **go-enclave builds on DragonFly** (#86), and is now built and vetted there
+  by `make cross-build`.
+- **No mutex of a `Sealer`'s is held across a provider call** (#87). A
+  provider stalled in the first `ModeRootKey` `UnsealRoot` no longer stalls
+  every `Seal`, `Open` and `Openable` on that sealer, and a caller waiting for
+  initialization leaves when its own context ends.
 - **A shutdown sweep that overlaps the first root unseal leaves the sealer
-  wiped** (#87). A sweep cannot reclaim the root while the provider is
-  still writing into it. A sweep whose context ends while it waits on that
-  borrow leaves the root behind, and the root used to be published
-  afterwards. A refused release of a discarded root is reported alongside
-  `ErrSealerWiped`, and the root stays on the `WipeAll` ledger until a later
-  attempt or sweep reclaims it. The sweep sequence is now read before the unseal and
-  compared on every exit after it: before the KEK mint, after a failed mint,
-  and at publication. If a sweep overlapped, the root (and the KEK, if one was
-  minted) is destroyed and the sealer reports `ErrSealerWiped` without asking
-  the provider again. A mint that keeps failing can no longer keep a swept
-  root resident behind an allocation error.
-
+  wiped** (#87). The root (and any minted KEK) is destroyed and the sealer
+  reports `ErrSealerWiped` without asking the provider again; a refused release
+  of the discarded root is reported alongside it.
 - **No test copies enclave contents out of a borrow into ordinary memory**
   (security-review §6); assertions happen inside the borrow.
 - **`providertest` no longer copies a provider's root onto the ordinary heap**
-  (#90). Against a real device `UnsealRoot` returns that device's actual root
-  key; the root checks now receive it, snapshot it and compare it only in
-  locked enclaves held for each check's observation windows, and destroy them
-  afterwards.
+  (#90). The root checks compare it only inside locked enclaves, which they
+  destroy afterwards.
 
 ### Changed
 
 - **go-enclave owns its OS memory layer; `github.com/awnumar/memcall` is
-  gone** (#86). Allocation, locking, protection, unmapping and core-dump
-  hardening now go directly through `golang.org/x/sys/unix` (`mmap`, `mlock`,
-  `munlock`, `mprotect`, `munmap`, `setrlimit`) and `golang.org/x/sys/windows`
-  (`VirtualAlloc`, `VirtualLock`, `VirtualUnlock`, `VirtualProtect`,
-  `VirtualFree`), one system call per primitive. The module's only dependency
-  is now `golang.org/x/sys`. Release is the explicit sequence make writable →
-  wipe → verify canary → munlock → munmap, with nothing hidden inside a
-  primitive: memcall's `Free` re-protected and re-wiped the region itself,
-  which forced a second "direct" unmap and fallback logic choosing between the
-  two. There is now one unmap, so a successful release makes one `mprotect`
-  instead of two, and an orphaned failed construction's retry no longer
-  depends on which of two unmaps happens to be allowed. Every #83 guarantee —
-  no unwiped unmap outside the denied-`mprotect` path (`ErrReleasedWithoutWipe`),
-  sticky corruption across retries, at most one successful unlock, the
-  locked/mapped refund classification and the orphan ledger — is unchanged.
-
+  gone** (#86). Allocation, locking, protection and unmapping go directly
+  through `golang.org/x/sys`, now the module's only dependency. Every #83
+  release guarantee is unchanged.
+- **The per-mapping core-dump exclusion now covers DragonFly** (#86):
+  `MAP_NOCORE` plus a verified `MADV_NOCORE` on FreeBSD and DragonFly,
+  `MAP_CONCEAL` on OpenBSD and `MADV_DONTDUMP` on Linux as before.
+- **An unsupported GOOS fails to compile with one deliberate error**,
+  `undefined: go_enclave_does_not_support_this_GOOS`, instead of a failure
+  inside a dependency.
+- **`(*SealedEnclave).Destroy` no longer waits for an `Open` in flight** (#87).
+  An open already in flight completes, opens that start after `Destroy` return
+  `ErrEnclaveDestroyed`, and the last open out wipes the ciphertext.
+- **A borrow costs two atomic adds and one atomic load more** (#88), so a
+  waiting `WipeAll` hears a borrow end. `BenchmarkBorrow*` and
+  `BenchmarkIsAliveParallel` measure the cost.
 - **Every analysis tool is pinned and runs at exactly its pin** (#89).
-  golangci-lint v2.13.2, staticcheck v0.8.1 (2026.2.1), gosec v2.29.0,
-  govulncheck v1.7.0, actionlint v1.7.7 and shellcheck v0.9.0 match the CI
-  runner image. trivy v0.74.0 and shellcheck are installed from their release
-  archives. Each is verified against archive and binary SHA-256s pinned in the
-  Makefile; upstream shellcheck publishes no checksums, so its binaries were
-  matched against upstream's `koalaman/shellcheck:v0.9.0` image.
-  `scripts/tool.sh` resolves each tool. With `TOOL_INSTALL=1` (the default) it
-  installs into `bin/tools/` in the repository rather than `GOPATH/bin`. A
-  cached Go tool is keyed by version and toolchain, and is reused only when
-  its build metadata names that toolchain. A cached archive tool is reused
-  only when it matches its pinned binary hash. With `TOOL_INSTALL=0`, which CI
-  sets on our runners, it installs nothing and fails closed unless the tool on
-  `PATH` reports exactly the pinned version. No `@latest` install remains.
+  `scripts/tool.sh` installs each tool into `bin/tools/`, verified against
+  pinned SHA-256s; with `TOOL_INSTALL=0` it installs nothing and fails unless
+  the tool on `PATH` reports exactly the pinned version.
 - **Every check in the CI, nightly and release workflows is a Make target**
-  (#89). gosec's flags, the coverage floor, the FIPS environment and trivy's
-  flags now exist only in the Makefile, so a local run and a CI run cannot
-  disagree. Tokens are read-only by default. Two kinds of job get write
-  scopes, each at job level: the two jobs that upload SARIF get
-  `security-events: write`, and release.yml's Publish job gets
-  `contents: write` to create the release.
+  (#89), so a local run and a CI run cannot disagree. Workflow tokens are
+  read-only except for the jobs that upload SARIF or publish a release.
 - **Values from a tag, a workflow or a command line are data, never shell or
-  make source** (#89). The Makefile binds `TAG`, `SHA`, `MAIN_REF`, `VERSION`,
-  `TOOL_INSTALL` and `COVERAGE_THRESHOLD` once, to their raw text. Recipes read
-  them only as quoted shell variables, and release.yml passes them to make only
-  through the environment. Git accepts a tag named v`id`, and the `v*` trigger
-  matches it. Before this, such a value ran as a command before any validator
-  saw it, and `$(shell …)` in a make command-line value ran inside make
-  itself. gosec no
-  longer excludes the non-existent `examples/` directory, and its
-  `-concurrency=4` memory bound applies locally too. `make lint` now covers
-  gofmt, go vet, golangci-lint, actionlint and shellcheck (devops §4).
+  make source** (#89). `make lint` now also covers gofmt, go vet, actionlint
+  and shellcheck.
 - **`make ci` checks tidiness instead of running `go mod tidy`** (#89), and
-  runs `coverage` rather than `test`, as CI does. `COVERAGE_THRESHOLD` and
-  `TESTFLAGS` can no longer be lowered or dropped by an environment variable.
-  The Makefile exports `GOWORK=off` (dependency-resolution §2).
-- **nightly.yml installs trivy pinned and verified** (#89). It used to run
-  `curl …/install.sh from main | sh`. The third-party `trivy-action` steps are
-  gone too, because the CLI now produces the SARIF itself. Misconfiguration
-  scanning runs on both hosts as an advisory step. `trivy fs` now also scans
-  `test/`, which it used to skip.
+  runs `coverage` as CI does. `COVERAGE_THRESHOLD` and `TESTFLAGS` can no
+  longer be lowered by an environment variable.
+- **nightly.yml installs trivy pinned and verified** (#89) instead of piping
+  an install script from `main`. `trivy fs` now also scans `test/`.
 - **CHANGELOG.md names the versions it follows**: Keep a Changelog 1.1.0 and
   Semantic Versioning 2.0.0 (#89).
-
-- **The unit suite has no skip guards** (#90). Every former `t.Skip` was
-  resolved by what it was hiding: allocation and ledger preconditions and
-  vacuity guards ("the measurement observed nothing", "no fault was
-  injected") are failures; environment capabilities the suite relies on are
-  guaranteed and fail loudly when absent; platform-specific tests are
-  build-tagged files. Test files are consolidated so each maps to the source
-  file it covers.
+- **The unit suite has no skip guards** (#90). Every former skip is now a
+  failure, a guaranteed environment requirement, or a build-tagged platform
+  file.
 - **The suite states its locked-memory requirement**: both packages' `TestMain`
-  refuse to run under a soft `RLIMIT_MEMLOCK` below 2 MiB (measured need about
-  1 MiB) with one actionable message, instead of failing allocation by
-  allocation. An unlimited limit satisfies it; so does `CAP_IPC_LOCK` when the
-  hard limit also reaches 2 MiB, because the fault-injection tests drop the
-  capability and then raise the soft limit to at most the hard one.
+  refuse to run under a soft `RLIMIT_MEMLOCK` below 2 MiB, with one actionable
+  message.
 - **`make coverage` enforces the 90% floor per package**, not only on the
-  statement-weighted total that let `providertest` sit at 84.6%;
-  `providertest` is now above the floor.
-
-- **README.md and the package documentation are an overview** (#92): what the
-  library is, install, a quick start, the platform matrix, development and
-  release targets, and links into `docs/`. The detailed material they carried
-  now lives, verified against the code, in the feature folders.
-
+  total; `providertest` is now above the floor.
+- **README.md and the package documentation are an overview** (#92); the
+  detailed material now lives in `docs/`.
 - **A `ModeRootKey` sealer wraps under a key derived from the root** (#99),
-  never the provider's root itself: HKDF-SHA256 under a 256-bit salt drawn
-  per sealer. Sealers sharing a provider, and restarts unsealing the same
-  hardware root, no longer share one random-nonce GCM key, so the per-sealer
-  usage bounds hold for the key they count. Sealed values never outlive their
-  sealer, so nothing persisted changes.
+  never the provider's root itself. Sealers sharing a provider no longer share
+  one random-nonce GCM key; nothing persisted changes.
 
 ### Changed — BREAKING: Windows `CoreDumpsDisabled()` reports the truth
 
 - **`CoreDumpsDisabled()` on Windows returns `ErrCoreDumpLimitUnsupported`
-  instead of `nil`** (#86). Windows has no process-wide core-dump limit:
-  dumps are written under machine policy (WER `LocalDumps`) or by any process
-  with access calling `MiniDumpWriteDump`, and neither honours `VirtualLock`.
-  memcall reported that no-op as success, telling a caller who checked that a
-  hardening step had taken when none exists. Code that treats a non-nil
-  result as fatal will now see the truth on Windows; match the new sentinel to
-  accept it deliberately. Unix semantics are unchanged: `RLIMIT_CORE` soft and
-  hard are both lowered to zero, exactly as memcall did. That stops core
-  *files*; a Linux `core_pattern` piping to a collector (systemd-coredump,
-  apport) ignores `RLIMIT_CORE` (core(5)), and there the per-mapping
-  `MADV_DONTDUMP` is what keeps enclave pages out — the docs now say so.
-- **The per-mapping core-dump exclusion now covers DragonFly** (#86):
-  `MAP_NOCORE` plus a verified `MADV_NOCORE` on FreeBSD and DragonFly. OpenBSD's
-  `MAP_CONCEAL` (a property of the `mmap` itself, so a mapping that exists is
-  concealed), which memcall already applied, is preserved and now lives in this
-  package; `MADV_DONTDUMP` on Linux as before. Windows'
-  `WerRegisterExcludedMemoryBlock` is deliberately not used: it covers WER
-  reports only, and its process-wide pool of 512 registered entries is shared
-  with every other WER user, so failing closed would cap live enclaves and
-  starve other libraries while best effort would be silently partial
-  (rationale in `dontdump_windows.go`).
-- **An unsupported GOOS fails to compile with one deliberate error**,
-  `undefined: go_enclave_does_not_support_this_GOOS`, from this package
-  (js, wasip1, plan9, and any future GOOS until it is checked), instead of a
-  failure inside a dependency.
+  instead of `nil`** (#86), because Windows has no process-wide core-dump
+  limit to lower. Code that treats a non-nil result as fatal must match the
+  new sentinel to accept it deliberately. Unix semantics are unchanged.
 
-### Added
+### Changed — BREAKING: calls that reach a provider take a `context.Context`
 
-- **`ErrCoreDumpLimitUnsupported`** (#86), the sentinel `CoreDumpsDisabled`
-  returns on a platform with no process-wide core-dump limit to lower
-  (Windows).
-- **illumos, Solaris and AIX are supported** (#86), and are in
-  `make cross-build` along with DragonFly and windows/386. On those three,
-  `mlock` requires a privilege an ordinary process lacks, so an unprivileged
-  process gets `ErrLockedMemoryUnavailable` from every allocation.
-
-- **The conformance suite checks the provider's half of the context
-  contract** (#87). Protect, Unprotect and UnsealRoot are each called with an
-  already-canceled context and with an already-expired one. Each call must
-  fail with an error matching that context's error, and never as
-  `ErrSealedAuthentication`. It must write no key material into the
-  destination and must leave the provider able to serve the next call.
-  For `UnsealRoot` that last property means a one-shot handle survives a
-  refused call, because a `Sealer` retries a failed unseal. Such calls run on
-  their own goroutine, so a provider that never returns cannot hold a run
-  whose context is bounded; the run is reported aborted. Cancellation that arrives mid-call can only be forced from inside a
-  provider, so the suite does not measure it.
-
-- **`release.yml`: every pushed `v*` tag is verified, gated, consumed and
-  published without a manual step** (#89). It checks that the tag equals
-  `v$(cat VERSION)`, that `CHANGELOG.md` has exactly one non-empty section for
-  it, that no `changelog.d/` fragment or `[Unreleased]` entry was left out, and
-  that the tagged commit is on `main`. It then runs the full gate on the tagged
-  commit, `trivy fs` and FIPS strict mode included. It builds and runs a
-  throwaway consumer that `go get`s the tag in a scratch module outside the
-  repository with `GOWORK=off` and a fresh module cache. Finally it publishes
-  the Gitea release with the version's CHANGELOG section as its body, marked
-  as a prerelease for `-alpha`. The public GitHub mirror never publishes
-  automatically: the job is skipped there, and the publish script also refuses
-  any github.com host, however the URL spells it (case, port, scheme,
-  userinfo, trailing dot, subdomain). Every stage runs through a Make target
-  (`release-verify`, the gate targets, `consumer-check`, `release-publish`),
-  so each reproduces from a shell. The workflow itself keeps only
-  orchestration: reading the tag, checking that the runner injected forge
-  resolution, and refusing to publish unless every stage passed.
-- **Release scripts, each driven offline by `make check-scripts`** (#89).
-  `scripts/release-notes.sh` extracts one version's section.
-  `scripts/release-check-tag.sh` is the tag/VERSION/CHANGELOG check, which
-  `make release-alpha` now also runs before it commits.
-  `scripts/release-publish.sh` creates the forge release, or brings an
-  existing one up to date. It attaches nothing to a tag that names a commit
-  other than the gated one, and never lets the API create a missing tag. It
-  checks the token as a whole string against an allowlist, so a multi-line
-  value cannot add curl directives through the configuration it is written
-  into.
-  `scripts/release-version-check.sh` makes `make release-alpha` refuse,
-  before it writes anything, a version that is not strictly greater (SemVer
-  2.0.0 precedence) than the current `VERSION` and every existing `v*` tag
-  (release-versioning §3).
-  Every script validates its arguments as whole values, not line by line.
-  `scripts/consumer-check.sh` runs the post-tag consumer build. The tests run
-  against a fake forge API and against this working tree served as a module
-  from a local proxy, so an API change that breaks the consumer program fails
-  in its own PR.
-- **New Make targets** (#89): `ci-fast` (devops §4: the part of `ci` that needs
-  no Docker, currently all of it), `tidy-check`, `bench` and `bench-<pkg>`,
-  `test-<pkg>`, `coverage-<pkg>`, `coverage-report` (HTML, no threshold),
-  `lint-actions` (actionlint with shellcheck), `lint-scripts`,
-  `trivy-misconfig` (advisory), `trivy-sarif`, `clean-tools`,
-  `release-verify`, `consumer-check` and `release-publish`. Also
-  `integration-test` and `integration-test-enclave`, which run
-  `test/integration/<pkg>` in the devcontainer and fail, rather than pass with
-  nothing to run, until the suite and devcontainer exist (#91).
-
-- **An integration suite that checks go-enclave's guarantees from the kernel's
-  side** (#91). `test/integration/enclave/` (build tag `integration`) drives
-  the public API (`MemoryEnclave`, `Allocator`, `Sealer`/`SealedEnclave`,
-  `WipeAll`) the way a consumer does. It then reads the result back from the
-  kernel instead of trusting the library's own report:
-  - Admission runs against a real, unliftable `RLIMIT_MEMLOCK` ceiling. The
-    allocator's accounting is checked against `/proc/self/status` `VmLck`. A
-    budget refusal is told apart from a real `mlock` refusal at the ceiling.
-    `SetLimit`, `ForceLimit` and `TransferTo` are exercised, and so is
-    contention with the budget set exactly at the kernel ceiling. Zero-ceiling
-    processes and both `ProcessAllocator` installation orders are covered too.
-  - Every enclave, by every constructor and by `SealedEnclave.Open`, is shown
-    by `/proc/self/smaps` to be `VM_LOCKED` and `VM_DONTDUMP`. Each is fenced
-    by unlocked `PROT_NONE` guard pages, and has the permissions its frozen
-    state calls for. Every locked mapping in the process, including the
-    sealer's own keys, is excluded from core dumps. `RLIMIT_CORE` drops from a non-zero starting
-    limit to 0/0 on import, and the process cannot raise it again.
-  - Plaintext residue is checked by sweeping every readable mapping through
-    `/proc/self/mem`. The material is findable where it is meant to live and
-    absent everywhere after `Destroy`, after `WipeAll`, and from a
-    `SealedEnclave` between opens.
-  - Sealing runs end to end in both modes through an injected provider backed
-    by `SoftwareProvider`, sealing and opening 1,024 values concurrently. The
-    suite checks that a deadline reaches a blocked provider and that no lock
-    is held across a provider call. It checks that the root is unsealed
-    exactly once, and that the one-shot process `Sealer` behaves as
-    documented. `providertest.TestProvider` runs against the shipped provider,
-    with its residue sweep confirmed to have run.
-  - `WipeAll` is tested with live borrows and a deadline, with a concurrent
-    caller (`ErrSweepInProgress`), and with real canary corruption. That
-    corruption is reported as `SweepError`, and `Destroy` panics only after
-    wiping.
-
-  Every test that touches process-global state runs in a fresh child process
-  of its own.
-- **`build/docker/devcontainer/`: the only place the suite runs.** The Go
-  1.27.0 Alpine base is pinned by digest. The container runs as an
-  unprivileged user with every capability dropped, `no-new-privileges`, a
-  read-only root filesystem and no network. Its `memlock` and `core` ulimits
-  are finite and declared. Modules are baked in and verified against
-  `go.sum`, so runs work offline. The source is baked into the image, not
-  bind-mounted, so the container is correct on a CI runner that reaches the
-  host's Docker daemon. The suite refuses to run on the host, or in a
-  container whose capabilities, limits or FIPS state differ from what
-  `compose.yaml` declares.
-- **`make integration-test`, `make integration-test-fips`, the per-package
-  `integration-test-<pkg>` / `integration-test-fips-<pkg>`, and
-  `make lint-integration`.** The FIPS variant runs the whole suite under
-  FIPS 140-3 strict mode (`GOFIPS140=latest`, `GODEBUG=fips140=only`) and
-  checks that the mode took effect. Each run is its own Compose project,
-  torn down with its volume and image. `make ci` now includes both suites.
-  `make ci-fast` and the CI Lint job run `lint-integration`, the tagged
-  analysis the untagged `lint` cannot see. CI gains an `Integration` job,
-  required by the CI Gate. `release.yml` runs the same three targets on the
-  tagged commit, and the release publishes only if they pass.
-
-- **Feature documentation under `docs/`** (#92), one folder per capability with
-  `architecture.md`, `engineering.md`, `api.md`, `cli.md` and `user.md`:
-  `docs/locked-memory` (`MemoryEnclave` lifecycle, the one panic, guard pages
-  and canary, the per-GOOS platform and core-dump matrix), `docs/locked-memory-budget`
-  (`Allocator`, `RLIMIT_MEMLOCK` discovery, retuning, the process allocator,
-  refunds for failed constructions), `docs/sealing` (modes, the provider seam
-  and its context contract, `Openable`, FIPS, the AES key-schedule heap
-  exposure), `docs/shutdown-sweep` (`WipeAll(ctx)` admission, waits,
-  termination and return values) and `docs/provider-conformance`
-  (`providertest.TestProvider`). Mermaid diagrams cover the mapping layout,
-  the release sequence, lock ordering and the sweep state machine.
-- **An upgrade guide from v0.6** (#92): `docs/README.md` lists every breaking
-  change since v0.6.2-alpha with before/after code in the relevant feature's
-  `user.md`.
-- **`SECURITY.md`** (#92): supported versions (only the latest release while
-  pre-1.0), private reporting through the forge's vulnerability reporting,
-  scope (memory exposure, residue, core-dump leaks, cryptographic misuse,
-  provider-contract violations, build and release supply chain) and documented
-  out-of-scope limits, response targets, coordinated disclosure, and links to
-  the threat-model sections of `docs/`.
-
-- **AES key schedules are erased under `runtime/secret`** (#98). Built with
-  `GOEXPERIMENT=runtimesecret` for linux/amd64 or linux/arm64 (not Android), every AES
-  operation runs under `runtime/secret.Do`, so the key schedule a seal or open
-  leaves on the heap is erased at the next garbage collection instead of
-  persisting until the memory is reused. The new `KeyScheduleErasure()`
-  reports which build is running. Other builds are unchanged and keep the
-  documented exposure. `make test-runtimesecret` (part of CI) proves the
-  erasure against a control that must see the unerased schedule.
-
-- **`WithKEKRotationLimit(n)` sets a KEK generation's crypto-period** (#99):
-  how many DEKs one generation wraps before a `ModeRootKey` sealer rotates.
-  `n` must be between 1 and 2^31 (the package's safe bound, half of the 2^32
-  `crypto/cipher` allows a random-nonce GCM key); zero, larger values, or the
-  option given for `ModePerOperation` are refused by `NewSealer` with the new
-  `ErrInvalidRotationLimit`. Every retired generation's blob is retained, so
-  values sealed under any generation keep opening. A sealer wraps at most 2^31
-  generations; a seal that would need one more is refused with the new
-  `ErrSealerExhausted` (joined with `ErrSealFailed`), leaving every existing
-  value openable.
-
-### Removed
-
-- **The `github.com/awnumar/memcall` dependency** (#86).
-
-### Changed — BREAKING:
-
-- **Every call that can reach a provider takes a `context.Context`** (#87).
-  A provider can block for as long as its device does, and a deadline is
-  only real if every layer between the caller and the blocking call honors
-  it. The provider seam is now
-  `KeyProtector.Protect(ctx, key)`, `KeyProtector.Unprotect(ctx, blob, key)`
-  and `RootUnsealer.UnsealRoot(ctx, dst)`. The calls that reach it take the
-  context first: `NewSealed(ctx, data)`, `(*Sealer).Seal(ctx, data)`,
-  `(*SealedEnclave).Open(ctx)` and `(*SealedEnclave).OpenWith(ctx, a)`.
-  The context is checked before every provider call and again after it
-  returns. A context that has ended fails a seal with an error matching both
-  `ErrSealFailed` and `context.Canceled` / `context.DeadlineExceeded`, and an
-  open with one matching both the new `ErrOpenFailed` and the context's error.
-  Neither matches `ErrSealedAuthentication`, with one deliberate exception:
-  if the provider itself reports an authentication failure and the context
-  has ended by the time it returns, the error carries both, because that
-  verdict is a security signal and must not be overwritten. A refused seal
-  still wipes the caller's data, and a `NewSealed` refused for its context
-  installs no process sealer, so a later `SetSealer` still succeeds. When
-  the context ends during a successful root unseal and the KEK mint then
-  fails, the error carries both the cancellation and the mint failure, and
-  the root is kept. A refused open costs no locked memory and no `Allocator`
-  reservation, and the value stays intact.
-  `SoftwareProvider` refuses an ended context before touching, or
-  generating, its root. Provider authors: see the context contract on
-  `RootUnsealer`.
+- **Every call that can reach a provider takes a `context.Context`** (#87):
+  `Protect(ctx, key)`, `Unprotect(ctx, blob, key)`, `UnsealRoot(ctx, dst)`,
+  `NewSealed(ctx, data)`, `Seal(ctx, data)`, `Open(ctx)` and
+  `OpenWith(ctx, a)`. An ended context fails a seal with `ErrSealFailed`, or an
+  open with the new `ErrOpenFailed`, joined with the context's error. Provider
+  authors: see the context contract on `RootUnsealer`.
 - **A `ModePerOperation` provider's infrastructure failure on open is now
-  joined under `ErrOpenFailed`** (#87), where it used to surface bare. The
-  provider's own error is still reachable through `errors.Is` and `errors.As`.
-  Authentication refusals, `ErrSealerWiped` and `ErrLockedMemoryUnavailable`
-  still pass through untouched while the caller's context is live. If the
-  provider returns one of them as the context ends, the error is the
-  cancellation (`ErrOpenFailed` or `ErrSealFailed`, plus the context's
-  error) joined with the provider's error, and matches all of them.
-- **`(*SealedEnclave).Destroy` no longer waits for an `Open` in flight** (#87).
-  `Destroy` takes no context, and an open can sit in a provider call
-  indefinitely. An open already in flight completes against the envelope it
-  pinned, opens that start after `Destroy` return `ErrEnclaveDestroyed`, and
-  the last open out wipes the ciphertext.
-- **`providertest.TestProvider(ctx, cfg)`** takes a context and passes it to
-  every provider call (#87). A run whose context ends early returns an error
-  matching the new `providertest.ErrAborted` (an `*AbortedError`), never `nil`.
-  A provider call refused only because the run's own context ended is not
-  charged to the provider, and neither is a call the run stopped waiting for:
-  an unfinished call shows only that the run ended, not that the provider
-  misbehaved. Violations observed before the abort are still reported.
+  joined under `ErrOpenFailed`** (#87); the provider's own error is still
+  reachable through `errors.Is` and `errors.As`.
+- **`providertest.TestProvider(ctx, cfg)`** takes a context (#87). A run whose
+  context ends early returns an error matching the new
+  `providertest.ErrAborted`, never `nil`.
+
+### Changed — BREAKING: `MemoryEnclave.Destroy` returns an error
 
 - **`MemoryEnclave.Destroy` returns an `error`, and `DestroyErr` is gone**
-  (#88). `Destroy() error` has `DestroyErr`'s semantics. It returns `nil`
-  for a successful release, for a nil enclave and for every call after a
-  successful release. It returns `ErrReleasedWithoutWipe` when a denied
-  `mprotect` forced a bare unmap, and `ErrLockedMemoryUnavailable` when the
-  kernel refused the release. A refused release keeps the mapping, the
-  `WipeAll` ledger entry and the `Allocator` reservation. Calling `Destroy`
-  again retries it, and returns the refusal again for as long as the kernel
-  keeps refusing. Detected canary corruption still panics with a
-  value matching `ErrEnclaveCorrupted`. It is the package's one deliberate
-  panic and is now documented as the single exception to "library code
-  does not panic", with its security rationale: a returned error is
-  dropped by `defer e.Destroy()`, and a secrets process whose memory was
-  written by something that did not own it must not carry on. Migration:
-  `e.DestroyErr()` becomes `e.Destroy()`. A bare `e.Destroy()` or
-  `defer e.Destroy()` still compiles and still discards the report.
-- **`WipeAll` takes a `context.Context` and waits for borrows instead of
-  sleeping** (#88). `WipeAll(ctx) (int, error)` replaces the fixed 200µs
-  backoff between at most eight passes. An enclave being read when the
-  sweep reaches it is waited for, and the end of the borrow wakes the sweep
-  (any `WithBytes`, `Open`, `OpenString`, `EqualTo`, `Size`, `IsAlive`,
-  `Freeze` or `Destroy` holding its lock). `ctx` bounds every wait and
-  nothing else: the wait for a borrow, immediate retries of a contended
-  lock, and the wait to be admitted while another sweep runs. When it ends
-  during a sweep, a still-borrowed enclave is left mapped and counted. An
-  already-done or nil `ctx` that is admitted still reclaims everything not
-  currently held and only declines to wait. Only one sweep runs at a time.
-  A call whose `ctx` ends before it is admitted, or whose `ctx` is nil while
-  another sweep runs, sweeps nothing and returns the current ledger count
-  with the new sentinel `ErrSweepInProgress`. A deadline is never held
-  hostage by a sweep running under `context.Background()`. Under
-  `context.Background()` the sweep, and a second `Background` caller queued
-  behind it, waits as long as the borrows it owes take, so give a shutdown
-  sweep a deadline, taken at shutdown. Constructors racing the sweep are
-  reclaimed when reached, but they can no longer keep it running: only
-  entries present at the first pass are waited for or earn another pass.
-  A goroutine that constructs forever cannot stop a `context.Background()`
-  sweep from finishing. Migration: `WipeAll()` becomes `WipeAll(ctx)`.
-- **The findings of an admitted `WipeAll` are a typed
-  `*SweepError{Corrupt, Unwiped int}`** (#88), replacing a join of
-  `fmt.Errorf` values with the same text. A call that was never admitted
-  returns `ErrSweepInProgress` instead. That is an admission result, not a
-  finding about memory.
-  `errors.Is` still matches `ErrEnclaveCorrupted` when `Corrupt > 0` and
-  `ErrReleasedWithoutWipe` when `Unwiped > 0`, and `errors.As` now exposes
-  the counts. A context ending during an admitted sweep is not an error,
-  and the count already reports what it left behind.
-- **A borrow costs two atomic adds and one atomic load more** (#88). This
-  is how a waiting sweep hears a borrow end without relying on what a
-  failed `TryLock` cannot promise. No lock and no allocation were added to
-  the borrow path. New benchmarks (`BenchmarkBorrow*`,
-  `BenchmarkIsAliveParallel`) measure the cost.
+  (#88). It reports `ErrReleasedWithoutWipe` or `ErrLockedMemoryUnavailable`
+  as `DestroyErr` did, and canary corruption still panics. Migration:
+  `e.DestroyErr()` becomes `e.Destroy()`; a bare `defer e.Destroy()` still
+  compiles.
 
-### Changed — BREAKING
+### Changed — BREAKING: `WipeAll` takes a context and returns `*SweepError`
+
+- **`WipeAll` takes a `context.Context` and waits for borrows instead of
+  sleeping** (#88). `ctx` bounds every wait, and a call not admitted while
+  another sweep runs returns the new `ErrSweepInProgress`. Migration:
+  `WipeAll()` becomes `WipeAll(ctx)`; give a shutdown sweep a deadline.
+- **The findings of an admitted `WipeAll` are a typed
+  `*SweepError{Corrupt, Unwiped int}`** (#88). `errors.Is` still matches
+  `ErrEnclaveCorrupted` and `ErrReleasedWithoutWipe`, and `errors.As` now
+  exposes the counts.
+
+### Changed — BREAKING: an unwiped release no longer matches `ErrLockedMemoryUnavailable`
 
 - **An unwiped release no longer matches `ErrLockedMemoryUnavailable`** (#98).
   `ErrReleasedWithoutWipe` (the pages are gone) and
-  `ErrLockedMemoryUnavailable` (the pages are still held) are now disjoint
-  on release, and `UnwipedReleaseError.Cause` is the raw OS error rather than
-  a `*LockedMemoryError`. Code that retried `Destroy` on
-  `ErrLockedMemoryUnavailable` no longer retries a release that already
+  `ErrLockedMemoryUnavailable` (the pages are still held) are now disjoint, and
+  `UnwipedReleaseError.Cause` is the raw OS error. Code that retried `Destroy`
+  on `ErrLockedMemoryUnavailable` no longer retries a release that already
   happened.
+
+### Changed — BREAKING: `ErrSealerWiped` means the hierarchy is dead
+
 - **`ErrSealerWiped` means the hierarchy is dead** (#98). A `ModeRootKey`
-  operation whose per-call key (its DEK, or a retired KEK materialized for one
-  unwrap) is destroyed by a concurrent `WipeAll` now fails with
-  `ErrEnclaveDestroyed`; `ErrSealerWiped` is reported only when the root or
-  the current KEK is dead. A sweep overlapping initialization or rotation
-  still wipes the sealer, as before.
+  operation whose per-call key is destroyed by a concurrent `WipeAll` now
+  fails with `ErrEnclaveDestroyed`; `ErrSealerWiped` is reported only when the
+  root or the current KEK is dead.
 
 ### Changed — BREAKING: `Open` and `OpenWith` return read-only plaintext
 
 - **The enclave `SealedEnclave.Open` and `OpenWith` return is frozen** (#99),
-  like every other constructor whose material is final: a stray write through
-  a retained slice faults instead of silently corrupting the plaintext. Code
-  that wrote into an opened enclave must copy into its own sized enclave
-  instead. A refused freeze fails the open closed (no enclave; the
-  destination is wiped) rather than returning writable plaintext. `OpenWith`'s
-  reservation is returned with the destination's pages; if the kernel also
-  refuses that release, the charge stays until `WipeAll` reclaims them.
+  so a stray write through a retained slice faults instead of corrupting the
+  plaintext. Code that wrote into an opened enclave must copy into its own
+  sized enclave instead.
+
+### Added
+
+- **`ErrCoreDumpLimitUnsupported`** (#86), the sentinel `CoreDumpsDisabled`
+  returns where there is no process-wide core-dump limit (Windows).
+- **illumos, Solaris and AIX are supported** (#86), and are in
+  `make cross-build` along with DragonFly and windows/386. There `mlock` needs
+  a privilege, so an unprivileged process gets `ErrLockedMemoryUnavailable`
+  from every allocation.
+- **The conformance suite checks the provider's half of the context
+  contract** (#87). `Protect`, `Unprotect` and `UnsealRoot` must refuse an
+  already-canceled or expired context with that context's error, write no key
+  material, and stay able to serve the next call.
+- **`release.yml`: every pushed `v*` tag is verified, gated, consumed and
+  published without a manual step** (#89). It checks the tag against `VERSION`
+  and `CHANGELOG.md`, runs the full gate and a consumer build on the tagged
+  commit, and publishes a Gitea prerelease; the GitHub mirror never publishes
+  automatically.
+- **Release scripts, each driven offline by `make check-scripts`** (#89):
+  `release-notes.sh`, `release-check-tag.sh`, `release-publish.sh`,
+  `release-version-check.sh` and `consumer-check.sh` under `scripts/`.
+  `make release-alpha` now refuses a version that is not greater than
+  `VERSION` and every existing `v*` tag.
+- **New Make targets** (#89): `ci-fast`, `tidy-check`, `bench`, `bench-<pkg>`,
+  `test-<pkg>`, `coverage-<pkg>`, `coverage-report`, `lint-actions`,
+  `lint-scripts`, `trivy-misconfig`, `trivy-sarif`, `clean-tools`,
+  `release-verify`, `consumer-check`, `release-publish`, `integration-test`
+  and `integration-test-enclave`.
+- **An integration suite that checks go-enclave's guarantees from the kernel's
+  side** (#91). `test/integration/enclave/` (build tag `integration`) drives
+  the public API and checks memory locking, core-dump exclusion, guard pages,
+  plaintext residue, sealing and `WipeAll` against `/proc`.
+- **`build/docker/devcontainer/`: the only place the suite runs.** The
+  container is pinned by digest, unprivileged, read-only and offline, and the
+  suite refuses to run anywhere else.
+- **`make integration-test`, `make integration-test-fips`, the per-package
+  `integration-test-<pkg>` / `integration-test-fips-<pkg>`, and
+  `make lint-integration`.** The FIPS variant runs the suite under FIPS 140-3
+  strict mode. `make ci`, a required CI `Integration` job and `release.yml`
+  all run them.
+- **Feature documentation under `docs/`** (#92), one folder per capability:
+  `locked-memory`, `locked-memory-budget`, `sealing`, `shutdown-sweep` and
+  `provider-conformance`.
+- **An upgrade guide from v0.6** (#92): `docs/README.md` lists every breaking
+  change since v0.6.2-alpha with before/after code.
+- **`SECURITY.md`** (#92): supported versions, private reporting, scope,
+  response targets and coordinated disclosure.
+- **AES key schedules are erased under `runtime/secret`** (#98) in builds with
+  `GOEXPERIMENT=runtimesecret` for linux/amd64 or linux/arm64 (not Android).
+  The new `KeyScheduleErasure()` reports which build is running, and
+  `make test-runtimesecret` (part of CI) proves the erasure.
+- **`WithKEKRotationLimit(n)` sets a KEK generation's crypto-period** (#99):
+  how many DEKs one generation wraps before a `ModeRootKey` sealer rotates.
+  An out-of-range `n` is refused with the new `ErrInvalidRotationLimit`, and a
+  seal that would need more than 2^31 generations is refused with the new
+  `ErrSealerExhausted`, leaving existing values openable.
+
+### Removed
+
+- **The `github.com/awnumar/memcall` dependency** (#86).
 
 ## [v0.6.2-alpha] - 2026-10-01
 
@@ -495,7 +220,6 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.ht
   two pages of headroom and reported `InUse` as -8192 on a 4 KiB-page host.
   Any negative result now takes the read-locked fallback, as a wrap already
   did. Admission is unchanged and still lock-free.
-
 - **`make ci` builds its lint tools with this module's toolchain** (#83).
   `go install tool@version` runs outside the module, so under
   `GOTOOLCHAIN=auto` it built golangci-lint and staticcheck with the tools'
@@ -509,7 +233,6 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.ht
   exit 2 (no such ref) now counts as free, and a missing `dev` remote is named.
 - **nightly.yml runs Go 1.27.0**, matching `ci.yml` and `go.mod` (it was
   1.26.7).
-
 - **`scripts/changelog-assemble.sh` refuses to release over entries still in
   `[Unreleased]`** (#83). When `CHANGELOG.md` already had a hand-written
   section for the version and no fragment was waiting, the script took its
@@ -518,7 +241,6 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.ht
   sitting there. It now fails, changing nothing, and quotes the first such
   entry. A bare `### ` heading with nothing under it is not an entry and
   does not block, matching how the fold already drops empty subsections.
-
 - **A failed `Allocator.New` or `Allocator.NewSized` no longer refunds
   budget for pages it could not release** (#83). When construction failed
   after the pages were mapped and locked, and the rollback was refused too,
@@ -534,7 +256,6 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.ht
   when `memcall.Free` is refused, as release already did, and now reports
   pages left mapped but unlocked as held. It previously reported them as
   released when both unmaps were refused after a successful `munlock`.
-
 - **`Destroy` no longer panics when the kernel refuses a release** (#83).
   `DestroyErr` panicked on every error except `ErrReleasedWithoutWipe`. That
   included a plain refused `munlock` or `munmap` (`ENOMEM` at
@@ -545,7 +266,6 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.ht
   retry, stays on the `WipeAll` ledger and keeps its `Allocator`
   reservation, as before. It reports itself destroyed once its material is
   wiped.
-
 - **`WipeAll` reclaims the pages of a construction whose cleanup was
   refused** (#83). When a constructor failed after mapping its pages, and
   the rollback was refused too (a freeze refused by `mprotect`, then a
@@ -565,7 +285,6 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.ht
   `WipeAll`'s documentation now also states that its error reports
   `ErrReleasedWithoutWipe` alongside `ErrEnclaveCorrupted`, which it already
   did.
-
 - **`providertest` builds on 32-bit Linux again** (#83). The residue sweep's
   signed-offset guard compared a `uintptr` against `math.MaxInt64`, which does
   not compile where `uintptr` is 32 bits, so `GOARCH=386` and `GOARCH=arm`
@@ -574,7 +293,6 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.ht
   than a fixed 64 bits, so a bound that does not fit the platform is rejected
   as unparsable instead of being narrowed into a different range, and the
   header parser's table test now compiles and runs on 32-bit targets.
-
 - **A retried release no longer unlocks pages it already unlocked** (#83).
   When a release's `munlock` succeeded and its `munmap` was refused, every
   retry through `DestroyErr` or `WipeAll` called the unlock again. Linux
@@ -584,7 +302,6 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.ht
   the process lifetime. A mapping now records a successful unlock, a retry
   goes straight to the `munmap`, and a held release reports whether the
   pages are still locked from that same record.
-
 - **A `ModeRootKey` sealer no longer calls `UnsealRoot` again after it
   succeeded** (#83). If minting the first KEK failed after a successful
   unseal (locked memory exhausted, for example), the root was destroyed and
@@ -594,7 +311,6 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.ht
   KEK mint. The kept root is an ordinary registered enclave, so `WipeAll`
   still destroys it. If a sweep does, the sealer reports `ErrSealerWiped`
   instead of unsealing a replacement.
-
 - **A detected canary corruption is no longer lost when the release after it
   is refused** (#83). Verification wipes the guard pages and the canary.
   When the `munlock` or `munmap` after it failed, the release returned only
@@ -606,7 +322,6 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.ht
   it again. The joined error is never counted as released: the handle,
   ledger entry and `Allocator` reservation are all kept until the pages
   actually go back.
-
 - **`WipeAll` reports canary corruption even when the corrupt enclave's pages
   could not be released** (#83). The sweep tallied corruption only on the
   attempt that reclaimed the pages, so a corrupt enclave whose munlock or
@@ -621,7 +336,6 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.ht
   every package for linux amd64/arm64/386/arm, darwin, freebsd, openbsd,
   netbsd and windows. DragonFly is unsupported: the pinned memcall v0.5.0 does
   not compile there.
-
 - **`providertest` errors are typed: `ErrInvalidConfig`, `ConfigError` and
   `PropertyError`** (#83). A harness mistake and a provider defect used to be
   distinguishable only by parsing the message. A `Config` that cannot be run
@@ -867,11 +581,9 @@ library admits against, in the shared library rather than in each consumer.
   the list is what guarantees a multi-core run happens anyway. No production
   code changed. Cost: the CI test step goes from 74s to 195s, against a
   30-minute job timeout.
-
 - `make lint` pins golangci-lint v2.13.2 — the floor for linting Go 1.27;
   v2.12.2's vendored analysis tools cannot parse the 1.27 standard library.
   CI already runs the same version baked into the runner image.
-
 - **The `RLIMIT_MEMLOCK` check is now sticky: an allocator built by
   `NewAllocatorWithinRLimit` carries it for life.** (#46) `SetLimit` re-reads the
   ceiling and refuses to raise that allocator's budget above it with
@@ -911,7 +623,6 @@ library admits against, in the shared library rather than in each consumer.
 
   A discovery failure during a raise is reported as `ErrLimitDiscoveryFailed`
   and refuses the raise — nothing was compared, so nothing passed.
-
 - **The package docs no longer present shipped API as future work** (#65).
   `doc.go` and `README.md` described `OpenWith` as "tracked as issue #17" and
   `Openable` as "tracked as issue #33" after both had shipped, and both files
@@ -1023,7 +734,6 @@ library admits against, in the shared library rather than in each consumer.
   `ErrSealedAuthentication`, `ErrPlaintextEscaped`, `ErrMaterialTooLarge`,
   `ErrSealerWiped`, `ErrProviderMode`, `ErrInvalidMode`,
   `ErrSealerInstalled`, `ErrNilSealer`, `ErrProviderMessageLimit`.
-
 - **`NewMemoryEnclaveCopy(src []byte) (*MemoryEnclave, error)` — a constructor
   that copies without consuming its source.** `NewMemoryEnclave` takes ownership
   and wipes the caller's slice on every return path; that stays the default and
@@ -1054,7 +764,6 @@ library admits against, in the shared library rather than in each consumer.
   `NewMemoryEnclave` is now implemented as this constructor plus the wipe, so the
   two cannot drift apart in the mapping, freeze or cleanup sequence — which is the
   same divergence the duplicated hand-rolled composition was heading for.
-
 - **`(*MemoryEnclave) Freeze() error` — restore fault-on-write once a sized
   enclave's fill is done.** `NewMemoryEnclave` freezes its pages read-only as
   the material moves in, so a write through a slice retained past its borrow
@@ -1113,7 +822,6 @@ library admits against, in the shared library rather than in each consumer.
   same write on an unfrozen enclave and requires it to SUCCEED, since an
   implementation that froze sized enclaves at construction would break every
   consumer of them. (#6)
-
 - **`NewAllocatorWithinRLimit(maxBytes int64) (*Allocator, error)` — the
   startup check for a locked-memory budget.** It discovers the process's
   `RLIMIT_MEMLOCK` and **refuses** a budget above it, returning
@@ -1131,7 +839,6 @@ library admits against, in the shared library rather than in each consumer.
 
   `NewAllocator` is unchanged and still accepts any positive budget, so nothing
   existing changes behavior.
-
 - **`DiscoverLockedMemoryLimit() (LockedMemoryLimit, error)`**, with
   `LimitSource` and its `String`, for **deriving** a budget from the host rather
   than guessing one — and for logging where the figure came from. "8 MiB because
@@ -1172,14 +879,12 @@ library admits against, in the shared library rather than in each consumer.
   the other's value silently yields a bounded ceiling of nine exabytes or of
   -1. Only the syscall and the sentinel constant go unexercised, and a mistake
   there fails loudly at startup rather than quietly later.
-
 - **`ErrLimitDiscoveryFailed` and `LimitDiscoveryError`** for a ceiling that
   could not be READ, wrapping the syscall failure and reachable with
   `errors.As`. Nothing was compared, so it is deliberately neither a verdict on
   the budget nor a shortage of locked memory.
 
   Resolves #11 (acceptance criterion 2 of #2).
-
 - **`(*SealedEnclave) OpenWith(a *Allocator) (*MemoryEnclave, error)` — the
   admitted open (#17).** `Open` allocates through the UNADMITTED constructors,
   so a caller bounding locked memory through an `Allocator` had no way to bound
@@ -1223,7 +928,6 @@ library admits against, in the shared library rather than in each consumer.
   is still unadmitted. There is no `SealWith`; sealing allocates once per value
   rather than once per use, so it does not scale with request rate the way
   opening does.
-
 - **`(*SealedEnclave) Openable() error` — the openability question `IsAlive`
   cannot answer (#33).** Returns nil, `ErrSealerWiped`, or
   `ErrEnclaveDestroyed`, consulting the sealer.
@@ -1238,7 +942,6 @@ library admits against, in the shared library rather than in each consumer.
   `IsAlive` is deliberately UNCHANGED — its cheap, local meaning and its lock
   profile are worth keeping — and is now documented as reporting on the
   ciphertext, with `Openable` as the openability question.
-
 - **`WithProviderHealth(fn func() error)` and `ErrOpenabilityUnknown` — an
   out-of-package provider can now report that a sweep took its sealing key
   (#33).** `SealedEnclave.Openable` consulted an UNEXPORTED interface, which by
@@ -1285,7 +988,6 @@ library admits against, in the shared library rather than in each consumer.
   syscall that can be refused, so its material is gone even when that `mprotect`
   is the step that fails. The two differ in fact, and the flag follows the fact:
   a genuinely refused wipe still reads as alive, because nothing was destroyed.
-
 - **`WipeAll` will not be extended to sweep `SealedEnclave` values (#33,
   decided; no behavior change).** Three grounds, now recorded where the count is
   defined rather than left open in an issue. The COUNT means "still holding
@@ -1299,7 +1001,6 @@ library admits against, in the shared library rather than in each consumer.
   would REGRESS diagnostics, since a swept value would report
   `ErrEnclaveDestroyed` ("you destroyed this") in place of `ErrSealerWiped` ("a
   sweep did"), sending an operator to the wrong code.
-
 - **`Openable` now answers "I cannot tell" instead of guessing, and `WipeAll`
   bumps a sweep generation before it destroys anything (#33).** For a provider
   that reports no health, `Openable` returns nil until a sweep has run and
@@ -1360,7 +1061,6 @@ library admits against, in the shared library rather than in each consumer.
   rather than left to discover it, and admits nothing further until reservations
   drain beneath the new budget. Zero is a legal runtime budget — quiescing an
   allocator — even though it remains a construction-time error.
-
 - **The admission counter now holds the REMAINING budget rather than the bytes
   used**, which is what makes a moving budget safe. Every operation reduces to
   one signed adjustment of that single word: admitting subtracts, releasing
@@ -1390,7 +1090,6 @@ library admits against, in the shared library rather than in each consumer.
   is over-subscribed, and `BudgetError.InUse` may now exceed `BudgetError.Limit`
   — both states are reachable only through `ForceLimit`, and both are what an
   over-subscribed allocator honestly looks like.
-
 - **`Allocator.TransferTo` moves headroom between two allocators as one
   operation.** Doing it as a lowering plus a raise leaves a window in which the
   bytes are in both allocators or in neither, depending on the order; "both"
@@ -1529,7 +1228,6 @@ library admits against, in the shared library rather than in each consumer.
   collide. The control now also requires `repository.full_name` to be this
   repository, and that is verified live: pointed at go-blockstore with a valid
   token, it fails.
-
 - **`Allocator`'s cacheline budget is asserted rather than assumed (#60).**
   This type's lock-free argument rests on `free` and `limit` sharing a line that
   nothing unrelated writes, and nothing enforced it. The slack ran out
@@ -1542,7 +1240,6 @@ library admits against, in the shared library rather than in each consumer.
   now fails on the next field of any size — measured: one added `bool` takes it
   to 72 bytes and the test names it — and separately fails if `free` and `limit`
   are ever split across lines.
-
 - **The parked withdrawal no longer leaks on the handoff test's failure path
   (#60).** It parks inside `withdrawLocked` and therefore parks HOLDING `a.mu`,
   since `SetLimit`'s deferred `Unlock` has not run; a `t.Fatalf` between the park
@@ -1551,7 +1248,6 @@ library admits against, in the shared library rather than in each consumer.
   `sync.Once` on `t.Cleanup` now. Exercised rather than argued: with `reserve`
   mutated to refuse every admission, the test fails on that exact line and the
   cleanup runs.
-
 - **The retune/admission race test no longer inherits the scheduler's luck
   (#51).** `TestAllocator_Retune_RacesAdmission` ran a storm — goroutines
   allocating and destroying in a loop against goroutines raising a page and
@@ -1580,7 +1276,6 @@ library admits against, in the shared library rather than in each consumer.
   window. Measured 0 failures in 25 runs in each of multi-core, `GOMAXPROCS=1`,
   `taskset -c 0`, and under 16 busy loops, with `lowered` never below 546 of 600
   — against a structural floor of 400 that no scheduling can take away.
-
 - **The linearization defect is now caught deterministically rather than a
   third of the time.** Arranging the contest fixed the vacuity, but neither form
   reliably catches the regression the test exists for: against a
@@ -1659,7 +1354,6 @@ library admits against, in the shared library rather than in each consumer.
   Cost is milliseconds at shutdown, and only when something is genuinely still
   held. Stated as measured rather than as arithmetic: nominally 1.4ms, measured
   at **7.5ms** against a held enclave, because short sleeps overshoot.
-
 - **`WipeAll`'s documentation no longer attributes a non-zero count solely to
   caller ordering.** A read that simply outlasts the retry budget produces the
   same number, so the count now reads as "these were still in use" rather than
@@ -1668,7 +1362,6 @@ library admits against, in the shared library rather than in each consumer.
   belonging to subsystems a library knows nothing about. Two independent
   consumers reached that conclusion on their own and declined to call it; an API
   two callers separately avoid is inviting the mistake.
-
 - **An enclave is published to the shutdown ledger as the LAST step of its
   construction**, after every field a sweep reads has been set. `Allocator.New`
   and `Allocator.NewSized` install the reservation callback and then register;
@@ -1685,7 +1378,6 @@ library admits against, in the shared library rather than in each consumer.
   a 256 MiB budget was stranded per run.
 
   No API change; `WipeAll` and both allocator constructors behave as documented.
-
 - **A momentary reader no longer costs an enclave its sweep.** `WipeAll` retries
   an enclave it could not lock on its next pass, instead of writing it off after
   one lost race.
@@ -1704,7 +1396,6 @@ library admits against, in the shared library rather than in each consumer.
   so it is gone. A genuinely long borrow still outlives every pass and is
   skipped and counted, which remains correct: memory being actively read must
   not be unmapped underneath the reader.
-
 - `tryReleaseMapping` now returns `(released bool, err error)` rather than
   `(error, bool)`, putting the error last as the conventions require.
 
@@ -1790,7 +1481,6 @@ library admits against, in the shared library rather than in each consumer.
   error from v0.1.0-alpha, but a `recover` cannot undo a purge that already ran,
   so it also needed `purgeMu`, a process-wide lock serializing every allocation
   against every borrow.
-
 - **`purgeMu` is gone, and with it the nested-allocation deadlock.** Allocating,
   borrowing or destroying an enclave from inside another enclave's live borrow
   now works. It previously deadlocked: allocation took the lock exclusively,
@@ -1799,17 +1489,14 @@ library admits against, in the shared library rather than in each consumer.
   material to an injected interface whose implementations allocate protected
   memory of their own — because the three ways of writing the code were
   deadlock, an unprotected heap copy, or an unsynchronized read.
-
 - **An allocation failure no longer damages unrelated enclaves.** Exhausting
   `RLIMIT_MEMLOCK` fails exactly the allocation that reached the ceiling. An
   enclave is destroyed when its owner destroys it and at no other time, so
   `ErrEnclaveDestroyed` can no longer appear spontaneously on an enclave the
   caller still holds.
-
 - **A failed mapping releases everything it took.** Where memguard aborts and
   never unwinds, this returns an error — so the cleanup is real code, verified
   against `VmLck` and the process's VMA count over 256 induced failures.
-
 - **The material is destroyed before any syscall that could be refused.**
   `mprotect` can be denied — a seccomp filter is the realistic case — and the
   release path used to make the region writable first and wipe afterwards, so a
@@ -1818,7 +1505,6 @@ library admits against, in the shared library rather than in each consumer.
   succeeded, the material needs no syscall to destroy; it is now destroyed
   first, so the worst a refusal can cost is an empty mapping that could not be
   handed back.
-
 - **A release that could not unmap keeps its handle.** If the region cannot be
   made writable — so it was never wiped — or cannot be unlocked or unmapped, the
   mapping is left intact and the `Allocator` reservation is NOT returned.
@@ -1826,7 +1512,6 @@ library admits against, in the shared library rather than in each consumer.
   possibly still locked and possibly still holding material, with no reference
   left to retry through, while the budget reported those bytes as available. A
   caller that recovers from the panic can call `Destroy` again to retry.
-
 - The `Allocator` is unchanged in shape but its rationale is narrower and
   honest: it bounds one path's consumption so an untrusted source cannot starve
   the rest of the process. It never protected against collateral purges, and
@@ -1842,7 +1527,6 @@ library admits against, in the shared library rather than in each consumer.
   `MADV_DONTDUMP` as they are locked, which **is** verified and fails the
   allocation if refused. memcall attempts the same madvise and discards its
   result, so this is the first core-dump control here that is actually checked.
-
 - `ErrEnclaveCorrupted`, reported when the canary does not verify on release.
   `Destroy` wipes and releases everything it holds, returns the `Allocator`
   reservation, and then panics with it — see its documentation for why detected
@@ -1869,7 +1553,6 @@ library admits against, in the shared library rather than in each consumer.
   undercount, and 200 of them charged 6400 bytes against a budget while locking
   819200. Reservations are now charged, reported and released in locked bytes,
   page-rounded as the kernel charges them.
-
 - **A size too large to MAP reached memguard and purged the process.** memguard
   lays out the data region plus two guard pages using `int` arithmetic
   (`core.NewBuffer` asks `memcall.Alloc` for `2*pageSize + roundToPageSize(size)`),

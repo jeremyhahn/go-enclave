@@ -11,11 +11,10 @@ import (
 )
 
 // Tests for scripts/changelog-assemble.sh, the step `make release-alpha` runs
-// before tagging (#80, handbook release-versioning §5). Fragments are only
-// safe to adopt if the release folds every one of them into the version's
-// section exactly once and deletes it: a fragment left behind is an entry
-// missing from the release, and one folded twice is a duplicate in it. The
-// tests drive the real script on scratch trees and compare what comes out.
+// before tagging. The release must fold every fragment into the version's
+// section exactly once and delete it: a fragment left behind is a missing
+// entry, and one folded twice is a duplicate. The tests drive the real script
+// on scratch trees.
 
 const assembleVersion = "v9.9.9-alpha"
 const assembleDate = "2026-01-02"
@@ -192,13 +191,10 @@ func TestChangelogAssemble_HandWrittenSectionWithNoFragmentsStillReleases(t *tes
 	}
 }
 
-// TestChangelogAssemble_RefusesUnreleasedEntriesLeftOutOfAHandWrittenSection is
-// the other half of the fragment refusal above. With the version section
-// already written and no fragment waiting, the script used to take its no-op
-// exit without looking at [Unreleased] at all, so `make release-alpha` tagged a
-// CHANGELOG whose release section silently omitted every entry still sitting
-// there. A bare subsection heading is not an entry and must not block — that
-// row keeps the refusal from being satisfied by refusing everything.
+// TestChangelogAssemble_RefusesUnreleasedEntriesLeftOutOfAHandWrittenSection
+// pins that, with the version section already written and no fragment
+// waiting, the script refuses while [Unreleased] still holds entries. A bare
+// subsection heading is not an entry and must not block.
 func TestChangelogAssemble_RefusesUnreleasedEntriesLeftOutOfAHandWrittenSection(t *testing.T) {
 	section := "\n## [v9.9.9-alpha] - 2026-01-01\n\n### Added\n\n- HAND-WRITTEN\n\n" + assemblePrevious
 	cases := []struct {
@@ -270,25 +266,22 @@ func TestChangelogAssemble_RefusesWhatItCannotPlace(t *testing.T) {
 	}
 }
 
-// gateVersion is the version the release-queue check assembles for. It is
-// deliberately one no real CHANGELOG carries, so the check always exercises
-// the fold rather than the "section already exists" no-op.
+// gateVersion is one no real CHANGELOG carries, so the release-queue check
+// always exercises the fold rather than the "section already exists" no-op.
 const gateVersion = "v999.0.0-gate"
 
 // checkReleaseQueue asserts that a tree (CHANGELOG.md plus changelog.d/
 // fragments) is in a releasable state. Two states are valid:
 //
-//   - the queue is empty — no fragment is waiting and [Unreleased] holds no
-//     entry, as it is straight after `make release-alpha` folds and deletes
-//     everything. The script must then report "nothing to release" and
-//     change nothing; that is the post-release tree, not a defect.
-//   - entries are waiting — assembly must succeed, and every entry line of
-//     every fragment must appear in the result exactly as many times as it
-//     appeared before plus once per fragment carrying it, with every
-//     fragment deleted.
+//   - the queue is empty: no fragment is waiting and [Unreleased] holds no
+//     entry, as straight after `make release-alpha`. The script must report
+//     "nothing to release" and change nothing.
+//   - entries are waiting: assembly must succeed, every entry line must
+//     appear as many times as before plus once per fragment carrying it, and
+//     every fragment must be deleted.
 //
-// Anything else — a malformed fragment, a missing [Unreleased] heading, a
-// whitespace-only fragment — fails.
+// Anything else (a malformed fragment, a missing [Unreleased] heading, a
+// whitespace-only fragment) fails.
 func checkReleaseQueue(t *testing.T, changelog string, fragments map[string]string) {
 	t.Helper()
 	for _, p := range releaseQueueProblems(t, changelog, fragments) {
@@ -348,9 +341,8 @@ func treeFragments(t *testing.T, root string) map[string]string {
 }
 
 // TestChangelogAssemble_RealTree applies checkReleaseQueue to this
-// repository's own CHANGELOG.md and changelog.d/: the fragments waiting to
-// release fold in exactly once, or — on the release commit itself, where
-// assembly has already emptied the queue — the tree is accepted as is.
+// repository's own CHANGELOG.md and changelog.d/: waiting fragments fold in
+// exactly once, or, on the release commit itself, the empty queue is accepted.
 func TestChangelogAssemble_RealTree(t *testing.T) {
 	root := repoRoot(t)
 	checkReleaseQueue(t, readFile(t, filepath.Join(root, "CHANGELOG.md")), treeFragments(t, root))

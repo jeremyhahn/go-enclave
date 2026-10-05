@@ -6,8 +6,6 @@
 // This file is part of go-enclave. Use of this source code is governed by the
 // MIT license that can be found in the LICENSE file.
 
-//go:build linux
-
 package enclave
 
 import (
@@ -19,9 +17,8 @@ import (
 	"testing"
 )
 
-// vmLckBytes reports the process's total mlock'd bytes from
-// /proc/self/status. This is the kernel's own RLIMIT_MEMLOCK accounting — the
-// exact quantity an Allocator budget claims to be comparable to.
+// vmLckBytes reports the process's total mlock'd bytes from /proc/self/status,
+// the kernel's own RLIMIT_MEMLOCK accounting.
 func vmLckBytes() (int64, error) {
 	f, err := os.Open("/proc/self/status")
 	if err != nil {
@@ -51,30 +48,19 @@ func vmLckBytes() (int64, error) {
 	return 0, fmt.Errorf("no VmLck line in /proc/self/status")
 }
 
-// TestAllocator_ChargesWhatTheKernelLocks is the conformance test for the
-// accounting unit, and the one assertion here that cannot rot.
-//
-// Every other test in this package compares the allocator against
-// roundToPageSize semantics that this package itself implements — so if the
-// assumption underneath were wrong, or memguard changed what it locks, they
-// would all agree with each other and all be wrong together. This one takes its
-// yardstick from the KERNEL: it reads VmLck before and after each allocation and
-// requires the allocator's reservation to equal the locked bytes the kernel
-// actually charged.
-//
-// That is what makes the budget comparable to RLIMIT_MEMLOCK, which is the
-// entire claim the Allocator rests on. If memguard ever starts locking the guard
-// pages too, the reservation silently becomes an undercount again and only a
-// kernel-sourced yardstick notices.
+// TestAllocator_ChargesWhatTheKernelLocks pins the accounting unit against the
+// kernel: each allocation's reservation must equal the change in VmLck, and
+// Destroy must return both. Other tests compare against this package's own
+// page rounding, so only this one would notice if guard pages started being
+// locked or the rounding were wrong.
 func TestAllocator_ChargesWhatTheKernelLocks(t *testing.T) {
 	a, err := NewAllocator(64 * pageSize)
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
 
-	// Probe first. If mlock is not effective here — a container without
-	// CAP_IPC_LOCK, a kernel that does not account it — every delta below is
-	// zero and the comparison would be vacuous rather than informative.
+	// Probe first: if the kernel does not account mlock, every delta below is
+	// zero and the comparison would be vacuous.
 	probeBefore, err := vmLckBytes()
 	if err != nil {
 		t.Fatalf("VmLck: %v", err)
@@ -135,14 +121,8 @@ func TestAllocator_ChargesWhatTheKernelLocks(t *testing.T) {
 	}
 }
 
-// TestAllocator_BudgetHoldsTheEnclavesItPromises is the consequence of the unit
-// being right, stated the way an operator would state it: a budget of N pages
-// holds N enclaves and refuses the next one, whatever their material's size.
-//
-// Under byte accounting the same 5-page budget — 20480 bytes on a 4 KiB-page
-// host — "held" 640 thirty-two-byte enclaves, because it charged them 32 bytes
-// each. Those 640 enclaves lock 640 pages: 2621440 bytes, 128x the budget's own
-// limit. That is the defect, expressed as behavior rather than as arithmetic.
+// TestAllocator_BudgetHoldsTheEnclavesItPromises pins that a budget of N pages
+// holds N enclaves and refuses the next, whatever their material's size.
 func TestAllocator_BudgetHoldsTheEnclavesItPromises(t *testing.T) {
 	const capacity = 5
 	a, err := NewAllocator(capacity * pageSize)

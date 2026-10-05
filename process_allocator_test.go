@@ -8,11 +8,8 @@ import (
 	"time"
 )
 
-// freshProcessAllocator makes a test hermetic against the package-level process
-// allocator, for the same reason freshProcessSealer exists: installation is
-// one-shot, so without a reset the first test to touch it decides the outcome
-// of every later one, and -shuffle or -count>1 would turn that into order
-// dependence rather than a finding.
+// freshProcessAllocator resets the one-shot process allocator so tests stay
+// independent of order under -shuffle and -count>1.
 func freshProcessAllocator(t *testing.T) {
 	t.Helper()
 	resetProcessAllocatorForTest()
@@ -137,9 +134,8 @@ func TestProcessAllocator_DiscoveryFailureInstallsNothing(t *testing.T) {
 		t.Fatal("a failed discovery returned an allocator")
 	}
 
-	// Nothing was installed, so the binary can still install its own — the
-	// failure must not have defaulted to an unbounded allocator behind the
-	// error.
+	// Nothing was installed, so the binary can still install its own; the
+	// failure did not default to an unbounded allocator.
 	mine, err := NewAllocator(LockedSize(1))
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
@@ -266,8 +262,7 @@ func TestProcessAllocator_DefaultMatchesThisHost(t *testing.T) {
 }
 
 // TestProcessAllocator_ConcurrentFirstUseInstallsOne races the lazy default:
-// every caller must see the SAME allocator, or two libraries would admit
-// against two budgets — the defect the process allocator exists to remove.
+// every caller must see the same allocator.
 func TestProcessAllocator_ConcurrentFirstUseInstallsOne(t *testing.T) {
 	freshProcessAllocator(t)
 	withDiscovery(t, func() (LockedMemoryLimit, error) {
@@ -307,10 +302,9 @@ func TestProcessAllocator_ConcurrentFirstUseInstallsOne(t *testing.T) {
 	}
 }
 
-// TestProcessAllocator_OneBudgetAcrossCallers is the property that matters to
-// consumers: two independent callers drawing from the process allocator share
-// ONE budget, so the second is refused with the typed error before any locked
-// memory is requested, and a release returns the room.
+// TestProcessAllocator_OneBudgetAcrossCallers pins that two independent callers
+// share one budget: the second is refused with the typed error before any
+// locked memory is requested, and a release returns the room.
 func TestProcessAllocator_OneBudgetAcrossCallers(t *testing.T) {
 	freshProcessAllocator(t)
 

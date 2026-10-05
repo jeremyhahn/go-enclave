@@ -6,8 +6,6 @@
 // This file is part of go-enclave. Use of this source code is governed by the
 // MIT license that can be found in the LICENSE file.
 
-//go:build linux
-
 package enclave
 
 import (
@@ -28,12 +26,13 @@ var (
 	}
 )
 
-// HardenProcess applies the process-wide protections that are the BINARY's
-// choice, not a library's, and reports which took effect. It is never called by
-// this package; a main package opts in, normally first thing in main.
+// HardenProcess applies the process-wide protections that are the binary's
+// choice, not a library's, and reports which took effect. This package never
+// calls it; a main package opts in, normally first thing in main.
 //
 // On Linux it marks the process non-dumpable with prctl(PR_SET_DUMPABLE, 0) and
-// reads the flag back. That stops core dumps, including ones piped to a
+// reads the flag back; a refusal or a disagreeing read-back is a
+// *[ProcessHardeningError]. That stops core dumps, including ones piped to a
 // collector, and stops other processes of the same uid from attaching with
 // ptrace or reading /proc/<pid>/mem. The cost is the same list: same-uid
 // debuggers, profilers and crash collectors stop working, and /proc/<pid> files

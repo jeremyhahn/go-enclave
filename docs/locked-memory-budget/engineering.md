@@ -35,7 +35,12 @@
    budget, which only `ForceLimit` produces (e.g. `ForceLimit(0)` with one page
    reserved leaves `free = −pageSize`). While `free` is below a request's charge
    that request is refused, so nothing is admitted until reservations fall to
-   `limit − charge` or below.
+   `limit − charge` or below. Holding the remainder rather than the usage makes
+   admit, release, raise and lower each one signed adjustment of one word, so a
+   single CAS linearizes a lowering against an admission; a separate limit and
+   usage counter would be check-then-act. The predicate involves no addition,
+   so an oversized request cannot overflow into admission. `limit` is a
+   reporting shadow that admission never reads.
 3. **A reservation lives exactly as long as the enclave's pages.** `Destroy`
    returns it once (guarded by `sync.Once`) after the pages are unmapped — or
    after a corrupted or unwiped release, both of which do unmap. A refused
@@ -57,9 +62,13 @@
    credited by `TransferTo`. A failed reading refuses the raise with
    `ErrLimitDiscoveryFailed`. Lowerings are never refused on a ceiling.
    `ForceLimit` reads no ceiling and refuses nothing but a negative budget.
+   A transfer is checked on the destination even though it is
+   process-conservative: the check judges each budget alone, not the process
+   total.
 7. **`TransferTo` passes through "in neither", never "in both".** Source is
    debited before the destination is credited, with both retune locks held in
-   ascending allocator-id order. A successful reservation and a refund take no
+   ascending allocator-id order (ids come from a process-wide counter, not
+   pointer comparison). A successful reservation and a refund take no
    lock. A refusal may take one allocator's read lock to build its
    `BudgetError` (`budgetSnapshot`), and `InUse` takes it too; neither holds any
    other lock while doing so, so neither can join a cycle.
@@ -68,7 +77,16 @@
    `ProcessAllocator` call installs a default sized to the discovered ceiling
    when it binds (keeping the ceiling check), `0` for a zero ceiling, and
    `math.MaxInt64` when no ceiling binds. A discovery failure installs nothing;
-   a later call retries.
+   a later call retries. The installed allocator is never replaced, which would
+   strand live reservations on an allocator nothing admits against.
+9. **Readers never see ungranted headroom.** Where a retune writes both words,
+   `limit` is stored before `free` is credited, so a lock-free reader may
+   overstate usage but never understates it. A lock-free refusal can still pair
+   words from either side of a retune: mid-raise on an over-subscribed
+   allocator `limit − free` can wrap, and a lowering between its two loads
+   gives `free > limit`. `budgetSnapshot` rejects any negative difference and
+   re-reads under the read lock, so `BudgetError.InUse` is never negative while
+   the ordinary refusal stays lock-free.
 
 ## Error semantics
 
@@ -105,7 +123,28 @@ None. Budgets are set in code. Nothing is persisted.
 - Unit and race tests (`make test`, `make coverage`) across `-cpu=1,2,8`.
 - `Allocator.stalled` — a nil-in-production hook inside the retune CAS loop —
   parks a lowering in the window a racing admission must hit, making the
-  over-commit race deterministic.
+  over-commit race deterministic. `reserve` deliberately duplicates the loop
+  rather than sharing it, so the seam stays off the admission path.
+- `TestAllocator_Retune_RacesAdmission` arranges rounds of one-page claims with
+  known supply and demand instead of running a storm: in a storm, admitters
+  holding pages across preemption starve the lowerings, so coverage depends on
+  load. A double-spend in the contested shape is detectable only with more than
+  one CPU. Each round needs RLIMIT_MEMLOCK of at least `retuneActors` (8)
+  pages. Race tests bound their run by the side they assert about, with a
+  minimum-sample floor and a vacuity control.
+- `TestAllocator_StaysWithinItsCachelineBudget` holds `Allocator` to 64 bytes
+  (a fixed budget, not a discovered line size; it is exactly 64 on amd64) with
+  `free` and `limit` in one line. A new field must justify its place on the hot
+  type, or the hot pair moves into its own aligned struct.
+- `BenchmarkRefusalSerial` / `BenchmarkRefusalParallel` guard that refusal is
+  lock-free. A refusal performs only atomic loads, so concurrent refusers share
+  a read-only cacheline and parallel refusal is cheaper per operation than
+  serial (parallel/serial about 0.6–0.75). Any read-modify-write on the path —
+  a mutex, even `RWMutex.RLock`, or one no-op `free.Add(0)` — serializes
+  refusers and pushes the ratio above 1; the bare atomic on `free` is the worst
+  case, because it contends on the line every refuser loads. Compare the
+  ratio, not absolute nanoseconds, with `benchstat` before and after changing
+  the refusal path. It is not a CI gate: thresholds on shared runners are noise.
 - `setLimit` / `transferTo` take the ceiling reading as a parameter, so a failed
   `getrlimit` is testable on a healthy host; `LockedMemoryLimit.refuse` and
   `classifyRlimit` cover every ceiling shape without privilege.

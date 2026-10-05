@@ -30,12 +30,9 @@ import (
 // is exactly its own enclaves.
 
 // TestWipeAllReclaimsEverythingAndLeavesNoResidue places one secret in every
-// kind of enclave a process accumulates — generated, constructed, admitted,
-// left unfrozen, and opened from sealed values in both modes — confirms the
-// sweep sees every copy, and then requires that one WipeAll leaves: a zero
-// count and no error; no copy anywhere in readable memory; no locked mapping
-// and no locked byte; every enclave reporting destroyed; the allocator's
-// reservations returned; and the sealers' keys gone (ErrSealerWiped).
+// kind of enclave a process accumulates and requires one WipeAll to leave a
+// zero count, no error, no readable copy, no locked memory, every enclave
+// destroyed, reservations returned, and the sealers wiped (ErrSealerWiped).
 func TestWipeAllReclaimsEverythingAndLeavesNoResidue(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		ctx := context.Background()
@@ -135,17 +132,11 @@ func TestWipeAllReclaimsEverythingAndLeavesNoResidue(t *testing.T) {
 	})
 }
 
-// TestWipeAllWaitsForLiveBorrowsUntilItsDeadline: a sweep never unmaps memory
-// under a reader. With a borrow held across the whole call and a DEADLINE,
-// WipeAll reclaims everything else, leaves the borrowed enclave alone, and
-// reports it in the count — and the borrower, still inside its callback,
-// reads its material intact. With no deadline, a second sweep waits for that
-// borrow to end and only then reclaims it; it cannot return while the borrow
-// is live.
-//
-// The outcome does not depend on timing: the borrow is held, by construction,
-// until after the deadline-bounded sweep has returned, so the deadline bounds
-// only how long the test waits.
+// TestWipeAllWaitsForLiveBorrowsUntilItsDeadline: with a borrow held and a
+// deadline, WipeAll reclaims everything else, counts the borrowed enclave, and
+// the borrower still reads its material intact. With no deadline, a second
+// sweep waits for the borrow to end and then reclaims it. No timing involved:
+// the borrow is held until after the deadline-bounded sweep returns.
 func TestWipeAllWaitsForLiveBorrowsUntilItsDeadline(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		n := newNeedle(t)
@@ -268,12 +259,9 @@ func (c *manualDeadline) expire() {
 	close(c.done)
 }
 
-// requireWaiting blocks until a sweep signals, through its context, that it
-// has completed a pass, found a borrow it owes still held, and is about to
-// wait (WipeAll consults ctx.Err exactly there, and nowhere earlier), and
-// fails if the sweep returns first. A sweep that never waited cannot pass:
-// it either returns, which this reports, or never consults Err, which the
-// test's timeout reports.
+// requireWaiting blocks until a sweep consults ctx.Err, which WipeAll does only
+// when it is about to wait for a held borrow, and fails if the sweep returns
+// first.
 func requireWaiting(t *testing.T, what string, waiting <-chan struct{}, res <-chan sweepResult) {
 	t.Helper()
 	select {
@@ -386,14 +374,10 @@ func TestWipeAllTurnsAwayAConcurrentCaller(t *testing.T) {
 	})
 }
 
-// TestWipeAllReportsCanaryCorruptionWithoutPanicking simulates the defect the
-// canary exists to catch — a consumer's buffer UNDERFLOW, one byte written just
-// before an enclave's data — and requires the shutdown sweep to reclaim the
-// enclave anyway, wipe its material, and REPORT the event as a SweepError
-// counting one corrupt enclave (matching ErrEnclaveCorrupted, not
-// ErrReleasedWithoutWipe) instead of panicking or staying silent. Healthy
-// enclaves swept alongside it are unaffected, and once reclaimed the
-// corruption is not reported again.
+// TestWipeAllReportsCanaryCorruptionWithoutPanicking simulates a one-byte
+// underflow and requires the sweep to reclaim and wipe the enclave and report a
+// SweepError counting one corrupt enclave (ErrEnclaveCorrupted only), without
+// panicking. Healthy enclaves are unaffected, and a later sweep is clean.
 func TestWipeAllReportsCanaryCorruptionWithoutPanicking(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		n := newNeedle(t)
@@ -467,11 +451,9 @@ func TestDestroyReturnsCanaryCorruptionAfterWiping(t *testing.T) {
 	})
 }
 
-// underflowOneByte writes one byte immediately BEFORE the enclave's data — the
-// canary's last byte — through the writable pages of an unfrozen sized
-// enclave: exactly what an off-by-one underflow in a consumer does. It is the
-// only way to produce real corruption through the public API, and it is why
-// the enclave must not be frozen (the write would fault instead).
+// underflowOneByte writes the canary's last byte, just before the data, through
+// the writable pages of an unfrozen sized enclave, as a consumer's off-by-one
+// underflow would. A frozen enclave would fault instead.
 func underflowOneByte(t *testing.T, e *enclave.MemoryEnclave) {
 	t.Helper()
 	if err := e.WithBytes(func(b []byte) error {

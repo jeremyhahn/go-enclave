@@ -6,8 +6,6 @@
 // This file is part of go-enclave. Use of this source code is governed by the
 // MIT license that can be found in the LICENSE file.
 
-//go:build linux
-
 package enclave
 
 import (
@@ -18,27 +16,13 @@ import (
 	"testing"
 )
 
-// TestWipeAll_LeavesNoResidentMaterial is the end-to-end property a shutdown
-// path depends on: after the sweep, no material this package was holding is
-// anywhere in the process's memory.
-//
-// It uses the corrected sweep from PR #16 — every anonymous mapping, named or
-// not, with the needle held only in locked memory and compared inside a borrow.
-// The earlier version of that helper skipped kernel-named mappings and would
-// have reported a clean process while the material sat in [anon: Go: heap].
-//
-// The control comes first and is a real one: with the enclaves alive, the
-// material must be findable OUTSIDE the enclave holding the needle. That proves
-// the sweep can see the mappings a leak would live in, which is precisely what
-// the earlier control failed to establish.
+// TestWipeAll_LeavesNoResidentMaterial pins that after the sweep no material
+// this package held is anywhere in process memory. It scans every anonymous
+// mapping, named or not. The control comes first: with the enclaves alive the
+// material must be found outside the needle's own mapping.
 func TestWipeAll_LeavesNoResidentMaterial(t *testing.T) {
-	// The needle lives in a RAW mapping, not a MemoryEnclave. Two reasons, and
-	// the first is not obvious: every MemoryEnclave is on the shutdown ledger, so
-	// WipeAll would destroy the needle's own holder and there would be nothing
-	// left to compare against afterwards. (Measured — the first version of this
-	// test did exactly that and failed reading its own needle.) The second is the
-	// usual one: a []byte literal would put the needle on the heap and the sweep
-	// would find the test's own constant every run.
+	// The needle lives in a raw mapping, not a MemoryEnclave: WipeAll would
+	// destroy an enclave holding it, and a []byte literal would put it on the heap.
 	m, err := newMapping(64)
 	if err != nil {
 		t.Fatalf("newMapping: %v", err)
@@ -56,14 +40,11 @@ func TestWipeAll_LeavesNoResidentMaterial(t *testing.T) {
 		t.Fatalf("needle address: %v", err)
 	}
 
-	// Several registered enclaves holding the same material, so the sweep has
-	// more than one place to find it and the assertion is not about a single
-	// allocation.
+	// Several enclaves, so the sweep has more than one copy to find.
 	const copies = 4
 	for i := 0; i < copies; i++ {
-		// Handed over from a LOCKED transfer enclave, never a heap copy:
-		// NewMemoryEnclave wipes its input, and that wipe lands in locked
-		// pages (security-review §6).
+		// From a locked transfer enclave, never a heap copy: NewMemoryEnclave
+		// wipes its input, and that wipe must land in locked pages.
 		transfer, err := NewMemoryEnclaveSized(len(m.data))
 		if err != nil {
 			t.Fatalf("allocating the transfer enclave: %v", err)
@@ -80,10 +61,8 @@ func TestWipeAll_LeavesNoResidentMaterial(t *testing.T) {
 		}
 	}
 
-	// Control first, and a real one: with those enclaves alive the material must
-	// be findable OUTSIDE the needle's own mapping. That proves the sweep can see
-	// the mappings a leak would live in — which is exactly what the earlier
-	// version of this control never established.
+	// Control: with the enclaves alive the material must be findable outside
+	// the needle's mapping, proving the scan sees where a leak would live.
 	withLive, err := processMemoryFind(m.data)
 	if err != nil {
 		t.Fatalf("cannot sweep process memory: %v (see processMemoryFind for what the runner must allow)", err)
@@ -109,9 +88,8 @@ func TestWipeAll_LeavesNoResidentMaterial(t *testing.T) {
 }
 
 // TestWipeAll_ReturnsLockedMemoryToTheKernel measures the sweep against VmLck
-// rather than against this package's own bookkeeping. An implementation that
-// cleared its registry and marked everything destroyed without unmapping would
-// satisfy every other assertion in this file and leave the pages locked.
+// rather than the package's own bookkeeping, so a sweep that deregistered
+// without unmapping fails.
 func TestWipeAll_ReturnsLockedMemoryToTheKernel(t *testing.T) {
 	requireCleanLedger(t)
 
@@ -154,16 +132,9 @@ func TestWipeAll_ReturnsLockedMemoryToTheKernel(t *testing.T) {
 	}
 }
 
-// TestWipeAllAccountsAnUnwipedRelease is the regression for the sweep half.
-//
-// releaseLocked clears the mapping for an unwiped release -- the pages ARE gone --
-// so a sweep that still treated only nil and ErrEnclaveCorrupted as released
-// left the enclave registered with its Allocator reservation unreturned, and
-// reported it as still held. A retry on a later pass then saw a nil error and
-// the mprotect denial vanished entirely.
-//
-// Asserts all three: the count, the reservation, and that the condition is
-// REPORTED rather than swallowed.
+// TestWipeAllAccountsAnUnwipedRelease pins that a release unmapped without a
+// wipe (mprotect denied) counts as released: the enclave is deregistered, its
+// reservation returned, and the condition reported as ErrReleasedWithoutWipe.
 func TestWipeAllAccountsAnUnwipedRelease(t *testing.T) {
 	a, err := NewAllocator(1 << 20)
 	if err != nil {

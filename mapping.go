@@ -17,77 +17,17 @@ import (
 	"runtime"
 )
 
-// This file owns go-enclave's memory: it maps, locks, guards, wipes and
-// releases every page the package hands out.
-//
-// # Why this is not memguard
-//
-// go-enclave used memguard's LockedBuffer until v0.3.0-alpha. The layout below
-// is deliberately the same one — guard pages either side of an mlock'd inner
-// region, a random canary in the slack ahead of the data, wipe and verify on
-// release — because that design is sound and well reviewed. What changed is the
-// FAILURE POLICY, and it could not be changed from the outside.
-//
-// memguard registers every buffer in a process-global list and, on any mapping
-// failure, calls core.Panic: Purge() first, which destroys and UNMAPS every
-// live buffer in the process, then panic. A library whose whole purpose is to
-// hold key material safely cannot have "some unrelated allocation failed" mean
-// "your key's pages are gone". go-enclave converted the panic into a typed
-// error from v0.1.0-alpha, but a recover cannot undo a purge that already ran —
-// so it also needed purgeMu, a process-wide lock serializing every allocation
-// against every borrow, whose cost was that allocating inside a live borrow
-// deadlocked — a shape real consumers had no way to write around.
-//
-// Owning the mapping removes the mechanism instead of guarding it. There is no
-// registry, so nothing can purge these pages; every failure is a returned
-// error; and purgeMu is gone because there is no longer anything for it to
-// serialize. The reasoning: mapping memory is not cryptography, and a library
-// whose whole purpose is locked memory should own that discipline rather than
-// inherit someone else's failure policy for it.
-
 // coreDumpErr records whether the process-wide core-dump hardening took. It is
 // written once, from init, before any goroutine can observe it.
 var coreDumpErr = sysDisableCoreDumps()
 
-// ErrCoreDumpLimitUnsupported is what [CoreDumpsDisabled] reports on a platform
-// with no process-wide core-dump limit to lower — Windows, where crash dumps are
-// governed by machine policy and by other processes, never by a setting the
-// process makes for itself.
-//
-// It is distinct from a refused setrlimit, which is a control that exists and
-// was denied. This one says there is no such control at all, so an application
-// whose threat model requires dump exclusion learns that it has to be enforced
-// outside the process — by host policy — rather than being told, as memcall
-// told it before #86, that the hardening had succeeded.
+// ErrCoreDumpLimitUnsupported is what [CoreDumpsDisabled] reports on Windows,
+// which has no process-wide core-dump limit; dump exposure there must be
+// governed by host policy.
 var ErrCoreDumpLimitUnsupported = errors.New("enclave: this platform has no process-wide core-dump limit to lower")
 
-// The memory primitives a test needs to refuse sit behind package-private
-// seams: lockMemory, unlockMemory, protectMemory and unmapMemory are the
-// platform's [sysLock], [sysUnlock], [sysProtect] and [sysUnmap]. The
-// conditions they model -- an mlock refused at the RLIMIT_MEMLOCK ceiling AFTER
-// the region was mapped, an munlock or munmap refused (ENOMEM at
-// vm.max_map_count, a seccomp filter) after the wipe succeeded, an mprotect
-// denied on a region this process already owns -- are exactly the paths whose
-// accounting and reporting decide whether material stays resident and whether
-// a reservation is refunded for pages the kernel still holds, and none of them
-// is reachable on demand from a unit test any other way.
-//
-// The mprotect seam is what #12 is about: without the unmap fallback in
-// release, the material stays resident for the process lifetime when it is
-// refused. It covers every mprotect this package makes: the release path's,
-// freeze's, and the guard pages' inside newMapping.
-//
-// excludeCoreDump, excludeFork and fillCanary are the remaining construction
-// steps, so a test can fail each step of newMapping in turn and assert its
-// rollback.
-//
-// There is ONE unmap seam because there is one unmap. Each primitive is a
-// single system call with no wipe or protection change of its own, so
-// release's fallback for a denied mprotect and its ordinary teardown make the
-// same call, and a test refusing it refuses both.
-//
-// Unexported and never assigned outside this package's own tests, so nothing
-// downstream can swap a syscall out from under a security primitive.
+// Fault-injection seams: each is one system call or construction step with no
+// side effects of its own, reassigned only by this package's tests.
 var (
 	lockMemory      = sysLock
 	unlockMemory    = sysUnlock
@@ -104,82 +44,27 @@ func randomCanary(b []byte) error {
 	return err
 }
 
-// CoreDumpsDisabled reports whether this package succeeded in disabling core
-// dumps process-wide at import, returning the failure if it did not.
-//
-// A core dump writes a process's memory to disk in plaintext, locked pages
-// included, so this is real hardening rather than housekeeping. It is applied at
-// two levels and this reports only the first:
-//
-//   - PROCESS-WIDE, by lowering RLIMIT_CORE, soft and hard, to zero on import.
-//     That suppresses core FILES only: on Linux a core_pattern that pipes
-//     dumps to a collector (systemd-coredump, apport) is not bound by
-//     RLIMIT_CORE at all, per core(5). It is also best effort: a sandbox or
-//     seccomp filter can deny setrlimit, and a privileged process can raise
-//     the limit again afterwards, so no library can promise it. That is what
-//     this function exposes, so an application whose threat model requires it
-//     can assert it rather than assume it. On Windows there is no such limit
-//     at all and this returns [ErrCoreDumpLimitUnsupported].
-//
-//   - PER MAPPING, as every enclave's pages are mapped and locked:
-//     MADV_DONTDUMP on Linux; MAP_NOCORE and MADV_NOCORE on FreeBSD and
-//     DragonFly; MAP_CONCEAL on OpenBSD. That one is NOT best effort: the
-//     madvise is verified, and the OpenBSD flag is part of the mmap itself, so
-//     a refusal fails the allocation with [ErrLockedMemoryUnavailable] rather
-//     than handing back an enclave whose pages could reach disk. On platforms
-//     where this package applies no per-mapping exclusion — darwin, NetBSD,
-//     AIX, Solaris and illumos, which have none, and Windows, whose WER-only
-//     WerRegisterExcludedMemoryBlock is deliberately not used (see
-//     dontdump_windows.go) — there is nothing to verify and this function is
-//     the only signal available.
-//
-// Constructors do not consult this. A host that cannot lower RLIMIT_CORE still
-// gets the lock, the guard pages, the canary and — where the platform has one —
-// the per-mapping exclusion, and refusing to build an enclave at all would
-// remove those too.
+// CoreDumpsDisabled reports the result of lowering RLIMIT_CORE (soft and hard)
+// to zero at import, or [ErrCoreDumpLimitUnsupported] on Windows. The limit is
+// best effort and does not bind a piped Linux core_pattern (core(5)); where the
+// platform has one, the verified per-mapping exclusion (MADV_DONTDUMP,
+// MAP_NOCORE, MAP_CONCEAL) is what keeps enclave pages out of dumps.
+// Constructors do not consult this result.
 func CoreDumpsDisabled() error { return coreDumpErr }
 
-// pageSize is both the locked-memory accounting unit and the mapping's
-// granularity. The kernel charges RLIMIT_MEMLOCK in whole pages and mmap works
-// in whole pages, so everything here rounds to it. Read once: it cannot change
-// for a running process.
+// pageSize is the mapping granularity and the RLIMIT_MEMLOCK accounting unit.
 var pageSize = int64(os.Getpagesize())
 
-// maxInt is the largest value of type int on this platform, and therefore the
-// ceiling a whole mapping has to fit under.
+// maxInt is the largest int, the ceiling a whole mapping has to fit under.
 const maxInt = int64(^uint(0) >> 1)
 
-// ErrEnclaveCorrupted reports that an enclave's canary did not verify when its
-// memory was released, which means something wrote into the slack region ahead
-// of the data — a buffer underflow, or memory corruption from elsewhere in the
-// process.
-//
-// It is the one condition this package treats as unrecoverable. See
-// [MemoryEnclave.Destroy] for what happens when it is detected and why.
+// ErrEnclaveCorrupted reports that an enclave's canary or guard pages were
+// overwritten, detected at release. See [MemoryEnclave.Destroy].
 var ErrEnclaveCorrupted = errors.New("enclave: canary verification failed; memory ahead of the enclave was overwritten")
 
-// LockedSize reports how much locked memory an enclave of n bytes actually
-// consumes, which is n rounded UP to a whole page.
-//
-// Callers need this to size an [Allocator] budget, because the kernel's unit
-// and the caller's are not the same one. An enclave of 32 bytes occupies a
-// full page — measured against /proc/self/status VmLck, 4096 bytes on a
-// 4 KiB-page host — so a budget meant to hold a hundred small credentials must
-// be a hundred PAGES, not a hundred times thirty-two bytes. Without this the
-// correct budget is folklore.
-//
-// Only the data region is charged. Each enclave is fenced by two guard pages,
-// but those are mapped PROT_NONE and never mlock'd, so they cost address space
-// and VMAs rather than locked memory — verified against the kernel's own
-// accounting, not inferred from the mapping code.
-//
-// It returns int64 to match [NewAllocator]'s budget, so sizing a budget from it
-// needs no conversion: NewAllocator(100 * LockedSize(32)) type-checks as
-// written, and the conversion it removes sits exactly where a truncation would
-// bite.
-//
-// It returns 0 when n is not a size any enclave can have — see [ErrInvalidSize]
-// for what that covers.
+// LockedSize reports the locked memory an n-byte enclave consumes (n rounded
+// up to a page, guard pages excluded), for sizing an [Allocator] budget:
+// NewAllocator(100 * LockedSize(32)). It returns 0 for an impossible size.
 func LockedSize(n int) int64 {
 	locked, ok := lockedSize(int64(n))
 	if !ok {
@@ -188,27 +73,9 @@ func LockedSize(n int) int64 {
 	return locked
 }
 
-// lockedSize reports the locked memory an enclave of n bytes consumes — n
-// rounded up to a whole page — and whether such an enclave can be mapped here
-// at all.
-//
-// Three conditions, and each one is a fault or a corrupt mapping if it is
-// missed.
-//
-// n must be positive: there is no zero-byte mapping to make.
-//
-// The rounding must not overflow. The obvious form, n+pageSize-1 masked down,
-// overflows for a large enough n and wraps NEGATIVE — the same shape as the
-// admission fail-open fixed in PR #3, and it would reach mmap with a nonsense
-// length. Dividing first cannot overflow for n >= 1, and the multiplication
-// back is guarded.
-//
-// And the whole MAPPING must be representable, not just the locked part. The
-// allocation is the data region plus two guard pages, sized as an int, so a
-// size whose data region rounds representably can still overflow once the guard
-// pages are added. The guard pages cost no LOCKED memory — they are PROT_NONE
-// and never mlock'd, so they stay out of the charge — but they are part of the
-// mapping, and it is the mapping that has to fit.
+// lockedSize returns n rounded up to a whole page and whether a mapping of
+// that size plus two guard pages fits in an int. It divides before multiplying
+// because n+pageSize-1 can overflow and wrap negative.
 func lockedSize(n int64) (int64, bool) {
 	if n <= 0 {
 		return 0, false
@@ -224,25 +91,13 @@ func lockedSize(n int64) (int64, bool) {
 	return locked, true
 }
 
-// mapping is one guarded, locked allocation: a region of mlock'd pages holding
-// the caller's data, fenced on both sides by inaccessible guard pages and
-// preceded by a random canary.
-//
-// The layout, for a request of n bytes:
+// mapping is one guarded, locked allocation, not safe for concurrent use:
 //
 //	| preguard | canary … data | postguard |
 //	|<- page ->|<-- innerLen ->|<- page  ->|
 //
-// innerLen is n rounded up to a whole page, and data sits at the END of it, so
-// the first byte past the data is the postguard — an overflow past the end
-// faults immediately rather than corrupting anything. The slack ahead of the
-// data holds the canary, which cannot fault (it is readable, writable memory),
-// so an underflow into it is detected at release instead. The same canary bytes
-// are copied into both guard pages before they are made inaccessible, which is
-// what lets release check that the guards themselves were not remapped.
-//
-// A mapping is not safe for concurrent use; [MemoryEnclave] provides the
-// locking around it.
+// Both guard pages hold a copy of the canary. The canary is empty when the
+// size is a page multiple.
 type mapping struct {
 	// memory is the whole allocation. Every other field is a sub-slice of it.
 	memory []byte
@@ -253,80 +108,26 @@ type mapping struct {
 	// preguard and postguard are the inaccessible pages either side of inner.
 	preguard  []byte
 	postguard []byte
-	// canary is the slack ahead of data, filled with random bytes and verified
-	// on release. It is EMPTY when the requested size is an exact multiple of
-	// the page size, because there is no slack — see newMapping.
+	// canary is the slack ahead of data, verified on release.
 	canary []byte
-	// mutable records whether inner is currently writable, so freeze is
-	// idempotent and release knows it has to restore write access first.
+	// mutable records whether inner is writable.
 	mutable bool
-	// corrupted records a failed canary, so release can finish unmapping and
-	// still report it afterwards rather than having to choose between the two.
-	//
-	// It is STICKY for as long as the mapping is held: only ever set, never
-	// cleared, until the pages are actually gone. The verification that sets it
-	// also wipes the guards and the canary, so it cannot be repeated — a second
-	// one compares zeroes with zeroes and passes — and a release whose munlock or
-	// munmap is refused AFTER detecting corruption keeps the mapping for a retry.
-	// Before #83 that retry re-verified and reported a clean release; this flag
-	// is now the only record of the detection, and it has to survive the retry.
+	// corrupted is sticky until the pages are gone: the check that sets it
+	// wipes the canary and guards, so it cannot be repeated on a retry.
 	corrupted bool
-	// verified records that the canary check has RUN and the whole mapping was
-	// wiped after it, so a retried release skips straight to unlocking and
-	// unmapping. Re-running it could only produce a false "clean" (see
-	// corrupted) and would cost an mprotect that a retry does not need: the
-	// first attempt left the region read-write.
+	// verified records that the check ran and the mapping was wiped.
 	verified bool
-	// wiped records that the material is GONE while the pages are still held.
-	//
-	// It exists for the failed-release path: when the wipe succeeded but the
-	// munlock or munmap that follows was refused, the mapping is deliberately
-	// KEPT so the caller can retry -- and without this flag it then read as a
-	// perfectly ordinary live enclave. IsAlive said true, Size said 21, Open
-	// handed back 21 bytes of zeroes, and both guard pages had been left
-	// READ-WRITE by the release path, so the guards were off as well.
-	//
-	// A caller whose Destroy failed and that READS rather than re-Destroying
-	// would then derive from an all-zero secret with no guard protection, and
-	// nothing would say so. The pages being retained is the
-	// truth about the MAPPING; it was never the truth about the ENCLAVE.
+	// wiped records that the material is gone while the pages are still held.
 	wiped bool
-	// unlocked records that inner is known NOT to be mlock'd any more: an
-	// unlock succeeded, or a rollback found the region was never locked.
-	//
-	// A retried release must not unlock again (#83). Linux's munlock accepts
-	// pages that are not locked; Windows' VirtualUnlock refuses them with
-	// ERROR_NOT_LOCKED. So a release whose munlock succeeded and whose munmap
-	// was refused used to fail EVERY retry at the unlock, before reaching the
-	// munmap — the mapping, and any Allocator reservation behind it, then held
-	// for the process lifetime however often DestroyErr or WipeAll retried.
-	// The flag is also what a held failure's [pagesHeldError.locked] is read
-	// from, so the report and the retry cannot disagree about the lock.
+	// unlocked records that inner is not mlock'd. A retry must not unlock
+	// again: Windows' VirtualUnlock refuses unlocked pages (ERROR_NOT_LOCKED).
 	unlocked bool
-	// abandoned records that this mapping was given up by a failed
-	// construction before any material was copied in, so unmapping it gives up
-	// nothing even while it is still locked.
-	//
-	// release reads it to carry on to the munmap when the munlock is refused,
-	// as abandon's own rollback does (#83): munmap drops the lock along with the
-	// mapping, so stopping at the refused munlock would strand a locked orphan,
-	// and the charge kept for it, for as long as munlock stays refused, however
-	// available the munmap became.
+	// abandoned marks an empty mapping a failed construction gave up.
 	abandoned bool
 }
 
-// newMapping allocates, locks and guards a region for size bytes, and returns
-// it mutable and zeroed.
-//
-// Every failure path returns a typed [LockedMemoryError] and releases whatever
-// it had already taken — a mapping that could not be locked is never left
-// mapped, and no other enclave in the process is affected. That is the whole
-// difference from memguard, which aborts the process instead and unmaps every
-// live buffer on its way out.
-//
-// size must already have been validated by [lockedSize]; callers do that so
-// they can report an impossible size as ErrInvalidSize rather than as a
-// mapping failure.
+// newMapping maps, locks and guards a zeroed, mutable region for size bytes.
+// Every failure returns a LockedMemoryError and rolls back what it took.
 func newMapping(size int) (*mapping, error) {
 	innerLen, ok := lockedSize(int64(size))
 	if !ok {
@@ -334,8 +135,7 @@ func newMapping(size int) (*mapping, error) {
 	}
 	total := int(innerLen) + 2*int(pageSize)
 
-	// The kernel zero-fills anonymous pages, so the region is zeroed on
-	// arrival. Nothing here needs to zero it a second time.
+	// Anonymous pages arrive zero-filled.
 	memory, err := sysMap(total)
 	if err != nil {
 		return nil, &LockedMemoryError{Cause: err}
@@ -348,47 +148,32 @@ func newMapping(size int) (*mapping, error) {
 		inner:     inner,
 		preguard:  memory[0:page:page],
 		postguard: memory[page+int(innerLen) : total : total],
-		// data sits at the end of inner so that the byte after it is the
-		// postguard.
+		// data ends inner, so the byte after it is the postguard.
 		data:    inner[len(inner)-size : len(inner) : len(inner)],
 		canary:  inner[0 : len(inner)-size : len(inner)-size],
 		mutable: true,
 	}
 
 	locked := false
-	// Lock before anything sensitive can be written, so the pages are never
-	// swappable while they hold material. This is the call that fails when the
-	// process is at its RLIMIT_MEMLOCK ceiling.
+	// Lock before anything sensitive is written.
 	if err := lockMemory(m.inner); err != nil {
 		return nil, m.abandon(err, locked)
 	}
 	locked = true
 
-	// Keep these pages out of any core dump, and CHECK that it took. The
-	// process-wide RLIMIT_CORE hardening is best effort and can be denied at
-	// import; this is the one core-dump control that is verified, so it is the
-	// one an enclave's pages actually rest on — a failure fails the allocation
-	// rather than handing back memory that could be written to disk in
-	// plaintext.
 	if err := excludeCoreDump(m.inner); err != nil {
 		return nil, m.abandon(err, locked)
 	}
 
-	// Keep the whole mapping out of any forked child, checked like the dump
-	// exclusion. See excludeFromFork for the choice of advice.
 	if err := excludeFork(m.memory); err != nil {
 		return nil, m.abandon(err, locked)
 	}
 
-	// The canary is random so that an overflow cannot reproduce it by writing a
-	// predictable pattern. It is empty when size is an exact page multiple,
-	// which is a known gap documented on the type.
+	// Random, so an overflow cannot reproduce it with a predictable pattern.
 	if err := fillCanary(m.canary); err != nil {
 		return nil, m.abandon(err, locked)
 	}
 
-	// The guard pages carry a copy of the canary before they are made
-	// inaccessible, so release can tell they are still the pages it mapped.
 	copyConstantTime(m.preguard, m.canary)
 	copyConstantTime(m.postguard, m.canary)
 
@@ -402,39 +187,10 @@ func newMapping(size int) (*mapping, error) {
 	return m, nil
 }
 
-// abandon gives back everything a partially built mapping has taken and reports
-// the failure that caused the rollback.
-//
-// Nothing sensitive has been written at this point — callers copy material in
-// only after [newMapping] returns — so a mapping left behind here is empty. It
-// is still reported rather than discarded: a leak nobody is told about is one
-// nobody can act on, and this path only runs when the kernel is already refusing
-// things, which is exactly when the cleanup is most likely to be refused too.
-//
-// A refused munlock does not stop the rollback: it carries on to the munmap,
-// which drops the lock along with the mapping. Nothing was ever written here,
-// so there is nothing to wipe first and an unmap gives nothing up; the refusal
-// is still reported, joined into the cleanup failure.
-//
-// And the report says what was left behind, by marking the error with
-// [pagesHeldError] whenever nothing could unmap the region (#83). MAPPED and
-// LOCKED are tracked separately, because they decide different things. A region
-// still mapped is marked held and HANDS OVER the mapping itself, so the
-// constructor can put it on the orphan ledger for [WipeAll] to retry rather than
-// drop the only handle to it. Whether it is still locked is what an [Allocator]
-// constructor reads to decide whether to refund the charge now: munmap drops the
-// lock along with the mapping, and a region that was never locked, or was
-// unlocked before the unmap failed, costs address space but no locked memory.
-// An earlier revision marked only the locked case, so a cleanup that unlocked
-// and then could unmap nothing reported its still-mapped pages as gone.
-//
-// A handed-over mapping is marked verified and wiped — nothing was ever written
-// to it, and its canary may be half-built, so a later release must not run a
-// verification that could only report a false corruption — and its unlocked
-// flag says whether the retry still has an munlock to make.
-//
-// locked says whether the inner region was successfully mlock'd before the
-// failure, since unlocking pages that were never locked is itself an error.
+// abandon rolls back an empty, partially built mapping and returns cause
+// joined with any cleanup failure. A refused munlock still goes on to munmap,
+// which drops the lock. If munmap is refused, the mapping is handed out in a
+// pagesHeldError, marked verified so its half-built canary is never checked.
 func (m *mapping) abandon(cause error, locked bool) error {
 	failure := error(&LockedMemoryError{Cause: cause})
 
@@ -458,8 +214,7 @@ func (m *mapping) abandon(cause error, locked bool) error {
 
 	report := errors.Join(failure, &LockedMemoryError{Cause: cleanup})
 	if !mapped {
-		// Unmapped, so nothing is held — a refused munlock included, since the
-		// lock went with the mapping.
+		// Unmapped, so nothing is held, a refused munlock included.
 		return report
 	}
 	m.verified, m.wiped, m.abandoned = true, true, true
@@ -479,17 +234,8 @@ func (m *mapping) freeze() error {
 	return nil
 }
 
-// wipeAndVerify zeroes the whole mapping and checks the canary, reporting
-// [ErrEnclaveCorrupted] if the region ahead of the data was overwritten.
-//
-// The data is wiped BEFORE the canary is checked, so a detected corruption
-// still leaves nothing readable behind — the check reports what happened, it
-// does not decide whether to clean up. It is split out from release so that a
-// test can inspect the wiped memory before it is handed back to the kernel.
-//
-// It runs the check at most ONCE per mapping. A release refused after it keeps
-// the mapping, and the retry finds verified set and returns what the first run
-// found — never a fresh comparison of the zeroes that run left behind (#83).
+// wipeAndVerify zeroes the whole mapping, then checks the canary and guards.
+// The check runs at most once; a retry returns the first result.
 func (m *mapping) wipeAndVerify() error {
 	if m.verified {
 		if m.corrupted {
@@ -498,35 +244,16 @@ func (m *mapping) wipeAndVerify() error {
 		return nil
 	}
 
-	// FIRST, destroy the material, before any syscall that could be refused.
-	// While the inner region is still writable — which it is unless a freeze
-	// succeeded — this needs no call that anything can deny. Doing it after the
-	// mprotect below meant a denied mprotect left the secret sitting in locked
-	// memory (Codex round 3 on PR #9); doing it here means the worst a refusal
-	// can cost is an empty mapping that could not be handed back.
-	//
-	// ONLY the data region. The canary shares the inner pages and is the thing
-	// the verification below compares against the guards, so wiping it here
-	// would report every clean release as corrupted — measured, on the first
-	// attempt at this fix.
+	// Wipe a writable data region first, with no syscall that can be denied,
+	// so a refused mprotect below cannot leave an unfrozen enclave's material
+	// behind. Only the data: the canary is still needed for the check.
 	if m.mutable {
 		wipe(m.data)
-
-		// The material is gone from HERE, not from the later assignment after
-		// the mprotect. This early wipe is the whole point of doing it first,
-		// and the mprotect below can be refused -- so a mutable mapping whose
-		// data has already been zeroed would otherwise sit at wiped=false all
-		// the way through release's fallback, and if that fallback is refused
-		// too the mapping is KEPT and reads as a live enclave over zeroes.
-		// That is the same defect the flag exists to close, reached down the
-		// other branch.
 		m.wiped = true
 	}
 
-	// The rest needs the WHOLE region readable and writable: the guard pages are
-	// PROT_NONE, and inner is read-only if it was frozen. A refusal here is
-	// returned, and release decides what it costs — see its unwiped-unmap
-	// branch.
+	// The guards are PROT_NONE and a frozen inner is read-only. A refusal is
+	// handled by release.
 	if err := protectMemory(m.memory, protReadWrite); err != nil {
 		return &LockedMemoryError{Cause: err}
 	}
@@ -534,18 +261,15 @@ func (m *mapping) wipeAndVerify() error {
 
 	wipe(m.data)
 
-	// OR'd in, never assigned: the flag is sticky (see the field), and this
-	// line must not be the one that clears it.
+	// OR'd in, never assigned: corrupted is sticky.
 	m.corrupted = m.corrupted ||
 		!equalConstantTime(m.preguard, m.postguard) ||
 		!equalConstantTime(m.preguard[:len(m.canary)], m.canary)
 
 	wipe(m.memory)
 
-	// From here the material is gone whatever happens next. Set BEFORE the
-	// error return below, because the case this exists for is precisely the one
-	// where a later step fails and the mapping is kept. verified with it: the
-	// guards and canary are zero now, so the comparison above cannot be redone.
+	// Set before the error return: the guards and canary are now zero, so the
+	// check cannot be redone if a later step fails.
 	m.wiped = true
 	m.verified = true
 
@@ -555,87 +279,27 @@ func (m *mapping) wipeAndVerify() error {
 	return nil
 }
 
-// release wipes the mapping, verifies the canary, unlocks the pages and returns
-// them to the kernel — in that order, as explicit steps:
-//
-//  1. make the whole mapping writable (mprotect), wipe it and verify the
-//     canary — [mapping.wipeAndVerify], which wipes a still-writable data
-//     region BEFORE the mprotect, so a refusal there cannot leave an unfrozen
-//     enclave's material behind;
-//  2. munlock the data region, at most once per mapping (see mapping.unlocked);
-//  3. munmap the whole mapping.
-//
-// Nothing else happens on the way: the unmap primitive does not wipe or
-// re-protect on its own (osmem.go), so this list is the whole of what a
-// release does.
-//
-// It clears its fields ONLY when the pages have actually gone back. If the
-// unlock or the unmap is refused, the mapping is left fully intact and the
-// error is returned. Dropping the slices would strand a region that is still
-// mapped, possibly still locked, with no handle left to retry through; the
-// caller's [Allocator] would then be told those bytes are available while the
-// kernel still holds them. Keeping the state means a caller that recovers can
-// simply call Destroy again, and the retry resumes rather than repeats: the
-// wipe and the verification are not redone, and neither is a successful unlock.
-//
-// One refusal is handled by unmapping ANYWAY: the mprotect in step 1. See the
-// comment at that branch for why that is the only safe answer for a frozen
-// region, and [ErrReleasedWithoutWipe] for how it is reported.
-//
-// ErrEnclaveCorrupted is returned WITH the memory released: a failed canary is
-// a report about what already happened, not a reason to hold on to pages that
-// were successfully wiped and unmapped. When the canary failed AND the unlock
-// or unmap after it was refused, both are returned, joined, and marked as
-// leaving the pages held (#83): dropping the refusal would release a handle the
-// kernel has not, and dropping the corruption would lose it for good, since the
-// verification cannot be repeated (see mapping.corrupted). The retry that does
-// release the pages reports ErrEnclaveCorrupted again.
-//
-// Every failure that keeps the mapping is marked with [pagesHeldError], so
-// [releasedPages] — which a corruption report alone would otherwise satisfy —
-// and an Allocator constructor's refund both read the same answer.
+// release wipes and verifies, munlocks (at most once) and munmaps. A refused
+// munlock or munmap keeps the mapping intact behind a pagesHeldError so a
+// retry resumes; a refused mprotect unmaps anyway as an UnwipedReleaseError.
 func (m *mapping) release() error {
-	// Step 1. A corrupted canary still means the region was wiped, so it falls
-	// through and is reported after the pages are gone. Any other error is the
-	// mprotect that makes the region writable, refused.
+	// Step 1. Corruption falls through and is reported once the pages are
+	// gone; any other error is the refused mprotect.
 	if err := m.wipeAndVerify(); err != nil && !errors.Is(err, ErrEnclaveCorrupted) {
-		// For a FROZEN enclave that refusal is the whole exposure:
-		// wipeAndVerify skips its early wipe when the pages are read-only, and
-		// a read-only page cannot be overwritten by anyone, this package
-		// included, without the very mprotect that was denied. Under a
-		// PERMANENT denial -- a seccomp filter is the realistic threat --
-		// keeping the mapping would leave the material resident in locked
-		// memory for the process lifetime, and retrying cannot help.
-		//
-		// So hand the pages back unwiped, with the same munmap step 3 makes.
-		// The kernel zeroes an anonymous page before any reuse and these were
-		// mlock'd for their whole life, so nothing can read the material
-		// afterwards and no copy reached swap. No munlock first: munmap drops
-		// the lock with the mapping, and a refused munlock here would only
-		// keep material resident that the unmap would have removed.
-		//
-		// This is the ONE path that unmaps material it could not wipe, and it
-		// is reported, never silent. Returning nil here would collapse
-		// "released the normal way" into "released after the wipe was
-		// refused", and the caller could not tell a healthy teardown from a
-		// sandbox quietly removing a security step.
+		// A frozen region cannot be wiped without the denied mprotect, and
+		// under a permanent denial (seccomp) keeping it would leave the
+		// material resident for the process lifetime. Unmap it unwiped: it
+		// was mlock'd throughout and the kernel zeroes anonymous pages before
+		// reuse. No munlock first; munmap drops the lock.
 		if uerr := unmapMemory(m.memory); uerr != nil {
-			// Refused too: keep everything. The region is still mapped and may
-			// still hold material, and dropping the handle would strand it
-			// with no way to retry. Not unlocked on this path, so the pages are
-			// still mlock'd unless an earlier attempt already unlocked them.
+			// Refused too: keep everything for a retry.
 			return &pagesHeldError{err: errors.Join(err, uerr), locked: !m.unlocked}
 		}
 
 		m.forget()
-		// The refusal arrives wrapped as a LockedMemoryError, and carrying
-		// that wrapper would make this error ALSO match
-		// ErrLockedMemoryUnavailable — which callers read as "the pages are
-		// still held", the opposite of what happened here: they are gone,
-		// unmapped without the in-process wipe. The two classes are kept
-		// disjoint (#98): the underlying OS failure is carried directly, so
-		// errors.As still reaches the errno, but only ErrReleasedWithoutWipe
-		// matches.
+		// Carry the raw OS error, not the LockedMemoryError wrapper, so this
+		// matches only ErrReleasedWithoutWipe and never reads as "pages still
+		// held".
 		cause := err
 		var lme *LockedMemoryError
 		if errors.As(err, &lme) {
@@ -646,17 +310,9 @@ func (m *mapping) release() error {
 		return &UnwipedReleaseError{Cause: cause}
 	}
 
-	// Step 2. At most ONE successful unlock per mapping, recorded so a retry
-	// after a refused munmap goes straight to the munmap. See mapping.unlocked:
-	// on Windows a second unlock is refused and the retry would never get there.
-	//
-	// An abandoned mapping does not stop at a refused unlock. abandon's own
-	// rollback carries on to the unmap when munlock is refused, because munmap
-	// drops the lock along with the mapping, and its retries must do the same:
-	// returning here would leave a locked orphan — and the charge kept for it —
-	// stranded for as long as munlock stays refused, however available the
-	// unmap became. An enclave keeps the old order, since its pages may still
-	// be the subject of a retry that has to unlock before anything else.
+	// Step 2. An enclave stops at a refused unlock; an abandoned mapping goes
+	// on to the munmap, which drops the lock, rather than strand a locked
+	// orphan while munlock stays refused.
 	var unlockErr error
 	if !m.unlocked {
 		if err := unlockMemory(m.inner); err != nil {
@@ -674,8 +330,7 @@ func (m *mapping) release() error {
 		return m.held(&LockedMemoryError{Cause: errors.Join(unlockErr, err)})
 	}
 
-	// The pages are gone, so this is the one place the sticky flags may be
-	// cleared — there is no mapping left for them to describe.
+	// The pages are gone: the only place the sticky flags may be cleared.
 	corrupted := m.corrupted
 	m.forget()
 
@@ -685,10 +340,7 @@ func (m *mapping) release() error {
 	return nil
 }
 
-// forget drops every handle into a mapping whose pages the kernel has taken
-// back, and clears the state a retried release would act on. It is called only
-// after a successful unmap: anything earlier would strand a region that is
-// still mapped.
+// forget clears the mapping; call it only after a successful unmap.
 func (m *mapping) forget() {
 	m.memory, m.data, m.inner = nil, nil, nil
 	m.preguard, m.postguard, m.canary = nil, nil, nil
@@ -696,11 +348,8 @@ func (m *mapping) forget() {
 	m.abandoned = false
 }
 
-// held reports a refused unlock or unmap that keeps the mapping, joining in a
-// corruption the same release already detected so the one attempt that saw it
-// cannot drop it. Whether the pages are still mlock'd is read from
-// mapping.unlocked rather than passed in, so it is the same state the next
-// retry acts on. See release.
+// held wraps a refused unlock or unmap as a pagesHeldError, joining in any
+// corruption already detected.
 func (m *mapping) held(err error) error {
 	if m.corrupted {
 		err = errors.Join(ErrEnclaveCorrupted, err)
@@ -708,11 +357,8 @@ func (m *mapping) held(err error) error {
 	return &pagesHeldError{err: err, locked: !m.unlocked}
 }
 
-// wipe overwrites b with zeroes.
-//
-// The KeepAlive is what stops the compiler removing the loop as a dead store to
-// memory nothing reads afterwards — golang/go#33325. Without it this function
-// can legally compile to nothing at all.
+// wipe overwrites b with zeroes. The KeepAlive stops the compiler eliminating
+// the loop as a dead store.
 func wipe(b []byte) {
 	for i := range b {
 		b[i] = 0

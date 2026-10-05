@@ -16,21 +16,13 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// coreDumpMapFlags asks for the exclusion at mapping time as well, with
-// MAP_NOCORE, so the pages are never eligible for a core file even in the
-// instant between the mmap and the madvise below.
+// coreDumpMapFlags excludes the pages from the moment they are mapped, before
+// the madvise below runs.
 const coreDumpMapFlags = unix.MAP_NOCORE
 
 // excludeFromCoreDump marks b so the kernel omits it from any core dump,
-// independently of RLIMIT_CORE.
-//
-// MADV_NOCORE is the per-mapping equivalent of Linux's MADV_DONTDUMP on
-// FreeBSD, where it has been since FreeBSD 4, and on DragonFly, which inherited
-// it from there; golang.org/x/sys defines it for both. The mapping already
-// carries MAP_NOCORE, but a flag the kernel silently ignored would leave
-// nothing to notice, so this call is the VERIFIED one: as on Linux, a failure
-// is surfaced and fails the allocation rather than handing back an enclave
-// whose pages could be written to disk in plaintext.
+// independently of RLIMIT_CORE. MAP_NOCORE could be ignored silently, so this
+// madvise is the verified step: a failure fails the allocation.
 func excludeFromCoreDump(b []byte) error {
 	return os.NewSyscallError("madvise", unix.Madvise(b, unix.MADV_NOCORE))
 }

@@ -18,15 +18,10 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// TestCoreDumpsDisabled_LowersBothLimitsToZero pins the process-wide hardening
-// to memcall.DisableCoreDumps' exact semantics, which #86 had to keep: RLIMIT_CORE
-// lowered to zero SOFT AND HARD. A soft-only zero would read the same through
-// CoreDumpsDisabled and be undone by any library that raises it again; the hard
-// zero is what makes it stick for an unprivileged process.
-//
-// The answer is environment-dependent, so both outcomes are asserted rather
-// than one assumed: success must be visible in the kernel's own rlimit, and a
-// failure must be the setrlimit refusal itself, named.
+// TestCoreDumpsDisabled_LowersBothLimitsToZero pins that RLIMIT_CORE is
+// lowered to zero soft and hard, so an unprivileged process cannot raise it
+// again. Success must be visible in the kernel's rlimit; failure must be the
+// named setrlimit refusal.
 func TestCoreDumpsDisabled_LowersBothLimitsToZero(t *testing.T) {
 	err := CoreDumpsDisabled()
 	if err != nil {

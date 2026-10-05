@@ -6,8 +6,6 @@
 // This file is part of go-enclave. Use of this source code is governed by the
 // MIT license that can be found in the LICENSE file.
 
-//go:build linux
-
 package enclave
 
 import (
@@ -24,32 +22,17 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// TestRlimInfinityMatchesTheKernelConstant backs the claim made where
-// rlimInfinity is declared. The constant is spelled out there because
-// unix.RLIM_INFINITY is untyped and generated per architecture and the
-// comparison needs a uint64; if that spelling ever stops matching the ABI, the
-// unlimited case silently becomes "some enormous finite ceiling" and every
-// budget passes for the wrong reason.
+// TestRlimInfinityMatchesTheKernelConstant pins rlimInfinity to
+// unix.RLIM_INFINITY, so unlimited never reads as an enormous finite ceiling.
 func TestRlimInfinityMatchesTheKernelConstant(t *testing.T) {
 	if rlimInfinity != uint64(unix.RLIM_INFINITY) {
 		t.Fatalf("rlimInfinity = %#x, but unix.RLIM_INFINITY = %#x", rlimInfinity, uint64(unix.RLIM_INFINITY))
 	}
 }
 
-// TestDiscoverLockedMemoryLimit_LinuxAlwaysLooks pins the claim that
-// LimitUnsupported means "this package did not look", not "this host has no
-// ceiling" — Linux always has one to read, so reporting it here would be a
-// silent instrument: a discovery that answers without looking reads exactly
-// like one that looked and found nothing, and the constructor then accepts
-// every budget while appearing to check.
-//
-// It is separate from the subprocess contract test on purpose, and the reason
-// is measured. Replacing the Linux discovery body with
-// `LockedMemoryLimit{Source: LimitUnsupported}` was caught ONLY by that
-// subprocess test — and that test asserts the privileged contract instead
-// whenever the runner holds CAP_IPC_LOCK and cannot drop it, so on a privileged
-// CI the mutant survived the entire suite. This assertion needs no privilege,
-// no injection and no subprocess, so it holds on every runner.
+// TestDiscoverLockedMemoryLimit_LinuxAlwaysLooks pins that Linux never reports
+// LimitUnsupported. It needs no privilege or subprocess, so it holds on a runner
+// where the subprocess contract test asserts only the privileged contract.
 func TestDiscoverLockedMemoryLimit_LinuxAlwaysLooks(t *testing.T) {
 	limit, err := DiscoverLockedMemoryLimit()
 	if err != nil {
@@ -68,13 +51,11 @@ const (
 	memlockContractMarker = "GO_ENCLAVE_MEMLOCK_CONTRACT"
 
 	// limitDiscovered is logged once the child has read back the ceiling it
-	// injected. Without it a discovery that returned some unrelated figure
-	// would still let the refusal below look correct.
+	// injected.
 	limitDiscovered = "the discovered ceiling matches the injected RLIMIT_MEMLOCK"
 
-	// withinLimitAccepted is the CONTROL. An implementation that refused every
-	// budget would satisfy overLimitRefused and fail this, which is the whole
-	// reason it is a required line and not an incidental assertion.
+	// withinLimitAccepted is the control: an implementation that refused every
+	// budget would fail it.
 	withinLimitAccepted = "a budget equal to the discovered ceiling was accepted and allocates"
 
 	// overLimitRefused is logged once a budget one byte above the ceiling has
@@ -82,38 +63,28 @@ const (
 	overLimitRefused = "a budget above the discovered ceiling was refused with both figures named"
 
 	// notEnforcedConfirmed replaces the three lines above when the child holds
-	// CAP_IPC_LOCK and could not drop it. It is not a skip: it asserts the
-	// documented privileged contract instead — an unenforced limit refuses
-	// nothing — and the parent reports which of the two contracts ran.
+	// CAP_IPC_LOCK and could not drop it; it asserts that an unenforced limit
+	// refuses nothing.
 	notEnforcedConfirmed = "an unenforced RLIMIT_MEMLOCK refused nothing"
 
-	// constructorReturned is logged last, and its presence is the assertion
-	// that the refusal came back as a value. A library must never end its
-	// host's process over a resource limit, and a child that had exited or
-	// panicked could not print this.
+	// constructorReturned is logged last, proving the refusal came back as a
+	// value rather than ending the process.
 	constructorReturned = "the refusal returned to its caller; the process was not aborted"
 )
 
 // TestNewAllocatorWithinRLimit_StartupContract injects an RLIMIT_MEMLOCK
-// ceiling and asserts the whole startup contract against it: the ceiling is
-// discovered, a budget within it is accepted AND usable, a budget above it is
-// refused with a typed error naming both figures, and the refusal arrives as a
-// return value rather than as a dead process.
-//
-// It runs in a subprocess because the fault is process-wide — setrlimit here
-// would bind every other test in the package — through runTestChild in
-// enclave_linux_test.go, including the rule that the child must log a
-// confirmation line so a child that verified nothing cannot be mistaken for one
-// that did.
+// ceiling and asserts that it is discovered, a budget within it is accepted and
+// usable, and a budget above it is refused with a typed error naming both
+// figures, returned as a value. It runs in a subprocess (runTestChild) because
+// setrlimit is process-wide.
 func TestNewAllocatorWithinRLimit_StartupContract(t *testing.T) {
 	if os.Getenv(memlockContractMarker) == "1" {
 		memlockContractChild(t)
 		return
 	}
 
-	// There is no legitimate skip in the child: lowering one's own soft limit
-	// needs no privilege, and the privileged case has a contract of its own to
-	// assert rather than to duck. runTestChild fails a child that skipped.
+	// No legitimate skip: lowering one's own soft limit needs no privilege.
+	// runTestChild fails a child that skipped.
 	out, err := runTestChild(t, "TestNewAllocatorWithinRLimit_StartupContract", memlockContractMarker, "1")
 	if err != nil {
 		t.Fatalf("subprocess failed: %v\n%s", err, out)
@@ -125,10 +96,7 @@ func TestNewAllocatorWithinRLimit_StartupContract(t *testing.T) {
 
 	switch {
 	case strings.Contains(out, notEnforcedConfirmed):
-		// The child proved — with its OWN capability read, not the package's —
-		// that it holds CAP_IPC_LOCK and could not drop it. Say so loudly: this
-		// run did NOT exercise the refusal, and a reader of a green log needs to
-		// know which of the two contracts was measured.
+		// This run did not exercise the refusal; say which contract was measured.
 		t.Logf("ran the unenforced-limit contract (CAP_IPC_LOCK held and not droppable); the refusal path was not exercised here")
 	default:
 		for _, want := range []string{limitDiscovered, withinLimitAccepted, overLimitRefused} {
@@ -142,17 +110,13 @@ func TestNewAllocatorWithinRLimit_StartupContract(t *testing.T) {
 func memlockContractChild(t *testing.T) {
 	t.Helper()
 
-	// Capabilities are PER-THREAD on Linux, and the Go runtime moves goroutines
-	// between threads. Pin this goroutine before touching them, and leave it
-	// pinned, or the capability state asserted below belongs to one thread while
-	// the mlock happens on another. Never unlocked: the test ends with the
+	// Capabilities are per-thread; stay pinned so the asserted state is the
+	// one the mlock runs under. Never unlocked: the test ends with the
 	// process.
 	runtime.LockOSThread()
 
-	// Inject the ceiling. Lowering one's own soft limit requires no privilege,
-	// and raising it towards the hard limit does not either. 64 pages is far
-	// below any plausible real budget and still several times what the control
-	// allocation needs.
+	// Inject the ceiling: 64 pages, well above what the control needs.
+	// Lowering one's own soft limit requires no privilege.
 	var original unix.Rlimit
 	if err := unix.Getrlimit(unix.RLIMIT_MEMLOCK, &original); err != nil {
 		t.Fatalf("cannot read RLIMIT_MEMLOCK: %v", err)
@@ -168,18 +132,12 @@ func memlockContractChild(t *testing.T) {
 		t.Fatalf("cannot set RLIMIT_MEMLOCK to %d: %v", target, err)
 	}
 
-	// WHICH CONTRACT TO ASSERT IS DECIDED BY AN ORACLE THIS PACKAGE DOES NOT
-	// OWN. Asking memlockRLimitEnforced() instead would let the test follow the
-	// implementation wherever it went: invert the capability sense in that
-	// function and an unprivileged run would quietly assert the PRIVILEGED
-	// contract — which it satisfies — and stay green while the refusal it
-	// exists to guard had been disabled for every ordinary process. Measured:
-	// that mutant survives when the branch is chosen by the production
-	// function, and dies when it is chosen here.
+	// The contract is chosen by the test's own capability read, not by
+	// memlockRLimitEnforced: otherwise an inverted capability check would make
+	// an unprivileged run assert the privileged contract and stay green.
 	if testHoldsIPCLock(t) {
-		// Running privileged. Give the capability up so the mainstream contract
-		// can be measured; if that is refused, assert the privileged contract
-		// rather than pretending to have measured the other one.
+		// Privileged: drop the capability to measure the mainstream contract;
+		// if that is refused, assert the privileged one.
 		if err := dropIPCLock(); err != nil {
 			t.Logf("could not drop CAP_IPC_LOCK (%v); asserting the unenforced contract", err)
 		}
@@ -192,14 +150,11 @@ func memlockContractChild(t *testing.T) {
 	}
 
 	enforcedContract(t, target)
-	// Reaching this line is the assertion. A constructor that called
-	// log.Fatal, os.Exit or panic on a host resource limit would have taken the
-	// process out above, and the parent requires this line.
+	// Reaching this line proves the constructor did not exit or panic.
 	t.Log(constructorReturned)
 }
 
-// enforcedContract asserts the mainstream case: RLIMIT_MEMLOCK binds, so the
-// ceiling is a ceiling.
+// enforcedContract asserts the mainstream case: RLIMIT_MEMLOCK binds.
 func enforcedContract(t *testing.T, target uint64) {
 	t.Helper()
 
@@ -212,10 +167,7 @@ func enforcedContract(t *testing.T, target uint64) {
 	}
 	t.Log(limitDiscovered)
 
-	// CONTROL. A budget EQUAL to the ceiling is within it and must be accepted,
-	// and the allocator it returns must work — an implementation that refused
-	// everything, or that returned a broken allocator, dies here rather than
-	// passing the refusal test below.
+	// Control: a budget equal to the ceiling is accepted and usable.
 	a, err := NewAllocatorWithinRLimit(int64(target))
 	if err != nil {
 		t.Fatalf("NewAllocatorWithinRLimit(%d) refused a budget equal to the ceiling: %v", target, err)
@@ -234,10 +186,8 @@ func enforcedContract(t *testing.T, target uint64) {
 	e.Destroy()
 	t.Log(withinLimitAccepted)
 
-	// ONE BYTE over. Paired with the control above this pins the comparison at
-	// the exact discovered figure, in bytes: a `>=` refuses the control, a
-	// reversed comparison refuses nothing here, and a comparison against any
-	// other quantity lands on neither boundary.
+	// One byte over: with the control, pins the comparison at the exact
+	// discovered figure.
 	for _, over := range []int64{int64(target) + 1, int64(target) * 2} {
 		bad, err := NewAllocatorWithinRLimit(over)
 		if bad != nil {
@@ -246,8 +196,7 @@ func enforcedContract(t *testing.T, target uint64) {
 		if !errors.Is(err, ErrBudgetExceedsRLimit) {
 			t.Fatalf("NewAllocatorWithinRLimit(%d) err = %v, want ErrBudgetExceedsRLimit", over, err)
 		}
-		// Distinguishable from its neighbors ON THE REAL PATH, not only in the
-		// hand-built error of the portable test.
+		// Distinguishable from its neighbors on the real path.
 		if errors.Is(err, ErrInvalidBudget) || errors.Is(err, ErrLockedMemoryUnavailable) || errors.Is(err, ErrBudgetExhausted) {
 			t.Fatalf("the refusal also matched a neighboring sentinel: %v", err)
 		}
@@ -259,9 +208,7 @@ func enforcedContract(t *testing.T, target uint64) {
 		if typed.Requested != over || typed.Limit.Bytes != int64(target) || !typed.Limit.Bounded {
 			t.Fatalf("RLimitError = %+v, want Requested=%d and the bounded ceiling %d", typed, over, target)
 		}
-		// The discovered figure has to be IN THE MESSAGE. An operator reading a
-		// startup failure needs the number to change, not a statement that some
-		// number was too big.
+		// The discovered figure must be in the message.
 		if !strings.Contains(err.Error(), strconv.FormatUint(target, 10)) {
 			t.Fatalf("error message %q does not name the discovered limit %d", err.Error(), target)
 		}
@@ -269,9 +216,8 @@ func enforcedContract(t *testing.T, target uint64) {
 	t.Log(overLimitRefused)
 }
 
-// unenforcedContract asserts the privileged case: the process holds
-// CAP_IPC_LOCK, mlock may exceed RLIMIT_MEMLOCK, and so a budget above it is
-// NOT refused — the figure is reported for diagnostics only.
+// unenforcedContract asserts the privileged case: with CAP_IPC_LOCK a budget
+// above RLIMIT_MEMLOCK is not refused.
 func unenforcedContract(t *testing.T, target uint64) {
 	t.Helper()
 
@@ -293,37 +239,29 @@ func unenforcedContract(t *testing.T, target uint64) {
 	t.Log(notEnforcedConfirmed)
 }
 
-// ipcLockBit is CAP_IPC_LOCK's place in the capability bitmap, which is split
-// into 32-bit words. It is 14, so the low word; the indices are derived rather
-// than written as 0 so this stays correct if copied for a higher capability.
+// ipcLockBit is CAP_IPC_LOCK's word and bit in the capability bitmap.
 const (
 	ipcLockWord = unix.CAP_IPC_LOCK / 32
 	ipcLockBit  = uint32(1) << (unix.CAP_IPC_LOCK % 32)
 )
 
-// testHoldsIPCLock reports whether this THREAD holds CAP_IPC_LOCK, read
-// independently of the package code under test so that the choice of which
-// contract to assert is never made by the thing being asserted.
+// testHoldsIPCLock reports whether this thread holds CAP_IPC_LOCK, read
+// independently of the code under test.
 func testHoldsIPCLock(t *testing.T) bool {
 	t.Helper()
 
 	hdr := unix.CapUserHeader{Version: unix.LINUX_CAPABILITY_VERSION_3}
 	var data [2]unix.CapUserData
 	if err := unix.Capget(&hdr, &data[0]); err != nil {
-		// Not a skip and not a guess: a host where the capability cannot be read
-		// cannot tell the two contracts apart, and running the wrong one would
-		// report a verification that did not happen.
+		// Unreadable capability: the two contracts cannot be told apart.
 		t.Fatalf("capget: %v", err)
 	}
 	return data[ipcLockWord].Effective&ipcLockBit != 0
 }
 
 // dropIPCLock removes CAP_IPC_LOCK from this thread's effective and permitted
-// sets, so RLIMIT_MEMLOCK starts binding. Permitted goes too: leaving it would
-// let anything raise the capability back into the effective set, and then the
-// state the test asserted is not the state the mlock runs under.
-//
-// The caller must already hold the OS thread, since capset is per-thread.
+// sets, so RLIMIT_MEMLOCK binds and the capability cannot be raised back. The
+// caller must hold the OS thread, since capset is per-thread.
 func dropIPCLock() error {
 	hdr := unix.CapUserHeader{Version: unix.LINUX_CAPABILITY_VERSION_3}
 	var data [2]unix.CapUserData
@@ -352,25 +290,17 @@ const (
 )
 
 // TestAllocator_RLimitContract_UnderAnInjectedCeiling asserts the sticky
-// ceiling contract against a ceiling this test controls, which is the only way
-// to reach the figures and the only way to demonstrate the property the whole
-// issue turns on: that the ceiling is re-read on every raise rather than
-// remembered from construction.
-//
-// It runs in a subprocess because setrlimit is process-wide and would bind every
-// other test in the package — through runTestChild in enclave_linux_test.go,
-// including the rule that the child logs a confirmation line for each
-// contract it verified, so a child that verified nothing cannot be mistaken
-// for one that did.
+// ceiling contract against an injected ceiling, including that the ceiling is
+// re-read on every raise rather than remembered from construction. It runs in a
+// subprocess (runTestChild) because setrlimit is process-wide.
 func TestAllocator_RLimitContract_UnderAnInjectedCeiling(t *testing.T) {
 	if os.Getenv(retuneContractMarker) == "1" {
 		retuneContractChild(t)
 		return
 	}
 
-	// A skip here would be a contract nobody checked: lowering one's own soft
-	// limit needs no privilege, and the privileged case has its own contract to
-	// assert rather than to duck. runTestChild fails a child that skipped.
+	// No legitimate skip: lowering one's own soft limit needs no privilege.
+	// runTestChild fails a child that skipped.
 	out, err := runTestChild(t, "TestAllocator_RLimitContract_UnderAnInjectedCeiling", retuneContractMarker, "1")
 	if err != nil {
 		t.Fatalf("subprocess failed: %v\n%s", err, out)
@@ -381,8 +311,7 @@ func TestAllocator_RLimitContract_UnderAnInjectedCeiling(t *testing.T) {
 
 	switch {
 	case strings.Contains(out, retuneUnenforcedConfirmed):
-		// Say so loudly. This run did NOT exercise a single refusal, and a
-		// reader of a green log has to know which contract was measured.
+		// This run did not exercise a refusal; say which contract was measured.
 		t.Logf("ran the unenforced-limit contract (CAP_IPC_LOCK held and not droppable); no refusal was exercised here")
 	default:
 		for _, want := range []string{
@@ -404,9 +333,7 @@ func TestAllocator_RLimitContract_UnderAnInjectedCeiling(t *testing.T) {
 func retuneContractChild(t *testing.T) {
 	t.Helper()
 
-	// Capabilities are per-thread and the runtime moves goroutines between
-	// threads; pin before touching them and stay pinned, or the capability
-	// state asserted is not the one the checks run under.
+	// Capabilities are per-thread; pin and stay pinned.
 	runtime.LockOSThread()
 
 	var original unix.Rlimit
@@ -429,11 +356,8 @@ func retuneContractChild(t *testing.T) {
 	}
 	setCeiling(high)
 
-	// WHICH CONTRACT TO ASSERT IS DECIDED BY AN ORACLE THIS PACKAGE DOES NOT
-	// OWN — testHoldsIPCLock reads the capability itself rather than asking the
-	// production code, for the reason spelled out in memlock_linux_test.go: a
-	// test that asks the implementation which contract applies follows the
-	// implementation wherever it goes, including into a bug.
+	// The contract is chosen by testHoldsIPCLock, not the production code,
+	// as in the startup-contract child above.
 	if testHoldsIPCLock(t) {
 		if err := dropIPCLock(); err != nil {
 			t.Logf("could not drop CAP_IPC_LOCK (%v); asserting the unenforced contract", err)
@@ -449,8 +373,7 @@ func retuneContractChild(t *testing.T) {
 	t.Log(retuneChildFinished)
 }
 
-// retuneEnforcedContract asserts the mainstream case, where RLIMIT_MEMLOCK
-// binds and the ceiling is therefore a ceiling.
+// retuneEnforcedContract asserts the mainstream case: RLIMIT_MEMLOCK binds.
 func retuneEnforcedContract(t *testing.T, high, low uint64, setCeiling func(uint64)) {
 	t.Helper()
 
@@ -462,10 +385,7 @@ func retuneEnforcedContract(t *testing.T, high, low uint64, setCeiling func(uint
 		t.Fatalf("NewAllocatorWithinRLimit(%d) under a %d-byte ceiling: %v", hi/2, hi, err)
 	}
 
-	// CONTROL FIRST. A raise that fits must be accepted, and the allocator must
-	// still work afterwards — an implementation that refused every raise, or
-	// that returned success without raising, dies here rather than passing the
-	// refusal below.
+	// Control: a raise that fits is accepted and the allocator still works.
 	if err := a.SetLimit(hi - pageSize); err != nil {
 		t.Fatalf("SetLimit(%d) under a %d-byte ceiling was refused: %v", hi-pageSize, hi, err)
 	}
@@ -483,9 +403,7 @@ func retuneEnforcedContract(t *testing.T, high, low uint64, setCeiling func(uint
 	e.Destroy()
 	t.Log(retuneWithinCeilingAccepted)
 
-	// ONE BYTE over. Paired with the control this pins the comparison at the
-	// exact discovered figure: a `>=` refuses the control, a reversed comparison
-	// refuses nothing here.
+	// One byte over: pins the comparison at the exact discovered figure.
 	for _, over := range []int64{hi + 1, hi * 2} {
 		before := a.Limit()
 		err := a.SetLimit(over)
@@ -512,11 +430,9 @@ func retuneEnforcedContract(t *testing.T, high, low uint64, setCeiling func(uint
 	}
 	t.Log(retuneOverCeilingRefused)
 
-	// FRESHNESS, DOWNWARD. Lower the ceiling under the running allocator. A
-	// budget that was comfortably legal a moment ago must now be refused, and
-	// the error must name the NEW figure. An implementation that cached the
-	// ceiling at construction still sees the old one and admits this raise,
-	// which is the mutation this whole subprocess exists to kill.
+	// Freshness, downward: lower the ceiling under the running allocator. A
+	// previously legal raise must now be refused, naming the new figure; a
+	// ceiling cached at construction would admit it.
 	setCeiling(low)
 	target := hi - pageSize/2 // above lo, below hi: legal before, illegal now
 	err = a.SetLimit(target)
@@ -532,9 +448,7 @@ func retuneEnforcedContract(t *testing.T, high, low uint64, setCeiling func(uint
 		t.Fatalf("the refusal named %d as the ceiling, want the CURRENT %d", typed.Limit.Bytes, lo)
 	}
 
-	// Only raises are checked. The budget is above the ceiling right now, and a
-	// LOWERING must still be allowed, or an over-ceiling allocator could never
-	// move back towards compliance.
+	// Only raises are checked: a lowering above the ceiling is allowed.
 	if err := a.SetLimit(lo * 2); err != nil {
 		t.Fatalf("SetLimit(%d) as a lowering under a %d-byte ceiling was refused: %v", lo*2, lo, err)
 	}
@@ -543,9 +457,7 @@ func retuneEnforcedContract(t *testing.T, high, low uint64, setCeiling func(uint
 	}
 	t.Log(retuneLoweringUnchecked)
 
-	// FRESHNESS, UPWARD. Put the ceiling back. The same raise that was just
-	// refused must now be accepted — a ceiling cached at the FIRST check, rather
-	// than at construction, would still refuse it.
+	// Freshness, upward: restore the ceiling; the refused raise now succeeds.
 	setCeiling(high)
 	if err := a.SetLimit(target); err != nil {
 		t.Fatalf("after the ceiling returned to %d, SetLimit(%d) was still refused: %v "+
@@ -556,9 +468,8 @@ func retuneEnforcedContract(t *testing.T, high, low uint64, setCeiling func(uint
 	}
 	t.Log(retuneFreshCeilingHonored)
 
-	// ForceLimit is the documented override: it raises above the ceiling without
-	// reading it. The allocator must remain bound afterwards — an override is
-	// not an opt-out.
+	// ForceLimit raises above the ceiling without reading it, and the
+	// allocator stays bound.
 	excess, err := a.ForceLimit(hi * 4)
 	if err != nil {
 		t.Fatalf("ForceLimit(%d) under a %d-byte ceiling: %v (the override picked up the check)", hi*4, hi, err)
@@ -593,9 +504,7 @@ func retuneEnforcedContract(t *testing.T, high, low uint64, setCeiling func(uint
 		t.Fatalf("a refused transfer moved something: src %d->%d, dst %d->%d",
 			srcBefore, src.Limit(), dstBefore, dst.Limit())
 	}
-	// CONTROL: a transfer that leaves dst within the ceiling must succeed, or
-	// "refuses over the ceiling" would be indistinguishable from "refuses every
-	// transfer into a bound allocator".
+	// Control: a transfer that leaves dst within the ceiling succeeds.
 	if err := src.TransferTo(dst, hi/8); err != nil {
 		t.Fatalf("a transfer leaving dst within the ceiling was refused: %v", err)
 	}
@@ -604,8 +513,7 @@ func retuneEnforcedContract(t *testing.T, high, low uint64, setCeiling func(uint
 	}
 	t.Log(retuneTransferJudged)
 
-	// And the opt-in half, under the very same ceiling: an allocator that never
-	// asked for the contract is never judged by it.
+	// An allocator that never opted in is never judged by the ceiling.
 	plain, err := NewAllocator(hi / 8)
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
@@ -626,9 +534,8 @@ func retuneEnforcedContract(t *testing.T, high, low uint64, setCeiling func(uint
 	t.Log(retunePlainUnaffected)
 }
 
-// retuneUnenforcedContract asserts the privileged case: the process holds
-// CAP_IPC_LOCK, so mlock may exceed RLIMIT_MEMLOCK and the figure is not a
-// ceiling. Nothing is refused, on any path.
+// retuneUnenforcedContract asserts the privileged case: nothing is refused,
+// on any path.
 func retuneUnenforcedContract(t *testing.T, high uint64) {
 	t.Helper()
 
@@ -654,8 +561,7 @@ func retuneUnenforcedContract(t *testing.T, high uint64) {
 }
 
 // testMemlockHardLimit reports whether the hard RLIMIT_MEMLOCK reaches the
-// suite's requirement — what a fault-injection test can raise the soft limit
-// to after dropping CAP_IPC_LOCK — and the hard limit itself.
+// suite's requirement, and the hard limit itself.
 func testMemlockHardLimit() (uint64, bool) {
 	var rl unix.Rlimit
 	if err := unix.Getrlimit(unix.RLIMIT_MEMLOCK, &rl); err != nil {

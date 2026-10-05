@@ -63,6 +63,36 @@ heuristic in places, so a pass is weaker than the contract:
 - **Context handling** is checked only for contexts that ended before the call;
   cancellation arriving mid-call is not measured.
 
+Deliberately out of scope, because a conforming provider cannot satisfy it:
+
+- **Plaintext in the provider's own memory.** Every real backend decrypts into
+  a fresh slice (a TPM2 RSA decrypt, a PKCS#11 wrapper, a cloud KMS HTTP
+  response body), so the suite requires the transient be wiped, not that it
+  never exist. Key expansion inside `crypto/aes` falls under the
+  validated-module carve-out.
+- **Refusing another instance's blob.** A device-backed provider shares its key
+  across instances, so a blob from a second instance genuinely is its own.
+- **A residue sweep for the root.** A `RootUnsealer` legitimately retains the
+  root (`SoftwareProvider` holds it in a locked enclave), so only
+  `KeyProtector` is swept.
+
+The spy is the primary instrument and the residue sweep corroborates it. The
+sweep is the only one that sees a retained copy, but a negative from it is
+weak: bytes that transit a stack local can be stranded on a freed old stack by
+stack growth, out of any wipe's reach, and a sweep whose scan buffer is not
+wiped finds its own copy of the needle. The sweep therefore wipes the prefix of
+its scan buffer it requested from `ReadAt` after every mapping (not the whole
+1 MiB buffer, which is too slow under the race detector), sweeps
+kernel-named anonymous mappings such as `[anon: Go: heap]`, and keeps the
+needle only in locked memory so the suite never plants a heap copy itself.
+
+`UnsealRoot` writing the whole destination is proved exactly: two calls into
+destinations pre-filled with different canaries must agree, so every byte was
+written. That equality also requires a root to be deterministic within an
+instance, so two Sealers over one device hold the same root. A provider that
+can unseal only once sets `SingleUseRoot`, since the seam guarantees only that a
+Sealer calls `UnsealRoot` at most once.
+
 The harness itself never copies a provider's root onto the ordinary heap.
 Against a real device `UnsealRoot` hands back that device's actual root key, so
 every destination, comparison snapshot and control the root checks use is a

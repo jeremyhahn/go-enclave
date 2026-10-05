@@ -19,15 +19,10 @@ import (
 	enclave "github.com/jeremyhahn/go-enclave"
 )
 
-// Covers enclave.go: where a MemoryEnclave's material is in the process while
-// it lives, and that it is nowhere after Destroy — measured by sweeping every
-// readable mapping of the process (procfs_test.go), never by asking the
-// library.
-//
-// Each sweep is paired with a CONTROL that proves it can see what it claims is
-// absent: the material is found exactly where it is known to be before it is
-// required to be gone. A sweep that found nothing in the first place would
-// pass the absence check for free.
+// Where a MemoryEnclave's material lives, and that it is gone after Destroy,
+// measured by sweeping every readable mapping (procfs_test.go). Each absence
+// check is preceded by a control that finds the material where it is known to
+// be, so a blind sweep cannot pass.
 
 // TestEnclaveMaterialLivesOnlyInItsEnclaveAndIsGoneAfterDestroy follows one
 // secret through every MemoryEnclave constructor a consumer has.
@@ -38,8 +33,7 @@ func TestEnclaveMaterialLivesOnlyInItsEnclaveAndIsGoneAfterDestroy(t *testing.T)
 			t.Fatalf("NewAllocator: %v", err)
 		}
 
-		// Generated straight into locked pages: the material never exists
-		// anywhere but the enclave, from the first byte to the last.
+		// Generated straight into locked pages: never anywhere but the enclave.
 		t.Run("NewMemoryEnclaveSized", func(t *testing.T) {
 			n := newNeedle(t)
 			e := enclaveFromNeedle(t, n)
@@ -51,10 +45,8 @@ func TestEnclaveMaterialLivesOnlyInItsEnclaveAndIsGoneAfterDestroy(t *testing.T)
 			destroyAndRequireGone(t, e, n)
 		})
 
-		// The ownership contract: the constructor WIPES the caller's slice, so
-		// the heap copy the material arrived in does not outlive it. The heap
-		// copy is also the sweep's control for the Go heap: it must be found
-		// there before the constructor runs.
+		// The constructor wipes the caller's slice. The heap copy is also the
+		// sweep's control: it must be found before the constructor runs.
 		t.Run("NewMemoryEnclave", func(t *testing.T) {
 			n := newNeedle(t)
 			src := heapBytes(needleLen)
@@ -74,9 +66,8 @@ func TestEnclaveMaterialLivesOnlyInItsEnclaveAndIsGoneAfterDestroy(t *testing.T)
 			destroyAndRequireGone(t, e, n)
 		})
 
-		// The DOCUMENTED cost of the copying constructor: the source survives
-		// on the heap until its owner wipes it, and the enclave's Destroy does
-		// not (cannot) reach it.
+		// The copying constructor's documented cost: the source survives on
+		// the heap until its owner wipes it; Destroy cannot reach it.
 		t.Run("NewMemoryEnclaveCopy", func(t *testing.T) {
 			n := newNeedle(t)
 			src := heapBytes(needleLen)
@@ -242,10 +233,8 @@ func TestEnclaveAccessorsTellTheTruth(t *testing.T) {
 			if s := e.String(); strings.Contains(s, secret) || strings.Contains(s, secret[:8]) {
 				t.Errorf("%s: String() leaks the material: %q", name, s)
 			}
-			// Open is the documented UNSAFE view: it aliases the enclave's own
-			// read-only pages (a write would fault), so it is read and dropped,
-			// never written. OpenString is the deliberate heap copy for legacy
-			// string APIs.
+			// Open aliases the enclave's read-only pages (a write would fault);
+			// OpenString is a deliberate heap copy.
 			//lint:ignore SA1019 the deprecated API keeps working until it is removed; this pins that.
 			b, err := e.Open()
 			if err != nil || string(b) != secret {
@@ -296,21 +285,18 @@ func TestEnclaveAccessorsTellTheTruth(t *testing.T) {
 	})
 }
 
-// TestKeyScheduleErasureReportsThisBuild: the devcontainer builds without
-// GOEXPERIMENT=runtimesecret, so this build does NOT erase key schedules and
-// must say so — a deployment's startup check would otherwise trust an erasure
-// that is not happening. The erasing build is proven by make
-// test-runtimesecret.
+// TestKeyScheduleErasureReportsThisBuild pins that a build without
+// GOEXPERIMENT=runtimesecret reports that it does not erase key schedules.
+// make test-runtimesecret covers the erasing build.
 func TestKeyScheduleErasureReportsThisBuild(t *testing.T) {
 	if enclave.KeyScheduleErasure() {
 		t.Fatal("KeyScheduleErasure() = true in a build without GOEXPERIMENT=runtimesecret")
 	}
 }
 
-// TestEnclaveErrorTypesRenderEveryValue: the release and allocation error
-// types are exported, so a caller can build any value of them — including the
-// zero value — and each must still render in the package's voice and unwrap
-// to nothing it does not carry.
+// TestEnclaveErrorTypesRenderEveryValue pins that every value of the exported
+// release and allocation error types, including the zero value, renders and
+// unwraps to nothing it does not carry.
 func TestEnclaveErrorTypesRenderEveryValue(t *testing.T) {
 	for _, e := range []error{&enclave.UnwipedReleaseError{}, &enclave.LockedMemoryError{}} {
 		if msg := e.Error(); !strings.HasPrefix(msg, "enclave: ") {
@@ -322,9 +308,9 @@ func TestEnclaveErrorTypesRenderEveryValue(t *testing.T) {
 	}
 }
 
-// TestDestroyedAndNilEnclavesAnswerSafely covers what every accessor of a
-// destroyed — or nil — MemoryEnclave reports: each answers with the
-// documented sentinel or zero value and never touches unmapped memory.
+// TestDestroyedAndNilEnclavesAnswerSafely pins that every accessor of a
+// destroyed or nil MemoryEnclave returns its documented sentinel or zero value
+// without touching unmapped memory.
 func TestDestroyedAndNilEnclavesAnswerSafely(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		var nilEnclave *enclave.MemoryEnclave

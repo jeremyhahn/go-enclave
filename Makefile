@@ -1,43 +1,24 @@
-# go-enclave — foundational locked-memory primitive.
-# Pure library, single package: no binaries, no container image.
+# go-enclave: locked-memory library. No binaries, no image, no protobuf, so no
+# docker-build/docker-run/proto targets.
 #
-# THE MAKEFILE IS THE CONTRACT (handbook devops §4). Every check CI runs is a
-# target here, and the workflows call the targets rather than carrying their
-# own commands or flags, so a red CI reproduces with the same `make` line on a
-# workstation. A check that exists only in a workflow file is debugged by
-# pushing commits.
-#
-# Not applicable here, deliberately (project-scaffold §4 lists them for every
-# repository): `docker-build` and `docker-run` — the library ships no binary and
-# no image, so there is nothing to containerise or to scan with `trivy image`;
-# `proto` — there is no protobuf and no generated code. They are absent rather
-# than stubbed, because a target that succeeds by doing nothing reports work
-# that was never done.
+# The Makefile is the contract: CI calls these targets and carries no commands
+# or flags of its own, so a red CI reproduces with the same `make` line locally.
 
-# Release tooling. MAINTAINER-ONLY: nothing in the build or test targets needs
-# any of this, and a contributor never invokes it.
+# Release tooling (maintainer-only). AGENT_GIT is the commit/signing wrapper; it
+# has no default on purpose and release-alpha fails closed without it. Set it in
+# the environment or a gitignored local.mk.
 #
-# AGENT_GIT points at a wrapper that supplies the committing identity and SSH
-# signing for release writes. It has NO DEFAULT ON PURPOSE — a hardcoded path
-# would publish one machine's directory layout to everyone who reads this file,
-# and the release target fails closed with an explanatory message rather than
-# silently doing the wrong thing. Set it in the environment, or in a gitignored
-# local.mk.
+# REPO_NAME must be the LITERAL repo name, never $(notdir $(CURDIR)): it selects
+# the signing identity, which must not depend on the checkout directory name.
 #
-# REPO_NAME must be the LITERAL repo name and never $(notdir $(CURDIR)): that
-# derives the SIGNING IDENTITY from the checkout directory, so a worktree, a CI
-# workspace or a clone named anything else signs and attributes the release
-# under the wrong name (measured: a directory named `mk` signed as `mk`).
-# The file `make help` reads, captured before anything is included (it is the
-# only entry in MAKEFILE_LIST here).
+# HELP_MAKEFILE is captured before any include, so `make help` reads this file.
 export HELP_MAKEFILE := $(firstword $(MAKEFILE_LIST))
 
 -include local.mk
 AGENT_GIT ?=
 REPO_NAME ?= go-enclave
 
-# Dependencies resolve from published tags, never from a workspace
-# (dependency-resolution §2): a stray go.work is inert for every target.
+# Dependencies resolve from published tags; a stray go.work is ignored.
 export GOWORK := off
 
 GOCMD    ?= go
@@ -45,38 +26,26 @@ PKG      := ./...
 COVERAGE_PROFILE := coverage.out
 COVERAGE_HTML    := coverage/coverage.html
 
-# raw_bind VARS: re-bind each variable to its RAW text and export it, so a
-# recipe reads it as a quoted shell variable ("$$VAR") and nothing in it — a
-# space, a quote, `$`, a backtick, `;` — is ever parsed as shell or make
-# source. The full reasoning is at EXTERNAL_VARS below. A path is data like
-# any other: the checkout directory, a tool path, an output file.
+# raw_bind VARS: re-bind each variable to its raw, unexpanded text and export
+# it. Recipes read it as "$$VAR", so tag/CLI/path values are never parsed as
+# shell or make source. See EXTERNAL_VARS.
 raw_bind = $(foreach v,$(1),$(eval override $(v) := $$(value $(v)))$(eval export $(v)))
 
-# sq TEXT: TEXT as one single-quoted shell word, for the one place a value
-# must be spliced into shell source — $(shell …), which in GNU Make 4.3 does
-# not see the variables this Makefile exports.
+# sq TEXT: TEXT as one single-quoted shell word, for $(shell ...), which does
+# not see exported variables in GNU Make 4.3.
 sq = '$(subst ','\'',$(1))'
 
-# GOCMD is the go command — a PATH, possibly with spaces in it, so it is one
-# quoted word ("$$GOCMD"), never spliced. AGENT_GIT and REPO_NAME likewise.
+# Paths may hold spaces or quotes: bind raw, read as "$$VAR".
 $(call raw_bind,GOCMD AGENT_GIT REPO_NAME COVERAGE_PROFILE COVERAGE_HTML)
 
 # ---------------------------------------------------------------------------
 # PINNED TOOLS
 #
-# Every analyser runs at exactly the version below, here and in CI. The pins
-# are the versions the CI runner image bakes (its versions.conf is the single
-# source of CI tool versions, owner-approved 2026-09-25), because CI runs with
-# TOOL_INSTALL=0 and refuses any other version — so raising a pin is a
-# two-step change: the image first, then this line. Each line says where the
-# next version comes from. This is a pin "specifically documented, in place,
-# with the reason" (devops §9, the clause permitting one), not the `@latest`
-# installs it replaced: `@latest` changed underneath the repository without a
-# commit and once produced unattributable "Version: dev" scans (go-luks2 #21).
+# Pins match the CI runner image, which runs with TOOL_INSTALL=0 and rejects
+# any other version: raise a pin in the image first, then here. Never @latest.
 #
 # Raise with the runner image: `go list -m github.com/golangci/golangci-lint/v2@latest`.
-# v2.13.2 is also the floor for linting Go 1.27: v2.12.2's vendored analysis
-# tools cannot parse the 1.27 stdlib ("unexpected expr: *ast.KeyValueExpr").
+# v2.13.2 is the floor for linting Go 1.27.
 GOLANGCI_VERSION    := v2.13.2
 # Raise with the runner image: `go list -m honnef.co/go/tools@latest` (v0.8.1 is release 2026.2.1).
 STATICCHECK_VERSION := v0.8.1
@@ -87,176 +56,86 @@ GOVULNCHECK_VERSION := v1.7.0
 # Raise with the runner image: `go list -m github.com/rhysd/actionlint@latest`.
 ACTIONLINT_VERSION  := v1.7.7
 #
-# The two tools below are release ARCHIVES, not `go install` builds, and each
-# carries four SHA-256s pinned here: the archive per Linux architecture
-# (checked before anything is unpacked) and the binary inside it (checked
-# after unpacking, and again before a cached copy is reused — a self-reported
-# version is not a trust anchor). scripts/tool.sh says why not `go install`
-# and why never a checksum file fetched beside the archive. Raise a version
-# and all four of its hashes together, or not at all.
+# trivy and shellcheck are release archives pinned by four SHA-256s each: the
+# archive per Linux arch and the binary inside it (see scripts/tool.sh).
+# Raise a version and all four of its hashes together, or not at all.
 #
-# trivy is NOT in the runner image, so every job that scans installs it. The
-# archive hashes match upstream's trivy_0.74.0_checksums.txt, and the amd64
-# binary is byte-identical to a copy acquired independently on 2026-08-27.
-# Raise by reading the new release's checksums file, downloading both
-# archives and confirming each hash. Held at v0.74.0 (2026-08-14), not
-# v0.75.0: v0.75.0 was published on 2026-10-01, the day this pin was set, and a
-# security scanner's release channel is a supply-chain target — a release gets
-# to age before it runs on our runners. Re-evaluate from 2026-10-08.
+# trivy is not in the runner image. Held at v0.74.0 so a scanner release ages
+# before it runs here; re-evaluate v0.75.0 from 2026-10-08.
 TRIVY_VERSION                  := v0.74.0
 TRIVY_SHA256_LINUX_AMD64       := 2ae6fe3ee734b7fdf11335663e18c75ea12dccc76062f09f164a3b0f8be4371a
 TRIVY_SHA256_LINUX_ARM64       := b94ce1976bbf3c15b514b605ee88be7c6d94a29be2302847ff01cb794d47aad5
 TRIVY_BIN_SHA256_LINUX_AMD64   := d89bcc6510a267f11b773398cbf1be5520ce39f9e8b6633178c4487f05b7d791
 TRIVY_BIN_SHA256_LINUX_ARM64   := fed2c9ca7d27191ada34524b5eaf5216a845c6d6f3246143c3b475552ffe5358
-# shellcheck, which actionlint runs over every workflow `run:` block and
-# lint-scripts runs over scripts/. Pinned to what the runner image carries:
-# the image installs the distro package from its Ubuntu 24.04 base, and
-# Ubuntu 24.04 ships 0.9.0 (0.9.0-1); the image asserts that version and
-# records it in its tool manifest. Raise with the runner image's base, not
-# ahead of it. Upstream publishes NO checksums, so these hashes were computed
-# from the release archives and corroborated against upstream's other
-# channel: both extracted binaries are byte-identical to /bin/shellcheck in the
-# koalaman/shellcheck:v0.9.0 image (amd64 and arm64).
+# shellcheck (actionlint and lint-scripts): the runner image's Ubuntu 24.04
+# package version; raise with the image's base. Upstream publishes no
+# checksums; these match the koalaman/shellcheck:v0.9.0 image's binaries.
 SHELLCHECK_VERSION             := v0.9.0
 SHELLCHECK_SHA256_LINUX_AMD64  := 700324c6dd0ebea0117591c6cc9d7350d9c7c5c287acbad7630fa17b1d4d9e2f
 SHELLCHECK_SHA256_LINUX_ARM64  := 179c579ef3481317d130adebede74a34dbbc2df961a70916dd4039ebf0735fae
 SHELLCHECK_BIN_SHA256_LINUX_AMD64 := 7087178d54de6652b404c306233264463cb9e7a9afeb259bb663cc4dbfd64149
 SHELLCHECK_BIN_SHA256_LINUX_ARM64 := ef4c0f06039f2034dfba012251ddfeb1edba88e049fc5edfbc289fef179daaa0
 
-# TOOL_INSTALL=1 (the default) installs a missing pinned tool into TOOLS_DIR,
-# inside the repository and version-addressed, so a `make lint` never touches
-# the developer's GOPATH/bin (devops §4: targets do not mutate the machine
-# outside the repository). TOOL_INSTALL=0 installs NOTHING: each tool must
-# already be on PATH at exactly its pin, and an absent or different one fails
-# closed. CI on our runners sets 0 — the image bakes every tool but trivy, and
-# a workflow that network-installs over the baked copy is how v2.12.2 once
-# silently replaced the v2.13.2 that could lint Go 1.27. A fallback install on
-# mismatch would reintroduce that substitution at exactly the moment the guard
-# exists for, so there is none.
+# TOOL_INSTALL=1 installs missing pins into TOOLS_DIR (inside the repo, keyed by
+# version and toolchain). TOOL_INSTALL=0 (CI) installs nothing: a missing or
+# mismatched tool fails closed, with no fallback install.
 TOOL_INSTALL ?= 1
 TOOLS_DIR    := $(CURDIR)/bin/tools
-# The checkout directory is whatever its owner named it — spaces, quotes, `$`
-# and `;` included — so TOOLS_DIR is data: exported, read as "$$TOOLS_DIR".
+# TOOLS_DIR derives from the checkout path, so it is raw-bound.
 $(call raw_bind,TOOLS_DIR)
-#
-# A Go tool's cache directory is keyed by version AND toolchain
-# (bin/tools/<tool>-<version>-<toolchain>/), and a cached binary is reused
-# only when its embedded build metadata names that toolchain: keyed by version
-# alone, raising the module's toolchain silently kept the analyser the old
-# compiler built.
 
-# The toolchain this module selects (go.mod's go/toolchain line), resolved HERE,
-# inside the module, and handed to every tool install (#83).
-#
-# Without it the installs are built by whatever toolchain the TOOL's go.mod asks
-# for: `go install pkg@version` runs outside this module's context, so under
-# GOTOOLCHAIN=auto it switches to the tool's own floor. Measured on a host
-# whose PATH go is 1.24.3: golangci-lint and staticcheck were both built with
-# go1.26.8, and both then refused this go 1.27.0 module — "the Go language
-# version (go1.26) used to build golangci-lint is lower than the targeted Go
-# version (1.27.0)", and staticcheck died parsing the 1.27 stdlib. `make ci`
-# failed at lint on a tree CI passes, which is the drift TESTFLAGS exists to
-# prevent.
+# This module's toolchain, passed to every tool install so `go install` builds
+# the tools with it rather than with the tool's own go.mod floor.
 TOOLCHAIN := $(shell $(call sq,$(GOCMD)) env GOVERSION)
 
-# `bin=$$($(TOOL) <name> <version>) && "$$bin" ...` — scripts/tool.sh prints
-# the path of the pinned binary, or fails closed explaining why it cannot. Its
-# inputs travel in the ENVIRONMENT (exported below), never spliced into the
-# recipe's shell source, so no value — a checkout path with a quote in it, a
-# TOOL_INSTALL from a workflow — is ever parsed as shell.
+# `bin=$$($(TOOL) <name> <version>)` prints the pinned binary's path or fails
+# closed. Its inputs are exported, never spliced into recipe source.
 export TOOLCHAIN
 export GO := $(GOCMD)
 export TRIVY_SHA256_LINUX_AMD64 TRIVY_SHA256_LINUX_ARM64 TRIVY_BIN_SHA256_LINUX_AMD64 TRIVY_BIN_SHA256_LINUX_ARM64
 export SHELLCHECK_SHA256_LINUX_AMD64 SHELLCHECK_SHA256_LINUX_ARM64 SHELLCHECK_BIN_SHA256_LINUX_AMD64 SHELLCHECK_BIN_SHA256_LINUX_ARM64
 TOOL = sh scripts/tool.sh
 
-# gosec's flags exist HERE ONLY; CI runs `make gosec` (devops §8: "CI invokes
-# gosec via the same make target developers use, never its own flag set, or
-# the two scans rule on different findings").
-#
-#   -concurrency 4: gosec sizes its worker pool from runtime.NumCPU(), which
-#     reports the HOST's cores regardless of GOMAXPROCS or a cgroup limit, so
-#     on a 24-core host in a 16 GB job container it analysed 24 packages' SSA
-#     at once and the LIVE heap alone passed the cap — GOMEMLIMIT cannot
-#     collect live memory. Concurrency changes how fast the scan runs, never
-#     what it finds, so the same bound applies on a workstation: one flag set.
-#   -exclude-dir=test: test/ holds the build gates (their own module, never
-#     shipped) and the integration suite (#91), neither of which reaches a
-#     consumer. Shipped code — the root package and providertest — is always
-#     scanned. CI also excluded `examples`, which does not exist; an exclusion
-#     waiting for a directory is a blind spot pre-declared for whatever lands
-#     there, so it is gone.
-#   -fmt=sarif -out + -stdout -verbose=text: the SARIF is what github.com's
-#     code scanning ingests; the text copy is what a Gitea log shows, since
-#     Gitea has no code-scanning API and a failure would otherwise exit 1 with
-#     the findings buried in a file nobody can see.
-#   No -exclude rules: every finding is fixed or carries `#nosec G### -- why`
-#     at the line (the one annotation both gosec and golangci-lint honour).
+# gosec flags live only here; CI runs `make gosec`.
+#   -concurrency=4: gosec sizes workers from host cores, ignoring cgroup limits.
+#   -exclude-dir=test: test/ is never shipped; shipped packages are always scanned.
+#   SARIF for code scanning, plus text on stdout for Gitea logs.
+#   No -exclude rules: fix the finding or annotate `#nosec G### -- why`.
 GOSEC_FLAGS := -concurrency=4 -severity=medium -confidence=medium -exclude-dir=test \
 	-fmt=sarif -out=gosec.sarif -stdout -verbose=text
 
-# trivy fs, one flag set for every target and both workflows. --skip-dirs bin:
-# the repository-local tool cache holds third-party binaries this library does
-# not ship. test/ is scanned: nothing that could ever be shipped is skipped,
-# and the build gates' dependencies are dependencies of a job holding a token.
-# --skip-version-check: the pin decides the version, so the scan does not call
-# home to ask whether a newer one exists.
+# trivy fs flags for every target and workflow. bin/ is the third-party tool
+# cache; the pin decides the version, so the version check is skipped.
 TRIVY_FS_FLAGS := --skip-dirs bin --ignorefile .trivyignore --skip-version-check
 
-# The coverage floor (project-scaffold §6, testing-guidelines: 90%). `:=`, not
-# `?=`: a floor an environment variable can lower is not a floor. Lowering it
-# takes an explicit `make COVERAGE_THRESHOLD=…` on the command line.
+# Coverage floor. `:=` so the environment cannot lower it; only the command line can.
 COVERAGE_THRESHOLD := 90
 
-# VALUES FROM OUTSIDE ARE DATA, NEVER SHELL OR MAKE SOURCE (#89).
+# VALUES FROM OUTSIDE ARE DATA, NEVER SHELL OR MAKE SOURCE.
 #
-# TAG, SHA and MAIN_REF come from release.yml, which takes them from the pushed
-# tag — and git accepts a tag named v`id` or v$(id), which the `v*` trigger
-# matches. VERSION is what a maintainer types for release-alpha;
-# TOOL_INSTALL and COVERAGE_THRESHOLD can arrive from a workflow or a command
-# line. Two separate ways such a value used to become code:
+# TAG/SHA/MAIN_REF come from a pushed tag (git allows v`id`), VERSION from a
+# maintainer, the rest from a workflow or command line. $(TAG) in a recipe is
+# pasted into shell source before any validator runs, and a command-line
+# variable is recursively expanded on export, so $(shell ...) in it runs inside
+# make. raw_bind stores each unexpanded and exports it; recipes read only
+# "$$TAG" and the scripts validate the whole string. Never write $(TAG),
+# $(SHA), $(MAIN_REF), $(VERSION), $(TOOL_INSTALL) or $(COVERAGE_THRESHOLD) in
+# a recipe.
 #
-#   - a recipe wrote "$(TAG)": make pastes the text into the recipe's shell
-#     source BEFORE the shell runs, so backticks, $(...), `;` or a quote in
-#     the value executed before any validator saw it (reproduced:
-#     `make release-verify 'TAG=v`id`'` handed the validator "vuid=1000…");
-#   - a variable given on the make COMMAND LINE is recursively expanded when
-#     make exports it to a recipe, so `$(shell …)` in the value runs inside
-#     make itself, even when no recipe mentions it (measured, GNU Make 4.3;
-#     a value from the environment is passed through untouched).
-#
-# So each is re-bound here, once, to its RAW text — `$(value X)` reads it
-# without expanding it, `:=` stores it without expanding it again — and
-# exported. Recipes read them only as quoted shell variables ("$$TAG"), and
-# the scripts validate them, whole-string, before using them. Never write
-# $(TAG), $(SHA), $(MAIN_REF), $(VERSION), $(TOOL_INSTALL) or
-# $(COVERAGE_THRESHOLD) in a recipe.
-#
-# PATHS are bound the same way (raw_bind): GOCMD, AGENT_GIT, REPO_NAME,
-# TOOLS_DIR (derived from the checkout directory), COVERAGE_PROFILE,
-# COVERAGE_HTML, DEVCONTAINER_COMPOSE and DEVCONTAINER_SERVICE. A checkout at
-# "/home/me/projects/go enclave" once turned `rm -rf $(TOOLS_DIR)` into
-# `rm -rf /home/me/projects/go enclave/bin/tools`, deleting a sibling
-# directory. The only values still spliced into recipes are FLAG LISTS an
-# operator sets on purpose and which must word-split — TESTFLAGS, GOSEC_FLAGS,
-# TRIVY_FS_FLAGS, INTEGRATION_TESTFLAGS, CROSS_TARGETS — and constants this
-# file defines (PKG, the package directories, the pinned versions).
+# Paths are raw-bound the same way. Only operator flag lists (TESTFLAGS,
+# GOSEC_FLAGS, TRIVY_FS_FLAGS, INTEGRATION_TESTFLAGS, CROSS_TARGETS) and
+# constants defined here are spliced into recipes.
 EXTERNAL_VARS := TAG SHA MAIN_REF VERSION TOOL_INSTALL COVERAGE_THRESHOLD
 $(call raw_bind,$(EXTERNAL_VARS))
 
-# Every GOOS/GOARCH pair a consumer may build this library for. 386 and arm are
-# here because a 32-bit target is where a uintptr comparison against
-# math.MaxInt64 stops compiling (security-review.md §5), and that is exactly how
-# providertest shipped unbuildable on 32-bit Linux through v0.6.1-alpha: nothing
-# built it.
+# Every GOOS/GOARCH a consumer may build for; 32-bit targets catch uintptr
+# comparisons that do not compile there.
 CROSS_TARGETS := linux/amd64 linux/arm64 linux/386 linux/arm \
 	darwin/amd64 darwin/arm64 freebsd/amd64 openbsd/amd64 netbsd/amd64 dragonfly/amd64 \
 	illumos/amd64 solaris/amd64 aix/ppc64 windows/amd64 windows/386 \
 	android/arm64
 
-# Packages, for the per-package targets (project-scaffold §4: test-<pkg>,
-# coverage-<pkg>, bench-<pkg>, integration-test-<pkg>). The root package is
-# `enclave`, its Go name.
+# Per-package targets (test-, coverage-, bench-<pkg>). The root package is enclave.
 PACKAGES          := enclave providertest
 PKGDIR_enclave      := .
 PKGDIR_providertest := ./providertest
@@ -292,9 +171,7 @@ tidy:
 	"$$GOCMD" mod tidy
 
 ## tidy-check: fail if go.mod/go.sum (root or test/buildgates) are not tidy
-# `make ci` used to run `tidy`, which REWRITES go.mod: a gate that repairs what
-# it checks passes locally on a tree CI would have to reject, and CI never ran
-# it at all. This reports the diff and changes nothing.
+# Reports the diff and changes nothing: a gate must not repair what it checks.
 .PHONY: tidy-check
 tidy-check:
 	@"$$GOCMD" mod tidy -diff || { echo "go.mod/go.sum are not tidy: run 'make tidy'"; exit 1; }
@@ -306,23 +183,17 @@ lint: fmt-check vet lint-go lint-actions lint-scripts
 
 ## lint-go: golangci-lint (pinned) over .golangci.yml
 # .golangci.yml must enable staticcheck, errcheck, unused, ineffassign,
-# misspell and gocritic (devops §8) — the umbrella with the security linters
-# off does not satisfy the gate.
-# --allow-serial-runners: golangci-lint takes a host-wide lock and, by default,
-# FAILS ("parallel golangci-lint is running") when another run holds it — on
-# a machine with several worktrees, an unrelated lint elsewhere turned this
-# gate red. It now waits for the lock instead; the result is unchanged.
-# test/buildgates is its own module, so `./...` from the root never reaches it;
-# lint-go, staticcheck and govulncheck run there too.
+# misspell and gocritic. --allow-serial-runners waits for golangci-lint's
+# host-wide lock instead of failing. test/buildgates is a separate module, so
+# lint-go, staticcheck and govulncheck also run there.
 .PHONY: lint-go
 lint-go:
 	@bin=$$($(TOOL) golangci-lint $(GOLANGCI_VERSION)) && "$$bin" run --allow-serial-runners --timeout=5m $(PKG) && \
 	cd test/buildgates && "$$bin" run --allow-serial-runners --timeout=5m $(PKG)
 
 ## lint-actions: actionlint (pinned) over .github/workflows, with the pinned shellcheck on every run: block
-# actionlint runs shellcheck over the shell in each step only when it finds
-# it, and skips that half SILENTLY otherwise — so the pinned shellcheck is
-# resolved here and handed to it explicitly, never discovered on PATH.
+# The pinned shellcheck is passed explicitly: actionlint silently skips shell
+# checks when it finds none on PATH.
 .PHONY: lint-actions
 lint-actions:
 	@sc=$$($(TOOL) shellcheck $(SHELLCHECK_VERSION)) && \
@@ -342,9 +213,7 @@ staticcheck:
 	cd test/buildgates && "$$bin" $(PKG)
 
 ## gosec: security static analysis (pinned; writes gosec.sarif)
-# A scanner killed by a signal exits 128+N — 137 for the OOM killer — which in
-# a job summary is indistinguishable from "findings". The recipe still fails
-# either way; it only says WHICH, so nobody hunts a finding that does not exist.
+# Exit >128 means killed by a signal (e.g. OOM), not findings; say which.
 .PHONY: gosec
 gosec:
 	@bin=$$($(TOOL) gosec $(GOSEC_VERSION)) || exit 1; \
@@ -354,9 +223,7 @@ gosec:
 	fi; exit $$rc
 
 ## govulncheck: known-vuln scan (pinned; also the toolchain-currency forcing function)
-# Same exit triage as gosec: govulncheck holds the whole package graph and its
-# SSA live, so in a memory-capped container it can be SIGKILLed, and a bare
-# non-zero reads exactly like "vulnerabilities found".
+# Same signal-exit triage as gosec.
 .PHONY: govulncheck
 govulncheck:
 	@bin=$$($(TOOL) govulncheck $(GOVULNCHECK_VERSION)) || exit 1; \
@@ -376,18 +243,14 @@ modverify:
 	"$$GOCMD" mod verify
 
 ## trivy: filesystem vulnerability + secret scan, CRITICAL/HIGH fail (pinned)
-# --ignorefile matches every other trivy target and the workflows, so a
-# suppression recorded in .trivyignore applies everywhere. Without it the scans
-# disagree, which is how a red nightly hid behind a green `make security`.
+# TRIVY_FS_FLAGS carries --ignorefile, so suppressions apply to every scan.
 .PHONY: trivy
 trivy:
 	@bin=$$($(TOOL) trivy $(TRIVY_VERSION)) && \
 	"$$bin" fs --scanners vuln,secret --severity CRITICAL,HIGH --exit-code 1 --format table $(TRIVY_FS_FLAGS) .
 
 ## trivy-misconfig: misconfiguration scan, ADVISORY (reports, never fails on findings)
-# Owner direction: misconfiguration scanning is enabled, advisory until its
-# baseline is clean (devops §8 records portfolio-wide enablement as an open
-# decision; this repository runs it without blocking anything).
+# Advisory until the misconfiguration baseline is clean.
 .PHONY: trivy-misconfig
 trivy-misconfig:
 	@bin=$$($(TOOL) trivy $(TRIVY_VERSION)) && \
@@ -400,31 +263,16 @@ trivy-sarif:
 	"$$bin" fs --scanners vuln,secret --exit-code 0 --format sarif --output trivy-results.sarif $(TRIVY_FS_FLAGS) .
 
 ## security: full local security suite — gosec, govulncheck, modverify, trivy
-# No container image to scan. CI runs the first three per push and trivy
-# nightly (devops §8a, alpha phase); release.yml runs all four.
+# No image to scan. CI runs the first three per push and trivy nightly; release.yml runs all four.
 .PHONY: security
 security: gosec govulncheck modverify trivy
 	@echo "Security suite passed"
 
-# The flags CI runs the suite with, in one place so a local run and the pipeline
-# cannot drift apart — a check that passes locally and fails in CI (or worse,
-# the reverse) is its own defect class. `:=`, so an exported TESTFLAGS cannot
-# quietly drop the two flags below.
-#
-# -race IS NOT OPTIONAL. It is the sole detector for the publication-ordering
-# defect class in the shutdown registry: measured 10/10 against the restored
-# defect with the detector on, 0/10 with it off.
-#
-# -cpu=1,2,8 IS NOT OPTIONAL EITHER (#61). The retune-versus-admission race in
-# `reserve` has no test seam and cannot be given one without putting a branch on
-# the lock-free admission path, so it is caught by contention — which makes the
-# CORE COUNT part of the oracle. Measured on an 8-core host against `reserve`
-# regressed to read-then-subtract, 10 whole-package runs per setting:
-#     -cpu=1  ->  0/10 killed the mutant   (single core CANNOT see it)
-#     -cpu=2  ->  6/10
-#     -cpu=8  -> 10/10
-# Trimming the list to one value retires that; the run costs ~3x, which for this
-# package is seconds.
+# CI's test flags, defined once so local and CI runs cannot drift; `:=` so an
+# exported TESTFLAGS cannot drop them. Neither flag is optional:
+#   -race is the only detector for publication-ordering bugs in the shutdown registry.
+#   -cpu=1,2,8: the reserve retune-vs-admission race is caught only by
+#   contention, so core count is part of the oracle (one core never sees it).
 TESTFLAGS := -race -count=1 -cpu=1,2,8
 
 ## test: unit tests with the race detector, across the CPU matrix
@@ -432,26 +280,14 @@ TESTFLAGS := -race -count=1 -cpu=1,2,8
 test:
 	"$$GOCMD" test $(TESTFLAGS) -timeout=900s $(PKG)
 
-# The profile `coverage` gates and `coverage-report` renders. Same flags as
-# `test`, matrix included: coverage is measured on the run that actually
-# gates, not on a cheaper one that exercises less.
+# Profile for coverage and coverage-report, measured with the full TESTFLAGS.
 .PHONY: coverage-profile
 coverage-profile:
 	"$$GOCMD" test $(TESTFLAGS) -covermode=atomic -timeout=900s -coverprofile="$$COVERAGE_PROFILE" $(PKG)
 
 ## coverage: unit tests with coverage; FAILS below COVERAGE_THRESHOLD, in total AND per package
-# The threshold is enforced HERE, and CI runs this target (project-scaffold §6,
-# devops §4): a floor that exists only in a workflow cannot be reproduced
-# locally, and two copies of it drift.
-#
-# The floor binds EVERY PACKAGE, not only the total (testing-guidelines: "ALL
-# packages have at least 90%"; #90). A total is a statement-weighted average,
-# and the root package is several times providertest's size, so providertest
-# sat at 84.6% for releases while the total read green. Each package's figure
-# is computed from the same profile the total is — covered statements over
-# statements, exactly what `go tool cover -func` totals — so one run gates both.
-# The comparison is exact — covered*100 against floor*statements, no rounding
-# and no tolerance — so a package a hair below the floor fails.
+# The floor binds the total AND every package (a statement-weighted total can
+# hide a small package below it). Exact comparison, no rounding.
 .PHONY: coverage
 coverage: coverage-threshold coverage-profile
 	@TOTAL=$$("$$GOCMD" tool cover -func="$$COVERAGE_PROFILE" | awk '/^total:/ {sub("%","",$$3); print $$3}'); \
@@ -478,8 +314,7 @@ coverage-threshold:
 	esac
 
 ## coverage-report: HTML coverage report at coverage/coverage.html (no threshold)
-# Separate from `coverage` so the report is produced exactly when it is most
-# wanted — when the floor is missed.
+# Separate from coverage so the report is produced even when the floor is missed.
 .PHONY: coverage-report
 coverage-report: coverage-profile
 	@mkdir -p -- "$$(dirname -- "$$COVERAGE_HTML")"
@@ -488,41 +323,19 @@ coverage-report: coverage-profile
 	@echo "Wrote $$COVERAGE_HTML"
 
 ## test-fips: build + unit tests under Go native FIPS 140-3 strict mode
-# Covers the same packages as `test`, but it is NOT the same run with only the
-# FIPS env added: it runs once, without -race and without the -cpu=1,2,8
-# matrix (security-review.md §6). Its job is to find non-approved cryptography
-# on a tested path, which neither the race detector nor the CPU matrix bears
-# on; the race and contention defects stay with `test`/`coverage`. nightly.yml
-# and release.yml run this target. The sealing surface performs real
-# cryptography chosen to pass this mode (NewGCMWithRandomNonce et al.), so this
-# gate is load-bearing: strict mode is what caught the NewGCM arbitrary-IV
-# refusal in the first place.
-#
-# STRICT mode, `fips140=only`, not `on`: `on` loads the Go Cryptographic Module
-# but still PERMITS non-approved algorithms, so a test exercising MD5 or SHA-1
-# passes and the gate reports green while a regulated path uses prohibited
-# cryptography. `only` makes non-approved operations error or panic. If this
-# fails, that failure IS the finding — fix the call site, never weaken it to
-# `on`. GOFIPS140=latest selects the newest validated module snapshot at build
-# time; GODEBUG is a runtime setting and cannot cause a compile error.
+# Runs once, without -race or the CPU matrix: it hunts non-approved crypto.
+# STRICT mode (fips140=only), never `on`, which still permits non-approved
+# algorithms. A failure here is the finding: fix the call site.
 .PHONY: test-fips
 test-fips:
 	GOFIPS140=latest GODEBUG=fips140=only "$$GOCMD" build $(PKG)
 	GOFIPS140=latest GODEBUG=fips140=only "$$GOCMD" test -count=1 -timeout=900s $(PKG)
 
 ## test-runtimesecret: unit tests built with GOEXPERIMENT=runtimesecret (key-schedule erasure, #98)
-# The erasing build is a different program — every AES operation runs under
-# runtime/secret.Do — and secret_erase_test.go, which proves the key schedule
-# is gone from process memory, only exists in it. The go binary is the
-# module's own toolchain, resolved with the experiment UNSET: an older go
-# command on PATH cannot parse an experiment it predates and dies before it
-# would switch toolchains.
-#
-# The erasure PROOF runs on its own, without -race: it measures what freed heap
-# memory still holds, and the race detector's instrumented allocator changes
-# exactly that — measured, its control (an UNERASED operation's key schedule
-# must be findable) goes blind under -race, which would make the proof vacuous.
-# Everything else in the erasing build runs under the full TESTFLAGS matrix.
+# Checks per-platform erasure file selection, then runs the suite with
+# GOEXPERIMENT=runtimesecret on the module's own toolchain (resolved with the
+# experiment unset; an older go cannot parse it). The erasure proof runs
+# without -race, whose allocator would blind its control.
 ERASURE_PROOF := ^TestWithAEAD_ErasesTheKeyScheduleUnderRuntimeSecret$$
 .PHONY: test-runtimesecret
 test-runtimesecret:
@@ -554,70 +367,27 @@ $(addprefix coverage-,$(PACKAGES)): coverage-%:
 $(addprefix bench-,$(PACKAGES)): bench-%:
 	"$$GOCMD" test -run '^$$' -bench . -benchmem $(PKGDIR_$*)
 
-# INTEGRATION SUITE (integration-testing §3-§4). Each package's suite lives in
-# test/integration/<pkg>/ and runs in the project devcontainer, NEVER on the
-# host: a suite that passes only on a workstation measures the workstation.
-# The suite's TestMain enforces that too, and refuses to run in a container
-# whose capabilities, limits or FIPS state differ from what compose.yaml
-# declares.
-#
-# The devcontainer (build/docker/devcontainer/) BAKES the source into its
-# image rather than bind-mounting the checkout: on our runners `docker compose`
-# talks to the HOST daemon through the job's socket, where a bind-mount source
-# path does not exist and is silently replaced by an empty directory (measured
-# on the CI runners, 2026-08-14). The build context is sent by the client, so it is right
-# on a laptop and on a runner alike. `--build` rebuilds the image on every run;
-# BuildKit's layer cache makes that a source-layer copy when only the source
-# changed, and the run itself has no network (compose.yaml: network_mode: none).
-#
-# Each run gets its own compose project (integration-testing §7: two runs on
-# one host must not claim each other's containers, images or volumes): the
-# name carries the time, this shell's pid AND random bytes, because two job
-# containers on one runner host can share a pid and a second. It is torn down
-# — container, per-run cache volume and per-run image — on every exit, and a
-# teardown that fails says so rather than leaking silently.
-#
-# The tag is part of the flags: the suite's files carry `//go:build
-# integration`, so without -tags=integration `go test` would compile nothing.
-# The package is named EXACTLY (no `/...`): an explicit directory whose files
-# are all excluded is an error ("build constraints exclude all Go files"),
-# whereas a `/...` pattern matching nothing exits 0 — a vacuous green.
-# -race is the suite's concurrency oracle (the sweep's waits on live borrows,
-# the admission CAS under contention); -v puts every test's name and its
-# kernel-side evidence in the CI log.
-#
-# Every precondition FAILS rather than skips: a target that passes with
-# nothing to run reports a suite that never ran as green, and such a target is
-# then wired into CI as a gate that gates nothing.
+# INTEGRATION SUITE. Each package's suite (test/integration/<pkg>/) runs in the
+# devcontainer, never on the host. The image bakes the source because on CI
+# runners compose talks to the host daemon, where bind-mount paths do not exist.
+# Each run uses a unique compose project, torn down on every exit. The package
+# is named exactly (no /...) so a wrong build tag errors instead of passing
+# vacuously. Every precondition fails rather than skips.
 INTEGRATION_PACKAGES  := enclave providertest
 DEVCONTAINER_COMPOSE  := build/docker/devcontainer/compose.yaml
 DEVCONTAINER_SERVICE  := devcontainer
 INTEGRATION_TESTFLAGS := -tags=integration -race -count=1 -v -timeout=1800s
 
-# GO_ENCLAVE_IT_PROFILE_OUT: where the devcontainer writes the merged
-# integration profile ("-" prints it between marker lines; see
-# run-integration-tests.sh). A caller-supplied path, so raw-bound and read as
-# "$$GO_ENCLAVE_IT_PROFILE_OUT", never spliced into the recipe.
+# GO_ENCLAVE_IT_PROFILE_OUT: where to write the merged integration profile
+# ("-" prints it). Caller-supplied, so raw-bound.
 GO_ENCLAVE_IT_PROFILE_OUT ?=
 $(call raw_bind,GO_ENCLAVE_IT_PROFILE_OUT)
-# Integration coverage (testing-guidelines: every package >= 90%). Measured
-# over the LIBRARY packages the suite exercises, from the parent and every
-# re-executed child, by build/docker/devcontainer/run-integration-tests.sh,
-# against the same COVERAGE_THRESHOLD floor as unit coverage (read in the
-# recipe as the exported "$$COVERAGE_THRESHOLD", never pasted in).
-# Each suite is gated on the package it is the integration suite FOR
-# (integration-testing §3: test/integration/<package>/), so one suite's reach
-# into another package cannot carry that package over the floor.
+# Integration coverage is gated per suite on the package it is FOR, against
+# COVERAGE_THRESHOLD.
 INTEGRATION_COVERPKG_enclave      := github.com/jeremyhahn/go-enclave
 INTEGRATION_COVERPKG_providertest := github.com/jeremyhahn/go-enclave/providertest
-# The FIPS 140-3 strict run (security-review §6): the same suite, flags and
-# container, with Go's native FIPS module selected at build (GOFIPS140=latest)
-# and non-approved cryptography made fatal at run time (GODEBUG=fips140=only —
-# STRICT, never `on`; test-fips above says why). GO_ENCLAVE_IT_FIPS_MODE tells
-# the suite which mode it was promised, and it fails unless the runtime
-# reports exactly that (crypto/fips140.Enabled and Enforced), so a FIPS run
-# that lost its environment cannot pass as one. The default run passes the
-# compose.yaml defaults (GOFIPS140=off, mode "off") and is checked the same way.
+# FIPS strict run: same suite with GOFIPS140=latest and fips140=only. The suite
+# fails unless the runtime reports the promised GO_ENCLAVE_IT_FIPS_MODE.
 INTEGRATION_FIPS_ENV  := -e GOFIPS140=latest -e GODEBUG=fips140=only -e GO_ENCLAVE_IT_FIPS_MODE=only
 $(call raw_bind,DEVCONTAINER_COMPOSE DEVCONTAINER_SERVICE)
 
@@ -672,12 +442,8 @@ $(addprefix integration-test-fips-,$(INTEGRATION_PACKAGES)): integration-test-fi
 	$(call run_integration,$*,$(INTEGRATION_FIPS_ENV))
 
 ## lint-integration: vet, golangci-lint and staticcheck over the integration suite, WITH its build tag
-# The suite is `//go:build integration`, so `make lint` — which runs without
-# the tag — never opens it: every analyser would report clean over files it
-# never read (devops §8: "an analyser not given the repo's build tags does not
-# fail"). This runs the same pinned analysers with the tag, and first proves
-# the tag is the one the files carry: `go list` must select test files WITH it
-# and none WITHOUT it, so a misspelled tag fails here instead of vanishing.
+# `make lint` runs without the integration tag and never sees the suite. This
+# first proves the tag selects the test files and nothing builds without it.
 .PHONY: lint-integration
 lint-integration:
 	@for p in $(INTEGRATION_PACKAGES); do \
@@ -704,11 +470,9 @@ cross-build:
 	  GOOS=$${t%/*} GOARCH=$${t#*/} "$$GOCMD" vet $(PKG); \
 	done
 
-# BUILD GATES. Their own module under test/ (see test/buildgates/doc.go): the
-# pin gate needs a YAML parser and the root module's minimal-dependency invariant is
-# not negotiable for a test helper. That is why these cannot be plain
-# `go test ./...` targets. Each gate selects its tests by name; every test the
-# other gates do not claim runs under check-action-pins.
+# BUILD GATES: their own module under test/buildgates (it needs a YAML parser
+# the root module must not depend on). check-action-pins runs every test the
+# other gates do not claim.
 BUILDGATES_OTHER := ^(TestReleasability|TestChangelogAssemble|TestScripts)
 
 ## check-action-pins: every `uses:` in a workflow names a 40-hex commit
@@ -717,43 +481,33 @@ check-action-pins:
 	@cd test/buildgates && "$$GOCMD" vet $(PKG) && "$$GOCMD" test -count=1 -skip '$(BUILDGATES_OTHER)' $(PKG)
 
 ## check-releasability: no tracked file names the lab fleet or is agent-only
-# The public GitHub tree is byte-identical to the Gitea release tag (handbook
-# version-control §5a), so every tracked file is published and a scrub has to
-# happen here, in the source, before tagging. The gate reads the git index —
-# what is published — and fails naming the file, the line and what to use
-# instead. Rules, waivers and the rationale: test/buildgates/releasability_test.go.
+# Every tracked file is published, so the scrub happens here. Rules and
+# waivers: test/buildgates/releasability_test.go.
 .PHONY: check-releasability
 check-releasability:
 	@cd test/buildgates && "$$GOCMD" vet $(PKG) && "$$GOCMD" test -count=1 -run '^TestReleasability' $(PKG)
 
 ## check-changelog-assembly: the release step folds every fragment in exactly once
-# scripts/changelog-assemble.sh is what `make release-alpha` runs before
-# tagging; its tests (test/buildgates/changelog_assemble_test.go) drive it on
-# scratch trees, so a defect in it is found here rather than in a tag.
+# Tests scripts/changelog-assemble.sh, which release-alpha runs, on scratch trees.
 .PHONY: check-changelog-assembly
 check-changelog-assembly:
 	@cd test/buildgates && "$$GOCMD" vet $(PKG) && "$$GOCMD" test -count=1 -run '^TestChangelogAssemble' $(PKG)
 
 ## check-scripts: the release and tooling scripts, driven on scratch inputs
-# scripts/release-notes.sh, release-check-tag.sh, release-publish.sh,
-# consumer-check.sh and tool.sh run with a write token or decide what a gate
-# trusts, and most of them run for real only when a tag is pushed — too late to
-# find a defect. test/buildgates/scripts_test.go drives each one on scratch
-# trees, a local fake of the forge API and a local module proxy, offline.
+# Drives the release and tooling scripts offline on scratch trees, a fake forge
+# API and a local module proxy, since most run for real only on a tag push.
 .PHONY: check-scripts
 check-scripts:
 	@cd test/buildgates && "$$GOCMD" vet $(PKG) && "$$GOCMD" test -count=1 -run '^TestScripts' $(PKG)
 
 ## ci-fast: everything `ci` runs that does not need Docker (devops §4)
-# lint-integration is here, not in `ci` only: it analyses the integration
-# suite's source and needs no container.
+# lint-integration needs no container, so it runs here.
 .PHONY: ci-fast
 ci-fast: tidy-check lint lint-integration check-action-pins check-releasability check-changelog-assembly check-scripts staticcheck security coverage test-runtimesecret build cross-build
 	@echo "ci-fast completed successfully"
 
 ## ci: the full local gate — what a PR must pass, security included (devops §4)
-# ci-fast plus the integration suite (#91), both variants, in the devcontainer.
-# Docker is required; without it these targets fail, they do not skip.
+# Adds both integration variants; Docker is required (fails, never skips).
 .PHONY: ci
 ci: ci-fast integration-test integration-test-fips
 	@echo "CI pipeline completed successfully"
@@ -769,58 +523,12 @@ deps-latest:
 	done; go mod tidy'
 
 ## release-alpha: cut a signed release — make release-alpha VERSION=vX.Y.Z-alpha
-# The version is stated EXPLICITLY rather than derived. An earlier recipe
-# auto-incremented the PATCH component, which would have named an additive
-# v0.2.0-alpha release as v0.1.1-alpha; it also created LIGHTWEIGHT UNSIGNED
-# tags, pushed every local tag rather than the named one, and let `|| true`
-# swallow a failed VERSION commit so a tag could disagree with its own VERSION
-# file. Releases cut from this repo so far were done by hand for exactly
-# those reasons.
-#
-# One deviation from the template as published, and it is a fix not a fork: v2.2
-# writes the branch-guard message with BACKTICKS inside a double-quoted string,
-# which the shell reads as command substitution — measured, it prints
-# "/bin/sh: 1: push: not found" and drops the phrase from the message, sending a
-# reader chasing a missing command at the exact moment a release just failed.
-# Single-quoted here. Reported upstream so the template can take the same change
-# before the other fifteen repos adopt it.
-#
-# A second fix, the one release-alpha.mk v2.3 made (its defect 1): VERSION is
-# written UNPREFIXED, `$${VERSION#v}`. The tag is `v0.6.0-alpha`; the file is
-# `0.6.0-alpha` (release-versioning §2). Writing the tag string verbatim is how
-# v0.6.0-alpha shipped a VERSION reading `v0.6.0-alpha` (#80).
-#
-# Third, CHANGELOG fragments (release-versioning §5, adopted in #80): before
-# VERSION is written, scripts/changelog-assemble.sh folds every changelog.d/
-# fragment, and whatever [Unreleased] still holds, into the new version's
-# section and deletes the fragments; the release commit carries CHANGELOG.md,
-# the deletions and VERSION together, so the tag's CHANGELOG has every entry
-# exactly once. The assembly is committed here, before tagging, because
-# release.yml only reads the tagged tree. If the section was written by hand
-# and a fragment is still waiting, the script refuses rather than tag a
-# CHANGELOG that leaves it out.
-#
-# Fourth, the remote-tag guard fails CLOSED. It used to read
-# `! git ls-remote ... dev ...`, and `!` turns EVERY failure into a pass —
-# including exit 128 from a clone with no `dev` remote at all, measured passing
-# for the already-published v0.6.1-alpha. The recipe then committed VERSION,
-# tagged locally and died at the push. Exit 2 (no such ref) is the only answer
-# that means "free"; anything else is an unanswered question.
-#
-# Fifth (#89), the version must move FORWARD before anything is written:
-# scripts/release-version-check.sh refuses a VERSION that is not strictly
-# greater, by SemVer 2.0.0 precedence, than the current VERSION and every
-# existing v* tag (release-versioning §3 — never lower VERSION, never
-# supersede a tag with a lower one). The checks above refuse a version that
-# already exists; this one refuses a version that would go backwards.
-#
-# Sixth (#89), the tree is checked with scripts/release-check-tag.sh — the
-# check release.yml runs first on the pushed tag — before anything is
-# committed, so the recipe cannot tag what the release workflow would refuse.
-# Pushing the tag is the last manual step: release.yml then gates the tagged
-# commit, builds a throwaway consumer from the published tag, and publishes the
-# Gitea release with the version's CHANGELOG section as its body. Nothing is
-# created by hand on the forge any more.
+# The version is explicit, never derived. Before anything is written: VERSION
+# must move forward (release-version-check.sh), the tag must be free locally
+# and on dev (ls-remote exit 2 is the only "free"; anything else fails closed),
+# and the assembled tree must pass release-check-tag.sh. VERSION is written
+# unprefixed, and changelog.d/ fragments fold into CHANGELOG.md in the same
+# commit. Pushing the tag hands off to release.yml.
 .PHONY: release-alpha
 release-alpha:
 	@case "$$VERSION" in \
@@ -850,15 +558,11 @@ release-alpha:
 	"$$AGENT_GIT" "$$REPO_NAME" push dev HEAD "refs/tags/$$VERSION"
 	@echo "Released $$VERSION (signed, annotated, single tag pushed); release.yml gates it and publishes the Gitea release"
 
-# RELEASE TARGETS (#89). release.yml calls these, never the scripts directly,
-# so the release workflow is as reproducible from a shell as CI is. Each takes
-# the tag as TAG=vX.Y.Z[-pre].
+# RELEASE TARGETS: release.yml calls these, never the scripts directly. Each
+# takes TAG=vX.Y.Z[-pre].
 
 ## release-verify: TAG=vX.Y.Z[-pre] [MAIN_REF=<ref>] — the tag agrees with VERSION and CHANGELOG.md (and is on MAIN_REF)
-# scripts/release-check-tag.sh: VERSION is the tag unprefixed, CHANGELOG.md has
-# exactly one non-empty section for it, no changelog.d/ fragment or
-# [Unreleased] entry was left out. With MAIN_REF, HEAD must also be an
-# ancestor of it: both release kinds are tags on main (release-versioning §1a).
+# See scripts/release-check-tag.sh. With MAIN_REF, HEAD must be an ancestor of it.
 .PHONY: release-verify
 release-verify:
 	@test -n "$$TAG" || { echo "ERROR: TAG=vX.Y.Z[-pre] is required"; exit 1; }
@@ -875,16 +579,14 @@ release-verify:
 	fi
 
 ## consumer-check: TAG=vX.Y.Z[-pre] — build and run a throwaway consumer of this module at TAG (GOWORK=off)
-# Resolution comes from the environment (dependency-resolution §1/§6), so on
-# a Gitea runner the injected GOPRIVATE/insteadOf fetch it from the forge and
-# elsewhere it comes from the public proxy.
+# Module resolution comes from the environment (GOPRIVATE, insteadOf, proxy).
 .PHONY: consumer-check
 consumer-check:
 	@test -n "$$TAG" || { echo "ERROR: TAG=vX.Y.Z[-pre] is required"; exit 1; }
 	sh scripts/consumer-check.sh "$$("$$GOCMD" list -m)" "$$TAG"
 
 ## release-publish: TAG=vX.Y.Z[-pre] SHA=<commit> — publish the Gitea release for TAG (FORGE_API_URL, FORGE_REPOSITORY, FORGE_TOKEN)
-# Refuses GitHub on its own (release-versioning §5); see scripts/release-publish.sh.
+# Refuses GitHub; see scripts/release-publish.sh.
 .PHONY: release-publish
 release-publish:
 	@test -n "$$TAG" || { echo "ERROR: TAG=vX.Y.Z[-pre] is required"; exit 1; }
@@ -892,10 +594,7 @@ release-publish:
 	sh scripts/release-publish.sh "$$TAG" "$$SHA"
 
 ## clean: remove build/test artifacts (the pinned-tool cache stays: clean-tools)
-# Removes FILES, and the report's directory only if it is then empty. It used
-# to `rm -rf $(dir $(COVERAGE_HTML))`, which for a report path with no
-# directory part is `rm -rf ./` — the checkout. A failed rm fails the target;
-# only the empty-directory rmdir is best effort.
+# Removes files, and the report directory only if empty (never rm -rf).
 .PHONY: clean
 clean:
 	@rm -f -- "$$COVERAGE_PROFILE" "$$COVERAGE_HTML" coverage-*.out gosec.sarif trivy-results.sarif || exit $$?; \
@@ -903,9 +602,7 @@ clean:
 	if [ "$$d" != . ]; then rmdir -- "$$d" 2>/dev/null || true; fi
 
 ## clean-tools: remove the repository-local pinned-tool cache (bin/tools)
-# One quoted operand, never the bare expansion: an unquoted path with a space
-# in it is two paths. Refuses a relative TOOLS_DIR, and one that resolves to
-# /, the checkout itself or $HOME.
+# Refuses a relative TOOLS_DIR, or one resolving to /, the checkout or $HOME.
 .PHONY: clean-tools
 clean-tools:
 	@case "$$TOOLS_DIR" in \

@@ -11,10 +11,9 @@
 // Package devcontainer is the integration suites' shared guard: every suite's
 // TestMain calls Refuse, which exits unless the process is running in
 // build/docker/devcontainer with exactly the security posture and limits
-// compose.yaml declares (integration-testing §4). A suite that passes only on a
-// workstation is measuring the workstation, and one that passes under
-// CAP_IPC_LOCK is measuring a ceiling that does not bind. Shared rather than
-// copied so that the posture cannot drift between suites.
+// compose.yaml declares. A suite that passes only on a workstation is measuring
+// the workstation, and one that passes under CAP_IPC_LOCK is measuring a
+// ceiling that does not bind.
 package devcontainer
 
 import (
@@ -63,8 +62,7 @@ func Problems() []string {
 	var problems []string
 	if os.Getenv(envDevcontainer) != "1" {
 		problems = append(problems, envDevcontainer+" is not 1: not running in build/docker/devcontainer")
-		// Nothing below is meaningful on a host; stop here with the one reason
-		// that matters.
+		// Nothing below is meaningful on a host.
 		return problems
 	}
 
@@ -72,9 +70,8 @@ func Problems() []string {
 		problems = append(problems, "running as root: the devcontainer runs as an unprivileged user")
 	}
 
-	// No capabilities at all — the effective, permitted and bounding sets are
-	// all empty under cap_drop: [ALL]. CAP_IPC_LOCK in particular would make the
-	// kernel ignore RLIMIT_MEMLOCK and every admission test vacuous.
+	// cap_drop: [ALL] empties every set. CAP_IPC_LOCK in particular would make
+	// the kernel ignore RLIMIT_MEMLOCK and every admission test vacuous.
 	for _, field := range []string{"CapEff", "CapPrm", "CapBnd", "CapAmb"} {
 		v, err := statusHex(field)
 		switch {
@@ -94,8 +91,7 @@ func Problems() []string {
 	}
 
 	// RLIMIT_MEMLOCK must be finite, soft = hard, and exactly the figure
-	// compose.yaml declares — a ceiling that varies with the daemon is not a
-	// ceiling a test can be written against.
+	// compose.yaml declares: the admission tests are written against it.
 	want, err := envUint64(EnvMemlockBytes)
 	if err != nil {
 		problems = append(problems, err.Error())
@@ -117,10 +113,8 @@ func Problems() []string {
 	return problems
 }
 
-// checkFIPSMode asserts that the Go runtime's FIPS 140-3 state is exactly the
-// one the run was configured for, in BOTH directions: a FIPS run that silently
-// lost GOFIPS140/GODEBUG would otherwise pass as an ordinary run and report a
-// strict-mode result it never produced.
+// checkFIPSMode checks the runtime's FIPS 140-3 state in both directions: a
+// FIPS run that lost GOFIPS140/GODEBUG would otherwise pass as an ordinary run.
 func checkFIPSMode() string {
 	switch mode := os.Getenv(EnvFIPSMode); mode {
 	case "only":
@@ -138,8 +132,6 @@ func checkFIPSMode() string {
 	return ""
 }
 
-// envUint64 reads a required positive integer from the environment, in the
-// unsigned form a getrlimit reading is compared against.
 func envUint64(name string) (uint64, error) {
 	s := os.Getenv(name)
 	v, err := strconv.ParseUint(s, 10, 64)
@@ -159,7 +151,6 @@ func EnvInt64(name string) (int64, error) {
 	return v, nil
 }
 
-// statusField returns the value text of one /proc/self/status line.
 func statusField(name string) (string, error) {
 	f, err := os.Open("/proc/self/status")
 	if err != nil {
@@ -179,7 +170,6 @@ func statusField(name string) (string, error) {
 	return "", fmt.Errorf("/proc/self/status has no %s line", name)
 }
 
-// statusHex reads a hexadecimal /proc/self/status field (the Cap* sets).
 func statusHex(name string) (uint64, error) {
 	v, err := statusField(name)
 	if err != nil {
@@ -192,7 +182,6 @@ func statusHex(name string) (uint64, error) {
 	return n, nil
 }
 
-// statusInt reads a decimal /proc/self/status field.
 func statusInt(name string) (int64, error) {
 	v, err := statusField(name)
 	if err != nil {

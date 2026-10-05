@@ -11,10 +11,9 @@
 package enclave
 
 // HardenProcess applies the process-wide protections that are the binary's
-// choice, not a library's, and reports which took effect. This package
-// implements them on Linux only; here it applies nothing and returns
-// [ErrProcessHardeningUnsupported]. See the Linux documentation for what it
-// does there.
+// choice, not a library's, and reports which took effect. It is implemented on
+// Linux only; here it applies nothing and returns
+// [ErrProcessHardeningUnsupported].
 func HardenProcess() (ProcessHardening, error) {
 	return ProcessHardening{}, ErrProcessHardeningUnsupported
 }

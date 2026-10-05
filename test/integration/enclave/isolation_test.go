@@ -24,26 +24,12 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// PER-TEST PROCESS ISOLATION.
-//
-// go-enclave keeps state that is global to the PROCESS by design: the shutdown
-// ledger WipeAll sweeps, the one-shot process Sealer and Allocator, and the
-// RLIMIT_MEMLOCK every allocation is charged against. A test sharing a process
-// with another would see the other's enclaves in its WipeAll count, its locked
-// pages in VmLck and its residue in a memory sweep, and could only install a
-// process default once per binary.
-//
-// So every such test re-executes this test binary, running ONLY itself, in a
-// fresh process: isolated(t, opts, body) runs body in the child and, in the
-// parent, waits for the child and fails with its output if it failed. The
-// child's environment selects it by its full test name and can lower its own
-// RLIMIT_MEMLOCK before any test code runs (TestMain → applyChildLimits).
-//
-// The parent does not trust an exit status alone: `-test.run` matching nothing
-// exits 0 with "no tests to run", so the child must also print a marker that
-// only a body which ran to completion without failing can print. A child that
-// matched nothing, skipped, or was renamed out from under its pattern fails the
-// parent.
+// Per-test process isolation. WipeAll's ledger, the one-shot process Sealer
+// and Allocator, and RLIMIT_MEMLOCK are process-global, so a test that touches
+// them re-executes this binary running only itself: isolated(t, opts, body)
+// runs body in the child and fails the parent with the child's output if it
+// failed. The parent also requires a completion marker, because a -test.run
+// pattern that matches nothing exits 0.
 const (
 	envChild        = "GO_ENCLAVE_IT_CHILD"
 	envChildMemlock = "GO_ENCLAVE_IT_CHILD_MEMLOCK"
@@ -52,21 +38,17 @@ const (
 
 // childOpts configures the child process.
 type childOpts struct {
-	// memlock, when positive, is the RLIMIT_MEMLOCK (soft AND hard) the child
-	// runs under. Lowering the hard limit is irreversible without
-	// CAP_SYS_RESOURCE, which the devcontainer does not grant, so this is a
-	// real ceiling the child cannot lift. Zero inherits the devcontainer's.
+	// memlock, when positive, is the child's RLIMIT_MEMLOCK (soft and hard).
+	// Without CAP_SYS_RESOURCE the child cannot raise it again. Zero inherits.
 	memlock int64
-	// memlockZero requests a ceiling of exactly zero, which memlock cannot
-	// express since zero means "inherit".
+	// memlockZero requests a ceiling of exactly zero.
 	memlockZero bool
 }
 
 // isChild reports whether this process is a re-exec'd child.
 func isChild() bool { return os.Getenv(envChild) != "" }
 
-// applyChildLimits applies the child's requested limits. It runs in TestMain,
-// before m.Run, so no test code — and no enclave — exists yet.
+// applyChildLimits runs in TestMain before m.Run, so no enclave exists yet.
 func applyChildLimits() error {
 	s := os.Getenv(envChildMemlock)
 	if s == "" {
@@ -82,20 +64,16 @@ func applyChildLimits() error {
 	return nil
 }
 
-// isolated runs body in a fresh child process (see above).
+// isolated runs body in a fresh child process.
 func isolated(t *testing.T, opts childOpts, body func(t *testing.T)) {
 	t.Helper()
 	if isChild() {
 		if got := os.Getenv(envChild); got != t.Name() {
 			t.Fatalf("child for %q is running %q: the -test.run pattern selected the wrong test", got, t.Name())
 		}
-		// Registered FIRST so it runs LAST: the marker is printed only once
-		// every other cleanup has run, and only for a body that RETURNED
-		// normally and left the test neither failed nor skipped. A body that
-		// called t.FailNow, t.SkipNow or runtime.Goexit, or panicked, never
-		// reaches returned = true; t.Skipped catches a skip recorded without
-		// unwinding. Skipped subtests are refused by the parent, which reads
-		// the child's -test.v output.
+		// Registered first so it runs last: the marker prints only after every
+		// other cleanup, and only if body returned normally (not FailNow,
+		// SkipNow, Goexit or panic) and the test neither failed nor skipped.
 		returned := false
 		t.Cleanup(func() {
 			if returned && !t.Failed() && !t.Skipped() {
@@ -112,16 +90,11 @@ func isolated(t *testing.T, opts childOpts, body func(t *testing.T)) {
 		"-test.count=1",
 		"-test.v=true",
 	}
-	// A coverage run (run-integration-tests.sh) writes counters to the
-	// directory named by -test.gocoverdir. The child is the same instrumented
-	// binary; handing it the same directory is what makes the code it
-	// exercises count — without this every isolated test would be invisible to
-	// the coverage floor.
+	// Pass -test.gocoverdir through so the child's coverage counts.
 	if f := flag.Lookup("test.gocoverdir"); f != nil && f.Value.String() != "" {
 		args = append(args, "-test.gocoverdir="+f.Value.String())
 	}
-	// Give the child a deadline inside the parent's, so a hung child dies with
-	// its own goroutine dump instead of the parent's.
+	// A deadline inside the parent's makes a hung child dump its own goroutines.
 	if deadline, ok := t.Deadline(); ok {
 		if remaining := time.Until(deadline) - 30*time.Second; remaining > 0 {
 			args = append(args, "-test.timeout="+remaining.String())

@@ -14,10 +14,8 @@ import (
 )
 
 // ErrInvalidConfig matches every error [TestProvider] returns because the
-// [Config] it was handed cannot be run at all — as opposed to a provider that
-// ran and failed a property. The distinction is the one a caller acts on: the
-// first is a mistake in the test harness and the second is a defect in the
-// provider, and only the message used to tell them apart.
+// [Config] it was handed cannot be run at all. No provider was tested: the
+// mistake is in the test harness, not the provider.
 var ErrInvalidConfig = errors.New("providertest: invalid Config")
 
 // ConfigError is the concrete error behind [ErrInvalidConfig]: which Config
@@ -37,9 +35,9 @@ func (e *ConfigError) Error() string { return "providertest: Config." + e.Field 
 func (e *ConfigError) Is(target error) bool { return target == ErrInvalidConfig }
 
 // ErrAborted matches the error [TestProvider] returns when its context ended
-// before the run finished. The run is INCOMPLETE: it is neither a pass nor,
-// by itself, a finding against the provider — properties that had already
-// failed while the context was live are joined alongside it and are real.
+// before the run finished. The run is incomplete: it is neither a pass nor, by
+// itself, a finding against the provider. Properties that had already failed
+// while the context was live are joined alongside it and are real.
 var ErrAborted = errors.New("providertest: run aborted because its context ended")
 
 // AbortedError is the concrete error behind [ErrAborted]. It matches
@@ -63,10 +61,8 @@ func (e *AbortedError) Is(target error) bool { return target == ErrAborted }
 func (e *AbortedError) Unwrap() error { return e.Err }
 
 // PropertyError is one property of the seam that the provider under test did
-// not honor. [TestProvider] returns every one it found joined with
-// errors.Join, so a caller can walk them — via the joined error's
-// Unwrap() []error — to act on each failed property individually rather than
-// parsing the combined message.
+// not honor. [TestProvider] joins every one it found with errors.Join; walk
+// them via the joined error's Unwrap() []error. Several may share a Property.
 type PropertyError struct {
 	// Property names the property, as the suite's documentation does.
 	Property string
@@ -100,8 +96,6 @@ func (e *NotMeasuredError) Error() string {
 // Is reports whether target is [ErrNotMeasured].
 func (e *NotMeasuredError) Is(target error) bool { return target == ErrNotMeasured }
 
-// stepError attaches the step that failed to an error the suite could not
-// proceed past, and keeps that error matchable.
 type stepError struct {
 	step string
 	err  error
@@ -110,8 +104,6 @@ type stepError struct {
 func (e *stepError) Error() string { return "providertest: " + e.step + ": " + e.err.Error() }
 func (e *stepError) Unwrap() error { return e.err }
 
-// nilProviderError is a Config.New that returned nil or a typed nil; see
-// newProvider for why that is refused rather than called.
 type nilProviderError struct{ provider any }
 
 func (e *nilProviderError) Error() string {
@@ -119,8 +111,6 @@ func (e *nilProviderError) Error() string {
 		"interfaces and panics at the first call, which is why NewSealer refuses it with ErrInvalidProvider", e.provider)
 }
 
-// missingSeamError is a provider that lacks the interface a mode it claims in
-// Config.Modes requires.
 type missingSeamError struct {
 	provider any
 	iface    string
@@ -132,5 +122,4 @@ func (e *missingSeamError) Error() string {
 		e.provider, e.iface, e.mode)
 }
 
-// errEmptySlice is addrOf asked for the address of nothing.
 var errEmptySlice = errors.New("providertest: cannot take the address of an empty slice")

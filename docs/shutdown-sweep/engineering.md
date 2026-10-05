@@ -15,12 +15,22 @@
 
 1. **One sweep at a time.** A second call waits for the slot only as long as its
    own `ctx` allows; a nil `ctx` only tries. A free slot is taken even under an
-   already-done `ctx`.
+   already-done `ctx`. Serialization keeps the sweep generation single-writer:
+   two overlapping sweeps would return it to even mid-sweep. The slot is a
+   one-token channel rather than a mutex so a waiting caller can abandon it when
+   its own `ctx` ends instead of inheriting the running sweep's bound.
 2. **Never unmaps under a reader.** "Reader" is any holder of the enclave's lock:
    `WithBytes`, `Open`, `OpenString`, `EqualTo`, `Size`, `IsAlive`,
    `Freeze`, or a `Destroy` waiting its turn. Such an enclave is waited for while
    `ctx` is live and left mapped (and counted) when it ends. A slice returned by
    `Open` is **not** a lock holder: the sweep can unmap the pages behind it.
+   The sweep only ever *tries* an enclave's lock (a blocked `Lock` cannot be
+   abandoned when `ctx` ends, and a pending writer stalls new readers), and it
+   retries every registered entry on every pass, because a write `TryLock` loses
+   to any momentary reader such as an `IsAlive` health probe. The wait is an
+   event, not a sleep: the release that frees a held enclave wakes the sweep
+   through a one-slot channel that coalesces wake-ups, drained at the start of
+   each pass before any lock is tried, so no release is missed.
 3. **`ctx` bounds waiting, not reclaiming.** An admitted call with a done or nil
    `ctx` still reclaims everything not currently held, including the extra passes
    reclamation pays for; it only declines to wait or retry contention.
@@ -35,7 +45,11 @@
    attached refund runs once, when its mapping is released.
 6. **Generation ordering.** The sweep generation is bumped (to odd) before
    anything is destroyed and bumped back (to even) on every return path of an
-   admitted sweep; a call that is not admitted does not touch it.
+   admitted sweep; a call that is not admitted does not touch it. The parity is
+   a sequence lock: a value sealed under an odd generation is suspect whatever
+   the count later says. Bumping first means the race window yields a brief
+   `ErrOpenabilityUnknown` (fail safe), never a nil from `Openable` about keys
+   already destroyed.
 7. **Sealing enclaves are swept like any other enclave**, in every mode: the
    plaintext enclaves `Open` returned, transient DEK and KEK enclaves of seals
    and opens in flight, and any in-process key — a `ModeRootKey` sealer's root
@@ -47,9 +61,17 @@
    `ModePerOperation` is wiped only if its root was destroyed. Sealed values
    stay openable where the needed in-process keys survived, or where the
    wrapping key is held outside the process (a device-held `ModePerOperation`
-   key).
+   key). `SealedEnclave` values are not swept: they own no locked pages (so
+   including them would corrupt the count), destroying them under
+   `ModePerOperation` would destroy data the device can still open, and a
+   swept value would report `ErrEnclaveDestroyed` instead of the more accurate
+   `ErrSealerWiped`.
 8. **Never call it from inside a borrow** — it would wait for the borrow that is
    waiting for it, until `ctx` ends.
+9. **Program-owned, never library-called.** It destroys every enclave in the
+   process, including those of subsystems a library cannot know about. It is a
+   cooperative teardown step, not a fault handler: it never panics, and a
+   corrupt enclave is reported and the sweep continues.
 
 ## Return values
 
@@ -61,7 +83,8 @@ instant — not that this package holds no mapped pages: a constructor maps and
 locks its pages before it registers them (registration is its last step), so a
 construction in flight when the count is read is not in it. It is a snapshot,
 not a diagnosis; a non-zero count is most often workers that outlived the
-shutdown.
+shutdown. Calling again at once does not help: a live borrow is waited for
+again, and an unchanged refusal is refused again.
 
 The **error**:
 
@@ -70,6 +93,10 @@ The **error**:
 | `nil` | Admitted, and found nothing to report. A `ctx` ending during an admitted sweep is not an error. |
 | `ErrSweepInProgress` | Not admitted. The count is still current; the running sweep reports its own findings to its own caller. |
 | `*SweepError` | Admitted, and found canary corruption (`Corrupt`, counted once per entry per sweep, including every enclave whose `Destroy` reported corruption since the previous admitted sweep) and/or releases that fell back to an unwiped unmap (`Unwiped`). Never a nil `*SweepError` behind a non-nil error. |
+
+Corruption is tallied by entry during the sweep, not read from the ledger: a
+reclaimed corrupt entry is no longer on it, and one whose release was refused
+reports corruption on every attempt.
 
 Neither finding is a held page, so neither is in the count — except a corrupt
 entry whose pages the kernel then refused to release, which is in both. A
@@ -82,9 +109,13 @@ they are, no later sweep reports it.
 Each acquisition of an enclave's lock adds two atomic adds on its `holders`
 counter and one load of a package-level flag that only a sweep writes — no lock,
 no allocation (`BenchmarkBorrow*`, `BenchmarkIsAliveParallel`). `registryMu`
-serializes construction and destruction process-wide for one map operation each.
+serializes construction and destruction process-wide for one map operation each;
+it is never held together with an enclave lock or across a syscall, so it cannot
+deadlock against a borrow. Lock order: the sweep slot, then `registryMu`.
 An enclave whose release keeps failing stays on the ledger for the process
-lifetime, by design.
+lifetime, by design: dropping the only reference to pages the kernel still has
+mapped would make them unreachable and unretryable. The same holds for the
+mapping of a failed construction whose rollback was refused (the orphan ledger).
 
 ## Configuration and persistence
 

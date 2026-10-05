@@ -34,9 +34,8 @@ func TestNewMemoryEnclave_HoldsMaterial(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	// Compared in place: the view aliases the locked pages, and neither a
-	// string conversion nor a %q of it may carry the material onto the heap or
-	// into the test log (#90; security-review.md §6).
+	// Compared in place: neither a string conversion nor a %q may carry the
+	// material onto the heap or into the test log.
 	if !bytes.Equal(got, []byte("private-key-material")) {
 		t.Errorf("Open returned a %d-byte view that does not hold the material it was built from", len(got))
 	}
@@ -77,16 +76,9 @@ func TestNewMemoryEnclave_Empty(t *testing.T) {
 	}
 }
 
-// TestNewMemoryEnclaveCopy_LeavesTheSourceIntact is the load-bearing test for
-// the copy constructor, and it has two halves on purpose.
-//
-// The half under test is that the source SURVIVES. On its own it would also
-// pass against a build in which NewMemoryEnclave had stopped wiping — a silent
-// security regression in the constructor everything else defaults to, and the
-// live risk here specifically, because the two constructors now share one body
-// and the wipe is the only thing separating them. So the companion half pushes
-// identical bytes through NewMemoryEnclave and requires them gone. Neither half
-// alone shows the two constructors DIFFER; together they do.
+// TestNewMemoryEnclaveCopy_LeavesTheSourceIntact pins that the copy constructor
+// leaves its source intact while NewMemoryEnclave wipes identical bytes. The two
+// constructors share one body, so only both halves together show they differ.
 func TestNewMemoryEnclaveCopy_LeavesTheSourceIntact(t *testing.T) {
 	const material = "caller-owned-credential"
 
@@ -119,16 +111,9 @@ func TestNewMemoryEnclaveCopy_LeavesTheSourceIntact(t *testing.T) {
 	}
 }
 
-// TestNewMemoryEnclaveCopy_IsIndependentOfTheSource covers the other way
-// "leaves the source intact" could be satisfied and still be wrong: an enclave
-// that ALIASED the caller's bytes would pass the wipe assertion above while
-// protecting nothing, and would then be corrupted — or unmapped — by whatever
-// the caller does with its own slice next.
-//
-// So both directions are exercised. A write through the source must not reach
-// the material, and wiping the source afterwards — which is exactly what a
-// careful caller does once it is done — must leave the enclave holding what it
-// was given.
+// TestNewMemoryEnclaveCopy_IsIndependentOfTheSource pins that the copy does not
+// alias the caller's slice: neither writing nor wiping the source afterwards
+// reaches the enclave's material.
 func TestNewMemoryEnclaveCopy_IsIndependentOfTheSource(t *testing.T) {
 	material := []byte("independent-material")
 
@@ -150,16 +135,10 @@ func TestNewMemoryEnclaveCopy_IsIndependentOfTheSource(t *testing.T) {
 	}
 }
 
-// TestNewMemoryEnclaveCopy_PagesAreFrozen pins the writability decision the
-// constructor documents, cheaply and in-process.
-//
-// The real oracle for this property is a fault, not an assertion — a write
-// through frozen pages kills the process, so the end-to-end version lives in a
-// subprocess (TestMemoryEnclave_CopyConstructedPagesAreReadOnly). This one
-// reads the protection state directly so that a build that forgot to freeze
-// fails with a named error rather than a SIGSEGV in a child, and it carries a
-// sized enclave as its control: without it, an assertion that "mutable is
-// false" would pass just as happily against a field that is never true.
+// TestNewMemoryEnclaveCopy_PagesAreFrozen pins that a copy-constructed enclave
+// is read-only, by reading the protection state in-process; the fault itself is
+// exercised in a subprocess by TestMemoryEnclave_CopyConstructedPagesAreReadOnly.
+// A sized enclave is the control, so the field is shown able to read true.
 func TestNewMemoryEnclaveCopy_PagesAreFrozen(t *testing.T) {
 	e, err := NewMemoryEnclaveCopy([]byte("frozen-after-copy"))
 	if err != nil {
@@ -171,8 +150,7 @@ func TestNewMemoryEnclaveCopy_PagesAreFrozen(t *testing.T) {
 		t.Error("a copy-constructed enclave is writable; a stray write would corrupt it silently instead of faulting")
 	}
 
-	// The control: the field can say "yes", and a sized enclave must, or the
-	// generate-in-place path would fault on its own fill.
+	// The control: a sized enclave must be writable or its fill would fault.
 	sized, err := NewMemoryEnclaveSized(16)
 	if err != nil {
 		t.Fatalf("NewMemoryEnclaveSized: %v", err)
@@ -198,11 +176,8 @@ func TestNewMemoryEnclaveCopy_Empty(t *testing.T) {
 	}
 }
 
-// TestNewMemoryEnclaveCopy_IsPublishedToTheLedger asserts the new constructor
-// registers what it hands out. Nothing in ordinary use reveals the omission:
-// the enclave works, and the only symptom is that a shutdown sweep quietly
-// walks past it, leaving the material resident on exit — the failure mode
-// WipeAll was added for in v0.4.0-alpha.
+// TestNewMemoryEnclaveCopy_IsPublishedToTheLedger pins that the copy
+// constructor registers its enclave, so WipeAll reaches it at shutdown.
 func TestNewMemoryEnclaveCopy_IsPublishedToTheLedger(t *testing.T) {
 	material := []byte("swept-at-shutdown")
 
@@ -231,8 +206,7 @@ func TestNewMemoryEnclaveFromString(t *testing.T) {
 	}
 	defer e.Destroy()
 
-	// OpenString is the API under test here — the string boundary it exists
-	// for — so its result is judged, never printed (#90).
+	// OpenString is the API under test, so its result is judged, never printed.
 	got, err := e.OpenString()
 	if err != nil {
 		t.Fatalf("OpenString: %v", err)
@@ -387,11 +361,9 @@ func TestMemoryEnclave_ConcurrentAccess(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			// Read through the scoped accessor, NOT Open: Open hands back a
-			// slice that outlives the lock, so dereferencing it here would
-			// race the Destroy below against unmapped pages — the very fault
-			// this test is supposed to rule out. Either the material or
-			// ErrEnclaveDestroyed is correct; a race or a fault is not.
+			// Read through the scoped accessor, not Open: Open's slice
+			// outlives the lock and would race Destroy against unmapped pages.
+			// Either the material or ErrEnclaveDestroyed is correct.
 			if s, err := e.OpenString(); err == nil && s != "concurrent" {
 				t.Errorf("OpenString returned a %d-byte string that is not the material", len(s))
 			}
@@ -412,12 +384,9 @@ func TestMemoryEnclave_ConcurrentAccess(t *testing.T) {
 	}
 }
 
-// TestMemoryEnclave_DestroyWaitsForInFlightReader asserts the lifetime
-// discipline the concurrency contract promises: Destroy blocks until an
-// in-flight scoped borrow has returned, instead of wiping and unmapping the
-// pages the borrower is still reading. An atomic swap of the buffer handle
-// would satisfy IsAlive and still leave the reader on freed memory, so the
-// property under test is the ordering, not the flag.
+// TestMemoryEnclave_DestroyWaitsForInFlightReader pins that Destroy blocks
+// until an in-flight scoped borrow returns. The property is the ordering, not
+// the IsAlive flag.
 func TestMemoryEnclave_DestroyWaitsForInFlightReader(t *testing.T) {
 	e, err := NewMemoryEnclave([]byte("private-key-material"))
 	if err != nil {
@@ -434,16 +403,9 @@ func TestMemoryEnclave_DestroyWaitsForInFlightReader(t *testing.T) {
 		_ = e.WithBytes(func(b []byte) error {
 			close(borrowed)
 			<-release
-			// Ordered from INSIDE the borrow, while the read lock is still
-			// held. Placed after WithBytes returns — where it used to be — it
-			// is ordered against nothing: the lock drops on return, so Destroy
-			// is free to take the write lock, finish, and increment first,
-			// leaving this store unexecuted when the assertion below reads it
-			// (#27; seen as "reader exited at 0 and Destroy at 1"). Here, the
-			// increment happens-before the lock is released, which
-			// happens-before Destroy can acquire it — so the ordering the
-			// assertion checks is the lock discipline itself rather than
-			// goroutine scheduling.
+			// Recorded inside the borrow, while the read lock is held, so it
+			// happens-before Destroy can take the write lock. After WithBytes
+			// returns it would be ordered by scheduling, not by the lock.
 			readerExit.Store(order.Add(1))
 			return nil
 		})
@@ -457,9 +419,7 @@ func TestMemoryEnclave_DestroyWaitsForInFlightReader(t *testing.T) {
 		close(destroyed)
 	}()
 
-	// Destroy must not complete while the borrow is outstanding. The reader is
-	// parked on release, so a Destroy that returns here returned while another
-	// goroutine held a live view of the locked pages.
+	// Destroy must not complete while the reader is parked inside its borrow.
 	select {
 	case <-destroyed:
 		t.Fatal("Destroy completed while a borrow was still in flight")
@@ -520,10 +480,9 @@ func TestMemoryEnclave_ConcurrentReadersAndDestroy(t *testing.T) {
 	}
 }
 
-// TestLockedMemoryError covers the typed error's contract: callers match the
-// ErrLockedMemoryUnavailable sentinel and never the struct, the memguard
-// diagnostic survives for an operator, and errors.As reaches a cause that
-// happens to be an error.
+// TestLockedMemoryError pins the typed error's contract: it matches
+// ErrLockedMemoryUnavailable, keeps the diagnostic text, and unwraps a cause
+// that is an error.
 func TestLockedMemoryError(t *testing.T) {
 	t.Run("matches the sentinel with no cause", func(t *testing.T) {
 		err := error(&LockedMemoryError{})
@@ -642,10 +601,8 @@ func panicValue(fn func()) (r any) {
 	return nil
 }
 
-// allZero reports whether every byte of b is zero. Tests judge enclave
-// contents with it IN PLACE — inside a borrow or a seam — rather than copying
-// them out to compare, because a test may not move material out of locked
-// memory to assert on it (#90; security-review.md §6).
+// allZero reports whether every byte of b is zero. Tests use it in place,
+// inside a borrow, so material is never copied out of locked memory.
 func allZero(b []byte) bool {
 	for _, c := range b {
 		if c != 0 {
@@ -655,12 +612,10 @@ func allZero(b []byte) bool {
 	return true
 }
 
-// generateInto fills the sized enclave e from the CSPRNG through a borrow and
-// records what was generated in a second locked enclave — the yardstick — from
-// inside that SAME borrow. The material therefore never exists outside locked
-// memory, and a later comparison against the yardstick (sameMaterial) says
-// whether e still holds exactly what was generated into it. The caller owns
-// the yardstick and must Destroy it.
+// generateInto fills the sized enclave e from the CSPRNG and copies the result,
+// from inside the same borrow, into a second locked enclave (the yardstick), so
+// the material never exists outside locked memory. The caller must Destroy the
+// yardstick.
 func generateInto(t *testing.T, e *MemoryEnclave) *MemoryEnclave {
 	t.Helper()
 	yardstick, err := NewMemoryEnclaveSized(e.Size())
@@ -669,8 +624,7 @@ func generateInto(t *testing.T, e *MemoryEnclave) *MemoryEnclave {
 	}
 	var zero bool
 	if err := e.WithBytes(func(key []byte) error {
-		// Exactly the shape the doc comment prescribes: the CSPRNG writes
-		// straight into the locked pages, never into an intermediate slice.
+		// The CSPRNG writes straight into the locked pages.
 		if _, err := io.ReadFull(rand.Reader, key); err != nil {
 			return err
 		}
@@ -687,11 +641,8 @@ func generateInto(t *testing.T, e *MemoryEnclave) *MemoryEnclave {
 		_ = yardstick.Destroy()
 		t.Fatal("the generator produced all zeroes; every comparison against it would be vacuous")
 	}
-	// Re-read BOTH through fresh borrows. The fill went through WithBytes on
-	// each, so if a borrow ever handed out a detached copy instead of the
-	// locked pages, both would still read as zero and every comparison below
-	// would accept zero against zero. A reference must not share the defect
-	// it is the yardstick for: persistence is checked here, independently.
+	// Re-read both through fresh borrows: if a borrow handed out a detached
+	// copy, both would read zero and every later comparison would be vacuous.
 	var storedZero, yardstickZero bool
 	if err := e.WithBytes(func(b []byte) error { storedZero = allZero(b); return nil }); err != nil {
 		_ = yardstick.Destroy()
@@ -708,10 +659,8 @@ func generateInto(t *testing.T, e *MemoryEnclave) *MemoryEnclave {
 	return yardstick
 }
 
-// sameMaterial reports whether a and b hold identical material. It compares
-// through nested borrows, so neither side is ever copied out of locked memory,
-// and it goes through a's EqualTo — the locked, constant-time accessor — so
-// that accessor is exercised against the real storage too.
+// sameMaterial reports whether a and b hold identical material, comparing
+// through a nested borrow and a's EqualTo so nothing leaves locked memory.
 func sameMaterial(t *testing.T, a, b *MemoryEnclave) bool {
 	t.Helper()
 	var same bool
@@ -732,20 +681,11 @@ func isRegistered(e *MemoryEnclave) bool {
 	return ok
 }
 
-// TestDestroy_ReleaseFailureIsReturnedNotPanicked is the regression for #83's
-// Destroy finding: a plain release failure — the munlock or munmap after a
-// successful wipe refused, ENOMEM at vm.max_map_count being the realistic one —
-// PANICKED, because what is now Destroy (DestroyErr until #88) panicked on every
-// error that was not ErrReleasedWithoutWipe. The documentation on both methods
-// and the package said only detected corruption panics, and a resource refusal is the
-// opposite of a state the caller cannot reason about: the material is gone, the
-// pages are held for a retry, and a retry is exactly what the caller should do.
-//
-// Asserts the whole retained-for-retry contract, not just the absence of the
-// panic: the error is returned and typed, the mapping is kept, the enclave reads
-// destroyed, it stays on the ledger for WipeAll, the Allocator keeps the charge
-// for the pages the kernel still holds — and a retry once the refusal lifts
-// completes the release and returns all of it.
+// TestDestroy_ReleaseFailureIsReturnedNotPanicked pins the retained-for-retry
+// contract when the munlock after a successful wipe is refused: Destroy returns
+// ErrLockedMemoryUnavailable without panicking, keeps the mapping, reads
+// destroyed, stays on the ledger, keeps the Allocator charge, and a retry once
+// the refusal lifts releases everything.
 func TestDestroy_ReleaseFailureIsReturnedNotPanicked(t *testing.T) {
 	a, err := NewAllocator(4 * pageSize)
 	if err != nil {
@@ -789,8 +729,7 @@ func TestDestroy_ReleaseFailureIsReturnedNotPanicked(t *testing.T) {
 		t.Errorf("InUse = %d after a failed release, want %d: the kernel still holds the pages", used, pageSize)
 	}
 
-	// A retry while the refusal persists reports it again, and still does not
-	// panic: the report is a resource condition, whichever attempt meets it.
+	// A retry under the same refusal reports it again without panicking.
 	if r := panicValue(func() { derr = e.Destroy() }); r != nil {
 		t.Fatalf("a retried Destroy panicked with %v on a release failure that is not corruption", r)
 	}
@@ -864,11 +803,10 @@ func TestDestroy_CorruptionIsReturnedAndReported(t *testing.T) {
 	}
 }
 
-// TestDestroy_CorruptionSurvivesAFailedRelease: a corrupted canary whose
-// release is also refused returns an error matching both ErrEnclaveCorrupted
-// and ErrLockedMemoryUnavailable, keeping the mapping and the charge; the retry
-// that releases the pages reports the corruption AGAIN, because the first
-// attempt's wipe zeroed the bytes a second verification would compare.
+// TestDestroy_CorruptionSurvivesAFailedRelease pins that a corrupted canary
+// whose release is also refused returns both ErrEnclaveCorrupted and
+// ErrLockedMemoryUnavailable, keeping the mapping and charge, and that the retry
+// which releases the pages still reports the corruption.
 func TestDestroy_CorruptionSurvivesAFailedRelease(t *testing.T) {
 	forgetDestroyedCorruption(t)
 
@@ -883,8 +821,7 @@ func TestDestroy_CorruptionSurvivesAFailedRelease(t *testing.T) {
 	if len(e.m.canary) == 0 {
 		t.Fatal("a 32-byte enclave has no canary slack; this test would be vacuous")
 	}
-	// An underflow through a retained slice. A sized enclave is writable, so
-	// this is a store rather than a fault.
+	// A sized enclave is writable, so this is a store rather than a fault.
 	e.m.canary[len(e.m.canary)-1] ^= 0xFF
 
 	denied := errors.New("munmap: cannot allocate memory")
@@ -943,11 +880,8 @@ func forgetDestroyedCorruption(t *testing.T) {
 	})
 }
 
-// TestNewMemoryEnclaveSized_ZeroedAndSized covers the two properties the
-// constructor's name promises: the enclave is exactly n bytes and every one of
-// them is zero. A caller that generates only part of the region — a short read,
-// a derivation that fills a prefix — must not find another allocation's remnant
-// in the tail.
+// TestNewMemoryEnclaveSized_ZeroedAndSized pins that the enclave is exactly n
+// bytes and every byte is zero.
 func TestNewMemoryEnclaveSized_ZeroedAndSized(t *testing.T) {
 	for _, n := range []int{1, 32, 4096, 8192} {
 		t.Run(fmt.Sprintf("%d", n), func(t *testing.T) {
@@ -980,19 +914,9 @@ func TestNewMemoryEnclaveSized_ZeroedAndSized(t *testing.T) {
 	}
 }
 
-// TestNewMemoryEnclaveSized_FillsInPlace is the generate-in-place property, and
-// the reason this constructor exists.
-//
-// It is asserted as ALIASING, not as a happy return: material written through
-// one borrow must be visible through the next. A borrow that handed out a copy
-// — or a buffer memguard had frozen read-only, as it freezes every enclave
-// built from existing material — would leave the second borrow reading zeroes,
-// so both mutations turn this red. Together with the mlock proof in
-// TestNewMemoryEnclaveSized_MemoryIsLocked (Linux), that establishes the
-// property the issue asks for: the bytes the generator produces land in locked
-// memory and nowhere else. No third assertion is available for "no heap copy",
-// because the API takes no []byte at all — there is no other place for a copy
-// to be.
+// TestNewMemoryEnclaveSized_FillsInPlace pins generate-in-place as aliasing:
+// material written through one borrow is visible through the next. A borrow
+// that handed out a copy would leave the second borrow reading zeroes.
 func TestNewMemoryEnclaveSized_FillsInPlace(t *testing.T) {
 	const n = 32
 
@@ -1002,16 +926,12 @@ func TestNewMemoryEnclaveSized_FillsInPlace(t *testing.T) {
 	}
 	defer e.Destroy()
 
-	// The yardstick is derived from the fill itself and kept independent of
-	// the enclave: what the generator produced, recorded as it was produced —
-	// into a second LOCKED enclave, from inside the filling borrow. An
-	// ordinary []byte yardstick would be the very heap copy of generated
-	// material this constructor exists to prevent (#90).
+	// The yardstick is a second locked enclave; a []byte one would be the
+	// heap copy this constructor exists to prevent.
 	want := generateInto(t, e)
 	defer want.Destroy()
 
-	// A SEPARATE borrow. If the first one wrote to a copy, this reads zeroes.
-	// Compared against the yardstick through nested borrows, in place.
+	// A separate borrow: if the first wrote to a copy, this reads zeroes.
 	var same bool
 	if err := e.WithBytes(func(b []byte) error {
 		return want.WithBytes(func(w []byte) error {
@@ -1031,14 +951,9 @@ func TestNewMemoryEnclaveSized_FillsInPlace(t *testing.T) {
 	}
 }
 
-// TestNewMemoryEnclaveSized_RejectsNonPositive asserts the size guard, and that
-// it decides BEFORE memguard is entered.
-//
-// The error type is what proves the ordering. memguard's own answer to a size
-// below one is a dead buffer rather than a panic, so lockedEnclave would report
-// it as ErrLockedMemoryUnavailable; getting ErrInvalidSize instead can only mean
-// the guard ran first. Delete the guard and this test fails on the sentinel,
-// not merely on a message.
+// TestNewMemoryEnclaveSized_RejectsNonPositive pins that a non-positive size is
+// refused with ErrInvalidSize before any mapping is attempted; reaching the
+// allocator would surface as ErrLockedMemoryUnavailable instead.
 func TestNewMemoryEnclaveSized_RejectsNonPositive(t *testing.T) {
 	for _, n := range []int{0, -1, -4096} {
 		t.Run(fmt.Sprintf("%d", n), func(t *testing.T) {
@@ -1056,9 +971,8 @@ func TestNewMemoryEnclaveSized_RejectsNonPositive(t *testing.T) {
 	}
 }
 
-// TestNewMemoryEnclaveSized_Lifecycle covers the destroyed contract for an
-// enclave that was filled rather than moved into: the material is gone, and
-// every accessor reports ErrEnclaveDestroyed instead of touching unmapped pages.
+// TestNewMemoryEnclaveSized_Lifecycle pins the destroyed contract for a filled
+// sized enclave: every accessor reports ErrEnclaveDestroyed.
 func TestNewMemoryEnclaveSized_Lifecycle(t *testing.T) {
 	e, err := NewMemoryEnclaveSized(16)
 	if err != nil {
@@ -1097,11 +1011,8 @@ func TestNewMemoryEnclaveSized_Lifecycle(t *testing.T) {
 }
 
 // TestNewMemoryEnclaveSized_ConcurrentBorrowsAndDestroy runs the scoped-borrow
-// paths of a filled sized enclave against a concurrent Destroy, matching the
-// coverage the move-in constructor already has. Under -race this catches an
-// access that escapes the enclave's lock; without it, a read of a destroyed
-// buffer. The fill completes before any of it starts, which is the discipline
-// the constructor documents.
+// paths of a filled sized enclave against a concurrent Destroy. Under -race it
+// catches an access that escapes the enclave's lock.
 func TestNewMemoryEnclaveSized_ConcurrentBorrowsAndDestroy(t *testing.T) {
 	material := bytes.Repeat([]byte{0x5A}, 24)
 
@@ -1123,8 +1034,7 @@ func TestNewMemoryEnclaveSized_ConcurrentBorrowsAndDestroy(t *testing.T) {
 			go func() {
 				defer wg.Done()
 				_ = e.WithBytes(func(b []byte) error {
-					// Either the material or a destroyed enclave is correct; a
-					// half-visible region is not.
+					// Either the material or a destroyed enclave is correct.
 					if len(b) != 0 && !bytes.Equal(b, material) {
 						t.Errorf("a %d-byte borrow saw neither the material nor a destroyed enclave", len(b))
 					}
@@ -1183,14 +1093,10 @@ func TestAllocator_NewSized_Admits(t *testing.T) {
 	}
 }
 
-// TestAllocator_NewSized_RefusesOverBudget asserts admission gates the sized
-// constructor the same way it gates New: over-budget is refused with
-// ErrBudgetExhausted, no enclave comes back, and the counter is untouched.
-//
-// That the refusal happens before memguard is a separate claim, proved under an
-// injected lock fault in TestAllocator_NewSized_RefusalNeverEntersMemguard
-// (Linux) — a typed error alone cannot show it, since ErrLockedMemoryUnavailable
-// is typed too and would mean the purge already ran.
+// TestAllocator_NewSized_RefusesOverBudget pins that over-budget NewSized is
+// refused with ErrBudgetExhausted, returns no enclave, and leaves the counter
+// untouched. TestAllocator_NewSized_RefusalNeverAttemptsMapping (Linux) proves
+// the refusal precedes the mapping.
 func TestAllocator_NewSized_RefusesOverBudget(t *testing.T) {
 	// One page of budget holds exactly one enclave, however small.
 	a, err := NewAllocator(pageSize)
@@ -1220,16 +1126,14 @@ func TestAllocator_NewSized_RefusesOverBudget(t *testing.T) {
 	if !errors.As(err, &be) {
 		t.Fatalf("err is not a *BudgetError: %v", err)
 	}
-	// Locked bytes throughout: 16 bytes of material costs a page, and the page
-	// already taken is what leaves no room.
+	// Locked bytes throughout: 16 bytes of material costs a page.
 	if be.Requested != pageSize || be.Limit != pageSize || be.InUse != pageSize {
 		t.Errorf("BudgetError = %+v, want Requested=InUse=Limit=%d", be, pageSize)
 	}
 }
 
-// TestAllocator_NewSized_RejectsNonPositive asserts the size guard runs ahead of
-// admission as well as ahead of memguard: an impossible size is neither charged
-// to the budget nor reported as a budget refusal.
+// TestAllocator_NewSized_RejectsNonPositive pins that an impossible size is
+// refused with ErrInvalidSize before admission: nothing is charged.
 func TestAllocator_NewSized_RejectsNonPositive(t *testing.T) {
 	a, err := NewAllocator(4 * pageSize)
 	if err != nil {
@@ -1255,16 +1159,10 @@ func TestAllocator_NewSized_RejectsNonPositive(t *testing.T) {
 	}
 }
 
-// TestAllocator_reserve_RefusesNonPositive asserts the gate's counter invariant
-// directly, because the public surface cannot see it.
-//
-// NewSized's own failure path returns whatever it reserved, so a bad reservation
-// of -1 bytes is charged and refunded within the one call and InUse reads 0
-// either way — a test that only watched NewSized would pass with the check
-// deleted. What a concurrent caller would see is the window in between: a
-// counter below zero means a budget larger than the limit, and any allocation
-// admitted during that window overshoots. Asserting on reserve is the only place
-// that window is observable, so the check lives here and is tested here.
+// TestAllocator_reserve_RefusesNonPositive pins reserve's counter invariant
+// directly. Through NewSized a negative charge would be refunded within the
+// call and InUse would read 0 either way, hiding the window in which a
+// concurrent allocation could overshoot the limit.
 func TestAllocator_reserve_RefusesNonPositive(t *testing.T) {
 	limit := 16 * pageSize
 	a, err := NewAllocator(limit)
@@ -1286,8 +1184,7 @@ func TestAllocator_reserve_RefusesNonPositive(t *testing.T) {
 		})
 	}
 
-	// The gate still admits a legitimate reservation afterwards, and charges it
-	// the page it will actually cost rather than the 64 bytes asked for.
+	// A legitimate reservation is still admitted and charged a whole page.
 	charge, err := a.reserve(64)
 	if err != nil {
 		t.Fatalf("reserve(64) after the refusals: %v", err)
@@ -1300,13 +1197,8 @@ func TestAllocator_reserve_RefusesNonPositive(t *testing.T) {
 	}
 }
 
-// TestLockedSize pins the accounting unit itself: an enclave costs its size
-// rounded UP to a whole page, so everything under a page costs a page.
-//
-// The exported helper exists because a caller cannot size a budget without it
-// — the change this test guards is what makes Limit comparable to
-// RLIMIT_MEMLOCK, and a hundred 32-byte credentials need a hundred pages of
-// budget, not 3200 bytes.
+// TestLockedSize pins the accounting unit: an enclave costs its size rounded up
+// to a whole page, and a size no enclave can have costs 0.
 func TestLockedSize(t *testing.T) {
 	p := int(pageSize)
 	for _, tc := range []struct {
@@ -1326,26 +1218,15 @@ func TestLockedSize(t *testing.T) {
 		}
 	}
 
-	// Not a size any enclave can have: no rounding is defined, so no cost is
-	// reported.
+	// Not a size any enclave can have.
 	for _, n := range []int{0, -1, -4096} {
 		if got := LockedSize(n); got != 0 {
 			t.Errorf("LockedSize(%d) = %d, want 0", n, got)
 		}
 	}
 
-	// The platform maximum is refused on every platform, and after Codex round
-	// 2 on PR #8 it is refused for a second reason as well: even where the data
-	// region rounds representably, memguard's mapping is that region PLUS two
-	// guard pages, laid out in int arithmetic. So the largest constructible
-	// enclave stops short of the platform maximum by those guard pages, and
-	// anything past it reports 0 — "not a size any enclave can have".
-	//
-	// Round 1 of that review argued the return type had to be int64 because a
-	// 32-bit platform could produce a locked size above MaxInt32. That reason is
-	// now GONE: the guard-page ceiling keeps every valid answer inside int on
-	// both word sizes. int64 stays because it matches NewAllocator's budget, and
-	// this comment records that the original justification did not survive.
+	// The mapping is the data region plus two guard pages in int arithmetic,
+	// so the largest constructible enclave stops two pages short of maxInt.
 	maxIntV := int(^uint(0) >> 1)
 	if got := LockedSize(maxIntV); got != 0 {
 		t.Errorf("LockedSize(maxInt) = %d, want 0", got)
@@ -1354,8 +1235,7 @@ func TestLockedSize(t *testing.T) {
 		t.Errorf("LockedSize(maxInt-page) = %d, want 0 (the mapping needs two guard pages too)", got)
 	}
 
-	// The boundary itself: the largest size whose data region plus two guard
-	// pages still fits, and the first one past it.
+	// The boundary: the largest size that fits with its guard pages, and one past it.
 	largest := int((maxInt - 2*pageSize) / pageSize * pageSize)
 	if got := LockedSize(largest); got != int64(largest) {
 		t.Errorf("LockedSize(largest constructible) = %d, want %d", got, largest)
@@ -1365,30 +1245,15 @@ func TestLockedSize(t *testing.T) {
 	}
 }
 
-// TestSizedConstructors_RefuseUnmappableSizes is the regression test for the
-// fail-open Codex found in round 2 of PR #8, and it covers BOTH construction
-// paths because both reach memguard.
-//
-// memguard maps roundToPageSize(size) + 2*pageSize in int arithmetic. A size
-// whose data region rounds representably can still overflow once the guard pages
-// are added; mmap then refuses the nonsense length and core.Panic purges every
-// live locked buffer in the process. Measured against v0.2.0-alpha with
-// n = MaxInt64-pageSize: admission passed, the request reached memguard, and an
-// unrelated canary enclave came back DEAD.
-//
-// The assertion that matters is the sentinel. ErrInvalidSize means the size was
-// refused on this side of the line; ErrLockedMemoryUnavailable would mean the
-// request reached memguard and the purge already ran — the failure this exists
-// to prevent, wearing a typed error.
-//
-// The budget is deliberately large enough to admit the rounded charge on both
-// word sizes and nothing is pre-reserved, so a refusal here cannot be the budget
-// doing the work by accident.
+// TestSizedConstructors_RefuseUnmappableSizes pins that both sized
+// constructors refuse a size whose mapping (data region plus two guard pages)
+// overflows int, with ErrInvalidSize and before any mapping is attempted. An
+// unrelated canary enclave must survive. The budget is large enough that
+// admission cannot be what refuses.
 func TestSizedConstructors_RefuseUnmappableSizes(t *testing.T) {
 	maxIntV := int(^uint(0) >> 1)
 
-	// A canary that must survive: if the request reaches memguard, the purge
-	// destroys it. That is the observable, not just the error value.
+	// A canary that must survive, observed alongside the error value.
 	canary, err := NewMemoryEnclave([]byte("canary-key-material"))
 	if err != nil {
 		t.Fatalf("could not allocate the canary enclave: %v", err)
@@ -1403,9 +1268,7 @@ func TestSizedConstructors_RefuseUnmappableSizes(t *testing.T) {
 		{"data region rounds, mapping does not", maxIntV - int(pageSize)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			// Unadmitted path first: no Allocator stands in front of it at all,
-			// so its own size check is the only thing between the caller and a
-			// process-wide purge.
+			// Unadmitted path: its own size check is the only guard.
 			e, err := NewMemoryEnclaveSized(tc.n)
 			if !errors.Is(err, ErrInvalidSize) {
 				t.Errorf("NewMemoryEnclaveSized(%d) = %v, want ErrInvalidSize", tc.n, err)
@@ -1418,8 +1281,7 @@ func TestSizedConstructors_RefuseUnmappableSizes(t *testing.T) {
 				e.Destroy()
 			}
 
-			// Admitted path, with a budget big enough that admission cannot be
-			// what refuses it.
+			// Admitted path, with a budget admission cannot refuse on.
 			a, err := NewAllocator(maxInt)
 			if err != nil {
 				t.Fatalf("NewAllocator: %v", err)
@@ -1450,32 +1312,14 @@ func TestSizedConstructors_RefuseUnmappableSizes(t *testing.T) {
 	}
 }
 
-// TestAllocator_reserve_DoesNotOverflow covers the two arithmetic guards on the
-// admission path. Each is a fail-open into memguard's process-wide purge if it
-// wraps, and they are asserted separately because a single request cannot
-// exercise both — one is caught before the other is ever consulted.
-//
-// The SIZE guard is the page rounding. The obvious form, `n+pageSize-1` masked
-// down, wraps for a large enough n; it also has to leave room for the two guard
-// pages memguard maps alongside the data region (see lockedSize).
-//
-// The BUDGET guard is the predicate itself, the fail-open Codex found on PR #3:
-// `used+charge > limit` performs signed addition, and for a large enough charge
-// that addition wraps NEGATIVE, passes the comparison, and admits an allocation
-// the budget cannot cover.
-//
-// One asymmetry, stated rather than hidden: the budget wrap is reachable only
-// where int is 64 bits. On a 32-bit platform the largest constructible charge is
-// bounded by int, far below the point where adding it to the counter could
-// overflow an int64. The assertions below hold on both — as a wrap on 64-bit and
-// as an ordinary over-budget refusal on 32-bit — but the mutant that restores
-// `used+charge > limit` is only caught on 64-bit, and claiming otherwise would
-// be false.
+// TestAllocator_reserve_DoesNotOverflow pins the two arithmetic guards on
+// admission, separately because one request cannot reach both: the page
+// rounding (size guard) and the budget predicate, where `used+charge > limit`
+// would wrap negative and admit. The budget wrap is reachable only where int is
+// 64 bits; on 32-bit the same assertions hold as a plain over-budget refusal.
 func TestAllocator_reserve_DoesNotOverflow(t *testing.T) {
-	// Guard 1 — the size. MaxInt64 has no representable page-rounded cost and
-	// no mapping that fits, so it is refused as an impossible SIZE before any
-	// budget comparison happens. A larger limit would not help, which is why
-	// this is ErrInvalidSize and not ErrBudgetExhausted.
+	// Size guard: MaxInt64 has no representable mapping, so it is
+	// ErrInvalidSize before any budget comparison.
 	a, err := NewAllocator(math.MaxInt64)
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
@@ -1493,11 +1337,8 @@ func TestAllocator_reserve_DoesNotOverflow(t *testing.T) {
 		t.Errorf("InUse = %d after the refusal, want the unchanged %d", got, pageSize)
 	}
 
-	// Guard 2 — the budget predicate. widest is the largest size that clears
-	// every size guard, so it reaches the comparison. The budget is exactly its
-	// charge and several pages are already spoken for, which makes it over
-	// budget on any platform; on 64-bit it is also past the point where
-	// used+charge overflows, which is what the restored-predicate mutant needs.
+	// Budget predicate: widest clears every size guard, and with pages already
+	// spoken for it is over budget; on 64-bit used+charge would overflow.
 	widest := (maxInt - 2*pageSize) / pageSize * pageSize
 	if _, ok := lockedSize(widest); !ok {
 		t.Fatalf("lockedSize(%d) refused; the test would never reach the budget predicate", widest)
@@ -1524,10 +1365,8 @@ func TestAllocator_reserve_DoesNotOverflow(t *testing.T) {
 		t.Errorf("InUse = %d after the refusal, want the unchanged %d (the counter wrapped)", got, before)
 	}
 
-	// The public half, through NewSized. Its job is the memguard arm check:
-	// with admission intact the request never enters memguard, and with either
-	// guard removed it does and comes back with ErrLockedMemoryUnavailable — a
-	// different sentinel, from the far side of the purge.
+	// Through NewSized: a failed guard would surface as
+	// ErrLockedMemoryUnavailable from the mapping instead of ErrBudgetExhausted.
 	small, err := NewAllocator(2 * pageSize)
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
@@ -1548,12 +1387,9 @@ func TestAllocator_reserve_DoesNotOverflow(t *testing.T) {
 	}
 }
 
-// TestAllocator_NewSized_DestroyReleasesReservation is the release-path mutation
-// killer for NewSized, asserted on the ALLOCATOR because the enclave itself
-// reads back identically whether or not its reservation was returned: fill the
-// budget, confirm the next allocation is refused, destroy the holder, and
-// confirm an identical allocation now succeeds. Dropping `e.release = …` from
-// NewSized leaves the budget consumed forever and fails the final call.
+// TestAllocator_NewSized_DestroyReleasesReservation pins that Destroy returns a
+// NewSized reservation exactly once: a full budget admits again after Destroy,
+// and a double Destroy does not underflow.
 func TestAllocator_NewSized_DestroyReleasesReservation(t *testing.T) {
 	a, err := NewAllocator(pageSize)
 	if err != nil {
@@ -1587,16 +1423,11 @@ func TestAllocator_NewSized_DestroyReleasesReservation(t *testing.T) {
 	e2.Destroy()
 }
 
-// TestAllocator_NewSized_Concurrent runs many concurrent generate-fill-verify-
-// destroy cycles against a tight budget. The invariants under -race: InUse never
-// exceeds the limit at any observed point, each enclave holds exactly what its
-// own goroutine generated into it (so no two fills share storage), and the
-// counter returns to exactly zero once everything is destroyed.
+// TestAllocator_NewSized_Concurrent runs concurrent fill-verify-destroy cycles
+// against a tight budget: InUse never exceeds the limit, each enclave holds its
+// own goroutine's material, and the counter returns to zero.
 func TestAllocator_NewSized_Concurrent(t *testing.T) {
-	// Budget in PAGES: each enclave costs one whatever its size, so a budget
-	// expressed in the requested bytes would refuse every allocation and leave
-	// this test asserting nothing while still reporting green. The admitted
-	// counter makes that failure mode loud instead of silent.
+	// Budget in pages; the admitted counter fails the test if nothing was admitted.
 	const (
 		capacity = 5
 		size     = 40
@@ -1652,18 +1483,11 @@ func TestAllocator_NewSized_Concurrent(t *testing.T) {
 	}
 }
 
-// TestMemoryEnclave_FreezeProtectsAfterTheFill covers the property Freeze
-// exists for, at the level the protection actually lives: m.mutable is the
-// package's record of whether the inner region is writable, and it is false only
-// when an mprotect to read-only succeeded. The fault that follows from it is
-// asserted by execution in TestMemoryEnclave_FrozenSizedPagesFault; this half
-// pins that a normal fill-then-freeze reaches that state and that everything
-// else about the enclave still works afterwards.
-//
-// The unfrozen control is not decoration. Without it an implementation that
-// reported enclaves frozen from birth would pass — and that implementation
-// cannot exist, because a sized enclave has to be filled, so the control is what
-// says the assertion measured the freeze rather than the constructor.
+// TestMemoryEnclave_FreezeProtectsAfterTheFill pins that fill-then-Freeze
+// leaves the region read-only (m.mutable false) and every accessor still
+// working. The fault itself is exercised by
+// TestMemoryEnclave_FrozenSizedPagesFault. An unfrozen sized enclave is the
+// control.
 func TestMemoryEnclave_FreezeProtectsAfterTheFill(t *testing.T) {
 	material := bytes.Repeat([]byte{0xA5}, 32)
 
@@ -1696,8 +1520,7 @@ func TestMemoryEnclave_FreezeProtectsAfterTheFill(t *testing.T) {
 		t.Error("the enclave is still writable after Freeze; a stray write would corrupt it silently")
 	}
 
-	// Freezing is a protection change, not a change to the material. Everything
-	// a caller does with an enclave has to keep working across it.
+	// Freezing changes protection only; every accessor keeps working.
 	if !holds(e, material) {
 		t.Error("the material did not survive the freeze")
 	}
@@ -1715,30 +1538,16 @@ func TestMemoryEnclave_FreezeProtectsAfterTheFill(t *testing.T) {
 	}); err != nil {
 		t.Errorf("borrowing a frozen enclave: %v", err)
 	}
-	// OpenString is the one accessor whose JOB is to materialize a string, so
-	// it is called here as the API under test; its result is judged, never
-	// printed (#90).
+	// OpenString is the API under test; its result is judged, never printed.
 	if s, err := e.OpenString(); err != nil || s != string(material) {
 		t.Errorf("OpenString() on a frozen enclave: err = %v, holds the material = %v; want the material "+
 			"and no error", err, s == string(material))
 	}
 }
 
-// TestMemoryEnclave_FreezeIsIdempotent pins the shapes of second freeze that a
-// caller can produce without a mistake: freezing an enclave it already froze,
-// and freezing one it was handed without knowing which constructor built it.
-//
-// Both must be a quiet no-op. The alternative — an error on a redundant freeze —
-// would force every caller receiving an enclave from elsewhere to track a
-// property it cannot observe, and re-issuing the mprotect instead would be a
-// syscall that can be refused for no reason at all.
-//
-// BOTH constructors that bring existing material in are covered, not just the
-// one this method was written against. They share newMemoryEnclaveCopy today, so
-// asserting only NewMemoryEnclave would be asserting an implementation detail
-// that a future split could quietly break — and a caller receiving an enclave
-// cannot tell which of the three built it, which is the whole reason this has to
-// be a no-op.
+// TestMemoryEnclave_FreezeIsIdempotent pins that Freeze is a nil no-op on an
+// enclave already frozen, whether by an earlier Freeze or by NewMemoryEnclave
+// or NewMemoryEnclaveCopy, which both return read-only enclaves.
 func TestMemoryEnclave_FreezeIsIdempotent(t *testing.T) {
 	sized, err := NewMemoryEnclaveSized(32)
 	if err != nil {
@@ -1756,8 +1565,7 @@ func TestMemoryEnclave_FreezeIsIdempotent(t *testing.T) {
 		t.Error("the second Freeze left the enclave writable")
 	}
 
-	// A move-constructed enclave arrives frozen: Freeze must accept it rather
-	// than treat the state it wanted as an error.
+	// A move-constructed enclave arrives frozen.
 	moved, err := NewMemoryEnclave([]byte("private-key-material"))
 	if err != nil {
 		t.Fatalf("NewMemoryEnclave: %v", err)
@@ -1773,8 +1581,7 @@ func TestMemoryEnclave_FreezeIsIdempotent(t *testing.T) {
 		t.Error("the material did not survive a redundant freeze")
 	}
 
-	// And the copy constructor, which arrives frozen for the same reason: its
-	// material is complete when it returns.
+	// So does a copy-constructed one.
 	src := []byte("material the caller keeps")
 	copied, err := NewMemoryEnclaveCopy(src)
 	if err != nil {
@@ -1795,13 +1602,8 @@ func TestMemoryEnclave_FreezeIsIdempotent(t *testing.T) {
 	}
 }
 
-// TestMemoryEnclave_FreezeReportsDestroyed asserts Freeze refuses when there are
-// no pages to protect, rather than reporting a success nothing established.
-//
-// The distinction matters because of what a caller does with the answer: a nil
-// return is read as "a stray write faults from here", and a destroyed or nil
-// enclave has established no such thing. The live case is asserted alongside so
-// an implementation that refused everything could not pass.
+// TestMemoryEnclave_FreezeReportsDestroyed pins that Freeze on a nil or
+// destroyed enclave returns ErrEnclaveDestroyed, with a live control.
 func TestMemoryEnclave_FreezeReportsDestroyed(t *testing.T) {
 	var nilEnclave *MemoryEnclave
 	if err := nilEnclave.Freeze(); !errors.Is(err, ErrEnclaveDestroyed) {
@@ -1813,7 +1615,7 @@ func TestMemoryEnclave_FreezeReportsDestroyed(t *testing.T) {
 		t.Fatalf("NewMemoryEnclaveSized: %v", err)
 	}
 
-	// The control: the same call on the same enclave while it is alive.
+	// The control: the same enclave while alive.
 	if err := e.Freeze(); err != nil {
 		t.Fatalf("Freeze on a live enclave: %v, want nil", err)
 	}
@@ -1824,23 +1626,13 @@ func TestMemoryEnclave_FreezeReportsDestroyed(t *testing.T) {
 	}
 }
 
-// TestMemoryEnclave_FreezeRefusesAWipedMapping is the #40 interaction: a mapping
-// KEPT after its material was wiped, because the munlock or munmap that follows
-// the wipe was refused and Destroy has to stay retryable.
-//
-// Every other method on the type calls that state destroyed, and Freeze has to
-// give the same answer for reasons past consistency. There is nothing left to
-// protect, so a nil return would report fault-on-write established over a region
-// of zeroes. And mprotecting it read-only would make the retry MELT pages it has
-// already melted — turning a release that needs one refusable syscall into one
-// that needs two, on the exact path that is already failing.
-//
-// The live control is next to it, because a Freeze that refused everything would
-// satisfy the refusal on its own.
+// TestMemoryEnclave_FreezeRefusesAWipedMapping pins that Freeze on a mapping
+// kept after its wipe (release refused, Destroy retryable) returns
+// ErrEnclaveDestroyed and leaves the region writable, so the retried release
+// needs no extra mprotect.
 func TestMemoryEnclave_FreezeRefusesAWipedMapping(t *testing.T) {
-	// Unexported: this drives wipeAndVerify directly rather than Destroy, so
-	// nothing deregisters, and a ledger entry left behind here is counted by
-	// every WipeAll test in the package.
+	// Unexported constructor: wipeAndVerify is driven directly, so nothing
+	// deregisters, and a ledger entry would leak into every WipeAll test.
 	e, err := newMemoryEnclaveSized(32)
 	if err != nil {
 		t.Fatalf("newMemoryEnclaveSized: %v", err)
@@ -1851,8 +1643,7 @@ func TestMemoryEnclave_FreezeRefusesAWipedMapping(t *testing.T) {
 		}
 	})
 
-	// The control first, while there is still material: the same call on the
-	// same enclave has to succeed.
+	// The control, while there is still material.
 	if err := e.WithBytes(func(b []byte) error {
 		copy(b, bytes.Repeat([]byte{0x11}, len(b)))
 		return nil
@@ -1863,10 +1654,8 @@ func TestMemoryEnclave_FreezeRefusesAWipedMapping(t *testing.T) {
 		t.Fatalf("Freeze on a live enclave: %v, want nil", err)
 	}
 
-	// wipeAndVerify is the step that produces the state release() leaves behind
-	// when what follows it is refused: material gone, pages still held. Calling
-	// it directly reaches that state with no syscall stub at all — the technique
-	// #40's own tests use.
+	// wipeAndVerify alone produces the state a refused release leaves: material
+	// gone, pages still held.
 	if err := e.m.wipeAndVerify(); err != nil {
 		t.Fatalf("wipeAndVerify: %v", err)
 	}
@@ -1880,34 +1669,20 @@ func TestMemoryEnclave_FreezeRefusesAWipedMapping(t *testing.T) {
 	if err := e.Freeze(); !errors.Is(err, ErrEnclaveDestroyed) {
 		t.Errorf("Freeze on a wiped-but-kept mapping = %v, want ErrEnclaveDestroyed", err)
 	}
-	// And it must not have re-protected the region on its way out: the kept
-	// mapping is left writable by wipeAndVerify precisely so the retry needs no
-	// further mprotect.
+	// The kept mapping stays writable so the retry needs no further mprotect.
 	if !e.m.mutable {
 		t.Error("Freeze re-protected a wiped mapping read-only; the retried release now needs " +
 			"an extra mprotect on the path that is already being refused")
 	}
-	// The enclave agrees with every other method about what it is.
 	if e.IsAlive() {
 		t.Error("IsAlive reports true for an enclave whose material is gone")
 	}
 }
 
-// TestMemoryEnclave_FreezeWaitsForBorrows asserts the lock Freeze takes is the
-// WRITE lock, which is the difference between bounding a hazard and creating
-// one.
-//
-// A borrow is where the fill happens. If Freeze could run under the read lock it
-// would overlap one, and the mprotect would land between two stores of a
-// goroutine that is still writing — faulting the filling goroutine on its next
-// store. A method whose whole purpose is to convert silent corruption into a
-// fault would then be manufacturing the fault itself.
-//
-// The negative half (Freeze does not return while the borrow is in flight) is
-// what catches a read lock; the positive half (it does return once the borrow
-// ends, having observed the borrow finished) is what keeps the negative half
-// from passing on a Freeze that simply hangs forever. Both waits are bounded, so
-// a regression names itself instead of timing out the suite.
+// TestMemoryEnclave_FreezeWaitsForBorrows pins that Freeze takes the write
+// lock: it does not return while a borrow (a fill in progress) is in flight, and
+// does return once the borrow ends. Under a read lock the mprotect could land
+// mid-fill and fault the filling goroutine.
 func TestMemoryEnclave_FreezeWaitsForBorrows(t *testing.T) {
 	e, err := NewMemoryEnclaveSized(32)
 	if err != nil {
@@ -1947,7 +1722,7 @@ func TestMemoryEnclave_FreezeWaitsForBorrows(t *testing.T) {
 		t.Fatalf("Freeze returned (%v) while a borrow was still in flight; it is not taking the write lock, "+
 			"so the mprotect can land mid-fill", err)
 	case <-time.After(100 * time.Millisecond):
-		// Still waiting, which is the whole point.
+		// Still waiting, as required.
 	}
 
 	close(release)
@@ -1969,21 +1744,10 @@ func TestMemoryEnclave_FreezeWaitsForBorrows(t *testing.T) {
 	}
 }
 
-// TestMemoryEnclave_FreezeFailureLeavesTheEnclaveUsable drives the branch where
-// the kernel refuses the mprotect, which is the one place Freeze's contract
-// differs from a constructor's.
-//
-// NewMemoryEnclave releases the mapping when its freeze is refused, because a
-// constructor cannot hand back a half-built enclave. Freeze must NOT: the caller
-// already owns this enclave, has a Destroy deferred on it, and may well be
-// holding the only reference to material it is still able to use. Destroying it
-// underneath the caller would turn a failed hardening step into lost key
-// material.
-//
-// So the enclave has to come back exactly as it went in — alive, writable,
-// readable — with the failure reported as a typed error. The refusal is
-// injected through the protectMemory seam, so the enclave's own slices are
-// never touched.
+// TestMemoryEnclave_FreezeFailureLeavesTheEnclaveUsable pins that a refused
+// mprotect returns ErrLockedMemoryUnavailable and leaves the enclave alive,
+// writable and holding its material (unlike a constructor, which releases), and
+// that a retry succeeds. The refusal is injected through the protectMemory seam.
 func TestMemoryEnclave_FreezeFailureLeavesTheEnclaveUsable(t *testing.T) {
 	e, err := NewMemoryEnclaveSized(32)
 	if err != nil {
@@ -2010,7 +1774,6 @@ func TestMemoryEnclave_FreezeFailureLeavesTheEnclaveUsable(t *testing.T) {
 		t.Errorf("err = %v, want ErrLockedMemoryUnavailable", err)
 	}
 
-	// Everything the caller had, it still has.
 	if !e.IsAlive() {
 		t.Error("a refused Freeze destroyed the enclave")
 	}
@@ -2020,8 +1783,7 @@ func TestMemoryEnclave_FreezeFailureLeavesTheEnclaveUsable(t *testing.T) {
 	if !holds(e, material) {
 		t.Error("the material did not survive a refused Freeze")
 	}
-	// Writable, which is what "usable" means for a sized enclave whose fill was
-	// not accepted as final.
+	// Still writable.
 	if err := e.WithBytes(func(b []byte) error {
 		b[0] ^= 0xFF
 		return nil
@@ -2033,8 +1795,7 @@ func TestMemoryEnclave_FreezeFailureLeavesTheEnclaveUsable(t *testing.T) {
 		t.Error("the write after a refused Freeze did not take")
 	}
 
-	// And a retry works, which is what makes the failure worth reporting rather
-	// than acting on.
+	// A retry succeeds.
 	if err := e.Freeze(); err != nil {
 		t.Errorf("Freeze after a transient refusal: %v", err)
 	}
@@ -2043,15 +1804,8 @@ func TestMemoryEnclave_FreezeFailureLeavesTheEnclaveUsable(t *testing.T) {
 	}
 }
 
-// TestWipeAll_ReclaimsAFrozenEnclave pins the interaction between the two
-// mechanisms that both act on an enclave's protection.
-//
-// The sweep's release path has to make a frozen region writable again before it
-// can wipe it, and it does that through the same code Destroy uses — but the
-// sweep must not panic and must not leave the enclave behind, so a freeze that
-// the release path could not undo would show up here as an enclave still holding
-// locked memory at exit. That is precisely the failure a shutdown sweep exists to
-// prevent, and it would be invisible in any test that only froze and destroyed.
+// TestWipeAll_ReclaimsAFrozenEnclave pins that the sweep makes a frozen region
+// writable, wipes and releases it, leaving nothing behind.
 func TestWipeAll_ReclaimsAFrozenEnclave(t *testing.T) {
 	requireCleanLedger(t)
 
@@ -2083,11 +1837,8 @@ func TestWipeAll_ReclaimsAFrozenEnclave(t *testing.T) {
 	}
 }
 
-// TestAllocator_FreezeKeepsTheReservation asserts freezing is a protection
-// change and nothing else. The enclave holds the same locked pages before and
-// after, so the budget must not move — and Destroy must still return the
-// reservation for an enclave that was frozen, which is the path an admitted
-// caller following the documented fill-then-freeze pattern actually takes.
+// TestAllocator_FreezeKeepsTheReservation pins that Freeze does not move the
+// Allocator charge and that Destroy of a frozen enclave returns it.
 func TestAllocator_FreezeKeepsTheReservation(t *testing.T) {
 	a, err := NewAllocator(4 * pageSize)
 	if err != nil {
@@ -2117,17 +1868,10 @@ func TestAllocator_FreezeKeepsTheReservation(t *testing.T) {
 	}
 }
 
-// The borrow benchmarks measure the cost a READER pays to hold an enclave's
-// lock, which is the path a shutdown sweep has to be able to wait on (#88).
-// Making a borrow observable to [WipeAll] must not cost a reader a lock or an
-// allocation, and these are what settle what it does cost: run them before and
-// after any change to withLocked, Size, IsAlive or the borrow bookkeeping, and
-// compare with benchstat. No threshold is wired into CI, for the reason given
-// on BenchmarkRefusalSerial.
-//
-// The callback does nothing on purpose. A real borrow does far more work than
-// the bracket around it, and a benchmark whose body dwarfed the bracket would
-// report noise as the answer.
+// The borrow benchmarks measure what a reader pays for an enclave's read-lock
+// bracket. Compare them with benchstat before and after any change to
+// withLocked, Size, IsAlive or borrow bookkeeping. The callback is empty so the
+// bracket dominates.
 
 // newBenchEnclave returns a small frozen enclave, destroyed at cleanup.
 func newBenchEnclave(b *testing.B) *MemoryEnclave {
@@ -2144,8 +1888,7 @@ func newBenchEnclave(b *testing.B) *MemoryEnclave {
 	return e
 }
 
-// noopBorrow is the callback every borrow benchmark runs. A package-level func
-// value, so taking it does not allocate a closure per iteration.
+// noopBorrow is package-level so taking it allocates no closure.
 func noopBorrow([]byte) error { return nil }
 
 // BenchmarkBorrowSerial is one goroutine borrowing one enclave: the
@@ -2162,10 +1905,8 @@ func BenchmarkBorrowSerial(b *testing.B) {
 	}
 }
 
-// BenchmarkBorrowParallelShared is GOMAXPROCS goroutines borrowing ONE enclave.
-// Every borrow writes the enclave's lock word, so this is the arm in which a
-// read-modify-write added to the bracket shows up at full amplitude: the line
-// is already contended, and anything else written on it is contended with it.
+// BenchmarkBorrowParallelShared is GOMAXPROCS goroutines borrowing one enclave,
+// where any write added to the bracket contends on the lock's cache line.
 func BenchmarkBorrowParallelShared(b *testing.B) {
 	e := newBenchEnclave(b)
 
@@ -2182,10 +1923,7 @@ func BenchmarkBorrowParallelShared(b *testing.B) {
 }
 
 // BenchmarkBorrowParallelDistinct is GOMAXPROCS goroutines each borrowing its
-// OWN enclave. Nothing per-enclave is shared, so the only cross-core cost left
-// is whatever package-level state a borrow touches — which is what this arm
-// exists to expose. A borrow that wrote a package-level word would collapse
-// here even though it looked free in the serial arm.
+// own enclave, exposing any package-level state a borrow writes.
 func BenchmarkBorrowParallelDistinct(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -2209,9 +1947,7 @@ func BenchmarkBorrowParallelDistinct(b *testing.B) {
 	})
 }
 
-// BenchmarkIsAliveParallel is the cheapest reader there is, polled from every
-// core against one enclave — a health probe during shutdown, which is the
-// reader the sweep most often meets.
+// BenchmarkIsAliveParallel polls IsAlive on one enclave from every core.
 func BenchmarkIsAliveParallel(b *testing.B) {
 	e := newBenchEnclave(b)
 
@@ -2227,11 +1963,9 @@ func BenchmarkIsAliveParallel(b *testing.B) {
 	})
 }
 
-// TestRelease_RetryReturnsTheReservationUnderStrictUnlock is the same
-// regression through both public retry paths, asserting what the defect cost a
-// caller: the reservation. Under VirtualUnlock semantics an enclave whose
-// munmap was refused once could never be released by DestroyErr or WipeAll,
-// and its Allocator charge stayed with it.
+// TestRelease_RetryReturnsTheReservationUnderStrictUnlock pins, through Destroy
+// and WipeAll, that under VirtualUnlock semantics an enclave whose munmap was
+// refused once is released by a retry and its Allocator charge returned.
 func TestRelease_RetryReturnsTheReservationUnderStrictUnlock(t *testing.T) {
 	for _, tc := range []struct {
 		name  string

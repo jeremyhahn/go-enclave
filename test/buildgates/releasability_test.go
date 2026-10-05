@@ -14,68 +14,50 @@ import (
 	"testing"
 )
 
-// The public-releasability gate (#80): no tracked file may name the private
-// development fleet, and no tracked file may be one that exists only for the
-// fleet's own agents.
+// The public-releasability gate: no tracked file may name the private
+// development fleet, and no tracked file may exist only for the fleet's own
+// agents.
 //
-// WHY A GATE. go-enclave's public GitHub tree is a squash commit whose tree is
-// BYTE-IDENTICAL to the Gitea release tag (handbook version-control §5a), and
-// the module zip every consumer's go.sum hashes is that same tree. So nothing
-// can be scrubbed at publication time: whatever is tracked at the tag is
-// published, and the scrub has to happen here, in the source, before tagging.
-// A scrub done once by hand is undone by the next commit that quotes a fleet
-// host in a measurement note — which is exactly how the one found by #80 got
-// in: a test comment recording where a timing was measured. This is what
-// prevents the repeat. It is modeled on go-quicbaas's `pkg/labstrings` gate
-// (docs/release/public-releasability.md there), scaled down to a repository
-// that has no fixtures, bundles or captured logs to allow-list.
+// The public tree is byte-identical to the release tag, and the module zip
+// consumers hash is that same tree, so nothing can be scrubbed at publication
+// time: the scrub has to happen in the source, before tagging, and a gate keeps
+// the next commit from undoing it.
 //
-// WHAT IS REPORTED, and why each class is a leak rather than a style problem:
+// Classes reported:
 //
-//   - lab-address — an address in the 192.168/16 private block. Unreachable for every
-//     public reader, so an example carrying one is broken documentation, and
-//     it publishes the operator's network layout. Unlike go-quicbaas, which
-//     names one /24, the WHOLE /16 is matched: the fleet spans more than a
-//     dozen /24s in it, and this repository uses no RFC 1918 literal as an
-//     opaque test address, so the wider rule costs nothing and cannot fall
-//     behind a new VLAN.
-//   - lab-host — a fleet hostname or the fleet's private DNS zones. Same, and
-//     it names the machines an attacker would go looking for.
-//   - owner-path — a path under the owner's home directory or the lab's NFS
-//     mount. Meaningless off that one machine, and it leaks the account name.
-//   - internal-file — a tracked file that exists for the fleet's agents, not
-//     for the public: CLAUDE.md and AGENTS.md (the owner's ruling on #80 keeps
-//     agent working notes out of the published tree), agent tool state, local
-//     Makefile overrides, and the retired `task-worker.yml` fabric workflow.
+//   - lab-address: an address anywhere in the 192.168/16 private block. It is
+//     unreachable for public readers and publishes the network layout. The
+//     whole /16 is matched because the fleet spans many /24s in it and this
+//     repository uses no RFC 1918 literal as an opaque test address.
+//   - lab-host: a fleet hostname or the fleet's private DNS zones.
+//   - owner-path: a path under the owner's home directory or the lab's NFS
+//     mount.
+//   - internal-file: a tracked file that exists for the fleet's agents:
+//     CLAUDE.md, AGENTS.md, agent tool state, local Makefile overrides, and
+//     the retired `task-worker.yml` workflow.
 //
-// WHAT TO DO WITH A FINDING, in order of preference:
+// To fix a finding, in order of preference:
 //
 //   - Use a documentation value: RFC 5737 addresses (192.0.2.0/24,
 //     198.51.100.0/24, 203.0.113.0/24), RFC 2606 names (example.com,
 //     *.example, *.invalid), or the role instead of the machine ("a factory
 //     runner", "an 8-core host").
-//   - Move the value out of the tree — a forge address into a CI repository
-//     variable, a fleet fact into the private infra repository.
-//   - If the value IS the point, waive the line in place: the text
+//   - Move the value out of the tree (a CI repository variable, the private
+//     infra repository).
+//   - If the value is the point, waive the line in place: the text
 //     `lab-string-ok: <reason>` on the offending line or the line immediately
-//     above it, in whatever comment syntax the file uses. The reason is what
-//     makes it a waiver; an empty one is not. There is no file-level allow
-//     list: nothing in this repository needs one, and a list is the thing that
-//     grows without anyone reading it.
+//     above it, in any comment syntax. An empty reason is not a waiver. There
+//     is no file-level allow list.
 //
-// WHAT IS SCANNED is the git INDEX, not the working tree's file listing: a
-// file is published because it is tracked, and untracked litter is nobody's
-// release problem. Content is read from the working tree, so a local edit is
-// judged before it is committed. The resolution is textual — no build tags,
-// no parser — so it covers Markdown, YAML, the Makefile and Go alike, and
-// works on a tree that does not compile.
+// The file list is the git index (a file is published because it is tracked);
+// content is read from the working tree, so a local edit is judged before it
+// is committed. Matching is textual, so it covers every file type and works on
+// a tree that does not compile.
 //
-// Test names share the `TestReleasability` prefix; `make check-releasability`
-// selects on it and `make check-action-pins` skips it, so each Makefile target
-// and each CI step reports exactly one gate.
+// Test names share the `TestReleasability` prefix, which `make
+// check-releasability` selects and `make check-action-pins` skips.
 
-// leakClass says what a finding leaks. It is a string so the report, a test
-// table and the documentation all spell it the same way.
+// leakClass says what a finding leaks.
 type leakClass string
 
 const (
@@ -86,8 +68,7 @@ const (
 )
 
 // waiverPrefix marks a line whose lab value is the point of the line. The text
-// after it is the reason and must not be empty. Same spelling as go-quicbaas,
-// so a waiver means one thing across the portfolio.
+// after it is the reason and must not be empty.
 const waiverPrefix = "lab-string-ok:"
 
 // leakPattern is one content rule. expr matches the VALUE, not the whole line,
@@ -101,11 +82,8 @@ type leakPattern struct {
 // leakPatterns is the content rule set, and the one place in this repository
 // the fleet's identifiers are written down. A new fleet host or zone is one
 // entry here plus one planted sample in TestReleasability_PlantedValuesAreCaught.
-//
-// The expressions are written so their own source text does not match them
-// (an escaped dot is not a dot; an alternation is not a hyphenated name). Where
-// that cannot be relied on, the line carries a waiver, which is the mechanism
-// working as designed rather than an exception to it.
+// The expressions are written so their own source text does not match them;
+// where that cannot be relied on, the line carries a waiver.
 var leakPatterns = []leakPattern{
 	{
 		class:    classLabAddress,
@@ -135,8 +113,7 @@ var leakPatterns = []leakPattern{
 }
 
 // internalFileRule marks a tracked path that must not be published at all. A
-// rule matches the path's basename, or — for a directory — any component of
-// its path.
+// rule matches the path's basename, or, for a directory, any path component.
 type internalFileRule struct {
 	name     string
 	dir      bool
@@ -144,8 +121,8 @@ type internalFileRule struct {
 }
 
 var internalFileRules = []internalFileRule{
-	{name: "CLAUDE.md", guidance: "agent working notes stay out of the published tree (#80): untrack it, it is in .gitignore"},
-	{name: "AGENTS.md", guidance: "agent working notes stay out of the published tree (#80): untrack it, it is in .gitignore"},
+	{name: "CLAUDE.md", guidance: "agent working notes stay out of the published tree: untrack it, it is in .gitignore"},
+	{name: "AGENTS.md", guidance: "agent working notes stay out of the published tree: untrack it, it is in .gitignore"},
 	{name: ".claude", dir: true, guidance: "local agent configuration: untrack it, it is in .gitignore"},
 	{name: ".serena", dir: true, guidance: "local agent tool state: untrack it, it is in .gitignore"},
 	{name: "local.mk", guidance: "per-machine Makefile overrides: untrack it, it is in .gitignore"},
@@ -161,22 +138,18 @@ type leakFinding struct {
 	guidance string
 }
 
-// String renders a finding in the file:line: form editors and CI log viewers
-// already know how to jump to.
+// String renders a finding in the file:line: form editors can jump to.
 func (f leakFinding) String() string {
 	return fmt.Sprintf("%s:%d: [%s] %q -- %s", f.path, f.line, f.class, f.match, f.guidance)
 }
 
 // binarySniff is how much of a file is examined for a NUL byte before deciding
-// it is binary — git's own test and threshold.
+// it is binary (git's own test and threshold).
 const binarySniff = 8000
 
-// Discovery floor. Every assertion in the tree test sits inside a loop over
-// discovered files, and an empty loop passes: a broken `git ls-files`, a wrong
-// root or a shallow checkout with no index would all report a clean tree. The
-// floor sits well below the current count (~70) so deleting files is never a
-// gate failure, and far enough above zero that a collapsed discovery cannot
-// slip under it. The anchors prove the listing is THIS repository's.
+// Discovery floor: an empty listing would report a clean tree. The floor sits
+// well below the current count (~70) so deleting files is not a failure; the
+// anchors prove the listing is this repository's.
 const minTrackedFiles = 40
 
 var trackedAnchors = []string{"go.mod", "VERSION", "CHANGELOG.md", "README.md", "Makefile"}
@@ -259,8 +232,8 @@ func TestReleasability_PlantedValuesAreCaught(t *testing.T) {
 	}
 }
 
-// The other direction: a gate that fires on the documentation values it tells
-// people to use gets waived wholesale by the first person who trips it.
+// TestReleasability_DocumentationValuesPass pins that the documentation values
+// the gate recommends do not fire.
 func TestReleasability_DocumentationValuesPass(t *testing.T) {
 	clean := []string{
 		"server at 192.0.2.10, fallback 198.51.100.7 and 203.0.113.254",
@@ -332,10 +305,10 @@ func TestReleasability_InternalFilesAreRefused(t *testing.T) {
 	}
 }
 
-// End to end, against a real index: the planted address in a TRACKED file
-// fails the gate, the same address in an UNTRACKED file does not (the index is
-// the manifest), a tracked file deleted from the working tree is skipped
-// rather than erroring, and a tracked CLAUDE.md is refused by name.
+// End to end, against a real index: the planted address in a tracked file
+// fails the gate, the same address in an untracked file does not, a tracked
+// file deleted from the working tree is skipped rather than erroring, and a
+// tracked CLAUDE.md is refused by name.
 func TestReleasability_PlantedTreeFailsTheGate(t *testing.T) {
 	root := t.TempDir()
 	addr := plant("192.168", ".101.50")
@@ -525,9 +498,7 @@ func scanContent(name string, content []byte) []leakFinding {
 	return findings
 }
 
-// waived reports whether a line carries a waiver with a reason. The reason is
-// what makes it a waiver: the prefix alone says only that somebody wanted the
-// gate to stop talking.
+// waived reports whether a line carries a waiver with a non-empty reason.
 func waived(line string) bool {
 	idx := strings.Index(line, waiverPrefix)
 	if idx < 0 {

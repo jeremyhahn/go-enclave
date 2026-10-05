@@ -1,23 +1,18 @@
-// Command consumer is the throwaway program scripts/consumer-check.sh builds
-// against a published go-enclave version, in a scratch module outside this
-// repository with GOWORK=off (handbook release-versioning §2: post-tag
-// verification builds a consumer, because every in-repo build resolves through
-// the working tree and never exercises what `go get` hands a consumer).
+// Command consumer is the program scripts/consumer-check.sh builds against a
+// published go-enclave version, in a scratch module outside this repository
+// with GOWORK=off, so it exercises what `go get` hands a consumer rather than
+// the working tree.
 //
-// It lives under testdata/ so the root module's `./...` — build, vet, lint,
-// coverage — never sees it: it is not part of the library, and as a package
-// main it would only dilute the coverage figure. gofmt still checks it, and
-// test/buildgates compiles and runs it against the working tree on every
-// change, so an API change that breaks it is found in that change's PR rather
-// than at the next tag.
+// It lives under testdata/ so the root module's `./...` (build, vet, lint,
+// coverage) never sees it. test/buildgates builds and runs it against the
+// working tree on every change, so an API change that breaks it fails in that
+// change's PR rather than at the next tag.
 //
-// It exercises the lifecycle every consumer depends on: construction takes
-// ownership of the caller's buffer and wipes it, the material is readable
-// inside the borrow window and comparable with EqualTo, Destroy releases it,
-// and a destroyed enclave refuses access with the documented sentinel. It then
-// seals the marker through a typed provider option and opens it again. The
-// value is a fixed, non-secret marker; nothing is copied out of the enclave to
-// be compared.
+// It checks the lifecycle every consumer depends on: construction wipes the
+// caller's buffer, the material is readable in the borrow window and comparable
+// with EqualTo, Destroy releases it, and a destroyed enclave returns
+// ErrEnclaveDestroyed. It then seals the marker through a typed provider option
+// and opens it again. The value is a fixed, non-secret marker.
 package main
 
 import (
@@ -53,7 +48,7 @@ func lifecycle() error {
 	if err != nil {
 		return fmt.Errorf("NewMemoryEnclave: %w", err)
 	}
-	defer func() { _ = e.Destroy() }() // second call after the explicit one: nil, idempotent
+	defer func() { _ = e.Destroy() }() // second call after the explicit one: idempotent
 
 	if !bytes.Equal(material, make([]byte, len(marker))) {
 		return errors.New("NewMemoryEnclave left the caller's buffer unwiped")

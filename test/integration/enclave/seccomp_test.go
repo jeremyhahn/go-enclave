@@ -10,49 +10,30 @@
 
 package enclave_test
 
-// REAL KERNEL REFUSALS, ON DEMAND.
+// Real kernel refusals, on demand.
 //
-// go-enclave's recovery paths — a refused mlock rolled back, a refused munlock
-// or munmap leaving a mapping held, a constructor's orphan adopted and later
-// reclaimed, a frozen enclave released unwiped because mprotect was denied —
-// run only when the kernel says no. The unit tests reach them through
-// in-package seams; an integration test must reach them through the public API,
-// so the refusal has to come from the kernel itself.
+// The library's recovery paths run only when the kernel refuses a memory
+// syscall, so an integration test needs the refusal to come from the kernel.
+// This is a seccomp user-notification supervisor: an isolated child (a filter
+// cannot be removed) installs a filter that routes mlock, munlock, mprotect up
+// to maxRoutedMprotect bytes, and munmap of one chosen length to a supervisor
+// goroutine in the same process. The supervisor answers from a policy the test
+// changes at run time: continue the call as the kernel would, or fail it with
+// an errno. Lifting a refusal is a policy change, so a test can drive
+// "refused, then retried".
 //
-// This is a seccomp user-notification supervisor. A child process (always one:
-// a seccomp filter cannot be removed, so it must never be installed in the
-// shared parent) installs a filter that routes exactly the library's memory
-// syscalls — mlock, munlock, mprotect, and munmap of one chosen length — to a
-// supervisor goroutine in the same process (mprotect only up to
-// maxRoutedMprotect bytes; see below). The supervisor answers each from a
-// policy the test changes at run time: let the call through
-// (SECCOMP_USER_NOTIF_FLAG_CONTINUE, the kernel performs it exactly as it would
-// have), or fail it with an errno. A refusal is therefore a real syscall
-// returning a real error to the library's real code, and lifting it is a
-// policy change, which is what lets a test drive "refused, then retried after
-// the condition lifted" — the shape every reclaim path is about.
-//
-// Scope, stated precisely:
-//   - Nothing the process needs in order to RUN the supervisor may be routed
-//     to it, or the two wait on each other. The pure-Go runtime makes no
-//     mlock, munlock or mprotect on linux, but a cgo build — every -race
-//     build is one — creates threads with pthread_create, and musl's
-//     pthread_create mprotects each new thread's stack read-write. Routed,
-//     that deadlocks the moment the supervisor's goroutine needs a fresh
-//     thread to run on (measured: three threads parked in
-//     seccomp_do_user_notification, none in the supervisor's receive), and
-//     refused it aborts the runtime (measured: "pthread_create failed").
-//     So mprotect is routed only for lengths up to maxRoutedMprotect, which
-//     covers every enclave region these tests create and no thread stack
-//     (musl's smallest is 128 KiB). The munmap rule likewise matches one
-//     length the test chooses (an enclave mapping's total size).
+// Scope:
+//   - Nothing the supervisor needs to run may be routed to it. A cgo build
+//     (every -race build) creates threads with pthread_create, and musl
+//     mprotects each new thread stack: routed, that deadlocks; refused, it
+//     aborts the runtime. mprotect is therefore routed only up to
+//     maxRoutedMprotect, below musl's smallest stack (128 KiB).
 //   - The supervisor's goroutine is locked to its own thread and makes only
-//     ioctl and futex-class calls, none of which the filter routes.
-//   - Requires Linux >= 5.19 (WAIT_KILLABLE_RECV, so the Go runtime's own
-//     preemption signals cannot withdraw a notification the supervisor is
-//     answering; TSYNC_ESRCH alongside NEW_LISTENER), no_new_privs
-//     (set here, unprivileged), and a container seccomp profile that permits
-//     seccomp(2) — Docker's default does. Absence is a failure, not a skip.
+//     ioctl and futex-class calls, none of which are routed.
+//   - Requires Linux >= 5.19 (WAIT_KILLABLE_RECV, so runtime preemption
+//     signals cannot withdraw a notification being answered; TSYNC_ESRCH),
+//     no_new_privs (set here), and a container profile permitting seccomp(2).
+//     Absence is a failure, not a skip.
 
 import (
 	"errors"
@@ -94,29 +75,21 @@ type seccompNotifResp struct {
 
 // syscallRule is the supervisor's answer for one syscall: refuse with errno
 // when Refuse is set, otherwise let it through. Addr, when non-zero, limits a
-// refusal to calls whose first argument is exactly that address — the way a
-// test refuses ONE enclave's munlock while every other proceeds.
+// refusal to calls whose first argument is exactly that address.
 type syscallRule struct {
 	Refuse bool
 	Errno  unix.Errno
 	Addr   uintptr
 	// Prot, when HasProt is set, limits a refusal to calls whose third
-	// argument is exactly Prot — mprotect's protection, which is how a test
-	// refuses the freeze (PROT_READ) while guard-page setup (PROT_NONE) and
-	// release (PROT_READ|PROT_WRITE) proceed.
+	// argument is Prot, so a test can refuse the freeze (PROT_READ) while
+	// guard-page setup and release proceed.
 	Prot    uint64
 	HasProt bool
 	// Skip lets that many matching calls through before the refusal starts,
-	// which is how a test refuses the Nth lock of an operation — the KEK a
-	// seal mints after its DEK and root, say — rather than the first.
-	//
-	// It counts DISTINCT addresses (args[0]), not notifications. A syscall
-	// the kernel restarts — a signal landing after the supervisor's answer
-	// was accepted but before the target consumed it, a race Linux closed
-	// only in commit cce436aafc2a — is presented again with the same
-	// arguments, and must not spend a second allowance. Within one refusal
-	// sequence every allocation is a distinct live mapping, so its address
-	// identifies it.
+	// so a test can refuse the Nth lock of an operation. It counts distinct
+	// addresses (args[0]), not notifications: a syscall the kernel restarts
+	// after an accepted answer is presented again with the same arguments
+	// and must not spend a second allowance.
 	Skip    uint64
 	skipped map[uintptr]struct{}
 	// Hold parks the matching call unanswered instead of refusing it, and
@@ -164,10 +137,8 @@ func auditArch() (uint32, error) {
 // installFaultInjector installs the filter and starts the supervisor. It must
 // run inside an isolated child: the filter is permanent for the process.
 // munmapLen is the one munmap length routed to the supervisor (0 routes none).
-// maxRoutedMprotect is the largest mprotect the filter routes to the
-// supervisor: well above any enclave region these tests create (a few pages),
-// well below any thread stack (musl's smallest is 128 KiB), so the runtime's
-// own thread creation is never routed; see the scope notes above.
+// maxRoutedMprotect is well above any enclave region these tests create and
+// below any thread stack, so the runtime's thread creation is never routed.
 const maxRoutedMprotect = 64 << 10
 
 func installFaultInjector(t *testing.T, munmapLen uint64) *faultInjector {
@@ -253,11 +224,9 @@ func installFaultInjector(t *testing.T, munmapLen uint64) *faultInjector {
 	started := make(chan struct{})
 	go f.supervise(started)
 	<-started
-	// The filter and its supervisor live until the process exits, but no
-	// refusal may outlive the test that set it: the child still runs the
-	// testing framework's teardown and the runtime's exit path afterwards, and
-	// a stale mprotect refusal there fails cgo's pthread_create (measured:
-	// SIGABRT after a passing test). Every rule is lifted at cleanup.
+	// The filter outlives the test, but no refusal may: the child still runs
+	// teardown and the runtime's exit path, and a stale mprotect refusal there
+	// fails cgo's pthread_create. Every rule is lifted at cleanup.
 	t.Cleanup(func() {
 		for nr := range f.refused {
 			f.allow(nr)
@@ -330,12 +299,9 @@ func (f *faultInjector) release(t *testing.T, id uint64) {
 func (f *faultInjector) refusals(nr int32) int64 { return f.refused[nr].Load() }
 
 // respond decides the answer to one notification, sends it, and only once
-// the kernel has ACCEPTED it commits what the answer consumed — a Skip
-// allowance, a counter. A notification the kernel withdraws (ENOENT: the
-// target was killed) consumes nothing, so it cannot shift which call of a
-// sequence is refused. f.mu is held throughout, so a rule a test changes
-// concurrently is never half-applied; the supervisor is the only responder,
-// so notifications are answered one at a time in any case.
+// the kernel has accepted it commits what the answer consumed. A withdrawn
+// notification (ENOENT: the target was killed) consumes nothing, so it cannot
+// shift which call of a sequence is refused. f.mu is held throughout.
 func (f *faultInjector) respond(n *seccompNotif) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -352,10 +318,8 @@ func (f *faultInjector) respond(n *seccompNotif) error {
 		resp = seccompNotifResp{ID: n.ID, Error: -int32(d.errno)}
 		counter = f.refused[n.Data.Nr]
 	}
-	// Counted BEFORE the answer is sent: the target resumes the moment the
-	// kernel accepts it, and a test that reads the counter right after its
-	// syscall returns must already see it. Taken back if the answer is not
-	// accepted.
+	// Counted before the answer is sent, so a test reading the counter as
+	// soon as its syscall returns sees it; taken back if not accepted.
 	if counter != nil {
 		counter.Add(1)
 	}
@@ -411,14 +375,10 @@ func (f *faultInjector) commitLocked(n *seccompNotif, d decision) {
 	f.rules[n.Data.Nr] = r
 }
 
-// supervise answers notifications for the life of the process. It is locked to
-// its own thread so nothing else ever runs on the thread that must answer.
-//
-// The filter is installed with WAIT_KILLABLE_RECV, so once a notification has
-// been received only a FATAL signal can cancel it; before that, a signal to
-// the target withdraws it and the target restarts the syscall, which RECV may
-// observe as ENOENT for a notification that is already gone. Both RECV errors
-// are therefore "nothing to answer", never a reason to stop answering.
+// supervise answers notifications for the life of the process, locked to its
+// own thread. With WAIT_KILLABLE_RECV a received notification can be canceled
+// only by a fatal signal; before receipt, a signal withdraws it and RECV may
+// report ENOENT. Both RECV errors mean "nothing to answer", not "stop".
 func (f *faultInjector) supervise(started chan<- struct{}) {
 	runtime.LockOSThread()
 	close(started)
@@ -428,9 +388,8 @@ func (f *faultInjector) supervise(started chan<- struct{}) {
 			if errno == unix.EINTR || errno == unix.ENOENT {
 				continue
 			}
-			// Any other failure means the listener itself is broken; nothing
-			// can be answered from here on, and every routed syscall would
-			// hang, so stop the process loudly instead.
+			// The listener is broken and every routed syscall would hang: stop
+			// loudly.
 			panic(fmt.Sprintf("seccomp supervisor: NOTIF_RECV: %v", errno))
 		}
 		if err := f.respond(&n); err != nil {
@@ -439,11 +398,9 @@ func (f *faultInjector) supervise(started chan<- struct{}) {
 	}
 }
 
-// TestFaultInjectorRefusesAndLifts proves the instrument before anything
-// relies on it: a refused mlock really fails with the chosen errno, the same
-// call succeeds once lifted, and the supervisor counted both answers. Without
-// this, a filter that silently routed nothing would make every fault test
-// below pass by never faulting.
+// TestFaultInjectorRefusesAndLifts proves the instrument: a refused mlock
+// fails with the chosen errno, succeeds once lifted, and both answers are
+// counted, so a filter that routed nothing cannot make the fault tests pass.
 func TestFaultInjectorRefusesAndLifts(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		f := installFaultInjector(t, 0)
@@ -458,9 +415,8 @@ func TestFaultInjectorRefusesAndLifts(t *testing.T) {
 		if err := unix.Mlock(b); !errors.Is(err, unix.EPERM) {
 			t.Fatalf("mlock under a refusing rule = %v, want EPERM from the supervisor", err)
 		}
-		// At least one: a kernel without the fast-reply fix can restart the
-		// call after an accepted refusal, which is answered (and counted)
-		// again; the result the caller sees is the same.
+		// At least one: a kernel can restart the call after an accepted
+		// refusal, which is answered and counted again.
 		if f.refusals(unix.SYS_MLOCK) < 1 {
 			t.Fatalf("the supervisor counted %d mlock refusals, want at least 1", f.refusals(unix.SYS_MLOCK))
 		}
@@ -490,14 +446,11 @@ func requireRefused(t *testing.T, f *faultInjector, nr int32) {
 	}
 }
 
-// TestFaultInjectorSkipSurvivesRestartedSyscalls replays the notifications a
-// kernel produces when it restarts a syscall after the supervisor's answer
-// was accepted (the fast-reply race, fixed upstream in cce436aafc2a): the same
-// call, same arguments, presented again. It drives the decision and commit
-// directly, so the replay is deterministic instead of depending on signal
-// timing. A replayed call that was let through on an allowance is let through
-// again without spending another; a replayed refusal is refused again; and
-// the call the rule targets is still the one refused.
+// TestFaultInjectorSkipSurvivesRestartedSyscalls replays the notifications of a
+// syscall the kernel restarts after an accepted answer, driving decide and
+// commit directly so it is deterministic. A replayed allowance is not spent
+// twice, a replayed refusal is refused again, and the targeted call is still
+// the one refused.
 func TestFaultInjectorSkipSurvivesRestartedSyscalls(t *testing.T) {
 	f := &faultInjector{rules: map[int32]syscallRule{}}
 	f.rules[unix.SYS_MLOCK] = syscallRule{Refuse: true, Errno: unix.ENOMEM, Skip: 2, skipped: map[uintptr]struct{}{}}

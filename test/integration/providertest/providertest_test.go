@@ -8,11 +8,10 @@
 
 //go:build integration
 
-// Package providertest_test is go-enclave's providertest integration suite:
-// the conformance harness driven through its public API exactly as a provider
-// author uses it, in the project devcontainer (integration-testing §3-§4).
-// The planted providers below each violate one property; the suite must go
-// RED naming it, so every check the harness claims is shown to exist.
+// Package providertest_test drives the providertest conformance harness
+// through its public API, as a provider author uses it, in the project
+// devcontainer. Each planted provider violates one property, and the suite must
+// fail naming it.
 package providertest_test
 
 import (
@@ -32,25 +31,17 @@ import (
 	"github.com/jeremyhahn/go-enclave/test/integration/internal/devcontainer"
 )
 
-// These tests are the suite's own deliberate-leak controls, and they are the
-// reason anything else here is worth reading.
-//
-// A conformance suite that cannot fail is worse than none, because it
-// certifies: every implementer who runs it comes away believing a property was
-// measured. So every property this package claims to check has a planted
-// provider here that violates exactly that property and nothing else, and the
-// test asserts the suite goes RED and NAMES the right property. A check whose
-// planted violator still passes is a check that does not exist.
+// Every property the harness checks has a planted provider here that
+// violates exactly that property and nothing else, and the test asserts the
+// suite fails and names the right property.
 
 // ---------------------------------------------------------------------------
 // The conforming baseline
 // ---------------------------------------------------------------------------
 
-// TestConformingProvider is the positive control for the whole suite: the one
-// provider go-enclave ships must pass every property, in both modes. If this
-// goes red the suite is over-asserting — demanding something the seam does not
-// actually require — and every implementer would be chasing a defect in their
-// own code that is really in this package.
+// TestConformingProvider is the positive control: the provider go-enclave
+// ships must pass every property in both modes. A failure here means the suite
+// demands something the seam does not require.
 func TestConformingProvider(t *testing.T) {
 	err := providertest.TestProvider(t.Context(), providertest.Config{
 		New:   func() (any, error) { return enclave.NewSoftwareProvider(), nil },
@@ -67,11 +58,7 @@ func TestConformingProvider(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // wantFail runs the suite and requires it to fail, naming every string in
-// wants. The property-name match is what separates "the suite failed" from
-// "the suite failed FOR THE REASON THIS TEST PLANTED" — without it a planted
-// violator that merely broke the round trip would be scored as a caught leak.
-// A test naming both the property and the specific arm pins that the arm fired
-// under the property it belongs to.
+// wants, so a violator caught for the wrong reason does not count.
 func wantFail(t *testing.T, cfg providertest.Config, wants ...string) {
 	t.Helper()
 	if cfg.Logf == nil {
@@ -108,12 +95,7 @@ func software() *enclave.SoftwareProvider { return enclave.NewSoftwareProvider()
 // ---------------------------------------------------------------------------
 
 // retainingProtector conforms in every visible way and keeps a copy of every
-// key it recovers. This is the exact defect the seam cannot see and the issue
-// was filed for: the destination is honored, the signature is honored, and
-// the plaintext lives in this process forever.
-//
-// Nothing but the residue sweep can catch it — the spy watches the caller's own
-// slices, and this provider never touches them after it returns.
+// key it recovers. Only the residue sweep can catch it.
 type retainingProtector struct {
 	inner *enclave.SoftwareProvider
 	mu    sync.Mutex
@@ -134,16 +116,8 @@ func (p *retainingProtector) Unprotect(ctx context.Context, blob, key []byte) er
 	return nil
 }
 
-// The deliberate-leak control for retainingProtector is
-// TestSuiteCatchesAProviderThatRetainsACopy, in residue_linux_test.go: the
-// residue sweep is the only instrument that can see a retained copy, and it
-// exists only on Linux. Its non-Linux counterpart,
-// TestResidueSweepReportsItselfNotRunOffLinux in residue_other_test.go,
-// pins that the suite says so there instead of passing in silence (#90).
-
-// TestResidueSweepSkipIsRecordedNotSilent pins the escape hatch's cost: a
-// skipped sweep is reported through Logf in the same words every time, so a
-// green run cannot hide that its only retention-by-copy instrument did not run.
+// TestResidueSweepSkipIsRecordedNotSilent pins that a skipped sweep is
+// reported through Logf, so a green run cannot hide that it did not run.
 func TestResidueSweepSkipIsRecordedNotSilent(t *testing.T) {
 	var log strings.Builder
 	cfg := perOp(func() (any, error) { return &retainingProtector{inner: software()}, nil })
@@ -164,9 +138,9 @@ func TestResidueSweepSkipIsRecordedNotSilent(t *testing.T) {
 // Retention by reference — what the spy is for
 // ---------------------------------------------------------------------------
 
-// aliasingProtector files the caller's SLICE rather than its contents: the
-// single-character defect (`= key` instead of `= bytes.Clone(key)`) that a
-// round-trip test passes and a wipe exposes.
+// aliasingProtector files the caller's slice rather than its contents
+// (`= key` instead of `= bytes.Clone(key)`): a round trip passes and a wipe
+// exposes it.
 type aliasingProtector struct {
 	mu   sync.Mutex
 	n    int
@@ -281,11 +255,9 @@ func TestSuiteCatchesALaterCallWipingAnEarlierDestination(t *testing.T) {
 // The controls that keep the spy from reading a false green
 // ---------------------------------------------------------------------------
 
-// silentProtector returns nil from Unprotect and writes nothing. Its
-// destination is zero after the call, unchanged by later calls, and holds no
-// plaintext anywhere — it passes every retention assertion for the worst
-// possible reason. Only the at-return-time control separates it from a
-// conforming provider, which is exactly why that control is not optional.
+// silentProtector returns nil from Unprotect and writes nothing, so it passes
+// every retention assertion for the wrong reason. Only the at-return-time
+// control separates it from a conforming provider.
 type silentProtector struct{ inner *enclave.SoftwareProvider }
 
 func (p *silentProtector) Protect(ctx context.Context, key []byte) ([]byte, error) {
@@ -300,9 +272,8 @@ func TestSuiteCatchesADestinationThatIsNeverPopulated(t *testing.T) {
 	if err == nil {
 		t.Fatal("the suite PASSED a provider whose Unprotect writes nothing; every retention assertion was vacuous")
 	}
-	// The point of this test is the CONTROL specifically, not merely that
-	// something went red: both spies must report that their setup did not hold
-	// rather than scoring a zeroed destination as a pass.
+	// Both spies must report that their setup did not hold, rather than
+	// scoring a zeroed destination as a pass.
 	got := err.Error()
 	for _, want := range []string{
 		"Unprotect does not write into a destination the caller has finished with: the control did not hold",
@@ -319,10 +290,9 @@ func TestSuiteCatchesADestinationThatIsNeverPopulated(t *testing.T) {
 // Authenticity
 // ---------------------------------------------------------------------------
 
-// unauthenticatedProtector authenticates a PREFIX of the blob and ignores the
-// rest — confidentiality without integrity, the shape the KeyProtector contract
-// disqualifies by name. No cryptography is hand-rolled here: the "device" is a
-// map, and the defect is that the lookup key is shorter than the blob.
+// unauthenticatedProtector authenticates a prefix of the blob and ignores the
+// rest: confidentiality without integrity. The "device" is a map whose lookup
+// key is shorter than the blob.
 type unauthenticatedProtector struct {
 	mu   sync.Mutex
 	n    int
@@ -364,18 +334,12 @@ func (p *unauthenticatedProtector) Unprotect(ctx context.Context, blob, key []by
 	return nil
 }
 
-// forgeableProtector is the disqualifying example the KeyProtector contract
-// names, reduced to its essence: the blob carries an unauthenticated tail, and
-// an attacker who can reach the stored blob chooses what it opens to. It is the
-// bare-RSA-OAEP shape — wrapping under a PUBLIC key, so anyone holding that key
-// forges a value that opens successfully to material of their choosing.
-//
-// It is a SEPARATE violator from unauthenticatedProtector because the two are
-// caught by different assertions, and a mutant proved it: an accepted forgery
-// that hands back the REAL key is also caught by the plaintext-in-destination
-// check, so disabling the "Unprotect ACCEPTED this blob" arm did not go red
-// until a violator existed whose forgery yields something OTHER than the key.
-// No cryptography is written here: the tail is copied out verbatim.
+// forgeableProtector carries an unauthenticated tail in the blob that chooses
+// what the blob opens to, the bare RSA-OAEP shape the KeyProtector contract
+// disqualifies. It is separate from unauthenticatedProtector because its
+// forgery yields something other than the real key, so only the "Unprotect
+// ACCEPTED this blob" arm catches it; the plaintext-in-destination check
+// cannot.
 type forgeableProtector struct {
 	mu   sync.Mutex
 	n    int
@@ -420,7 +384,7 @@ func (p *forgeableProtector) Unprotect(ctx context.Context, blob, key []byte) er
 		copy(key, k)
 		return nil
 	}
-	// THE DEFECT: the tail is unauthenticated and it CHOOSES the material.
+	// The defect: the unauthenticated tail chooses the material.
 	copy(key, tail)
 	return nil
 }
@@ -436,8 +400,7 @@ func TestSuiteCatchesAnUnauthenticatedProvider(t *testing.T) {
 }
 
 // wrongErrorProtector refuses forgeries but reports them as infrastructure
-// faults, which sends an operator hunting a device problem while an attacker is
-// feeding it blobs.
+// faults rather than ErrSealedAuthentication.
 type wrongErrorProtector struct{ inner *enclave.SoftwareProvider }
 
 func (p *wrongErrorProtector) Protect(ctx context.Context, key []byte) ([]byte, error) {
@@ -458,10 +421,8 @@ func TestSuiteCatchesAForgeryReportedAsADeviceFault(t *testing.T) {
 	if err == nil {
 		t.Fatal("the suite PASSED a provider that reports forgeries as device faults")
 	}
-	// Bound to the TAMPER property by name. A bare search for the phrase is
-	// satisfied by the wrong-length check, which emits the same sentence — so
-	// the tamper-path assertion could be deleted and this test would stay green,
-	// which a mutant demonstrated.
+	// Bound to the tamper property by name: the wrong-length check emits the
+	// same sentence, so a bare phrase search would not pin the tamper path.
 	if !strings.Contains(err.Error(), "a blob this provider did not produce is refused: Unprotect refused") ||
 		!strings.Contains(err.Error(), "want an error matching ErrSealedAuthentication") {
 		t.Fatalf("the suite failed, but not on the error KIND of a refused FORGERY:\n%v", err)
@@ -469,8 +430,7 @@ func TestSuiteCatchesAForgeryReportedAsADeviceFault(t *testing.T) {
 }
 
 // decryptBeforeAuthenticateProtector leaves the recovered key in the caller's
-// destination and then reports failure — the caller is told nothing happened
-// while its buffer holds the plaintext.
+// destination and then reports failure.
 type decryptBeforeAuthenticateProtector struct {
 	inner *enclave.SoftwareProvider
 	mu    sync.Mutex
@@ -590,13 +550,9 @@ func (p *looseLengthProtector) Unprotect(ctx context.Context, blob, key []byte) 
 }
 
 // silentLengthProtector treats a wrong-length destination as nothing to do and
-// reports success, so its caller is handed a buffer it believes holds a key.
-//
-// Like forgeableProtector, this exists because a mutant showed the assertion it
-// targets had no dedicated killer: looseLengthProtector truncates the REAL key
-// into the short destination, so it is also caught by the
-// plaintext-in-destination check, and the "Unprotect accepted a wrong-length
-// destination" arm could be deleted unnoticed.
+// reports success. It is the only violator that pins the "Unprotect accepted
+// a wrong-length destination" arm: looseLengthProtector is also caught by the
+// plaintext-in-destination check.
 type silentLengthProtector struct{ inner *enclave.SoftwareProvider }
 
 func (p *silentLengthProtector) Protect(ctx context.Context, key []byte) ([]byte, error) {
@@ -613,13 +569,9 @@ func (p *silentLengthProtector) Unprotect(ctx context.Context, blob, key []byte)
 	return p.inner.Unprotect(ctx, blob, key)
 }
 
-// shortDestinationLeakProtector refuses a wrong-length destination — correctly,
-// with ErrSealedAuthentication — after it has already written the key into it.
-// The caller is told the call failed and its buffer holds the material.
-//
-// It is the length path's counterpart to decryptBeforeAuthenticateProtector,
-// and it exists so the plaintext-in-destination check on THAT path has a killer
-// of its own rather than riding on the accepted-length arm beside it.
+// shortDestinationLeakProtector refuses a wrong-length destination with
+// ErrSealedAuthentication after it has already written the key into it. It
+// pins the plaintext-in-destination check on the length path.
 type shortDestinationLeakProtector struct {
 	inner *enclave.SoftwareProvider
 	mu    sync.Mutex
@@ -666,10 +618,9 @@ func TestSuiteCatchesASilentlyTruncatingDestination(t *testing.T) {
 // Mode / interface pairing
 // ---------------------------------------------------------------------------
 
-// stubRootProvider is a correct KeyProtector carrying a placeholder UnsealRoot,
-// added by someone who thought the seam required both halves. A Sealer cannot
-// tell the placeholder from an unseal, so ModeRootKey silently seals the whole
-// process under a constant.
+// stubRootProvider is a correct KeyProtector carrying a placeholder
+// UnsealRoot. A Sealer cannot tell the placeholder from an unseal, so in
+// ModeRootKey it would seal everything under a constant.
 type stubRootProvider struct{ inner *enclave.SoftwareProvider }
 
 func (p *stubRootProvider) Protect(ctx context.Context, key []byte) ([]byte, error) {
@@ -722,9 +673,8 @@ func TestSuiteCatchesAClaimedModeTheProviderCannotServe(t *testing.T) {
 type halfWritingUnsealer struct{ inner *enclave.SoftwareProvider }
 
 func (p *halfWritingUnsealer) UnsealRoot(ctx context.Context, dst []byte) error {
-	// The full root comes from a LOCKED scratch enclave, so the defect under
-	// test — a partial write — is the only thing this fixture gets wrong;
-	// its intermediate copy of the root never touches the ordinary heap.
+	// The full root comes from a locked scratch enclave, so a partial write is
+	// the only thing this fixture gets wrong.
 	scratch, err := enclave.NewMemoryEnclaveSized(enclave.RootKeyBytes)
 	if err != nil {
 		return err
@@ -767,8 +717,7 @@ func TestSuiteCatchesAnAllZeroRoot(t *testing.T) {
 		"all-zero root")
 }
 
-// nondeterministicUnsealer hands a different root to every caller, so two
-// Sealers over one device each believe they hold THE root.
+// nondeterministicUnsealer hands a different root to every caller.
 type nondeterministicUnsealer struct{}
 
 func (nondeterministicUnsealer) UnsealRoot(ctx context.Context, dst []byte) error {
@@ -820,15 +769,9 @@ func TestSuiteCatchesARootUnsealerRetainingTheDestination(t *testing.T) {
 		"UnsealRoot does not retain the caller's destination")
 }
 
-// oneShotUnsealer consumes its handle on a successful unseal — a sealed blob
-// read once, an operator-typed passphrase, an assembled share — and refuses
-// every call after the first. It satisfies the runtime contract exactly: the
-// seam guarantees only that a Sealer calls UnsealRoot AT MOST ONCE.
-//
-// It exists because a review found the suite rejecting it. A conformance suite
-// that fails a provider for honoring the contract is over-asserting, and
-// over-assertion is the same defect as under-measuring wearing the other hat:
-// implementers either work around it or stop believing it.
+// oneShotUnsealer consumes its handle on a successful unseal and refuses every
+// call after the first. It satisfies the seam, which guarantees only that a
+// Sealer calls UnsealRoot at most once.
 type oneShotUnsealer struct {
 	inner *enclave.SoftwareProvider
 	mu    sync.Mutex
@@ -848,10 +791,9 @@ func (p *oneShotUnsealer) UnsealRoot(ctx context.Context, dst []byte) error {
 	return nil
 }
 
-// TestSingleUseRootIsAccommodatedAndRecorded pins both halves: a one-shot root
-// FAILS by default — because the default must stay the strong one — and passes
-// with Config.SingleUseRoot set, with the relaxation reported in the log rather
-// than applied in silence.
+// TestSingleUseRootIsAccommodatedAndRecorded pins that a one-shot root fails
+// by default and passes with Config.SingleUseRoot set, with the relaxation
+// reported through Logf.
 func TestSingleUseRootIsAccommodatedAndRecorded(t *testing.T) {
 	newOneShot := func() (any, error) { return &oneShotUnsealer{inner: software()}, nil }
 
@@ -1000,14 +942,10 @@ func TestPropertyFailuresAreTyped(t *testing.T) {
 	}
 }
 
-// TestSuiteRefusesATypedNilProvider is the case a conformance suite must not
-// crash on, found by review: a (*SoftwareProvider)(nil) SATISFIES both seam
-// interfaces, so an unchecked type assertion succeeds and the first Protect
-// panics on a nil receiver — inside the suite, which then reports nothing.
-// NewSealer refuses the same value with ErrInvalidProvider, and so must this.
-//
-// The subtests cover both entry paths, because the KeyProtector and
-// RootUnsealer halves assert separately.
+// TestSuiteRefusesATypedNilProvider pins that a (*SoftwareProvider)(nil),
+// which satisfies both seam interfaces, is reported as a failure rather than
+// panicking inside the suite. The subtests cover both the KeyProtector and the
+// RootUnsealer entry paths.
 func TestSuiteRefusesATypedNilProvider(t *testing.T) {
 	tests := []struct {
 		name string
@@ -1030,8 +968,7 @@ func TestSuiteRefusesATypedNilProvider(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := tc.cfg
 			cfg.Logf = t.Logf
-			// A panic here fails the test, which is the point: the suite must
-			// REPORT this, not die on it.
+			// A panic here fails the test: the suite must report this.
 			err := providertest.TestProvider(t.Context(), cfg)
 			if err == nil {
 				t.Fatal("TestProvider = nil for a nil provider")
@@ -1059,34 +996,12 @@ func TestConstructionFailureIsReported(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Instrument unit checks
-// ---------------------------------------------------------------------------
-
-// TestIsNilProvider pins the classifier both directions. A false positive here
-// refuses a working provider; a false negative is the panic it exists to stop.
-
-// TestContainsRun pins the partial-write detector, because an equality test
-// against the whole key misses exactly the case it exists for.
-
-// A NEEDLE shorter than the window can never be found, even in a haystack
-// holding it whole: a run that short is a chance collision rather than
-// evidence, and reporting it would turn noise into leak findings.
-
-// TestFlipPositions pins the tamper sample: in range, deduplicated, and
-// covering both ends and the tag region for any blob a provider can return.
-
-// TestAddrOfLandsInsideTheMapping is the sanity check under the residue sweep's
-// home exclusion: an address that did not point into the needle's mapping would
-// make every legitimate match read as a leak.
-
-// ---------------------------------------------------------------------------
-// The context contract (#87)
+// The context contract
 // ---------------------------------------------------------------------------
 
 // endedContextProtector wraps the software provider and, when the context it
-// is handed has ENDED, does exactly one wrong thing — the defect named by its
-// field — and otherwise behaves. Each defect is one arm of the ended-context
-// check, so each test below kills exactly one assertion.
+// is handed has ended, does exactly the one wrong thing its fields select.
+// Each defect kills exactly one assertion of the ended-context check.
 type endedContextProtector struct {
 	inner *enclave.SoftwareProvider
 
@@ -1216,10 +1131,9 @@ func TestSuiteRequiresUnsealRootToRefuseAnEndedContext(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := rootOnly(func() (any, error) { return tc.u(), nil })
-			// A one-shot provider is the case the spend arm is about, so it
-			// runs with the relaxation an honest one-shot provider would set:
-			// the finding must come from the context check, not from the
-			// default's second call.
+			// A one-shot provider runs with the relaxation an honest one would
+			// set, so the finding must come from the context check, not from
+			// the default's second call.
 			cfg.SingleUseRoot = "the test violator models a one-shot handle"
 			wantFail(t, cfg, property+": ", tc.want)
 		})
@@ -1227,9 +1141,9 @@ func TestSuiteRequiresUnsealRootToRefuseAnEndedContext(t *testing.T) {
 }
 
 // hangingOnEndedContext blocks, until released, on any call made with an
-// ended context — the worst way to ignore one. acceptProtect additionally
-// makes Protect COMPLETE an ended-context call, a violation the suite observes
-// before the hang. entered is closed when the first hanging call arrives.
+// ended context. acceptProtect additionally makes Protect complete an
+// ended-context call, a violation the suite observes before the hang. entered
+// is closed when the first hanging call arrives.
 type hangingOnEndedContext struct {
 	inner         *enclave.SoftwareProvider
 	acceptProtect bool
@@ -1286,19 +1200,18 @@ func runAgainstHanging(t *testing.T, p *hangingOnEndedContext) error {
 	return providertest.TestProvider(ctx, cfg)
 }
 
-// TestAnUnfinishedEndedContextCallIsAnAbortNotAFinding is the fourth review
-// finding. A call the suite stopped waiting for proves the RUN ended, not that
-// the provider misbehaved — the worker goroutine may never have reached it —
-// so the run is reported aborted and nothing is charged to the provider.
+// TestAnUnfinishedEndedContextCallIsAnAbortNotAFinding pins that a call the
+// suite stopped waiting for is reported as an aborted run with nothing charged
+// to the provider: the worker goroutine may never have reached it.
 func TestAnUnfinishedEndedContextCallIsAnAbortNotAFinding(t *testing.T) {
 	err := runAgainstHanging(t, newHanging(false))
 	assertAbortedOnly(t, err)
 }
 
-// TestViolationsObservedBeforeAnAbortAreKept is the other half: an abort does
-// not erase what the suite DID observe while the run's context was live. Here
-// Protect completes an ended-context call — observed — and Unprotect then
-// hangs until the run's context ends.
+// TestViolationsObservedBeforeAnAbortAreKept pins that an abort does not
+// erase what the suite observed while the run's context was live: Protect
+// completes an ended-context call, then Unprotect hangs until the run's
+// context ends.
 func TestViolationsObservedBeforeAnAbortAreKept(t *testing.T) {
 	err := runAgainstHanging(t, newHanging(true))
 	if !errors.Is(err, providertest.ErrAborted) {
@@ -1314,9 +1227,8 @@ func TestViolationsObservedBeforeAnAbortAreKept(t *testing.T) {
 
 // endsOnFirstWait is a run context that ends the first time anything waits on
 // it. The suite's first wait is deriving the ended contexts for the context
-// check — after every control has run — so the bounded wait that follows
-// finds the run already over whether or not its worker goroutine has started:
-// the interleaving the fourth review finding described, made deterministic.
+// check, after every control has run, so the bounded wait that follows finds
+// the run already over whether or not its worker goroutine has started.
 type endsOnFirstWait struct {
 	context.Context
 	once   sync.Once
@@ -1343,10 +1255,9 @@ func TestARunEndingBeforeTheWorkerRunsChargesNothing(t *testing.T) {
 	assertAbortedOnly(t, providertest.TestProvider(ctx, cfg))
 }
 
-// TestAnAbortedRunIsNeverAPass pins the run-context half: a run whose context
-// has ended returns an error matching ErrAborted — never nil, since nothing was
-// measured — and does not charge the provider with failures that are only
-// the provider honoring that context.
+// TestAnAbortedRunIsNeverAPass pins that a run whose context has ended returns
+// an error matching ErrAborted, never nil, and does not charge the provider
+// with failures that are only the provider honoring that context.
 func TestAnAbortedRunIsNeverAPass(t *testing.T) {
 	t.Run("ended before the run", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(t.Context())
@@ -1362,9 +1273,8 @@ func TestAnAbortedRunIsNeverAPass(t *testing.T) {
 	t.Run("ended mid-run, by the provider's own call", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(t.Context())
 		defer cancel()
-		// The run's context ends inside a provider call, and the provider
-		// then honors it — exactly what a conforming provider does when its
-		// caller gives up. That refusal must not be scored as a defect.
+		// The run's context ends inside a provider call and the provider honors
+		// it, as a conforming provider does; that must not be scored a defect.
 		p := &cancellingProtector{inner: software(), cancel: cancel}
 		err := providertest.TestProvider(ctx, providertest.Config{
 			New:   func() (any, error) { return p, nil },
@@ -1411,27 +1321,19 @@ func assertAbortedOnly(t *testing.T, err error) {
 }
 
 // ---------------------------------------------------------------------------
-// A provider call that FAILS is a finding, never a pass (#90)
+// A provider call that fails is a finding, never a pass
 // ---------------------------------------------------------------------------
 //
-// Every check makes a fixed sequence of provider calls, and every one of those
-// calls can fail on a real device — a TPM busy, a KMS throttled, a session
-// expired. Each failure has its own branch in each check, and before #90 most
-// of those branches were covered by nothing: a regression turning any of them
-// into a silent `return` would have let a provider that cannot do the
-// operation pass the property that depends on it. These tests drive each call
-// ordinal to failure in turn and require the run to fail, under the right
-// property, naming the call and carrying the device's own error text.
+// Every provider call a check makes can fail on a real device. These tests
+// drive each call ordinal to failure in turn and require the run to fail under
+// the right property, naming the call and carrying the device's own error.
 
 // errDeviceFault is the failure the planted providers below report.
 var errDeviceFault = errors.New("device: transient fault")
 
-// failingProtector is the software provider with ONE call refused: the
-// failProtect-th Protect or the failUnprotect-th Unprotect made on this
-// instance, counting from 1 and counting every call (ended-context calls,
-// which the suite makes on a goroutine of its own, included). Zero refuses
-// nothing. Every other call is the conforming software provider's, so the
-// refused call is the only thing wrong with it.
+// failingProtector is the software provider with one call refused: the
+// failProtect-th Protect or the failUnprotect-th Unprotect on this instance,
+// counting from 1 and including ended-context calls. Zero refuses nothing.
 type failingProtector struct {
 	inner                      *enclave.SoftwareProvider
 	failProtect, failUnprotect int
@@ -1644,15 +1546,6 @@ func TestSuiteReportsEveryFailedUnsealRootCall(t *testing.T) {
 	}
 }
 
-// TestSuiteReportsAProviderThatCannotBeConstructed pins the Config.New
-// failure path in every check: a provider that cannot be built has measured
-// nothing, so every property it claims fails — naming Config.New and the
-// constructor's own error — and none of them passes for want of an instance.
-
-// The step error keeps the constructor's error MATCHABLE, not merely
-// printable: that is what lets a caller of the internals tell a device
-// fault from a nil provider without parsing a message.
-
 // TestSuiteReportsAKeyProtectorClaimTheProviderCannotServe is the
 // KeyProtector half of the missing-seam path: Config.Modes claims
 // ModePerOperation for a provider that only unseals roots, and every
@@ -1667,8 +1560,7 @@ func TestSuiteReportsAKeyProtectorClaimTheProviderCannotServe(t *testing.T) {
 	)
 }
 
-// emptyBlobProtector "protects" every key into an empty blob: a provider
-// whose device returned nothing and that passed the nothing along.
+// emptyBlobProtector "protects" every key into an empty blob.
 type emptyBlobProtector struct{ inner *enclave.SoftwareProvider }
 
 func (emptyBlobProtector) Protect(ctx context.Context, _ []byte) ([]byte, error) {
@@ -1679,22 +1571,18 @@ func (p emptyBlobProtector) Unprotect(ctx context.Context, blob, key []byte) err
 	return p.inner.Unprotect(ctx, blob, key)
 }
 
-// TestSuiteCatchesAnEmptyBlob pins the contract's non-empty-blob requirement:
-// a Sealer that stored an empty blob would hold a value nothing can recover,
-// and the tamper check has nothing to tamper with — which must read as a
-// failure, not as a vacuous pass of every tamper case.
+// TestSuiteCatchesAnEmptyBlob pins the non-empty-blob requirement, and that
+// the tamper check reports an empty blob as a failure rather than vacuously
+// passing every case.
 func TestSuiteCatchesAnEmptyBlob(t *testing.T) {
 	wantFail(t, perOp(func() (any, error) { return emptyBlobProtector{inner: software()}, nil }),
 		"Protect/Unprotect round trip: Protect returned an empty blob",
 		"a blob this provider did not produce is refused: Protect returned an empty blob; nothing to tamper with")
 }
 
-// firstDestinationRewriter keeps the FIRST destination it was handed and
+// firstDestinationRewriter keeps the first destination it was handed and
 // writes the root into it again on every later call. The root is
-// deterministic, so the destination the caller is still using never CHANGES —
-// the overwrite direction of the spy cannot see this — and the defect is
-// visible only once the caller has wiped those pages: the provider puts root
-// material back into memory the caller has released.
+// deterministic, so only the caller-wiped direction of the spy can see it.
 type firstDestinationRewriter struct {
 	inner *enclave.SoftwareProvider
 	mu    sync.Mutex
@@ -1726,8 +1614,7 @@ func TestSuiteCatchesARootWrittenIntoAWipedDestination(t *testing.T) {
 		"an earlier UnsealRoot was written again after the caller wiped it") {
 		t.Fatalf("the suite failed, but not on the wiped-destination write:\n%v", err)
 	}
-	// The overwrite direction must NOT have fired: the root never changed, so
-	// a report of it would be the wrong diagnosis.
+	// The overwrite direction must not have fired: the root never changed.
 	if strings.Contains(err.Error(), "by a later call") {
 		t.Errorf("the overwrite arm fired on a destination whose contents never changed:\n%v", err)
 	}
@@ -1774,8 +1661,7 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-// randKey and allZero are the suite-side equivalents of providertest's own
-// unexported helpers, which the planted providers below use.
+// randKey and allZero mirror providertest's unexported helpers.
 func randKey() ([]byte, error) {
 	k := make([]byte, 32)
 	if _, err := rand.Read(k); err != nil {

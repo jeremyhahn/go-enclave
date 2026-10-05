@@ -27,13 +27,8 @@ import (
 	enclave "github.com/jeremyhahn/go-enclave"
 )
 
-// THE KERNEL'S SIDE OF THE STORY.
-//
-// Everything in this file reads /proc/self: what the kernel says this process
-// has locked (VmLck), how each mapping is flagged (smaps VmFlags), and what the
-// process's memory actually contains (/proc/self/mem). The suite's assertions
-// about locking, core-dump exclusion, guard pages and residue are made against
-// these readings, never against the library's own report of what it did.
+// Readers of /proc/self (status VmLck, smaps VmFlags, mem) that the suite
+// asserts against instead of the library's own report.
 
 // ---------------------------------------------------------------------------
 // /proc/self/status
@@ -58,7 +53,7 @@ func statusField(name string) (string, error) {
 	return "", fmt.Errorf("/proc/self/status has no %s line", name)
 }
 
-// vmLck returns the bytes the KERNEL accounts as locked by this process.
+// vmLck returns the bytes the kernel accounts as locked by this process.
 func vmLck(t *testing.T) int64 {
 	t.Helper()
 	v, err := statusField("VmLck")
@@ -179,7 +174,7 @@ func parseMapsHeader(line string) (lo, hi uintptr, ok bool) {
 }
 
 // dataAddr returns the address of an enclave's first data byte. Only the
-// ADDRESS leaves the borrow: no byte of the material is copied anywhere.
+// address leaves the borrow.
 func dataAddr(t *testing.T, e *enclave.MemoryEnclave) uintptr {
 	t.Helper()
 	var addr uintptr
@@ -198,22 +193,15 @@ func addrOfSlice(b []byte) uintptr { return uintptr(unsafe.Pointer(unsafe.SliceD
 // ---------------------------------------------------------------------------
 // Residue: a needle that exists only where the test puts it
 
-// needle is test material that NEVER exists in this process except where the
-// test deliberately writes it.
-//
-// The obvious way to look for a value in memory is to hold a copy of it and
-// search for that — and the copy is then exactly the residue the sweep finds,
-// in every run. So the test never holds the value. It holds two random halves,
-// key and mask, and the material is key XOR mask: it is written byte by byte
-// into the destination (fill) and recognized byte by byte in place (matchAt),
-// and is never assembled in a buffer of its own. Neither half matches the
-// material, so neither half is ever a hit.
+// needle is test material that exists only where the test writes it. Holding
+// a copy to search for would itself be residue, so the test holds two random
+// halves and the material is key XOR mask, written (fill) and recognized
+// (matchAt) byte by byte, never assembled in a buffer of its own.
 type needle struct {
 	key, mask []byte
 }
 
-// needleLen is long enough that a chance match anywhere in a process's memory
-// is not a possibility worth discussing (2^-512 per position).
+// needleLen makes a chance match negligible (2^-512 per position).
 const needleLen = 64
 
 func newNeedle(t *testing.T) needle {
@@ -228,17 +216,11 @@ func newNeedle(t *testing.T) needle {
 	return n
 }
 
-// heapBytes returns a zeroed slice that is guaranteed to live on the HEAP.
-//
-// Every caller buffer that holds the material must come from here. A
-// constant-size `make` that the compiler proves does not escape is placed on
-// the goroutine's STACK, and when that stack grows the runtime copies it —
-// material included — to a new one and frees the old one without wiping it.
-// The sweep then finds the stale copy and reports a leak the library under
-// test never made (measured in this suite: two stray copies, 1 MiB apart, the
-// signature of successive stack copies). Heap objects are never moved by Go's
-// collector, so a wipe of a heap slice reaches the only copy there is.
-// noinline keeps the allocation in a function whose result escapes.
+// heapBytes returns a zeroed slice guaranteed to live on the heap. Every
+// buffer that holds the material must come from here: a non-escaping `make`
+// lands on the stack, and stack growth copies it and frees the old stack
+// unwiped, leaving a stale copy the sweep would report. Heap objects do not
+// move, so wiping one reaches the only copy. noinline forces the escape.
 //
 //go:noinline
 func heapBytes(n int) []byte { return make([]byte, n) }
@@ -292,28 +274,13 @@ type sweepScanned struct {
 	bytes    int64
 }
 
-// sweep reads EVERY readable mapping of this process through /proc/self/mem
-// and returns each address at which the material is found.
-//
-// Nothing readable is excluded — not the Go heap, not the stacks, not the
-// race detector's memory, not file-backed mappings (the material is random, so
-// unlike a literal needle it cannot appear in the binary's rodata) — with two
-// exceptions, each of which can hold nothing the process put there:
-//
-//   - the kernel's [vvar]/[vvar_vclock]/[vsyscall] pages (timekeeping data no
-//     user store can reach);
-//   - the sweep's OWN scan buffer. Its only contents are bytes the sweep just
-//     copied out of memory it has already scanned at their true addresses;
-//     reading it back would report those as a second, phantom location
-//     (measured: two "hits" in the Go heap, 512 KiB apart, before the library
-//     had been called at all).
-//
-// Any other mapping that cannot be read FAILS the sweep: a mapping the sweep
-// could not see is a place the material could be, and a clean result over a
-// blind spot is a lie.
-//
-// The scan buffer is wiped after EVERY window, so no copy of the material
-// outlives the comparison that needed it.
+// sweep reads every readable mapping of this process through /proc/self/mem
+// and returns each address at which the material is found. Only two regions
+// are skipped: the kernel's [vvar]/[vvar_vclock]/[vsyscall] pages, and the
+// sweep's own scan buffer, whose contents are copies of already-scanned bytes
+// and would show up as phantom hits. Any other unreadable mapping fails the
+// sweep, since a blind spot could hide the material. The scan buffer is wiped
+// after every window.
 func sweep(t *testing.T, n needle) ([]residueHit, sweepScanned) {
 	t.Helper()
 	maps, err := os.ReadFile("/proc/self/maps")
@@ -399,10 +366,8 @@ func scanRange(mem io.ReaderAt, r span, n needle, buf []byte) ([]uintptr, error)
 			want = int(remaining)
 		}
 		got, err := mem.ReadAt(buf[:want], int64(off))
-		// Candidates are found with bytes.IndexByte on the material's first
-		// byte — one byte of it, which is no residue — and confirmed in place.
-		// IndexByte is assembly, so under -race the scan is not instrumented
-		// per byte; a plain loop made each sweep of ~400 MiB take seconds.
+		// bytes.IndexByte on the first byte finds candidates, confirmed in
+		// place; it is assembly, so -race does not instrument it per byte.
 		for i := 0; i+needleLen <= got; i++ {
 			j := bytes.IndexByte(buf[i:got-needleLen+1], first)
 			if j < 0 {
@@ -426,16 +391,15 @@ func scanRange(mem io.ReaderAt, r span, n needle, buf []byte) ([]uintptr, error)
 		if got <= overlap {
 			return nil, fmt.Errorf("window at %#x too small to advance", off)
 		}
-		// Consecutive windows overlap by needleLen-1 bytes so material
-		// straddling a boundary is seen; the next window starts at the first
-		// position this one did not test, so nothing is reported twice.
+		// Windows overlap by needleLen-1 bytes so material straddling a
+		// boundary is seen once.
 		off += uintptr(got - overlap)
 	}
 	return found, nil
 }
 
 // requireHitsExactly fails unless the material was found at exactly the given
-// addresses — each one, and nowhere else.
+// addresses and nowhere else.
 func requireHitsExactly(t *testing.T, what string, hits []residueHit, scanned sweepScanned, want ...uintptr) {
 	t.Helper()
 	wantSet := map[uintptr]bool{}

@@ -18,8 +18,7 @@ import (
 
 var (
 	// ErrEmptyEnclave is returned when an enclave is requested for zero bytes
-	// of material. An empty enclave protects nothing and is almost always a
-	// sign that the caller lost the value it meant to protect.
+	// of material.
 	ErrEmptyEnclave = errors.New("enclave: refusing to create an enclave over empty material")
 
 	// ErrEnclaveDestroyed is returned when a destroyed enclave is opened or
@@ -27,56 +26,28 @@ var (
 	ErrEnclaveDestroyed = errors.New("enclave: enclave has been destroyed")
 
 	// ErrInvalidSize is returned by [NewMemoryEnclaveSized] and
-	// [Allocator.NewSized] for a size no enclave can have, and mirrors
-	// [ErrInvalidBudget]: it reports a programming mistake rather than a
-	// runtime condition.
-	//
-	// Two conditions produce it. A non-positive size, which has no mapping to
-	// make. And a size too large to MAP: an enclave is the data region plus two
-	// guard pages, sized as an int, so past a certain size that arithmetic
-	// overflows and mmap would be handed a nonsense length — see [LockedSize],
-	// which reports 0 for exactly these sizes. A bigger [Allocator] budget does
-	// not help with either, which is why this is not ErrBudgetExhausted.
-	//
-	// It is deliberately distinct from [ErrEmptyEnclave]. That one reports a
-	// caller that lost the material it meant to protect; this one reports a
-	// caller that asked for an impossible allocation. Both are refused before
-	// anything is mapped.
+	// [Allocator.NewSized], before anything is mapped, for a size that is
+	// non-positive or too large to map (the sizes [LockedSize] reports as 0).
 	ErrInvalidSize = errors.New("enclave: enclave size must be positive and small enough to map")
 
-	// ErrLockedMemoryUnavailable is the sentinel for a refusal by the operating
-	// system to allocate or lock the pages backing an enclave, which usually
-	// means the process has reached its RLIMIT_MEMLOCK ceiling. Every
-	// [LockedMemoryError] matches it, so this is what callers test for.
+	// ErrLockedMemoryUnavailable reports that the kernel refused to map, lock,
+	// protect or release an enclave's pages (often the RLIMIT_MEMLOCK ceiling).
+	// Every [LockedMemoryError] matches it.
 	ErrLockedMemoryUnavailable = errors.New("enclave: could not allocate locked memory")
 )
 
-// ErrReleasedWithoutWipe reports that an enclave's pages were returned to the
-// kernel WITHOUT the in-process overwrite, because the mprotect that makes a
-// frozen region writable was refused.
-//
-// The material is gone: the pages are unmapped, the kernel zeroes an anonymous
-// page before any reuse, and they were mlock'd for their whole life so nothing
-// reached swap. Nothing leaked. What it tells an operator is that something in
-// the environment -- a seccomp filter, a sandbox -- is denying mprotect, which
-// is worth knowing because the same denial reaches every other enclave in the
-// process.
-//
-// It is deliberately NOT [ErrEnclaveCorrupted]: no memory was corrupted, and the
-// invariant this package exists to hold -- material does not outlive its enclave
-// -- was kept.
+// ErrReleasedWithoutWipe reports that an enclave's pages were unmapped without
+// the in-process wipe because mprotect was denied (a seccomp filter, a
+// sandbox). Nothing leaked: the pages were mlock'd throughout and the kernel
+// zeroes them before reuse. An [UnwipedReleaseError] never also matches
+// [ErrLockedMemoryUnavailable].
 var ErrReleasedWithoutWipe = errors.New("enclave: pages unmapped without an in-process wipe; mprotect was denied")
 
-// UnwipedReleaseError reports a release that fell back to unmapping because the
-// mprotect making the region writable was refused. It carries that refusal.
-//
-// Match on [ErrReleasedWithoutWipe]; errors.Is reports it for every
-// UnwipedReleaseError.
+// UnwipedReleaseError is the error behind [ErrReleasedWithoutWipe], which
+// errors.Is reports for every UnwipedReleaseError.
 type UnwipedReleaseError struct {
-	// Cause is the operating-system failure of the mprotect that forced the
-	// fallback (an *os.SyscallError carrying the errno). It is deliberately
-	// NOT a LockedMemoryError: this error never matches
-	// ErrLockedMemoryUnavailable, which means pages are still held (#98).
+	// Cause is the refused mprotect's *os.SyscallError, deliberately not a
+	// LockedMemoryError.
 	Cause error
 }
 
@@ -96,19 +67,11 @@ func (e *UnwipedReleaseError) Is(target error) bool {
 // Unwrap returns the underlying mprotect failure so errors.As can reach it.
 func (e *UnwipedReleaseError) Unwrap() error { return e.Cause }
 
-// LockedMemoryError reports that the pages backing an enclave could not be
-// allocated or locked.
-//
-// It carries the failure the kernel reported, which names the failing address
-// and the errno — what separates an RLIMIT_MEMLOCK ceiling from any other
-// mapping failure. That detail is worth keeping for an operator, but it is
-// diagnostic rather than contract. Match on [ErrLockedMemoryUnavailable];
-// errors.Is reports it for every LockedMemoryError.
+// LockedMemoryError is the error behind [ErrLockedMemoryUnavailable], which
+// errors.Is reports for every LockedMemoryError. Its Cause is diagnostic.
 type LockedMemoryError struct {
-	// Cause is the underlying mmap, mlock or mprotect failure, and nil when
-	// none was reported. It is an any for compatibility with releases before
-	// v0.3.0-alpha, where it carried whatever memguard panicked with; every
-	// value this package produces now is an error, so errors.As reaches it.
+	// Cause is the failing system call's error, or nil. It is typed any for
+	// compatibility; every value this package sets is an error.
 	Cause any
 }
 
@@ -120,14 +83,12 @@ func (e *LockedMemoryError) Error() string {
 	return ErrLockedMemoryUnavailable.Error() + ": " + fmt.Sprint(e.Cause)
 }
 
-// Is reports every LockedMemoryError as ErrLockedMemoryUnavailable, so callers
-// match the sentinel and never have to know about this type.
+// Is reports every LockedMemoryError as ErrLockedMemoryUnavailable.
 func (e *LockedMemoryError) Is(target error) bool {
 	return target == ErrLockedMemoryUnavailable
 }
 
-// Unwrap returns the cause when it is an error, so errors.As can reach the
-// underlying mmap/mlock/mprotect failure, and nil otherwise.
+// Unwrap returns the cause when it is an error, and nil otherwise.
 func (e *LockedMemoryError) Unwrap() error {
 	if err, ok := e.Cause.(error); ok {
 		return err
@@ -135,175 +96,57 @@ func (e *LockedMemoryError) Unwrap() error {
 	return nil
 }
 
-// MemoryEnclave is a region of locked, zeroized memory holding sensitive
-// material for its whole lifetime.
+// MemoryEnclave is a region of locked, guarded memory holding sensitive
+// material. Construct one with [NewMemoryEnclave], [NewMemoryEnclaveCopy] or
+// [NewMemoryEnclaveSized]. A nil *MemoryEnclave is a valid receiver: not
+// alive, opens with [ErrEnclaveDestroyed], and Destroy returns nil.
 //
-// The zero value is not usable; construct one with NewMemoryEnclave or
-// NewMemoryEnclaveFromString to bring existing material in, or with
-// NewMemoryEnclaveSized to generate material directly into locked memory.
-// A nil *MemoryEnclave is a valid receiver for
-// every method: it reports itself as not alive, opens with
-// ErrEnclaveDestroyed, and destroys as a no-op returning nil, so callers
-// holding an optional enclave do not need nil guards at every use.
-//
-// A MemoryEnclave is safe for concurrent use through WithBytes, OpenString,
-// EqualTo, Size, IsAlive, String, Freeze and Destroy: each holds the enclave's
-// lock across the whole access, so Destroy waits out in-flight readers rather
-// than unmapping pages underneath them, and Freeze waits them out rather than
-// changing the protection under a fill. Open is the one exception — it hands
-// back a slice that outlives the lock, and its documentation says so.
+// Every method except Open holds the enclave's lock for the whole access, so
+// Destroy and Freeze wait out in-flight readers. Open's slice outlives the lock.
 type MemoryEnclave struct {
 	mu sync.RWMutex
 
-	// holders counts the goroutines inside — or waiting for — any acquisition
-	// of mu: every borrow, every Open, Size and IsAlive, every Freeze and every
-	// Destroy. It goes up BEFORE the lock is requested and down AFTER it is
-	// released, and the release that takes it to zero wakes a waiting
-	// [WipeAll] (#88). Every acquisition goes through [MemoryEnclave.rlock] or
-	// [MemoryEnclave.lock] for that reason; one that took mu directly would be
-	// invisible to the sweep, which could then wait for a wake-up that never
-	// comes. The one exception is the sweep's own TryLock, which nothing waits
-	// on.
-	//
-	// It exists because the lock cannot answer the question the sweep has to
-	// ask. The sweep tries for the write lock without waiting, and a failed
-	// TryLock carries nothing the memory model will vouch for: it is documented
-	// to have no synchronizing effect, and sync.Mutex's TryLock can fail with
-	// nobody holding the lock at all — it starts from a plain read of the state
-	// word, and its CAS loses to any change in the waiter bits. A sweep that
-	// went to sleep on the strength of a failed TryLock could be waiting for a
-	// release that had already happened, which under a context with no deadline
-	// is a shutdown that never finishes.
-	//
-	// The counter turns the handshake into a Dekker pair of sequentially
-	// consistent atomics instead. The sweep arms [sweepWaiting] and then reads
-	// holders; a holder decrements holders and then reads sweepWaiting. If the
-	// sweep read a non-zero count, the decrement that later takes it to zero
-	// comes after the arm in the total order of atomic operations, so that
-	// holder sees the arm and wakes the sweep. No wake-up can be lost, and
-	// nothing depends on how the runtime implements a mutex.
-	//
-	// The cost on the borrow path is two atomic adds on the cache line the lock
-	// word already occupies, and one load of a package-level flag that nothing
-	// writes outside a sweep: no lock and no allocation. The borrow benchmarks
-	// measure it.
+	// holders counts goroutines holding or waiting for mu; the release that
+	// takes it to zero wakes a waiting WipeAll. Every acquisition except the
+	// sweep's TryLock must go through rlock or lock, or a wake-up is lost.
 	holders atomic.Int32
 
 	m *mapping
 
-	// release, when non-nil, returns this enclave's reservation to the
-	// [Allocator] that created it. Destroy invokes it exactly once, via
-	// releaseOnce, after the pages have been released. It is nil for enclaves
-	// constructed directly with NewMemoryEnclave or NewMemoryEnclaveFromString,
-	// which hold no reservation.
+	// release, when non-nil, returns this enclave's Allocator reservation.
 	release     func()
 	releaseOnce sync.Once
 }
 
-// NewMemoryEnclave moves data into a new locked region and returns the
-// enclave holding it.
+// NewMemoryEnclave moves data into a new locked, read-only enclave. The
+// caller's slice is wiped on every return path, including failure.
 //
-// It TAKES OWNERSHIP of data: the caller's slice is wiped before this returns,
-// so there is no unprotected copy left behind. That is the right default and
-// should stay the common case. Callers that cannot give up their buffer have
-// [NewMemoryEnclaveCopy], which leaves the source intact — and by keeping it
-// they accept an unprotected copy, which is exactly what this type exists to
-// avoid. Material that has not been produced yet should skip both and be
-// generated straight into locked pages with [NewMemoryEnclaveSized].
-//
-// It returns ErrEmptyEnclave when data is empty, and
-// ErrLockedMemoryUnavailable when the kernel refuses to lock the pages.
-//
-// A successful return can hand back an ALREADY-DESTROYED enclave, in exactly one
-// situation: [WipeAll] ran between this enclave's publication and this return,
-// and destroyed it. The enclave is valid and every method behaves as documented
-// for a destroyed one — it reports itself not alive and opens with
-// ErrEnclaveDestroyed — so nothing is unsafe, but a caller that constructs
-// concurrently with a shutdown sweep must check rather than assume. Constructing
-// during a sweep is a consumer ordering problem; see WipeAll.
+// It returns [ErrEmptyEnclave] for empty data and [ErrLockedMemoryUnavailable]
+// when the kernel refuses the pages (also matching [ErrReleasedWithoutWipe] if
+// the rollback had to unmap unwiped); a failure touches no other enclave. A
+// concurrent [WipeAll] can make a successful return an already-destroyed
+// enclave, so callers constructing during shutdown must check IsAlive.
 func NewMemoryEnclave(data []byte) (*MemoryEnclave, error) {
 	e, err := newMemoryEnclave(data)
 	if err != nil {
-		// Pages a failed cleanup left mapped go to the orphan ledger, so a
-		// later WipeAll can still reclaim them. No budget is involved, so no
-		// refund rides with them.
+		// Pages a refused rollback left mapped go to the orphan ledger.
 		adoptOrphan(err, nil)
 		return nil, err
 	}
 	return register(e), nil
 }
 
-// newMemoryEnclave builds the enclave WITHOUT publishing it to the shutdown
-// ledger, so a caller with further initialization to do — [Allocator.New],
-// installing the reservation callback — can finish before [WipeAll] can reach
-// it. Publication is that caller's last statement; see [register].
+// newMemoryEnclave builds the enclave without publishing it to the WipeAll
+// ledger; the caller registers it as its last step.
 func newMemoryEnclave(data []byte) (*MemoryEnclave, error) {
-	// The caller's slice is wiped on EVERY return path, which is what the
-	// ownership contract above promises — including the mapping-failure path,
-	// where nothing was copied out and the material would otherwise survive in
-	// the caller's memory on exactly the resource-exhaustion case this
-	// constructor exists to handle. Wiping again after a successful move is a
-	// no-op over already-zeroed bytes. It is also a no-op for the empty slice
-	// newMemoryEnclaveCopy refuses, which is why this defer can precede the
-	// refusal rather than being repeated after it.
 	defer wipe(data)
-
-	// The move constructor IS the copy constructor plus this wipe. Composing
-	// them rather than writing the mapping sequence twice is deliberate: the
-	// two differ in exactly one dimension — who owns the source — and a second
-	// copy of the freeze-and-clean-up dance is how that stops being true. It is
-	// the same divergence the duplicated hand-rolled composition in consumers
-	// was heading for (#29).
 	return newMemoryEnclaveCopy(data)
 }
 
-// NewMemoryEnclaveCopy copies src into a new locked region and returns the
-// enclave holding it, leaving src UNTOUCHED on every path — success, refusal
-// and mapping failure alike.
-//
-// It is the counterpart to [NewMemoryEnclave], which takes ownership and wipes
-// what it is handed. Prefer that one: it leaves nothing behind. This exists for
-// the callers that legitimately cannot honor it — a buffer owned by someone
-// else that the consumer must not modify, a fixture handed back on every call,
-// material compared against the bytes it was built from. Without it those
-// callers hand-roll [NewMemoryEnclaveSized] plus WithBytes plus a Destroy on
-// the error path, which is easy to get subtly wrong: omitting that Destroy
-// leaks a locked page on a path nobody tests.
-//
-// # What the caller is accepting
-//
-// An UNPROTECTED copy of the material stays on the ordinary Go heap for as long
-// as the caller keeps src — swappable, core-dumpable, and beyond the reach of
-// any later wipe, since the compiler and the garbage collector may already have
-// copied it elsewhere. That is precisely what this type exists to avoid, and
-// this constructor does not undo it. It protects the copy it puts inside the
-// enclave and makes no claim whatsoever about the source; nothing here can wipe
-// src later either, because only the caller knows when it is done with it, and
-// [Wipe] is the most that can be done to heap memory anyway.
-//
-// So the choice is between two honest positions. Material that should never be
-// on the heap at all does not belong here: generate it directly into locked
-// pages with [NewMemoryEnclaveSized], the one shape where no unprotected copy
-// ever exists. Material that already exists outside an enclave and can be given
-// up belongs in [NewMemoryEnclave]. Reach for this constructor only when the
-// source genuinely has to survive, and wipe it yourself as soon as it does not.
-//
-// # Mutability
-//
-// The result is FROZEN read-only, exactly like [NewMemoryEnclave]'s and unlike
-// [NewMemoryEnclaveSized]'s. There is nothing left to fill — the material is
-// complete when this returns — so writable pages would buy nothing and would
-// cost the protection against a stray write through a retained
-// [MemoryEnclave.Open] slice. This is stated rather than left to be inferred
-// because the existing constructors disagree, so a caller generalizes from
-// whichever it met first, and because guessing wrong is not an error: a write
-// through a frozen enclave FAULTS the process.
-//
-// It returns ErrEmptyEnclave when src is empty, and ErrLockedMemoryUnavailable
-// when the kernel refuses to lock the pages — the same refusals as the other
-// constructors. Like [NewMemoryEnclave], a successful return can hand back an
-// already-destroyed enclave if [WipeAll] ran between publication and return;
-// see that constructor.
+// NewMemoryEnclaveCopy is [NewMemoryEnclave] without the wipe: src is left
+// untouched on every path. Prefer NewMemoryEnclave; the src kept here is an
+// unprotected heap copy the caller must [Wipe] when done. The result is frozen
+// and the errors are NewMemoryEnclave's.
 func NewMemoryEnclaveCopy(src []byte) (*MemoryEnclave, error) {
 	e, err := newMemoryEnclaveCopy(src)
 	if err != nil {
@@ -313,12 +156,8 @@ func NewMemoryEnclaveCopy(src []byte) (*MemoryEnclave, error) {
 	return register(e), nil
 }
 
-// newMemoryEnclaveCopy is the body both constructors share, without the
-// publication step, for the same reason [newMemoryEnclave] exists.
-//
-// It never touches src. Everything that wipes a source lives in the caller, so
-// there is exactly one place in this package that can, and adding a third
-// constructor cannot accidentally acquire the behavior.
+// newMemoryEnclaveCopy is the unpublished body both constructors share. It
+// never writes src.
 func newMemoryEnclaveCopy(src []byte) (*MemoryEnclave, error) {
 	if len(src) == 0 {
 		return nil, ErrEmptyEnclave
@@ -331,31 +170,8 @@ func newMemoryEnclaveCopy(src []byte) (*MemoryEnclave, error) {
 
 	copy(m.data, src)
 
-	// Freeze once the material is in: from here a write through a retained
-	// slice faults rather than corrupting the enclave. This covers BOTH
-	// constructors that bring existing material in, which is why a copy-built
-	// enclave is read-only too. A sized enclave cannot be frozen HERE — it
-	// exists to be filled, and pages that have to be filled cannot arrive
-	// read-only — so its caller freezes it with [MemoryEnclave.Freeze] once the
-	// fill is done. That is the one behavioral difference between bringing
-	// material in and generating it in place; see [NewMemoryEnclaveSized].
-	//
-	// A freeze failure means an mprotect was refused, and the same refusal is
-	// likely to meet the cleanup below. That is survivable in the way that
-	// matters: freeze failing leaves the region WRITABLE, so release wipes the
-	// material with no syscall before it attempts anything that can be denied.
-	// What can still fail is handing the pages back, and that is reported
-	// rather than dropped — an unreleasable mapping the caller is told about is
-	// a resource leak, one it is not told about is an invisible one. The release
-	// error keeps its pagesHeldError mark through the join, which is how an
-	// [Allocator] constructor knows not to refund the charge for those pages.
-	//
-	// And the mark carries the MAPPING (#83). Returning nil here drops the only
-	// handle to pages the kernel still holds, so no sweep could ever reclaim
-	// them even once the refusal lifted; handed over, the public constructor
-	// puts them on the orphan ledger and [WipeAll] retries them. release
-	// already recorded how far it got — wiped, verified, unlocked — so the
-	// retry resumes rather than repeats.
+	// A refused freeze leaves the region writable, so release can still wipe
+	// it. A refused release hands the mapping out for the orphan ledger.
 	if ferr := m.freeze(); ferr != nil {
 		if rerr := m.release(); rerr != nil {
 			var held *pagesHeldError
@@ -370,80 +186,28 @@ func newMemoryEnclaveCopy(src []byte) (*MemoryEnclave, error) {
 	return &MemoryEnclave{m: m}, nil
 }
 
-// NewMemoryEnclaveSized returns an enclave over n bytes of locked, ZEROED
-// memory for the caller to fill IN PLACE.
-//
-// It exists so that generated material — a freshly drawn key, a derived
-// wrapping key, a Shamir share — never exists on the ordinary Go heap, not
-// even transiently. Produce it inside the borrow, where the slice aliases the
-// locked pages themselves:
+// NewMemoryEnclaveSized returns an enclave over n zeroed, WRITABLE bytes, so
+// generated material is produced in locked memory and never on the heap:
 //
 //	e, err := enclave.NewMemoryEnclaveSized(32)
 //	if err != nil {
 //	    return err
 //	}
 //	defer e.Destroy()
-//
-//	err = e.WithBytes(func(key []byte) error {
-//	    _, err := io.ReadFull(rand.Reader, key) // straight into locked memory
+//	if err := e.WithBytes(func(key []byte) error {
+//	    _, err := io.ReadFull(rand.Reader, key)
 //	    return err
-//	})
-//	if err != nil {
+//	}); err != nil {
+//	    return err
+//	}
+//	if err := e.Freeze(); err != nil { // a refused Freeze leaves it writable
 //	    return err
 //	}
 //
-//	// The fill is done. A refused Freeze leaves the enclave WRITABLE, so the
-//	// fault-on-write property holds only if this error is checked.
-//	if err := e.Freeze(); err != nil {
-//	    return err
-//	}
-//
-// Do NOT use the make-then-move shape this constructor exists to replace:
-//
-//	tmp := make([]byte, 32)               // WRONG. The key lands on the
-//	io.ReadFull(rand.Reader, tmp)         // swappable, core-dumpable heap
-//	e, err := enclave.NewMemoryEnclave(tmp) // first, and the wipe that
-//	                                        // follows cannot reach copies the
-//	                                        // compiler or the collector has
-//	                                        // already made of it.
-//
-// [NewMemoryEnclave] is for material that already exists outside an enclave and
-// has to be brought in. When the material is about to be produced, produce it
-// here instead.
-//
-// # Mutability
-//
-// The pages of an enclave built by NewMemoryEnclave are frozen read-only once
-// the material has moved in. A sized enclave's arrive WRITABLE, because that is
-// what makes filling them possible, and stay writable until
-// [MemoryEnclave.Freeze] is called. Two obligations follow, and Freeze ends the
-// second one.
-//
-// The fill must complete before the enclave is shared with other goroutines:
-// WithBytes takes the read lock, so borrows run concurrently with each other,
-// and two of them writing is a data race like any other. Freezing does not help
-// with that one — a race is a race whether or not the pages are read-only
-// afterwards.
-//
-// And a slice retained past the borrow that produced it can silently CORRUPT
-// the material of an UNFROZEN sized enclave, where the same mistake against a
-// NewMemoryEnclave enclave would fault. Never retain what a borrow hands you —
-// and call Freeze once the material is final, which restores fault-on-write and
-// bounds that hazard to the fill rather than to the enclave's lifetime.
-//
-// It returns ErrInvalidSize for a size no enclave can have — non-positive, or
-// too large to map — and ErrLockedMemoryUnavailable when the kernel refuses to
-// map or lock the pages. Both size refusals are decided before anything is
-// mapped, so an impossible size never reaches the kernel.
-//
-// This constructor takes no [Allocator], so that size check is the only thing
-// standing between a caller's arithmetic and mmap. What it is NOT, since
-// v0.3.0-alpha, is the only thing standing between a caller and a process-wide
-// purge: go-enclave maps its own memory and nothing can purge it, so a failure
-// here fails this call and touches no other enclave.
-//
-// Like [NewMemoryEnclave], a successful return can hand back an already-destroyed
-// enclave if [WipeAll] ran between publication and return. See that constructor.
+// Until Freeze succeeds, finish the fill before sharing the enclave, and know
+// that a retained slice silently corrupts the material instead of faulting.
+// It returns [ErrInvalidSize] or [ErrLockedMemoryUnavailable], otherwise as
+// [NewMemoryEnclave].
 func NewMemoryEnclaveSized(n int) (*MemoryEnclave, error) {
 	e, err := newMemoryEnclaveSized(n)
 	if err != nil {
@@ -453,8 +217,7 @@ func NewMemoryEnclaveSized(n int) (*MemoryEnclave, error) {
 	return register(e), nil
 }
 
-// newMemoryEnclaveSized is [NewMemoryEnclaveSized] without the publication step,
-// for the same reason [newMemoryEnclave] exists.
+// newMemoryEnclaveSized is NewMemoryEnclaveSized without the publication step.
 func newMemoryEnclaveSized(n int) (*MemoryEnclave, error) {
 	if _, ok := lockedSize(int64(n)); !ok {
 		return nil, ErrInvalidSize
@@ -470,88 +233,33 @@ func newMemoryEnclaveSized(n int) (*MemoryEnclave, error) {
 
 // NewMemoryEnclaveFromString copies s into a new locked region.
 //
-// Go strings are immutable and cannot be wiped, so the source string survives
-// in unprotected heap memory until it is collected. This constructor exists
-// only for the boundary with APIs that hand out strings — configuration
-// loaders, flag parsers — and callers with a []byte must prefer
-// NewMemoryEnclave, which leaves nothing behind.
-//
 // Deprecated: the source string cannot be wiped. Build the material as a
 // []byte and use [NewMemoryEnclave], which wipes its input.
 func NewMemoryEnclaveFromString(s string) (*MemoryEnclave, error) {
 	return NewMemoryEnclave([]byte(s))
 }
 
-// withLocked runs fn against the material while HOLDING the read lock, so the
-// pages cannot be wiped or unmapped underneath fn: Destroy takes the write
-// lock and therefore waits out every in-flight reader. Every access path that
-// promises concurrency safety goes through here.
-//
-// fn must not call any method on the same enclave. The read lock is held for
-// the duration of the call, so a nested Destroy deadlocks, and a nested read
-// deadlocks whenever a Destroy is already waiting for the write lock.
-//
-// fn MAY construct, destroy and borrow OTHER enclaves. Until v0.3.0-alpha it
-// could not: a process-wide lock serialized every allocation against every
-// borrow, so allocating inside a live borrow deadlocked, and a caller holding a
-// key across a call that allocates had no way to write the code. That lock
-// existed to keep memguard's process-wide purge from unmapping these pages
-// mid-read; go-enclave now owns its own mapping and nothing can purge it, so the
-// lock is gone and so is the restriction.
+// withLocked runs fn against the material under the read lock.
 func (e *MemoryEnclave) withLocked(fn func([]byte) error) error {
 	if e == nil {
 		return ErrEnclaveDestroyed
 	}
 
-	// This enclave's own lock is now the whole story: only its Destroy (or a
-	// WipeAll, which also needs the write lock) can release these pages, and
-	// both wait out every in-flight reader.
 	e.rlock()
 	defer e.runlock()
 
 	if e.m == nil || e.m.wiped {
-		// wiped means the material is gone but the PAGES are still held,
-		// because the munlock or munmap after the wipe was refused and the
-		// mapping is kept so Destroy can be retried. Reading it would hand back
-		// zeroes from a region whose guard pages the release path has already
-		// left read-write. The enclave is destroyed even though the mapping is
-		// not yet released, and this is where those two stop being the same
-		// question.
+		// Wiped but held for a retried release: destroyed, and its guard
+		// pages are already read-write.
 		return ErrEnclaveDestroyed
 	}
 
 	return fn(e.m.data)
 }
 
-// Open returns a read-only view of the material inside the locked region.
-//
-// UNSAFE. The returned slice aliases the locked pages and is covered by NO
-// lock once this returns. A concurrent Destroy on this enclave unmaps it, and a
-// read through it then faults the process rather than returning an error.
-//
-// There are TWO such destroyers, and the second one is not obvious: this
-// enclave's own Destroy, and [WipeAll], which destroys every live enclave in the
-// process. A retained Open slice will SIGSEGV if a shutdown sweep runs while the
-// caller still holds it — no lock is held to prevent that. Callers that use Open
-// must therefore establish that neither can run concurrently, which for WipeAll
-// means the slice does not outlive the caller's own shutdown ordering.
-//
-// What can no longer unmap it: before v0.3.0-alpha any failed allocation
-// anywhere in the process could, through memguard's process-wide purge. That is
-// gone — WipeAll is called deliberately, never triggered by a fault.
-//
-// It is not a write path either, and how it fails depends on whether the pages
-// are frozen — which is the constructor for an enclave built by
-// NewMemoryEnclave, frozen as the material moves in, and the caller for a sized
-// one, frozen when it calls [MemoryEnclave.Freeze]. A write to frozen pages
-// faults. A write to a sized enclave that has not been frozen silently CORRUPTS
-// the material instead of announcing itself. See [NewMemoryEnclaveSized].
-//
-// Prefer WithBytes, OpenString or EqualTo, which hold the read lock across the
-// whole access and make Destroy wait. Open remains for callers that can
-// establish from their own structure that no Destroy can run concurrently —
-// single-goroutine setup code, or a value the caller alone owns — and the
-// slice must never be retained past that window.
+// Open returns a slice aliasing the locked pages. It is UNSAFE: once Open
+// returns no lock covers the slice, so a concurrent Destroy or [WipeAll] makes
+// a later read fault the process.
 //
 // Deprecated: the returned slice is covered by no lock, and a concurrent
 // Destroy or [WipeAll] faults a reader holding it. Use
@@ -571,15 +279,8 @@ func (e *MemoryEnclave) Open() ([]byte, error) {
 	return e.m.data, nil
 }
 
-// OpenString returns the material as a string.
-//
-// This deliberately materializes an UNPROTECTED copy that cannot be wiped, and
-// exists only for the boundary with legacy APIs that take plain strings (for
-// example a backend settings map[string]string). Materialize as late as
-// possible, and never store the result. Prefer WithBytes everywhere else.
-//
-// The copy is taken under the read lock, so it is safe against a concurrent
-// Destroy.
+// OpenString returns an unwipeable heap copy of the material, taken under the
+// read lock, for APIs that only take strings.
 //
 // Deprecated: the returned string cannot be wiped and outlives the enclave.
 // Use [MemoryEnclave.WithBytes] and pass the borrowed bytes on directly.
@@ -594,140 +295,35 @@ func (e *MemoryEnclave) OpenString() (string, error) {
 	return s, nil
 }
 
-// WithBytes calls fn with a view of the material and returns fn's error. The
-// view is valid only for the duration of the call; fn must not retain it, and
-// must not call back into the same enclave. This is the preferred way to
-// consume an enclave, because it scopes the borrow to the call and holds the
-// read lock across it — a concurrent Destroy blocks until fn returns instead
-// of unmapping the pages fn is using.
-//
-// It is also how an enclave from [NewMemoryEnclaveSized] is FILLED: the view
-// aliases the locked pages themselves, so material generated into it is never
-// anywhere else. The view is read-only in fact wherever the pages are frozen —
-// every enclave built from existing material, and a sized one from the moment
-// [MemoryEnclave.Freeze] returns — and a write through it there faults. A sized
-// enclave's pages are writable until then, with the obligations documented on
-// that constructor.
+// WithBytes calls fn with a view of the locked pages and returns fn's error,
+// or [ErrEnclaveDestroyed]. The read lock is held across fn, so Destroy,
+// Freeze and [WipeAll] wait for it. fn must not retain the view or call any
+// method on the same enclave (deadlock); it may use other enclaves. A write
+// through the view fills a sized enclave before Freeze and faults after.
 func (e *MemoryEnclave) WithBytes(fn func([]byte) error) error {
 	return e.withLocked(fn)
 }
 
-// Freeze makes this enclave's pages READ-ONLY, so that from here a write
-// through a slice retained past its borrow faults instead of silently
-// corrupting the material. It is the closing half of a sized enclave's fill:
-// call it once the material is final.
-//
-//	e, err := enclave.NewMemoryEnclaveSized(32)
-//	if err != nil {
-//	    return err
-//	}
-//	defer e.Destroy()
-//
-//	if err := e.WithBytes(func(key []byte) error {
-//	    _, err := io.ReadFull(rand.Reader, key)
-//	    return err
-//	}); err != nil {
-//	    return err
-//	}
-//	if err := e.Freeze(); err != nil { // a stray write faults from here
-//	    return err
-//	}
-//
-// That leaves a sized enclave with exactly the protection an enclave from
-// [NewMemoryEnclave] has, which freezes as the material moves in and cannot be
-// filled afterwards. What the method buys is the WINDOW: without it a sized
-// enclave's pages stay writable for its whole LIFETIME, so a retained slice can
-// rewrite a key at any point in it, and silent corruption of key material is a
-// strictly worse failure than a fault. With it the window is the fill.
-//
-// It is IDEMPOTENT and it is NOT reversible. A second Freeze is a no-op, and so
-// is a Freeze on an already-frozen move-constructed enclave — a caller handed an
-// enclave it did not build can freeze it without having to know which
-// constructor made it. There is deliberately no Melt: a re-mutable enclave
-// reopens exactly the window this closes, and the fill is the only reason the
-// pages were ever writable.
-//
-// # Ordering, and what it does not do
-//
-// It takes the WRITE lock, so it waits out every in-flight WithBytes,
-// OpenString, EqualTo, Size and IsAlive exactly as Destroy does. A fill still
-// running cannot be overtaken by the mprotect, which would fault the filling
-// goroutine on its next store — the very failure this exists to prevent. For the
-// same reason it must never be called from INSIDE a borrow on the same enclave:
-// that deadlocks, like any other nested call (see WithBytes).
-//
-// It does NOT make a concurrent fill safe. Two goroutines writing through
-// borrows of the same sized enclave are a data race whether or not a freeze
-// follows, and this bounds the window in which a stray write is possible rather
-// than synchronizing anything inside it.
-//
-// It returns [ErrEnclaveDestroyed] for a nil or destroyed enclave: there are no
-// pages left to protect, and returning nil would report that fault-on-write now
-// holds when nothing established it. That includes an enclave whose material has
-// been wiped while its pages are still held for a retry, which every method on
-// this type reports as destroyed. It returns
-// [ErrLockedMemoryUnavailable] (as a [LockedMemoryError]) when the kernel
-// refuses the mprotect, and a refused freeze leaves the enclave ALIVE, WRITABLE
-// and otherwise untouched — the caller keeps the enclave it had, still owes it a
-// Destroy, and now knows the property was not established. [NewMemoryEnclave]
-// releases the mapping on that same failure only because a constructor cannot
-// hand back a half-built enclave; here the caller already owns one.
-//
-// # What freezing costs
-//
-// It moves the material's wipe at Destroy time BEHIND a syscall that can be
-// refused. Destroy wipes first, before anything deniable, while the region is
-// still writable; a frozen region has to be made writable again first.
-//
-// A denied mprotect sends any enclave down the unwiped-release path, where the
-// pages are handed back with a bare munmap and
-// [MemoryEnclave.Destroy] reports [ErrReleasedWithoutWipe]. What is unique to
-// a FROZEN one is that the material is still there when it goes: an unfrozen
-// region was overwritten before the mprotect was ever attempted, and a frozen
-// region cannot be. Measured, not assumed —
-// TestMemoryEnclave_FreezeIsWhatPutsMaterialOnTheFallbackPath reads the data
-// region from inside the unmap seam in both cases.
-//
-// Nothing leaks either way: the pages were mlock'd for their whole life and the
-// kernel zeroes an anonymous page before reuse. But a caller that wants to know
-// its environment is denying mprotect has to check what Destroy returns rather
-// than deferring it bare.
-//
-// That is already true of every enclave built by [NewMemoryEnclave] and
-// [NewMemoryEnclaveCopy], and it is the trade this method makes deliberately: an
-// mprotect refused on a region this process already owns is a far narrower
-// hazard than an unbounded window in which a stray write rewrites a key with
-// nothing to announce it.
+// Freeze makes the pages read-only so a stray write faults. It is idempotent
+// and irreversible, and waits out in-flight borrows. It returns
+// [ErrEnclaveDestroyed] for a destroyed enclave, and
+// [ErrLockedMemoryUnavailable] if mprotect is refused, leaving the enclave
+// alive and writable. A frozen enclave whose later unprotect is denied is
+// released unwiped ([ErrReleasedWithoutWipe] from Destroy).
 func (e *MemoryEnclave) Freeze() error {
 	if e == nil {
 		return ErrEnclaveDestroyed
 	}
 
-	// The WRITE lock, not the read lock, for two independent reasons. m.mutable
-	// is plain state that freeze mutates, and a concurrent reader of it — a
-	// release, or another Freeze — would be a data race. And the protection
-	// change must not land in the middle of somebody's fill, which the read lock
-	// would happily allow: a borrow writing when the pages turn read-only faults,
-	// so a method whose purpose is to convert silent corruption into a fault
-	// would be manufacturing the fault itself.
+	// The write lock, so the protection change cannot land mid-fill.
 	e.lock()
 	defer e.unlock()
 
-	// wiped means the material is already gone while the pages are still held,
-	// because the munlock or munmap after the wipe was refused and the mapping is
-	// kept so Destroy can be retried (#40). Every other method treats that as
-	// destroyed and so does this one, for a reason beyond consistency: there is
-	// nothing left to protect, so a nil return would report fault-on-write
-	// established over zeroes — and mprotecting the region read-only would make
-	// the retry re-melt pages it had already melted, turning a release that
-	// needs one refusable syscall into one that needs two.
+	// Re-protecting a wiped-but-held mapping would cost its retry an mprotect.
 	if e.m == nil || e.m.wiped {
 		return ErrEnclaveDestroyed
 	}
 
-	// freeze is idempotent at the mapping layer and returns a typed
-	// LockedMemoryError, so there is nothing to translate here. It leaves the
-	// mapping mutable on failure, which is what makes a refusal survivable.
 	return e.m.freeze()
 }
 
@@ -759,16 +355,9 @@ func (e *MemoryEnclave) IsAlive() bool {
 	return e.m != nil && !e.m.wiped
 }
 
-// EqualTo reports whether the enclave holds exactly other, comparing under the
-// read lock so a concurrent Destroy waits rather than unmapping mid-compare.
-//
-// It returns [ErrEnclaveDestroyed] for a nil or destroyed enclave: "the
-// material differs" and "there was no material to compare" are different
-// answers, and false is only ever the first.
-//
-// The time taken does not depend on the contents of either slice, but it does
-// reveal whether their lengths differ; a caller that must hide the length of
-// the secret compares fixed-length values, such as digests.
+// EqualTo reports whether the enclave holds exactly other, or
+// [ErrEnclaveDestroyed]. Its timing reveals whether the lengths differ but not
+// the contents.
 func (e *MemoryEnclave) EqualTo(other []byte) (bool, error) {
 	equal := false
 	if err := e.withLocked(func(b []byte) error {
@@ -780,56 +369,21 @@ func (e *MemoryEnclave) EqualTo(other []byte) (bool, error) {
 	return equal, nil
 }
 
-// Destroy zeroizes the material, releases the locked region and reports
-// whether the release worked. It is idempotent and safe on a nil enclave, so
-// it can always be deferred.
+// Destroy wipes the material, verifies the canary, and unlocks and unmaps the
+// pages, waiting out in-flight borrows. It is idempotent, nil-safe and never
+// panics. It returns nil, or:
 //
-// It takes the write lock, so it BLOCKS until every in-flight WithBytes,
-// OpenString or EqualTo has returned. Nothing is wiped or unmapped while a
-// reader still holds a view obtained through those methods. A slice taken
-// from Open is outside that guarantee — see Open.
+//   - [ErrReleasedWithoutWipe]: mprotect was denied, the pages were unmapped
+//     unwiped and are released.
+//   - [ErrLockedMemoryUnavailable]: munlock or munmap was refused. The pages,
+//     the [WipeAll] ledger entry and any [Allocator] reservation are kept;
+//     Destroy again resumes. Once wiped, the enclave reads as destroyed.
+//   - [ErrEnclaveCorrupted]: the canary or guards were overwritten. The pages
+//     are still wiped and released; if the release was also refused the error
+//     matches ErrLockedMemoryUnavailable too and the retry reports it again.
 //
-// # What it returns
-//
-// nil for an ordinary release, and for every call after one: a destroyed or
-// nil enclave has nothing left to release.
-//
-// [ErrReleasedWithoutWipe] (as an [UnwipedReleaseError]) when the pages had to
-// be handed back with a bare unmap because the mprotect that makes a frozen
-// region writable was refused. Nothing leaked — the pages are gone and the
-// kernel zeroes an anonymous page before reuse — but the denial reaches every
-// other enclave in the process, and this return is the only signal on the main
-// path that a sandbox has removed part of the teardown contract.
-//
-// [ErrLockedMemoryUnavailable] (as a [LockedMemoryError]) when the release
-// itself was refused — the munlock or munmap, or both the wipe-enabling
-// mprotect and the bare-unmap fallback; ENOMEM at vm.max_map_count is the
-// realistic cause. The pages are still held, so the enclave keeps its mapping
-// and its place on the [WipeAll] ledger, any [Allocator] reservation stays
-// charged against pages the kernel has not taken back, and calling Destroy
-// again retries the release, resuming where the last attempt stopped. The
-// material is gone whenever the wipe got as far as running, and the enclave
-// then reports itself destroyed even though its pages are not yet released.
-//
-// A bare `defer e.Destroy()` discards that report, and for a caller with
-// nothing to do about a refusal that is a legitimate choice rather than a
-// leak: the enclave stays on the ledger, and a shutdown [WipeAll] retries it
-// and counts it if it is still held. A caller that wants to know checks the
-// error. Until #88 this method returned nothing and the report needed a second
-// method, DestroyErr, which is gone.
-//
-// [ErrEnclaveCorrupted] when the canary ahead of the data did not verify:
-// something wrote into memory it did not own, such as a buffer underflow
-// through a retained slice. The material is wiped, the pages are released and
-// any [Allocator] reservation is returned before it is reported. If the kernel
-// also refused the unlock or unmap, the error matches both ErrEnclaveCorrupted
-// and [ErrLockedMemoryUnavailable], the pages are kept for a retry as above, and
-// the retry reports the corruption again.
-//
-// Destroy never panics. Treat a corruption report as a memory-safety event:
-// whatever wrote the canary is still in the process. A detected corruption is
-// also reported by the next [WipeAll], so a deferred Destroy whose result was
-// discarded does not lose it.
+// Test ErrReleasedWithoutWipe first. A discarded error loses nothing: the next
+// WipeAll retries held pages and reports every detected corruption.
 func (e *MemoryEnclave) Destroy() error {
 	if e == nil {
 		return nil
@@ -837,24 +391,16 @@ func (e *MemoryEnclave) Destroy() error {
 
 	err := e.releaseMapping()
 
-	// The reservation goes back only once the PAGES have. A corrupted canary
-	// still counts as released — the region was wiped and unmapped, and the
-	// error is a report about what already happened — but a failed unlock or
-	// unmap does not: the kernel still holds those pages, and telling the
-	// allocator they are available would let it admit allocations the process
-	// cannot satisfy. releaseOnce keeps the accounting exact across the retry.
+	// Refund only once the pages are gone.
 	if e.release != nil && releasedPages(err) {
 		e.releaseOnce.Do(e.release)
 	}
 
-	// Noted BEFORE deregistering, so a sweep running in between sees either
-	// the enclave on the ledger or the note.
+	// Before deregistering, so a sweep sees the ledger entry or the note.
 	if errors.Is(err, ErrEnclaveCorrupted) {
 		noteCorrupted(e)
 	}
 
-	// Off the registry once the pages are actually gone. A release that failed
-	// leaves it registered so a later WipeAll still tries.
 	if releasedPages(err) {
 		deregister(e)
 	}
@@ -862,40 +408,15 @@ func (e *MemoryEnclave) Destroy() error {
 	return err
 }
 
-// destroyTransient destroys an enclave this package created for one operation
-// and owns outright — a DEK, a retired or superseded KEK, a key or root whose
-// fill failed, a destination an open failed to fill — on a path whose own
-// result must not depend on whether the release worked.
-//
-// Discarding the report here loses nothing that matters, which is what makes
-// it a decision rather than a swallowed error: a refused release keeps the
-// enclave's mapping AND its place on the [WipeAll] ledger, so a shutdown sweep
-// retries it and counts it for as long as it is held. What the operation
-// returns — a sealed value, an opened enclave, the error that ended it — is
-// the same either way, and turning a successful seal into a failure because a
-// scratch key's munmap was refused would hand the caller an error with no
-// remedy. Detected corruption is not lost: Destroy records it for the next
-// [WipeAll].
+// destroyTransient destroys a package-internal enclave whose release outcome
+// must not change the operation's result; WipeAll keeps the report.
 func destroyTransient(e *MemoryEnclave) {
 	_ = e.Destroy()
 }
 
-// releasedPages reports whether err came back with the pages actually returned
-// to the kernel. Three cases qualify: a clean release, a failed canary (a report
-// about what already happened), and a release that fell back to unmapping
-// because mprotect was denied. Everything else means the region is still mapped.
-//
-// A failed canary qualifies only when it arrives ALONE. Since #83 a release that
-// detects corruption and is then refused the unlock or unmap returns both,
-// joined, so that the detection is not lost — and that joined error matches
-// ErrEnclaveCorrupted while the pages are very much still mapped. The
-// [pagesHeldError] mark is what tells the two apart, and it vetoes everything
-// else: a held error is never released, whatever else it matches.
-//
-// It exists so the handle-drop, the reservation return and the deregistration
-// cannot answer this question differently -- copies of one predicate drift, and
-// the failure mode is an enclave that is alive over freed memory, or a budget
-// refunded for pages the kernel still holds.
+// releasedPages reports whether err left the pages returned to the kernel. A
+// pagesHeldError vetoes everything, since corruption joined with a refused
+// release still matches ErrEnclaveCorrupted.
 func releasedPages(err error) bool {
 	if pagesHeld(err) {
 		return false
@@ -905,39 +426,9 @@ func releasedPages(err error) bool {
 		errors.Is(err, ErrReleasedWithoutWipe)
 }
 
-// pagesHeldError marks a failure that left the pages MAPPED — and, as far as
-// this package can vouch, still locked — so the reservation behind them cannot
-// be returned (#83).
-//
-// It is a mark rather than a sentinel because what it wraps already has a
-// public identity: a [LockedMemoryError] matching [ErrLockedMemoryUnavailable],
-// joined with [ErrEnclaveCorrupted] when the same release detected corruption.
-// Callers keep matching those. The mark is for this package's own bookkeeping,
-// which has to answer a question those sentinels cannot: a corruption report
-// matches ErrEnclaveCorrupted whether or not the pages went back, and every
-// constructor failure matches ErrLockedMemoryUnavailable whether or not its
-// rollback succeeded. Error and Unwrap pass straight through, so the mark
-// changes neither the message nor what errors.Is and errors.As reach.
-//
-// Two places produce it: [mapping.release], for every failure that keeps the
-// mapping for a retry, and [mapping.abandon], for a constructor rollback that
-// could not unmap the region. Three places read it: [releasedPages], the
-// [Allocator] constructors deciding whether a failed construction's charge can
-// be refunded now, and [adoptOrphan], which takes a failed construction's
-// mapping onto the orphan ledger.
-//
-// locked separates the two things "held" can mean, and the constructors' refund
-// depends on the difference (#83). A mapping whose munlock succeeded and whose
-// munmap was then refused is still MAPPED — [releasedPages] is false — but it
-// no longer pins locked memory, so the charge a failed constructor took for it
-// goes back at once. Only pages that are still mlock'd keep the charge:
-// refunding those would let the allocator admit allocations RLIMIT_MEMLOCK
-// cannot satisfy. The kept charge rides on the orphan record and is returned
-// when a sweep finally releases the pages.
-//
-// orphan is the mapping a failed CONSTRUCTION is giving up, set only on that
-// path: an enclave's own failed release keeps its mapping on the enclave, and
-// leaves this nil. It is how the handle survives the constructor's nil return.
+// pagesHeldError marks, transparently, a failure that left the pages mapped.
+// locked says they are still mlock'd, so a failed constructor keeps its
+// Allocator charge; orphan is the mapping a failed construction gives up.
 type pagesHeldError struct {
 	err    error
 	locked bool
@@ -950,50 +441,32 @@ func (e *pagesHeldError) Error() string { return e.err.Error() }
 // Unwrap returns the wrapped failure, so the sentinels it matches still match.
 func (e *pagesHeldError) Unwrap() error { return e.err }
 
-// pagesHeld reports whether err left pages held: whether anything in its tree is
-// a [pagesHeldError]. errors.As walks joined errors, so a constructor that joins
-// its own failure with a held release still reports held.
+// pagesHeld reports whether err's tree holds a pagesHeldError.
 func pagesHeld(err error) bool {
 	var held *pagesHeldError
 	return errors.As(err, &held)
 }
 
-// lockedPagesHeld reports whether err left pages that are still mlock'd — the
-// narrower question an [Allocator] constructor asks before refunding a failed
-// construction's charge. See [pagesHeldError].
+// lockedPagesHeld reports whether err left pages that are still mlock'd.
 func lockedPagesHeld(err error) bool {
 	var held *pagesHeldError
 	return errors.As(err, &held) && held.locked
 }
 
-// releaseMapping wipes, verifies and unmaps the pages under the write lock, and
-// is idempotent. It is the memory half of Destroy, split out so Destroy can run
-// the reservation release and the deregistration after it.
-//
-// The handle is dropped only when the pages are actually gone. If the region
-// could not be unmapped — or could not be made writable, so it was never wiped —
-// the enclave KEEPS its mapping: the memory is still resident, and discarding
-// the only reference to it would strand it for the process lifetime with no way
-// to retry. The enclave reports itself alive in that case only if the wipe never
-// ran, which is the truth either way, and the caller can call Destroy again to
-// retry the release.
+// releaseMapping is the memory half of Destroy.
 func (e *MemoryEnclave) releaseMapping() error {
 	e.lock()
 	defer e.unlock()
 	return e.releaseLocked()
 }
 
-// rlock takes the read lock, counted in holders so a waiting [WipeAll] hears
-// when it is let go. Every read-side acquisition of e.mu goes through here and
-// [MemoryEnclave.runlock]; see holders for why one that bypassed them would be
-// a lost wake-up.
+// rlock takes the read lock, counted in holders.
 func (e *MemoryEnclave) rlock() {
 	e.holders.Add(1)
 	e.mu.RLock()
 }
 
-// runlock releases what rlock took, and wakes a waiting sweep if this was the
-// last holder.
+// runlock releases what rlock took.
 func (e *MemoryEnclave) runlock() {
 	e.mu.RUnlock()
 	e.unhold()
@@ -1005,67 +478,37 @@ func (e *MemoryEnclave) lock() {
 	e.mu.Lock()
 }
 
-// unlock releases what lock took. See runlock.
+// unlock releases what lock took.
 func (e *MemoryEnclave) unlock() {
 	e.mu.Unlock()
 	e.unhold()
 }
 
-// unhold is the second half of the handshake documented on holders: the
-// decrement FIRST, then the read of sweepWaiting. Reversing them reopens the
-// lost wake-up the counter exists to close.
-//
-// Only the holder that takes the count to zero signals, because only then can
-// the sweep's TryLock succeed; an earlier one would cost the sweep a pass that
-// finds the enclave still held. Outside a sweep the whole cost is the add and
-// one load of a flag no borrow writes.
+// unhold decrements holders before reading sweepWaiting; reversing them loses
+// wake-ups.
 func (e *MemoryEnclave) unhold() {
 	if e.holders.Add(-1) == 0 && sweepWaiting.Load() {
 		wakeSweep()
 	}
 }
 
-// tryOutcome is what [MemoryEnclave.tryReleaseMapping] reports about the lock.
+// tryOutcome is what tryReleaseMapping reports about the lock.
 type tryOutcome uint8
 
 const (
-	// tryReleased: the lock was taken and a release was attempted. Whether the
-	// PAGES went back is the error's question — see [releasedPages].
+	// tryReleased: the lock was taken and a release attempted.
 	tryReleased tryOutcome = iota
-	// tryHeld: somebody holds or is waiting for the lock, so holders was
-	// non-zero after the arm, and the release that frees it will wake the
-	// sweep. Safe to wait for.
+	// tryHeld: a holder will wake the sweep, so it may wait.
 	tryHeld
-	// tryContended: the TryLock failed and holders read zero, so nobody was
-	// there to wake the sweep later — a TryLock that failed spuriously, or a
-	// holder that came and went between the two reads (whose wake-up is then
-	// already pending). Retry at once while ctx allows; never wait on it.
+	// tryContended: a spurious TryLock failure; retry, never wait.
 	tryContended
 )
 
-// tryReleaseMapping is releaseMapping without the wait: nothing is done if the
-// lock is unavailable, instead of blocking until it is.
-//
-// The lock it tries for is the WRITE lock, so it loses to any concurrent
-// READER, not merely to a long WithBytes borrow — an IsAlive, a Size and an
-// EqualTo all take the read lock, and each is enough to make the attempt fail.
-// Callers must therefore treat a failure as "not right now", never as "cannot
-// be released", and it says which kind of "not right now" it was: tryHeld is a
-// holder whose release will wake [WipeAll], tryContended is a failure nobody
-// will announce, so the sweep retries rather than waits.
-//
-// It exists for WipeAll, which must not block on an enclave's lock — a blocked
-// Lock cannot be abandoned when the caller's context ends, and a pending writer
-// would stall every new reader of that enclave behind it. Nothing else should
-// use it — an ordinary Destroy is supposed to wait its turn.
-//
-// The sweep is deliberately NOT counted in holders: nothing waits on the
-// sweep's own hold, and counting it would make every enclave it releases wake
-// it once more for nothing.
+// tryReleaseMapping is releaseMapping without waiting, for WipeAll only: a
+// blocked Lock cannot be abandoned when ctx ends.
 func (e *MemoryEnclave) tryReleaseMapping() (tryOutcome, error) {
 	if !e.mu.TryLock() {
-		// Read AFTER the failed TryLock, and after the caller armed
-		// sweepWaiting: that order is the sweep's half of the handshake.
+		// Read after the caller armed sweepWaiting.
 		if e.holders.Load() != 0 {
 			return tryHeld, nil
 		}
@@ -1075,23 +518,14 @@ func (e *MemoryEnclave) tryReleaseMapping() (tryOutcome, error) {
 	return tryReleased, e.releaseLocked()
 }
 
-// releaseLocked is the body both paths share. The caller holds e.mu.
+// releaseLocked is the body both release paths share. The caller holds e.mu.
 func (e *MemoryEnclave) releaseLocked() error {
 	if e.m == nil {
 		return nil
 	}
 
 	err := e.m.release()
-	// Drop the handle exactly when the PAGES are gone. Two errors are returned
-	// with the memory already released -- a failed canary, and a release that
-	// fell back to unmapping because mprotect was denied -- and keeping the
-	// mapping for either would leave the enclave reporting itself alive over
-	// memory the kernel has taken back, which is a use-after-free waiting for a
-	// reader. Every other error means the region is still mapped, so the handle
-	// is kept and Destroy can be retried. That includes a failed canary joined
-	// with a refused unlock or unmap, which matches ErrEnclaveCorrupted with the
-	// pages still mapped; releasedPages is the predicate Destroy and WipeAll
-	// use, and this was a fourth spelling of it that could not have seen that.
+	// Drop the handle exactly when the pages are gone.
 	if !releasedPages(err) {
 		return err
 	}
@@ -1099,9 +533,7 @@ func (e *MemoryEnclave) releaseLocked() error {
 	return err
 }
 
-// String masks the contents. It exists so that an enclave reached by an
-// accidental %v or %s — a log line, a struct dump — cannot spill the material
-// it protects.
+// String masks the contents.
 func (e *MemoryEnclave) String() string {
 	if !e.IsAlive() {
 		return "MemoryEnclave(destroyed)"
@@ -1109,34 +541,19 @@ func (e *MemoryEnclave) String() string {
 	return "MemoryEnclave(redacted)"
 }
 
-// GoString masks the contents under %#v, exactly as String does under %v.
+// GoString masks the contents under %#v.
 func (e *MemoryEnclave) GoString() string {
 	return e.String()
 }
 
-// Wipe overwrites b with zeroes. It is for callers that must hand plain bytes
-// to an API outside this package and want the transient copy cleared as soon
-// as that API returns.
-//
-// It is a best-effort measure on ordinary heap memory and nothing more: the
-// bytes were swappable and core-dumpable for as long as they existed, and the
-// compiler or the garbage collector may already have copied them somewhere this
-// cannot reach. Prefer never materializing them — see [NewMemoryEnclaveSized]
-// for generating material directly into locked memory instead.
+// Wipe overwrites b with zeroes. On heap memory it is best effort: the bytes
+// may already have been swapped, dumped or copied by the runtime.
 func Wipe(b []byte) {
 	wipe(b)
 }
 
-// KeyScheduleErasure reports whether this build erases the temporaries of the
-// package's AES operations — most importantly the key schedule crypto/aes
-// expands, on the ordinary heap, from every DEK, KEK and wrapping key it uses
-// — and of the HKDF that derives a sealer's wrapping key from its root.
-//
-// It is true only when the program was built with GOEXPERIMENT=runtimesecret
-// for linux/amd64 or linux/arm64 (not Android): there every AES operation runs under
-// runtime/secret.Do, which erases its registers and stack before returning and
-// its heap allocations as soon as the garbage collector finds them
-// unreachable. Everywhere else it is false, and the documented exposure
-// applies: a key schedule stays on the heap, unwiped, until its memory is
-// reused. A deployment that relies on erasure can check this at startup.
+// KeyScheduleErasure reports whether AES key schedules and HKDF temporaries
+// are erased after use. It is true only with GOEXPERIMENT=runtimesecret on
+// linux/amd64 or linux/arm64 (not Android), where they run under
+// runtime/secret.Do; elsewhere they stay on the heap until reused.
 func KeyScheduleErasure() bool { return keyScheduleErasure }

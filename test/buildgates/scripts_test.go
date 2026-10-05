@@ -19,15 +19,13 @@ import (
 	"github.com/goccy/go-yaml"
 )
 
-// Tests for the release and tooling scripts (#89): scripts/release-notes.sh,
+// Tests for the release and tooling scripts: scripts/release-notes.sh,
 // release-check-tag.sh, release-publish.sh, consumer-check.sh and tool.sh.
 //
-// Most of these run for real only when a tag is pushed, some with a token that
-// can write to the forge, and tool.sh decides which binary every lint and
-// security gate trusts. A defect in any of them found at tag time is found too
-// late, so each is driven here on scratch inputs — a scratch tree, a local fake
-// of the forge API, a local module proxy, fake tool binaries — offline, and
-// `make check-scripts` (part of `make ci` and the CI Lint job) runs them.
+// Most of these run for real only when a tag is pushed, some with a write
+// token, and tool.sh decides which binary every lint and security gate trusts.
+// Each is driven here offline on scratch inputs: a scratch tree, a local fake
+// of the forge API, a local module proxy, fake tool binaries.
 
 // runScript runs scripts/<name> with sh in dir, with env layered over the
 // process environment (an empty value unsets in effect: the variable is set to
@@ -473,9 +471,8 @@ func TestScriptsReleasePublish_RefusesWithoutWriting(t *testing.T) {
 			},
 			wantMsg: "refusing to use it", noCalls: true,
 		},
-		// The curl-config injection: a token whose OTHER line is a valid
-		// token on its own. A line-oriented check accepts it, and the second
-		// line becomes a curl directive of its own.
+		// Curl-config injection: a token whose second line is a valid token
+		// on its own would otherwise become a curl directive.
 		{
 			name: "multi-line token, a later line valid on its own",
 			env: func(api string) map[string]string {
@@ -554,11 +551,10 @@ func TestScriptsReleasePublish_RefusesWithoutWriting(t *testing.T) {
 	}
 }
 
-// TestScriptsReleasePublish_RefusesEverySpellingOfGitHub: the refusal is a
-// test of the HOST, so no spelling of a github.com endpoint gets through —
-// case, port, scheme, userinfo, a trailing dot, the bare domain, another
-// subdomain — and a URL whose host cannot be verified is refused too. All of
-// these are refused before any request is made.
+// TestScriptsReleasePublish_RefusesEverySpellingOfGitHub pins that the refusal
+// tests the host, so no spelling of a github.com endpoint (case, port, scheme,
+// userinfo, trailing dot, bare domain, another subdomain) gets through, nor a
+// URL whose host cannot be verified. All are refused before any request.
 func TestScriptsReleasePublish_RefusesEverySpellingOfGitHub(t *testing.T) {
 	for _, api := range []string{
 		"https://api.github.com",
@@ -600,9 +596,9 @@ func TestScriptsReleasePublish_RefusesEverySpellingOfGitHub(t *testing.T) {
 	}
 }
 
-// TestScriptsReleasePublish_AHostMerelyNamingGitHubIsAForge: the refusal is
-// exact, not a substring match. curl resolves any *.localhost name to the
-// loopback address, so these hosts reach the local fake forge and publish.
+// TestScriptsReleasePublish_AHostMerelyNamingGitHubIsAForge pins that the
+// refusal is exact, not a substring match. curl resolves any *.localhost name
+// to loopback, so these hosts reach the local fake forge and publish.
 func TestScriptsReleasePublish_AHostMerelyNamingGitHubIsAForge(t *testing.T) {
 	for _, host := range []string{"github.com.localhost", "notgithub.localhost"} {
 		t.Run(host, func(t *testing.T) {
@@ -737,11 +733,10 @@ files:
 
 // consumerEnv points the script at the local proxy, falling back to the
 // already-verified module cache for go-enclave's own dependencies, so the run
-// needs no network. GOSUMDB is off ONLY here, in this subprocess: the module
-// is this working tree under a version no checksum database has seen, and its
-// dependencies are served from a cache that verified them when it fetched
-// them. The network path — GOPRIVATE and the forge on Gitea, the public proxy
-// and sum.golang.org elsewhere — is what release.yml exercises on every tag.
+// needs no network. GOSUMDB is off only in this subprocess: the module is the
+// working tree under a version no checksum database has seen, and the cache
+// verified the dependencies when it fetched them. release.yml exercises the
+// network path on every tag.
 func consumerEnv(t *testing.T, proxy string) map[string]string {
 	t.Helper()
 	root := repoRoot(t)
@@ -757,9 +752,9 @@ func consumerEnv(t *testing.T, proxy string) map[string]string {
 	if err != nil {
 		t.Fatalf("go env GOMODCACHE: %v", err)
 	}
-	// GOENV=off: the go command reads an EMPTY variable as unset and falls
-	// back to the user's go env file, which on a fleet machine sets GOPRIVATE
-	// and would send the fetch straight past this proxy to the forge.
+	// GOENV=off: the go command reads an empty variable as unset and falls
+	// back to the user's go env file, whose GOPRIVATE could send the fetch
+	// past this proxy.
 	return map[string]string{
 		"GOENV":       "off",
 		"GOPROXY":     "file://" + proxy + ",file://" + filepath.Join(strings.TrimSpace(string(modcache)), "cache", "download"),
@@ -835,11 +830,9 @@ func fakeTool(t *testing.T, dir, name, output string) string {
 }
 
 // toolUtilities are the external commands scripts/tool.sh and the fixtures
-// run, and nothing else. Every resolver test puts ONLY these on PATH (plus its
-// own fixtures), so the resolver cannot find a real copy of a tool on the
-// machine running the test. With /usr/bin on PATH, a runner whose image ships
-// shellcheck (the Gitea image and GitHub's ubuntu-24.04 both do) answered the
-// "absent" fixture with the real binary and failed the gate.
+// run, and nothing else. Resolver tests put only these (plus fixtures) on
+// PATH, so a real copy of a tool on the runner, such as an image's shellcheck,
+// cannot answer for an "absent" fixture.
 var toolUtilities = []string{
 	"sh", "cat", "chmod", "cut", "grep", "mkdir", "mktemp", "mv", "printenv",
 	"rm", "sed", "sha256sum", "tar", "uname",
@@ -875,9 +868,8 @@ func isolatedPath(t *testing.T) string {
 	return dir
 }
 
-// requireAbsent fails the test unless name is really undiscoverable on the
-// PATH in env — the precondition every "absent" case depends on, checked
-// rather than assumed.
+// requireAbsent fails the test unless name is undiscoverable on the PATH in
+// env, the precondition every "absent" case depends on.
 func requireAbsent(t *testing.T, env map[string]string, name string) {
 	t.Helper()
 	cmd := exec.Command("sh", "-c", `command -v "$1"`, "sh", name)
@@ -912,9 +904,8 @@ func toolEnv(t *testing.T, bin string, over map[string]string) map[string]string
 	return env
 }
 
-// The version each tool really prints, in the shapes seen in the wild —
-// including the ones that carry a SECOND version (the Go toolchain's) that a
-// careless parse reads instead.
+// The version each tool really prints, including shapes that carry a second
+// version (the Go toolchain's) that a careless parse would read instead.
 var toolOutputs = []struct {
 	tool, version, output string
 }{
@@ -1017,8 +1008,8 @@ func buildFakeGoTool(t *testing.T, output string) (string, string) {
 }
 
 // fakeGo writes a go command that answers `go version <file>` with the real
-// go and logs every other invocation to log, failing it — so a test can tell
-// a reuse (no install) from a reinstall attempt without touching the network.
+// go and logs and fails every other invocation, so a test can tell a reuse
+// from a reinstall attempt without the network.
 func fakeGo(t *testing.T, log string) string {
 	t.Helper()
 	real, err := exec.LookPath("go")
@@ -1050,9 +1041,8 @@ func copyExec(t *testing.T, src, dst string) {
 	}
 }
 
-// TestScriptsToolResolve_GoToolCacheIsKeyedByToolchain: a cached Go tool is
-// reused only for the toolchain that built it. Keyed by version alone, a
-// request for one toolchain reused a binary another compiler built.
+// TestScriptsToolResolve_GoToolCacheIsKeyedByToolchain pins that a cached Go
+// tool is reused only for the toolchain that built it.
 func TestScriptsToolResolve_GoToolCacheIsKeyedByToolchain(t *testing.T) {
 	built, toolchain := buildFakeGoTool(t, "Version: v2.29.0")
 	const other = "go1.26.7"
@@ -1081,8 +1071,8 @@ func TestScriptsToolResolve_GoToolCacheIsKeyedByToolchain(t *testing.T) {
 		t.Fatalf("did not reuse the cache built by %s (ok=%v, go calls %q):\n%s", toolchain, ok, calls, out)
 	}
 
-	// Another toolchain: a different cache entry, so an install, under that
-	// toolchain — never the binary the first compiler built.
+	// Another toolchain: a different cache entry, so an install under that
+	// toolchain.
 	out, ok, calls = run(other)
 	if ok || !strings.Contains(calls, "GOTOOLCHAIN="+other+" install") {
 		t.Fatalf("toolchain %s did not force a reinstall under it (ok=%v, go calls %q):\n%s", other, ok, calls, out)
@@ -1368,7 +1358,7 @@ func mergeEnv(a, b map[string]string) map[string]string {
 }
 
 // ---------------------------------------------------------------------------
-// Make entry points with hostile values (#89 review B8).
+// Make entry points with hostile values.
 
 // hostileValues are values a pushed tag, a workflow or a user can hand to the
 // release targets. Git accepts tag names with backticks, $(...), `;`, quotes
@@ -1433,11 +1423,10 @@ func TestScriptsMakeEntryPoints_TreatHostileValuesAsData(t *testing.T) {
 	for _, tc := range []struct {
 		name, target, variable string
 		fixed                  map[string]string // other values the target needs
-		// envIgnored: the Makefile assigns the variable itself, so a value in
-		// the environment is not used at all (the coverage floor cannot be
-		// lowered by an exported variable). envTarget is run instead, to show
-		// the environment value is ignored rather than refused — and still
-		// never executed.
+		// envIgnored: the Makefile assigns the variable itself, so an
+		// environment value is not used (the coverage floor cannot be lowered
+		// by an exported variable). envTarget is run instead, to show the
+		// value is ignored and never executed.
 		envIgnored bool
 		envTarget  string
 	}{
@@ -1493,9 +1482,9 @@ func TestScriptsMakeEntryPoints_TreatHostileValuesAsData(t *testing.T) {
 	}
 }
 
-// TestScriptsMakeEntryPoints_ValidatorsSeeTheRawValue: the value a script
-// validates is the text that was passed, not what a shell or make made of it.
-// Before the fix the validator received "vuid=1000(…)…" for TAG=v`id`.
+// TestScriptsMakeEntryPoints_ValidatorsSeeTheRawValue pins that the value a
+// script validates is the text that was passed, not what a shell or make made
+// of it (for TAG=v`id`, not the output of id).
 func TestScriptsMakeEntryPoints_ValidatorsSeeTheRawValue(t *testing.T) {
 	for _, assign := range []bool{true, false} {
 		env := map[string]string{"TAG": ""}
@@ -1513,14 +1502,13 @@ func TestScriptsMakeEntryPoints_ValidatorsSeeTheRawValue(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// The Makefile from a checkout at a hostile path (#89 review B10).
+// The Makefile from a checkout at a hostile path.
 
 // hostileDirName is a directory name a checkout can really have: a space, a
 // command substitution, backticks, `;`, `&&` and both quote characters. Each
 // payload creates a pwned-* file wherever a shell runs it. The quotes are
-// BALANCED on purpose: an unbalanced one turns a spliced command line into a
-// syntax error, so a splicing defect would fail without its payload running —
-// and the test would never see it.
+// balanced on purpose: an unbalanced one turns a spliced command line into a
+// syntax error, so the payload would never run and the test would not see it.
 const hostileDirName = "go enclave $(touch pwned-dollar) `touch pwned-tick` ;touch pwned-semi && touch pwned-and 'q' \"d\""
 
 // copyCheckout copies the files git would publish (tracked, plus untracked
@@ -1559,8 +1547,8 @@ func copyCheckout(t *testing.T, dst string) {
 }
 
 // operandLogger writes an executable that records each of its arguments as
-// one <…> line in log — so one operand with spaces in it is one line, and a
-// path split by the shell is two — and does nothing else.
+// one <…> line in log (one operand with spaces is one line, a path split by
+// the shell is two) and does nothing else.
 func operandLogger(t *testing.T, dir, name, log, extra string) {
 	t.Helper()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -1670,7 +1658,7 @@ func TestScriptsMakefile_AHostileCheckoutPathIsOneLiteralOperand(t *testing.T) {
 
 	// make -f <hostile path>/Makefile from elsewhere: MAKEFILE_LIST carries
 	// the path, which make cannot represent with spaces, so help cannot find
-	// its file — it must say so, and run nothing.
+	// its file; it must say so, and run nothing.
 	cmd := exec.Command("make", "--no-print-directory", "-s", "-f", filepath.Join(checkout, "Makefile"), "help")
 	cmd.Dir = parent
 	if b, err := cmd.CombinedOutput(); err == nil && !strings.Contains(string(b), "clean-tools:") {
@@ -1695,9 +1683,9 @@ func TestScriptsMakefile_AHostileCheckoutPathIsOneLiteralOperand(t *testing.T) {
 	requireNoPwned(t, parent, "make at a hostile checkout path")
 }
 
-// TestScriptsMakefile_CleanToolsRefusesWhatItMustNotDelete: an overridden
-// TOOLS_DIR that is relative, or resolves to /, the checkout or $HOME, is
-// refused before anything is removed.
+// TestScriptsMakefile_CleanToolsRefusesWhatItMustNotDelete pins that an
+// overridden TOOLS_DIR that is relative, or resolves to /, the checkout or
+// $HOME, is refused before anything is removed.
 func TestScriptsMakefile_CleanToolsRefusesWhatItMustNotDelete(t *testing.T) {
 	checkout := filepath.Join(t.TempDir(), "repo")
 	copyCheckout(t, checkout)

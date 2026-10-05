@@ -10,12 +10,7 @@
 
 package enclave
 
-// excludeFromFork is a no-op off Linux.
-//
-// FreeBSD and OpenBSD have minherit(2) with INHERIT_ZERO, but
-// golang.org/x/sys v0.48.0 exposes no minherit wrapper for either, and OpenBSD
-// rejects system calls made outside libc, so there is no supported way to
-// issue it from here. darwin's minherit is not exposed either, and Windows has
-// no fork. A child forked on these platforms inherits a copy-on-write view of
-// the enclave pages.
+// excludeFromFork is a no-op off Linux: x/sys exposes no minherit, and Windows
+// has no fork. A child forked on these platforms inherits a copy-on-write view
+// of the enclave pages.
 func excludeFromFork([]byte) error { return nil }

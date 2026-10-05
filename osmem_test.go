@@ -20,30 +20,22 @@ import (
 	"unsafe"
 )
 
-// knownGOOS is every GOOS go/build accepts, ported or not. The ported ones are
-// `go tool dist list`; hurd and zos are known to the toolchain without being
-// ports, and are here because they are exactly what a hand-maintained build
-// constraint forgets — hurd satisfies the `unix` meta-tag, which is why the
-// platform file does not use it.
+// knownGOOS is every GOOS go/build accepts. hurd and zos are not ports but
+// are listed because hurd satisfies the unix meta-tag.
 var knownGOOS = []string{
 	"aix", "android", "darwin", "dragonfly", "freebsd", "hurd", "illumos", "ios",
 	"js", "linux", "netbsd", "openbsd", "plan9", "solaris", "wasip1", "windows", "zos",
 }
 
-// supportedGOOS is the set #86 commits to: every GOOS where golang.org/x/sys
-// provides mmap, mlock, munlock, mprotect and munmap (or their Windows
-// equivalents). android, ios and illumos are reached through the linux, darwin
-// and solaris constraints Go implies for them.
+// supportedGOOS is every GOOS where x/sys provides the memory primitives.
+// android, ios and illumos are implied by linux, darwin and solaris.
 var supportedGOOS = []string{
 	"aix", "android", "darwin", "dragonfly", "freebsd", "illumos", "ios",
 	"linux", "netbsd", "openbsd", "solaris", "windows",
 }
 
-// matchingFiles reports which of files go/build would compile for goos.
-// MatchFile applies both the //go:build line and the _GOOS file-name suffix,
-// with the implications Go defines (android satisfies linux, illumos solaris,
-// ios darwin), so this is the toolchain's answer rather than a re-derivation of
-// it.
+// matchingFiles reports which of files go/build would compile for goos,
+// applying build lines, file-name suffixes and GOOS implications.
 func matchingFiles(t *testing.T, goos string, files []string) []string {
 	t.Helper()
 	ctxt := build.Default
@@ -61,16 +53,10 @@ func matchingFiles(t *testing.T, goos string, files []string) []string {
 	return matched
 }
 
-// TestPlatformLayer_EveryGOOSHasExactlyOneImplementation pins the partition the
-// three osmem files claim: every GOOS compiles exactly one of them, the
-// supported set compiles a real one, and everything else — including a GOOS
-// that satisfies `unix` without having the calls — compiles the file that
-// refuses to build. A constraint edited in one file and not its siblings would
-// otherwise produce a duplicate definition on one GOOS and a cascade of
-// undefined names on another, and nothing in a Linux-only CI would notice.
-//
-// The per-mapping core-dump files are held to the same rule over the supported
-// set, since each defines excludeFromCoreDump.
+// TestPlatformLayer_EveryGOOSHasExactlyOneImplementation pins that every GOOS
+// compiles exactly one osmem file: a real one for the supported set, the
+// refusing one otherwise. The dontdump files are held to the same rule over the
+// supported set.
 func TestPlatformLayer_EveryGOOSHasExactlyOneImplementation(t *testing.T) {
 	layer := []string{"osmem_unix.go", "osmem_windows.go", "osmem_unsupported.go"}
 	dontdump, err := globGo("dontdump_")
@@ -120,9 +106,8 @@ func globGo(prefix string) ([]string, error) {
 	return files, nil
 }
 
-// TestSysMap_ReturnsZeroedPageAlignedMemory pins what newMapping relies on
-// when it skips zeroing the region itself: the platform hands back exactly the
-// length asked for, page-aligned, readable, writable and all zero.
+// TestSysMap_ReturnsZeroedPageAlignedMemory pins what newMapping relies on to
+// skip zeroing: exactly the requested length, page-aligned, read-write, zero.
 func TestSysMap_ReturnsZeroedPageAlignedMemory(t *testing.T) {
 	n := 3 * int(pageSize)
 	b, err := sysMap(n)
@@ -148,10 +133,8 @@ func TestSysMap_ReturnsZeroedPageAlignedMemory(t *testing.T) {
 	b[0], b[n-1] = 0xA5, 0x5A
 }
 
-// TestSysProtect_RefusesAnUnknownProtection pins the default branch of the
-// platform translation: the zero protection, or any value past the three
-// defined ones, is refused with errInvalidProtection rather than mapped to
-// some guess — and the pages are left exactly as they were.
+// TestSysProtect_RefusesAnUnknownProtection pins that an undefined protection
+// is refused with errInvalidProtection and leaves the pages unchanged.
 func TestSysProtect_RefusesAnUnknownProtection(t *testing.T) {
 	b, err := sysMap(int(pageSize))
 	if err != nil {
@@ -180,11 +163,8 @@ func TestSysProtect_RefusesAnUnknownProtection(t *testing.T) {
 	}
 }
 
-// TestSysPrimitives_ReportTheirSyscall pins that a refusal from the platform
-// layer names the call that was refused and keeps the errno reachable, which is
-// what makes a LockedMemoryError diagnosable: "mlock: cannot allocate memory"
-// and "munmap: invalid argument" are different operator problems. A region
-// that is not a whole mapping is the refusal every platform makes on demand.
+// TestSysPrimitives_ReportTheirSyscall pins that a platform-layer refusal
+// names the refused call and keeps the errno reachable.
 func TestSysPrimitives_ReportTheirSyscall(t *testing.T) {
 	b, err := sysMap(2 * int(pageSize))
 	if err != nil {
@@ -196,9 +176,8 @@ func TestSysPrimitives_ReportTheirSyscall(t *testing.T) {
 		}
 	})
 
-	// Not the mapping's base: munmap and VirtualFree(MEM_RELEASE) both refuse
-	// it, so the unmap contract — whole mappings only — is enforced, not
-	// assumed.
+	// Not the mapping's base: munmap and VirtualFree(MEM_RELEASE) both
+	// refuse it.
 	err = sysUnmap(b[int(pageSize):])
 	var sys *os.SyscallError
 	if !errors.As(err, &sys) {
@@ -215,7 +194,7 @@ func TestSysPrimitives_ReportTheirSyscall(t *testing.T) {
 		t.Error("the refusal carries no underlying error to match on")
 	}
 
-	// And the mapping primitive's own refusal: no platform maps zero bytes.
+	// No platform maps zero bytes.
 	m, err := sysMap(0)
 	if m != nil {
 		t.Errorf("sysMap(0) returned %d bytes alongside %v", len(m), err)
@@ -229,11 +208,8 @@ func TestSysPrimitives_ReportTheirSyscall(t *testing.T) {
 	}
 }
 
-// TestCoreDumpsDisabled_UnsupportedOnlyWhereThereIsNoLimit pins the honest
-// answer on each side: Windows has no process-wide core-dump limit and must say
-// so, and every other platform has one and must never claim otherwise — a
-// sentinel returned everywhere would tell a Linux operator the control does
-// not exist when it was merely denied, or succeeded.
+// TestCoreDumpsDisabled_UnsupportedOnlyWhereThereIsNoLimit pins that only
+// Windows reports ErrCoreDumpLimitUnsupported.
 func TestCoreDumpsDisabled_UnsupportedOnlyWhereThereIsNoLimit(t *testing.T) {
 	unsupported := errors.Is(CoreDumpsDisabled(), ErrCoreDumpLimitUnsupported)
 	if want := runtime.GOOS == "windows"; unsupported != want {

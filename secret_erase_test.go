@@ -18,25 +18,19 @@ import (
 	"unsafe"
 )
 
-// TestWithAEAD_ErasesTheKeyScheduleUnderRuntimeSecret is the proof behind
-// KeyScheduleErasure (#98). An AES operation run through withAEAD — under
-// runtime/secret.Do — must leave no copy of its key in process memory once
-// the garbage collector has run, in either form crypto/aes stores it (byte
-// exact on the hardware path, big-endian words on the generic one).
-//
-// The CONTROL comes first and is what makes the result mean anything: the
-// very same operation run OUTSIDE secretDo, under a different key, leaves its
-// key schedule findable after GC. A sweep that could not see that would pass
-// the erasure check vacuously.
+// TestWithAEAD_ErasesTheKeyScheduleUnderRuntimeSecret pins that an AES
+// operation run through withAEAD leaves no copy of its key schedule in memory
+// after GC, in either form crypto/aes stores it. The control runs the same
+// operation outside secretDo and must find the schedule, so the sweep is not
+// vacuous.
 func TestWithAEAD_ErasesTheKeyScheduleUnderRuntimeSecret(t *testing.T) {
 	if !KeyScheduleErasure() {
 		t.Fatal("KeyScheduleErasure() = false in a build constrained to the erasing configuration")
 	}
 
-	// sealOnce performs one real AES-GCM seal under a fresh random key held in
-	// locked memory, through run (withAEAD, or the unerased inner call), and
-	// returns probe enclaves holding the key in both stored forms so the
-	// sweep can look for it without the needle ever being a heap value.
+	// sealOnce performs one AES-GCM seal under a fresh random key held in
+	// locked memory, through run, and returns probe enclaves holding the key in
+	// both stored forms so the needle is never a heap value.
 	sealOnce := func(t *testing.T, run func(*MemoryEnclave, func(cipher.AEAD) error) error) (exact, swapped *MemoryEnclave) {
 		t.Helper()
 		key, err := NewMemoryEnclaveSized(dekBytes)
@@ -67,11 +61,9 @@ func TestWithAEAD_ErasesTheKeyScheduleUnderRuntimeSecret(t *testing.T) {
 		}); err != nil {
 			t.Fatalf("filling the key and probes: %v", err)
 		}
-		// Many operations under the key, each expanding its own schedule:
-		// one freed schedule can be overwritten by the next allocation before
-		// the sweep reads it (measured: the single-operation control went
-		// blind in ~5% of runs), and with 64 the control has to lose every
-		// one to go blind — while the claim has to erase every one.
+		// 64 operations, each expanding its own schedule: a single freed
+		// schedule can be overwritten before the sweep (the one-operation control
+		// went blind in about 5% of runs).
 		for range 64 {
 			if err := run(key, func(gcm cipher.AEAD) error {
 				_ = gcm.Seal(nil, nil, []byte("a real seal under this key"), nil)
@@ -80,8 +72,8 @@ func TestWithAEAD_ErasesTheKeyScheduleUnderRuntimeSecret(t *testing.T) {
 				t.Fatalf("withAEAD: %v", err)
 			}
 		}
-		// The locked copy is wiped and unmapped: from here the key can only
-		// survive in what the AES operation left behind.
+		// The locked copy is gone: the key can only survive in what the AES
+		// operation left behind.
 		if err := key.Destroy(); err != nil {
 			t.Fatalf("destroying the key: %v", err)
 		}
@@ -106,7 +98,7 @@ func TestWithAEAD_ErasesTheKeyScheduleUnderRuntimeSecret(t *testing.T) {
 		return rangesOutside(hits, home)
 	}
 
-	// CONTROL: without secretDo the schedule survives the GC.
+	// Control: without secretDo the schedule survives the GC.
 	cExact, cSwapped := sealOnce(t, withAEADErasable)
 	defer func() { _ = cExact.Destroy(); _ = cSwapped.Destroy() }()
 	if len(residue(t, cExact))+len(residue(t, cSwapped)) == 0 {
@@ -114,7 +106,7 @@ func TestWithAEAD_ErasesTheKeyScheduleUnderRuntimeSecret(t *testing.T) {
 			"what this test claims is erased, so the erasure result below would be vacuous")
 	}
 
-	// THE CLAIM: through withAEAD, nothing is left.
+	// The claim: through withAEAD, nothing is left.
 	exact, swapped := sealOnce(t, withAEAD)
 	defer func() { _ = exact.Destroy(); _ = swapped.Destroy() }()
 	if hits := append(residue(t, exact), residue(t, swapped)...); len(hits) > 0 {
