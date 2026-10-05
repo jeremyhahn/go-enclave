@@ -90,7 +90,7 @@ func TestWipeAll_DestroysEveryLiveEnclave(t *testing.T) {
 		if e.Size() != 0 {
 			t.Errorf("enclave %d reports size %d after WipeAll", i, e.Size())
 		}
-		if e.EqualTo(material) {
+		if holds(e, material) {
 			t.Errorf("enclave %d still holds its material after WipeAll", i)
 		}
 	}
@@ -517,7 +517,7 @@ func TestWipeAll_ConcurrentWithAllocatorConstructionKeepsTheBudgetExact(t *testi
 		if !e.IsAlive() {
 			t.Fatal("Allocator.New returned a destroyed enclave with no sweep running")
 		}
-		if !e.EqualTo(material) {
+		if !holds(e, material) {
 			t.Fatal("Allocator.New returned an enclave that does not hold its material")
 		}
 	}()
@@ -590,7 +590,7 @@ func TestWipeAll_ConcurrentWithAllocatorConstructionKeepsTheBudgetExact(t *testi
 				// first destroys it, and the refund must happen exactly once
 				// either way.
 				if e.IsAlive() {
-					if e.EqualTo(material) {
+					if holds(e, material) {
 						verified.Add(1)
 					}
 					e.Destroy()
@@ -767,13 +767,11 @@ func TestWipeAll_RetriesAReaderRatherThanAbandoningIt(t *testing.T) {
 // WipeAll's documentation makes most prominently and that nothing tested:
 // it NEVER panics, including on an enclave whose canary fails.
 //
-// The guarantee is load-bearing in a specific way. Destroy panics on a detected
-// corruption, deliberately — the caller cannot act on state that is by
-// definition wrong. But a sweep is not one enclave: a panic partway through
+// The guarantee is load-bearing in a specific way. A sweep is not one
+// enclave: a panic partway through
 // leaves every enclave the sweep had not reached yet mapped and holding
 // material, which at process exit is the exact outcome WipeAll exists to
-// prevent. So the corruption is counted and the sweep goes on, and a caller who
-// needs to KNOW about it destroys that enclave itself.
+// prevent. So the corruption is counted and the sweep goes on.
 //
 // The corrupt enclave is placed in the middle of the batch, and the batch is
 // checked in full: if the sweep aborted at the failure, the enclaves it had not
@@ -858,7 +856,7 @@ func TestWipeAll_DoesNotPanicOnACorruptCanaryAndFinishesTheSweep(t *testing.T) {
 	}
 	if sweepErr != nil && !errors.Is(sweepErr, ErrEnclaveCorrupted) {
 		t.Errorf("WipeAll error = %v, want one matching ErrEnclaveCorrupted: callers match the sentinel, "+
-			"exactly as they do on Destroy's panic value", sweepErr)
+			"exactly as they do on Destroy's error", sweepErr)
 	}
 
 	// And the corrupt enclave is NOT part of the count: its pages went back like
@@ -1795,7 +1793,7 @@ func TestHolders_EveryMethodLeavesTheCountBalanced(t *testing.T) {
 		{"WithBytes panicking", func() { _ = panicValue(func() { _ = e.WithBytes(func([]byte) error { panic(errBoom) }) }) }},
 		{"Open", func() { _, _ = e.Open() }},
 		{"OpenString", func() { _, _ = e.OpenString() }},
-		{"EqualTo", func() { _ = e.EqualTo([]byte("x")) }},
+		{"EqualTo", func() { _ = holds(e, []byte("x")) }},
 		{"Size", func() { _ = e.Size() }},
 		{"IsAlive", func() { _ = e.IsAlive() }},
 		{"String", func() { _ = e.String() }},

@@ -117,6 +117,7 @@ excluded from `fork` children (`MADV_DONTFORK`), and a binary can opt in to
 | Sealing and the provider seam | [docs/sealing](docs/sealing/user.md) |
 | Shutdown sweep | [docs/shutdown-sweep](docs/shutdown-sweep/user.md) |
 | Provider conformance suite | [docs/provider-conformance](docs/provider-conformance/user.md) |
+| Upgrading from v0.7 | [docs/README.md](docs/README.md#upgrading-from-v07) |
 | Upgrading from v0.6 | [docs/README.md](docs/README.md#upgrading-from-v06-to-v07) |
 
 Each folder also has `architecture.md`, `engineering.md` and `api.md`. The API

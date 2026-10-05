@@ -441,7 +441,7 @@ func TestNewAllocatorWithinRLimit_AcceptsModestBudget(t *testing.T) {
 		t.Fatalf("New through a checked allocator: %v", err)
 	}
 	defer e.Destroy()
-	if !e.EqualTo([]byte("checked-allocator-material")) {
+	if !holds(e, []byte("checked-allocator-material")) {
 		t.Error("material did not survive into an enclave from a checked allocator")
 	}
 	if a.InUse() != pageSize {

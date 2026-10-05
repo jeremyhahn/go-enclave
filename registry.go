@@ -140,6 +140,10 @@ var (
 	// written by constructors running concurrently with a sweep, and a second
 	// lock would be a second lock order to get right.
 	orphans = make(map[*orphanRecord]struct{})
+	// destroyedCorrupt holds enclaves whose Destroy detected a failed canary
+	// since the last admitted sweep, which reports and clears them. Guarded by
+	// registryMu.
+	destroyedCorrupt = make(map[*MemoryEnclave]struct{})
 
 	// sweepGen is the sweep sequence behind [SealedEnclave.Openable]'s
 	// fallback for providers that can report nothing about their own sealing
@@ -366,6 +370,14 @@ func deregister(e *MemoryEnclave) {
 	registryMu.Unlock()
 }
 
+// noteCorrupted records that Destroy found e's canary broken, so the next
+// [WipeAll] reports it even when Destroy's caller discarded the error.
+func noteCorrupted(e *MemoryEnclave) {
+	registryMu.Lock()
+	destroyedCorrupt[e] = struct{}{}
+	registryMu.Unlock()
+}
+
 // SweepError reports what a [WipeAll] sweep FOUND that is not a held page: a
 // memory-safety event, an environment removing a teardown step, or both.
 //
@@ -379,16 +391,19 @@ func deregister(e *MemoryEnclave) {
 //
 // Match it with errors.Is against the sentinels — [ErrEnclaveCorrupted] when
 // Corrupt is non-zero, [ErrReleasedWithoutWipe] when Unwiped is — exactly as a
-// caller matches Destroy's panic value and Destroy's report. Read the numbers
-// with errors.As. WipeAll returns one only when at least one field is
-// non-zero, and never a nil *SweepError behind a non-nil error.
+// caller matches Destroy's report. Read the numbers with errors.As. WipeAll
+// returns one only when at least one field is non-zero, and never a nil
+// *SweepError behind a non-nil error.
 type SweepError struct {
 	// Corrupt is how many entries this sweep found with a failed canary:
 	// enclaves, and the mappings of failed constructions that had material
-	// copied in before they failed. Each is counted once per sweep however
-	// many attempts its release took, and is counted whether or not its pages
-	// then went back — a corrupt entry the kernel would not release is ALSO in
-	// the count WipeAll returns, the one overlap between the two.
+	// copied in before they failed. It also counts every enclave whose
+	// [MemoryEnclave.Destroy] reported [ErrEnclaveCorrupted] since the
+	// previous admitted sweep, whether or not that caller checked the error.
+	// Each is counted once per sweep however many attempts its release took,
+	// and is counted whether or not its pages then went back — a corrupt
+	// entry the kernel would not release is ALSO in the count WipeAll
+	// returns, the one overlap between the two.
 	Corrupt int
 
 	// Unwiped is how many entries this sweep unmapped WITHOUT the in-process
@@ -528,9 +543,6 @@ func (e *SweepError) Is(target error) bool {
 // aborted partway would leave every enclave after the failure untouched, which
 // is the opposite of what a caller wants at exit; the corruption is REPORTED
 // through the returned [SweepError] and the sweep goes on.
-// [MemoryEnclave.Destroy] panics on that same condition, deliberately — it is
-// the package's one fail-stop, and its documentation gives the reasons — but a
-// sweep is not one enclave, and non-fatal must not mean invisible.
 //
 // It never unmaps underneath a reader, and it never blocks on an enclave's
 // lock. An enclave being read when the sweep reaches it is left alone and
@@ -637,19 +649,20 @@ func (e *SweepError) Is(target error) bool {
 //
 // The ERROR is nil, [ErrSweepInProgress] when this call was never admitted,
 // or a [*SweepError] reporting what the sweep FOUND:
-// enclaves that failed their canary (matching [ErrEnclaveCorrupted], exactly as
-// Destroy's panic value does) and enclaves that had to be unmapped without an
+// enclaves that failed their canary, in this sweep or in a Destroy since the
+// previous admitted sweep (matching [ErrEnclaveCorrupted], exactly as
+// Destroy's report does), and enclaves that had to be unmapped without an
 // in-process wipe because the wipe-enabling mprotect was denied (matching
 // [ErrReleasedWithoutWipe]). Neither is a held page, so the count cannot carry
 // them; they overlap only for a corrupt enclave whose pages the kernel then
 // refused to give back, which is in both. The corruption tally is kept while
 // sweeping rather than read from the ledger — the opposite of how the count is
 // derived, and correct for the opposite reason: the ledger can express what is
-// still held, but it cannot express what was corrupt and is now gone. This call
-// is the only place that fact exists. ctx ending DURING an admitted sweep is
-// NOT an error: it is what bounded the wait, and the count already says what
-// it left behind. Only a call that was never admitted reports it, as
-// ErrSweepInProgress, because that call swept nothing at all.
+// still held, but it cannot express what was corrupt and is now gone; only
+// this call and the Destroy that detected it report that. ctx ending DURING
+// an admitted sweep is NOT an error: it is what bounded the wait, and the count
+// already says what it left behind. Only a call that was never admitted
+// reports it, as ErrSweepInProgress, because that call swept nothing at all.
 //
 // Both are worth acting on and they are different actions. A non-zero count is
 // most often a shutdown-ordering bug in the caller. A [*SweepError] is a
@@ -935,6 +948,10 @@ sweep:
 	// not taken back.
 	registryMu.Lock()
 	remaining := len(live) + len(orphans)
+	for e := range destroyedCorrupt {
+		corrupted[e] = struct{}{}
+	}
+	clear(destroyedCorrupt)
 	registryMu.Unlock()
 
 	// One error however many were corrupt, carrying the counts. Joining N

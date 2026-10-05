@@ -45,7 +45,7 @@ var (
 
 	// ErrBudgetInUse is the sentinel returned when LOWERING a budget would put
 	// the ceiling below the locked bytes already reserved through the allocator.
-	// Every [LimitError] matches it, so this is what callers test for.
+	// Every [BudgetInUseError] matches it, so this is what callers test for.
 	//
 	// The reservations behind that figure belong to live enclaves, and only
 	// their owners may [MemoryEnclave.Destroy] them — an allocator cannot
@@ -85,7 +85,9 @@ var (
 	//
 	// [SetAllocator] returns it too, for the same reason: installing a nil
 	// process allocator would turn every library's admitted allocation into
-	// a nil dereference.
+	// a nil dereference. So do [Allocator.New], [Allocator.NewSized],
+	// [Allocator.SetLimit], [Allocator.ForceLimit] and [Allocator.TransferTo]
+	// called on a nil *Allocator; New still wipes the data it was handed.
 	ErrNilAllocator = errors.New("enclave: allocator is nil")
 )
 
@@ -131,13 +133,14 @@ func (e *BudgetError) Is(target error) bool {
 	return target == ErrBudgetExhausted
 }
 
-// LimitError reports that a budget change was REFUSED because the requested
-// ceiling is below the locked memory already reserved through the allocator.
+// BudgetInUseError reports that a budget change was REFUSED because the
+// requested ceiling is below the locked memory already reserved through the
+// allocator.
 //
 // Nothing was changed: an allocator that returns this is exactly as it was
 // before the call, budget and reservations both. Match on [ErrBudgetInUse];
-// errors.Is reports it for every LimitError.
-type LimitError struct {
+// errors.Is reports it for every BudgetInUseError.
+type BudgetInUseError struct {
 	// Requested is the budget that was asked for, in locked bytes. For
 	// [Allocator.TransferTo] it is what the SOURCE would have been left with,
 	// since that is the ceiling the refusal is about.
@@ -153,14 +156,14 @@ type LimitError struct {
 }
 
 // Error implements error.
-func (e *LimitError) Error() string {
+func (e *BudgetInUseError) Error() string {
 	return fmt.Sprintf("%s: %d requested, %d of %d bytes in use",
 		ErrBudgetInUse.Error(), e.Requested, e.InUse, e.Limit)
 }
 
-// Is reports every LimitError as ErrBudgetInUse, so callers match the sentinel
-// and never have to know about this type.
-func (e *LimitError) Is(target error) bool {
+// Is reports every BudgetInUseError as ErrBudgetInUse, so callers match the
+// sentinel and never have to know about this type.
+func (e *BudgetInUseError) Is(target error) bool {
 	return target == ErrBudgetInUse
 }
 
@@ -197,8 +200,10 @@ var allocatorIDs atomic.Uint64
 //
 // A reservation is held for exactly the
 // lifetime of the enclave it backs: [MemoryEnclave.Destroy] returns it. The
-// zero value is not usable; construct one with [NewAllocator]. An Allocator is
-// safe for concurrent use, and its accounting is lock-free.
+// zero value is not usable; construct one with [NewAllocator]. A nil
+// *Allocator returns [ErrNilAllocator] from every method that can fail and
+// reports zero from InUse, Limit and Available. An Allocator is safe for
+// concurrent use, and its accounting is lock-free.
 //
 // # The obligation an Allocator does not remove
 //
@@ -428,6 +433,7 @@ func (a *Allocator) ceilingForRaise() (LockedMemoryLimit, error) {
 // failure.
 //
 // Returns, all leaving the budget as it was found except where noted:
+//   - ErrNilAllocator when a is nil (data is still wiped);
 //   - ErrEmptyEnclave when data is empty (no reservation is taken);
 //   - ErrBudgetExhausted (as a [BudgetError]) when the page-rounded cost of
 //     len(data) would exceed the budget — decided before any locked memory is
@@ -445,6 +451,10 @@ func (a *Allocator) ceilingForRaise() (LockedMemoryLimit, error) {
 // Callers must Destroy every enclave New returns, exactly as for
 // NewMemoryEnclave; the reservation leaks for the process lifetime otherwise.
 func (a *Allocator) New(data []byte) (*MemoryEnclave, error) {
+	if a == nil {
+		Wipe(data)
+		return nil, ErrNilAllocator
+	}
 	if len(data) == 0 {
 		// Match NewMemoryEnclave's contract: wipe the (empty) slice, take no
 		// reservation, refuse. WipeBytes tolerates an empty slice.
@@ -503,6 +513,7 @@ func (a *Allocator) New(data []byte) (*MemoryEnclave, error) {
 // the things admission refuses, which is why no separate size check precedes it.
 //
 // Returns, all leaving the budget as it was found except where noted:
+//   - ErrNilAllocator when a is nil;
 //   - ErrInvalidSize when n is a size no enclave can have — non-positive, or
 //     too large to map (no reservation is taken);
 //   - ErrBudgetExhausted (as a [BudgetError]) when the page-rounded cost of n
@@ -515,6 +526,9 @@ func (a *Allocator) New(data []byte) (*MemoryEnclave, error) {
 // — n rounded up to a whole page — until its Destroy runs, which callers must
 // always call; the reservation leaks for the process lifetime otherwise.
 func (a *Allocator) NewSized(n int) (*MemoryEnclave, error) {
+	if a == nil {
+		return nil, ErrNilAllocator
+	}
 	// Admission first, and it is admission that refuses a non-positive size:
 	// see reserve. Nothing below this line can be reached by a size the mapping
 	// layer would choke on.
@@ -772,8 +786,12 @@ func (a *Allocator) budgetSnapshot(free int64) (int64, int64) {
 //
 // It exceeds [Allocator.Limit] only after [Allocator.ForceLimit] deliberately
 // lowered the budget beneath live reservations, and that caller was told the
-// excess at the time. Nothing else can produce that state.
+// excess at the time. Nothing else can produce that state. A nil Allocator
+// reports 0.
 func (a *Allocator) InUse() int64 {
+	if a == nil {
+		return 0
+	}
 	// No overflow guard, for the same reason [Allocator.budgetSnapshot]'s
 	// fallback needs none: the lock pins limit to the free that belongs to it,
 	// so this difference is the reserved total rather than a skewed pair, and a
@@ -786,18 +804,26 @@ func (a *Allocator) InUse() int64 {
 
 // Limit reports the Allocator's total budget in locked bytes, as last set by
 // [NewAllocator], [Allocator.SetLimit], [Allocator.ForceLimit] or
-// [Allocator.TransferTo].
-func (a *Allocator) Limit() int64 { return a.limit.Load() }
+// [Allocator.TransferTo]. A nil Allocator reports 0.
+func (a *Allocator) Limit() int64 {
+	if a == nil {
+		return 0
+	}
+	return a.limit.Load()
+}
 
 // Available reports the locked bytes still admissible, clamped at zero. It is an
 // upper bound on what can still be admitted, not a count: a remainder smaller
-// than one page admits nothing. Like InUse it is
-// a snapshot for observability, not an admission gate.
+// than one page admits nothing. Like InUse it is a snapshot for observability,
+// not an admission gate, and a nil Allocator reports 0.
 //
 // The clamp is what hides an over-subscribed allocator's negative free counter,
 // which is a state [Allocator.ForceLimit] can create; zero is the honest answer
 // there, since nothing is admissible until reservations drain.
 func (a *Allocator) Available() int64 {
+	if a == nil {
+		return 0
+	}
 	free := a.free.Load()
 	if free < 0 {
 		return 0
@@ -812,8 +838,8 @@ func (a *Allocator) Available() int64 {
 // allocation refused a moment earlier will be admitted after this returns.
 //
 // Lowering succeeds only while the reservations already outstanding fit under
-// newLimit. If they do not it returns a [LimitError] matching [ErrBudgetInUse]
-// and changes NOTHING — the budget, the reservations and every live enclave are
+// newLimit. If they do not it returns a [BudgetInUseError] matching
+// [ErrBudgetInUse] and changes NOTHING — the budget, the reservations and every live enclave are
 // exactly as they were. That is the safe default because the reservations belong
 // to enclaves this allocator does not own and must never invalidate to make a
 // number fit; use [Allocator.ForceLimit] when the smaller ceiling is a fact to
@@ -827,7 +853,7 @@ func (a *Allocator) Available() int64 {
 // whatever is reserved. To stop admission while live enclaves keep working,
 // use [Allocator.ForceLimit] with zero, which records the over-subscription
 // and lets each Destroy return its reservation as usual. A negative newLimit
-// returns [ErrInvalidBudget].
+// returns [ErrInvalidBudget], and a nil allocator [ErrNilAllocator].
 //
 // It is safe to call concurrently with allocation, release and other retunes.
 // A lowering and an in-flight admission are decided by the same compare-and-swap
@@ -865,6 +891,9 @@ func (a *Allocator) Available() int64 {
 // admission fails safe regardless, with [ErrLockedMemoryUnavailable] from the
 // allocation that the kernel actually refused.
 func (a *Allocator) SetLimit(newLimit int64) error {
+	if a == nil {
+		return ErrNilAllocator
+	}
 	if newLimit < 0 {
 		return ErrInvalidBudget
 	}
@@ -925,7 +954,7 @@ func (a *Allocator) setLimit(newLimit int64, ceiling LockedMemoryLimit, cerr err
 		if !a.withdrawLocked(old - newLimit) {
 			// Nothing was mutated: withdrawLocked either takes the whole
 			// reduction or takes none of it.
-			return &LimitError{
+			return &BudgetInUseError{
 				Requested: newLimit,
 				InUse:     old - a.free.Load(),
 				Limit:     old,
@@ -960,8 +989,8 @@ func (a *Allocator) setLimit(newLimit int64, ceiling LockedMemoryLimit, cerr err
 // concurrent Destroy can reduce it a moment afterwards.
 //
 // newLimit of zero is legal and quiesces the allocator. A negative newLimit
-// returns [ErrInvalidBudget], and in that case nothing is changed and the
-// returned excess is 0.
+// returns [ErrInvalidBudget], and a nil allocator [ErrNilAllocator]; in both
+// cases nothing is changed and the returned excess is 0.
 //
 // # It is the override, including for RLIMIT_MEMLOCK
 //
@@ -985,6 +1014,9 @@ func (a *Allocator) setLimit(newLimit int64, ceiling LockedMemoryLimit, cerr err
 // [NewAllocatorWithinRLimit] exists to spare a service. Use it when you know
 // something the ceiling does not.
 func (a *Allocator) ForceLimit(newLimit int64) (int64, error) {
+	if a == nil {
+		return 0, ErrNilAllocator
+	}
 	if newLimit < 0 {
 		return 0, ErrInvalidBudget
 	}
@@ -1028,11 +1060,12 @@ func (a *Allocator) ForceLimit(newLimit int64) (int64, error) {
 // n bytes of headroom makes possible.
 //
 // It refuses, changing nothing, when:
+//   - this allocator is nil — [ErrNilAllocator];
 //   - n is not positive, dst is nil, or dst is this same allocator —
 //     [ErrInvalidTransfer];
 //   - this allocator does not have n bytes of headroom to give, because giving
-//     it would put its budget below its own live reservations — a [LimitError]
-//     matching [ErrBudgetInUse], with Requested reporting the budget this side
+//     it would put its budget below its own live reservations — a
+//     [BudgetInUseError] matching [ErrBudgetInUse], with Requested reporting the budget this side
 //     would have been left with. There is deliberately no forcing counterpart:
 //     [Allocator.ForceLimit] records a ceiling that already moved, whereas
 //     handing another allocator headroom this one cannot spare would create the
@@ -1087,6 +1120,9 @@ func (a *Allocator) ForceLimit(newLimit int64) (int64, error) {
 // either allocator cannot participate in a cycle and cannot be delayed by a
 // transfer.
 func (a *Allocator) TransferTo(dst *Allocator, n int64) error {
+	if a == nil {
+		return ErrNilAllocator
+	}
 	if n <= 0 || dst == nil || dst == a {
 		// The self-transfer check is a correctness guard, not tidiness: falling
 		// through with dst == a would take the same non-reentrant mutex twice
@@ -1151,7 +1187,7 @@ func (a *Allocator) transferTo(dst *Allocator, n int64, dstCeiling LockedMemoryL
 
 	srcLimit := a.limit.Load()
 	if !a.withdrawLocked(n) {
-		return &LimitError{
+		return &BudgetInUseError{
 			Requested: srcLimit - n,
 			InUse:     srcLimit - a.free.Load(),
 			Limit:     srcLimit,

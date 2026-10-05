@@ -1,6 +1,6 @@
 # Locked-memory enclaves — engineering contract
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-01
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-04
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Exported surface
@@ -12,14 +12,13 @@ All in package `enclave` (import path `github.com/jeremyhahn/go-enclave`).
 | `NewMemoryEnclave(data []byte) (*MemoryEnclave, error)` | Moves `data` in and **wipes the caller's slice on every return path**. Result is frozen read-only. |
 | `NewMemoryEnclaveCopy(src []byte) (*MemoryEnclave, error)` | Copies `src` in and leaves it **untouched on every path**. Result is frozen. The heap copy in `src` is the caller's to wipe. |
 | `NewMemoryEnclaveSized(n int) (*MemoryEnclave, error)` | `n` zeroed, **writable** bytes to fill through `WithBytes`; call `Freeze` when the fill is done. |
-| `NewMemoryEnclaveFromString(s string) (*MemoryEnclave, error)` | Boundary helper; the source string cannot be wiped. |
+| `NewMemoryEnclaveFromString(s string) (*MemoryEnclave, error)` | **Deprecated.** Boundary helper; the source string cannot be wiped. |
 | `(*MemoryEnclave).WithBytes(fn func([]byte) error) error` | Preferred access. Holds the read lock across `fn`; returns `fn`'s error. |
-| `(*MemoryEnclave).OpenString() (string, error)` | Unwipeable copy for string-only APIs; taken under the read lock. |
-| `(*MemoryEnclave).EqualTo(other []byte) bool` | Constant-time compare under the read lock; destroyed or nil reports `false`. |
-| `(*MemoryEnclave).EqualToErr(other []byte) (bool, error)` | As `EqualTo`, but a destroyed or nil enclave returns `ErrEnclaveDestroyed`. |
+| `(*MemoryEnclave).OpenString() (string, error)` | **Deprecated.** Unwipeable copy for string-only APIs; taken under the read lock. |
+| `(*MemoryEnclave).EqualTo(other []byte) (bool, error)` | Compare under the read lock; a destroyed or nil enclave returns `ErrEnclaveDestroyed`. Time does not depend on the contents but does reveal whether the lengths differ. |
 | `(*MemoryEnclave).Size() int` / `IsAlive() bool` / `String() string` | Locked accessors; `String` never prints the material. |
 | `(*MemoryEnclave).Freeze() error` | `mprotect` the data read-only. Idempotent, irreversible, waits out borrows. |
-| `(*MemoryEnclave).Open() ([]byte, error)` | **Unsafe**: the slice is not covered by any lock once `Open` returns. |
+| `(*MemoryEnclave).Open() ([]byte, error)` | **Deprecated, unsafe**: the slice is not covered by any lock once `Open` returns. |
 | `(*MemoryEnclave).Destroy() error` | Wipe, verify, unlock, unmap; idempotent, nil-safe. See below. |
 | `LockedSize(n int) int64` | Locked bytes an `n`-byte enclave costs (page-rounded); `0` for an impossible size. |
 | `CoreDumpsDisabled() error` | Result of lowering `RLIMIT_CORE` (soft and hard) to zero at package init. |
@@ -46,7 +45,7 @@ with `ErrEnclaveDestroyed`, `Destroy` returns `nil`.
 3. **Borrows are safe against `Destroy`, `Freeze` and `WipeAll`.** Each of those
    needs the write lock (the sweep only `TryLock`s it), so pages are never
    wiped, re-protected or unmapped under a `WithBytes`, `OpenString`, `EqualTo`,
-   `EqualToErr`, `Size` or `IsAlive`. `Open`'s slice is the one exception.
+   `Size` or `IsAlive`. `Open`'s slice is the one exception.
 4. **Inside a borrow**, `fn` must not call any method on the same enclave
    (nested `Destroy`/`Freeze` deadlock; a nested read deadlocks once a writer is
    waiting). `fn` may construct, borrow and destroy **other** enclaves.
@@ -58,7 +57,7 @@ with `ErrEnclaveDestroyed`, `Destroy` returns `nil`.
    `Destroy` again resumes where the last attempt stopped (the wipe, the canary
    check and a successful unlock are not repeated).
 7. **"Wiped but held" reads as destroyed.** Once the wipe has run, every
-   accessor (`WithBytes`, `Open`, `OpenString`, `EqualTo`/`EqualToErr`, `Size`,
+   accessor (`WithBytes`, `Open`, `OpenString`, `EqualTo`, `Size`,
    `IsAlive`, `String`, `Freeze`) reports the enclave destroyed even if its
    pages are still held; `Destroy` retries the release.
 8. **A construction racing `WipeAll` can return an already-destroyed enclave**
@@ -72,9 +71,9 @@ with `ErrEnclaveDestroyed`, `Destroy` returns `nil`.
 | `ErrEmptyEnclave` | `NewMemoryEnclave`, `NewMemoryEnclaveCopy`, `NewMemoryEnclaveFromString` | Zero-length material; nothing mapped. |
 | `ErrInvalidSize` | `NewMemoryEnclaveSized` | `n <= 0` or too large to map (data + two guard pages overflow `int`); decided before `mmap`. |
 | `ErrLockedMemoryUnavailable` (`*LockedMemoryError`) | constructors, `Freeze`, `Destroy` | Kernel refused `mmap`/`mlock`/`madvise`/`mprotect`. From `Destroy` it means the release was refused and the pages are held (retry by calling `Destroy` again) **only if the error does not also match `ErrReleasedWithoutWipe`** — see below. |
-| `ErrEnclaveDestroyed` | `WithBytes`, `Open`, `OpenString`, `EqualToErr`, `Freeze` | Material gone (destroyed, swept, or wiped-but-held). |
-| `ErrReleasedWithoutWipe` (`*UnwipedReleaseError`) | `Destroy`; `NewMemoryEnclave`/`NewMemoryEnclaveCopy`/`NewMemoryEnclaveFromString` (joined into a freeze failure's rollback); `Allocator.New` likewise | `mprotect` denied, pages handed back with a bare `munmap` and **released**. They were locked for their whole life (never swapped) and the kernel zeroes anonymous pages before reuse, but the in-process wipe did not run. Not a panic. |
-| `ErrEnclaveCorrupted` | `Destroy` **panic value** | Canary or guard mismatch. See below. |
+| `ErrEnclaveDestroyed` | `WithBytes`, `Open`, `OpenString`, `EqualTo`, `Freeze` | Material gone (destroyed, swept, or wiped-but-held). |
+| `ErrReleasedWithoutWipe` (`*UnwipedReleaseError`) | `Destroy`; `NewMemoryEnclave`/`NewMemoryEnclaveCopy`/`NewMemoryEnclaveFromString` (joined into a freeze failure's rollback); `Allocator.New` likewise | `mprotect` denied, pages handed back with a bare `munmap` and **released**. They were locked for their whole life (never swapped) and the kernel zeroes anonymous pages before reuse, but the in-process wipe did not run. |
+| `ErrEnclaveCorrupted` | `Destroy`; also counted by the next `WipeAll` | Canary or guard mismatch. See below. |
 | `ErrCoreDumpLimitUnsupported` | `CoreDumpsDisabled` | Windows: no process-wide core-dump limit exists. |
 | `ErrProcessHardeningUnsupported` | `HardenProcess` | Not Linux: nothing applied. |
 | `*ProcessHardeningError` | `HardenProcess` | `PR_SET_DUMPABLE` refused, or the read-back still shows the process dumpable. |
@@ -107,18 +106,21 @@ case errors.Is(err, enclave.ErrLockedMemoryUnavailable):
 }
 ```
 
-### The one panic
+### Canary corruption
 
-`Destroy` panics when the canary fails — the only explicit `panic` in the
-package ([enclave.go](../../enclave.go)) — with a value matching `ErrEnclaveCorrupted`. It panics **after** wiping
-the material, releasing the pages and returning any reservation. If the kernel
-refuses the release in the same attempt, the panic value matches both
-`ErrEnclaveCorrupted` and `ErrLockedMemoryUnavailable`, the pages are kept, and
-the retry that releases them panics again (detection is sticky). Rationale: a
-process holding secrets whose memory was written by something that did not own
-it must not continue, and a returned error would be dropped by
-`defer e.Destroy()`. `WipeAll` meets the same condition and reports it as a
-`*SweepError` instead of panicking.
+`Destroy` returns an error matching `ErrEnclaveCorrupted` when the canary
+fails, **after** wiping the material, releasing the pages and returning any
+reservation. If the kernel refuses the release in the same attempt, the error
+matches both `ErrEnclaveCorrupted` and `ErrLockedMemoryUnavailable`, the pages
+are kept, and the retry that releases them reports the corruption again
+(detection is sticky). Every corruption `Destroy` detects is also recorded for
+the next admitted `WipeAll`, which counts it in `SweepError.Corrupt` once per
+enclave, so a `defer e.Destroy()` that discards the error does not lose it.
+
+The package does not panic, and records no exception to that rule. Through
+v0.7 `Destroy` panicked here, because a deferred call drops its error; the
+sweep report above keeps the evidence instead, and whether a process with
+overwritten key memory should stop is the caller's decision.
 
 ## Platform contract
 

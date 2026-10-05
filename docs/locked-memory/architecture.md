@@ -1,6 +1,6 @@
 # Locked-memory enclaves — architecture
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-01
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-04
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Problem
@@ -65,11 +65,11 @@ flowchart TD
   G -- refused --> H
   G -- ok --> R[refund Allocator reservation, leave ledger]
   R --> P{canary failed?}
-  P -- yes --> PANIC[panic matching ErrEnclaveCorrupted]
+  P -- yes --> PC[note for next WipeAll; return ErrEnclaveCorrupted]
   P -- no --> OK[return nil]
   H --> HC{canary failed on this or an earlier attempt?}
   HC -- no --> HE[return ErrLockedMemoryUnavailable; Destroy again retries]
-  HC -- yes --> HP[panic matching ErrEnclaveCorrupted and ErrLockedMemoryUnavailable; pages kept]
+  HC -- yes --> HP[note for next WipeAll; return ErrEnclaveCorrupted and ErrLockedMemoryUnavailable; pages kept]
 ```
 
 A retry resumes rather than repeats: the wipe and canary check run once per
@@ -86,7 +86,7 @@ the `munmap` when its `munlock` is refused, since unmapping drops the lock.)
 |---|---|
 | memguard `LockedBuffer` (used through v0.2.0-alpha) | On any mapping failure it purges — unmaps — every live buffer in the process, then panics. Guarding against that needed a process-wide lock that made allocating inside a live borrow deadlock. It also put NaCl secretbox, a non-FIPS algorithm, in every consumer's build graph. |
 | memcall primitives (used through v0.6.2-alpha) | Its `Free` re-protected and re-wiped the region itself and its `Lock` discarded an `madvise` result, so the release path could not tell which refusal it was recovering from and needed a second, "direct" unmap. It also reported success for core-dump hardening on Windows, where none exists. |
-| Return an error, not panic, on canary corruption | `defer e.Destroy()` drops the error, so the evidence of a memory-safety event would vanish on the most common path; and the state a caller would consult to recover is the state that is wrong. See [engineering.md](engineering.md#the-one-panic). |
+| Panic on canary corruption (the behavior through v0.7) | Library code returns its failures. The case for a panic was that `defer e.Destroy()` drops the error; the next `WipeAll` now reports every corruption `Destroy` detected, so the evidence survives without one. See [engineering.md](engineering.md#canary-corruption). |
 | `WerRegisterExcludedMemoryBlock` on Windows | Covers WER reports only, and draws on a per-process pool of 512 entries shared with every WER user: failing closed would cap live enclaves and starve other libraries; best effort would be silently partial ([dontdump_windows.go](../../dontdump_windows.go)). |
 | Refuse to build enclaves where no per-mapping dump exclusion exists | Would also remove `mlock`, guard pages and canary — strictly worse than losing one control. |
 | A reversible `Freeze` | Re-mutable pages reopen exactly the window `Freeze` closes; the fill is the only reason pages are ever writable. |
@@ -124,7 +124,7 @@ in to `HardenProcess`), a debugger, a cold-boot capture. While an enclave exists
 `mlock` keeps pages out of swap, not out of a hibernation (suspend-to-disk)
 image or a virtual-machine snapshot, which capture locked memory too.
 Nor does it cover copies the caller makes: the `[]byte` handed to
-`NewMemoryEnclaveCopy`, the string from `OpenString`, or bytes generated on the
+`NewMemoryEnclaveCopy`, the string from the deprecated `OpenString`, or bytes generated on the
 heap before being moved in. For narrowing the live-memory window, see
 [sealing](../sealing/architecture.md).
 

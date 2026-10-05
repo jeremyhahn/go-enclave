@@ -100,7 +100,7 @@ func TestNewMemoryEnclaveCopy_LeavesTheSourceIntact(t *testing.T) {
 	if string(copied) != material {
 		t.Errorf("source = %q after NewMemoryEnclaveCopy, want it untouched (%q)", copied, material)
 	}
-	if !e.EqualTo([]byte(material)) {
+	if !holds(e, []byte(material)) {
 		t.Error("the enclave does not hold the material it was handed")
 	}
 	if e.Size() != len(material) {
@@ -140,12 +140,12 @@ func TestNewMemoryEnclaveCopy_IsIndependentOfTheSource(t *testing.T) {
 	defer e.Destroy()
 
 	src[0] = 0xFF
-	if !e.EqualTo(material) {
+	if !holds(e, material) {
 		t.Error("mutating the source changed the enclave: the copy aliases it")
 	}
 
 	Wipe(src)
-	if !e.EqualTo(material) {
+	if !holds(e, material) {
 		t.Error("wiping the source emptied the enclave: the copy aliases it")
 	}
 }
@@ -270,8 +270,8 @@ func TestMemoryEnclave_Destroy(t *testing.T) {
 	if err := e.WithBytes(func([]byte) error { return nil }); !errors.Is(err, ErrEnclaveDestroyed) {
 		t.Errorf("WithBytes err = %v, want ErrEnclaveDestroyed", err)
 	}
-	if e.EqualTo([]byte("transient")) {
-		t.Error("EqualTo = true on destroyed enclave")
+	if ok, err := e.EqualTo([]byte("transient")); ok || !errors.Is(err, ErrEnclaveDestroyed) {
+		t.Errorf("EqualTo = (%t, %v) on destroyed enclave, want (false, ErrEnclaveDestroyed)", ok, err)
 	}
 }
 
@@ -289,8 +289,8 @@ func TestMemoryEnclave_NilReceiver(t *testing.T) {
 	if _, err := e.Open(); !errors.Is(err, ErrEnclaveDestroyed) {
 		t.Errorf("Open err = %v, want ErrEnclaveDestroyed", err)
 	}
-	if e.EqualTo(nil) {
-		t.Error("EqualTo = true on nil enclave")
+	if ok, err := e.EqualTo(nil); ok || !errors.Is(err, ErrEnclaveDestroyed) {
+		t.Errorf("EqualTo = (%t, %v) on nil enclave, want (false, ErrEnclaveDestroyed)", ok, err)
 	}
 	if got := e.String(); got != "MemoryEnclave(destroyed)" {
 		t.Errorf("String = %q", got)
@@ -329,15 +329,25 @@ func TestMemoryEnclave_EqualTo(t *testing.T) {
 	}
 	defer e.Destroy()
 
-	if !e.EqualTo([]byte("compare-me")) {
-		t.Error("EqualTo = false for equal material")
+	for _, tc := range []struct {
+		other []byte
+		want  bool
+	}{
+		{[]byte("compare-me"), true},
+		{[]byte("compare-mE"), false},
+		{[]byte("compare"), false},
+		{nil, false},
+	} {
+		if got, err := e.EqualTo(tc.other); got != tc.want || err != nil {
+			t.Errorf("EqualTo(%q) = (%t, %v), want (%t, nil)", tc.other, got, err, tc.want)
+		}
 	}
-	if e.EqualTo([]byte("compare-mE")) {
-		t.Error("EqualTo = true for different material")
-	}
-	if e.EqualTo([]byte("compare")) {
-		t.Error("EqualTo = true for a prefix")
-	}
+}
+
+// holds reports whether e is alive and holds exactly b.
+func holds(e *MemoryEnclave, b []byte) bool {
+	ok, err := e.EqualTo(b)
+	return err == nil && ok
 }
 
 func TestMemoryEnclave_StringRedacts(t *testing.T) {
@@ -490,7 +500,7 @@ func TestMemoryEnclave_ConcurrentReadersAndDestroy(t *testing.T) {
 				defer wg.Done()
 				_ = e.WithBytes(func(b []byte) error { return nil })
 				_, _ = e.OpenString()
-				_ = e.EqualTo([]byte("private-key-material"))
+				_ = holds(e, []byte("private-key-material"))
 				_ = e.Size()
 				_ = e.String()
 			}()
@@ -559,14 +569,10 @@ func TestLockedMemoryError(t *testing.T) {
 	})
 }
 
-// TestEqualToErrSeparatesMismatchFromDestroyed is the regression for #30.
-//
-// EqualTo answers false for both "the material differs" and "there is no
-// material", so a caller cannot tell them apart. That is safe in the shape it is
-// nearly always written in — `if e.EqualTo(secret) { grant() }` fails closed —
-// and unsafe the moment the test is inverted, because a destroyed enclave then
-// reads as a definite mismatch.
-func TestEqualToErrSeparatesMismatchFromDestroyed(t *testing.T) {
+// TestEqualToSeparatesMismatchFromDestroyed pins that a mismatch is
+// (false, nil) and a missing enclave is (false, ErrEnclaveDestroyed): an
+// inverted test must never read a destroyed enclave as a definite mismatch.
+func TestEqualToSeparatesMismatchFromDestroyed(t *testing.T) {
 	const material = "the real material"
 
 	t.Run("match", func(t *testing.T) {
@@ -576,12 +582,12 @@ func TestEqualToErrSeparatesMismatchFromDestroyed(t *testing.T) {
 		}
 		defer e.Destroy()
 
-		equal, err := e.EqualToErr([]byte(material))
+		equal, err := e.EqualTo([]byte(material))
 		if err != nil {
-			t.Fatalf("EqualToErr on a live enclave = %v, want no error", err)
+			t.Fatalf("EqualTo on a live enclave = %v, want no error", err)
 		}
 		if !equal {
-			t.Error("EqualToErr reported a mismatch for identical material")
+			t.Error("EqualTo reported a mismatch for identical material")
 		}
 	})
 
@@ -592,13 +598,13 @@ func TestEqualToErrSeparatesMismatchFromDestroyed(t *testing.T) {
 		}
 		defer e.Destroy()
 
-		equal, err := e.EqualToErr([]byte("something else"))
+		equal, err := e.EqualTo([]byte("something else"))
 		if err != nil {
-			t.Fatalf("EqualToErr = %v, want no error: the comparison RAN, it "+
+			t.Fatalf("EqualTo = %v, want no error: the comparison RAN, it "+
 				"simply did not match", err)
 		}
 		if equal {
-			t.Error("EqualToErr reported equal for different material")
+			t.Error("EqualTo reported equal for different material")
 		}
 	})
 
@@ -609,33 +615,22 @@ func TestEqualToErrSeparatesMismatchFromDestroyed(t *testing.T) {
 		}
 		e.Destroy()
 
-		equal, err := e.EqualToErr([]byte(material))
+		equal, err := e.EqualTo([]byte(material))
 		if !errors.Is(err, ErrEnclaveDestroyed) {
-			t.Fatalf("EqualToErr on a destroyed enclave = (%v, %v), want "+
+			t.Fatalf("EqualTo on a destroyed enclave = (%v, %v), want "+
 				"ErrEnclaveDestroyed: a caller that cannot distinguish this "+
 				"from a mismatch is acting on a fact it does not have", equal, err)
 		}
 		if equal {
-			t.Error("EqualToErr reported equal for a destroyed enclave")
-		}
-
-		// The boolean spelling stays fail-closed, which is why it may keep the
-		// collapse: it is the inverted use that is unsafe, and that use now has
-		// EqualToErr.
-		if e.EqualTo([]byte(material)) {
-			t.Error("EqualTo on a destroyed enclave reported true; it must " +
-				"fail closed whatever else changes")
+			t.Error("EqualTo reported equal for a destroyed enclave")
 		}
 	})
 
 	t.Run("nil receiver", func(t *testing.T) {
 		var e *MemoryEnclave
-		equal, err := e.EqualToErr([]byte(material))
+		equal, err := e.EqualTo([]byte(material))
 		if !errors.Is(err, ErrEnclaveDestroyed) || equal {
-			t.Fatalf("nil EqualToErr = (%v, %v), want (false, ErrEnclaveDestroyed)", equal, err)
-		}
-		if e.EqualTo([]byte(material)) {
-			t.Error("nil EqualTo reported true")
+			t.Fatalf("nil EqualTo = (%v, %v), want (false, ErrEnclaveDestroyed)", equal, err)
 		}
 	})
 }
@@ -721,7 +716,7 @@ func sameMaterial(t *testing.T, a, b *MemoryEnclave) bool {
 	t.Helper()
 	var same bool
 	if err := b.WithBytes(func(w []byte) error {
-		same = a.EqualTo(w)
+		same = holds(a, w)
 		return nil
 	}); err != nil {
 		t.Fatalf("borrowing the yardstick: %v", err)
@@ -818,14 +813,65 @@ func TestDestroy_ReleaseFailureIsReturnedNotPanicked(t *testing.T) {
 	}
 }
 
-// TestDestroy_CorruptionSurvivesAFailedRelease is the enclave-level half of the
-// sticky-corruption regression (#83). A corrupted canary whose release is also
-// refused must still PANIC with ErrEnclaveCorrupted — the one condition Destroy
-// panics on — keeping the mapping and the charge; and the retry that finally
-// releases the pages must report the corruption AGAIN rather than nil, because
-// the first attempt's wipe zeroed the very bytes a second verification would
-// compare.
+// TestDestroy_CorruptionIsReturnedAndReported pins Destroy's contract for a
+// failed canary: it returns ErrEnclaveCorrupted rather than panicking, only
+// after wiping, unmapping and returning the reservation, and the next WipeAll
+// reports it once even though the caller's error was discarded.
+func TestDestroy_CorruptionIsReturnedAndReported(t *testing.T) {
+	requireCleanLedger(t)
+	forgetDestroyedCorruption(t)
+
+	a, err := NewAllocator(4 * pageSize)
+	if err != nil {
+		t.Fatalf("NewAllocator: %v", err)
+	}
+	e, err := a.NewSized(64)
+	if err != nil {
+		t.Fatalf("Allocator.NewSized: %v", err)
+	}
+	if len(e.m.canary) == 0 {
+		t.Fatal("no canary slack for this size; the test would be vacuous")
+	}
+	e.m.canary[0] ^= 0xFF
+
+	var derr error
+	if r := panicValue(func() { derr = e.Destroy() }); r != nil {
+		t.Fatalf("Destroy panicked with %v on a corrupted canary, want a returned error", r)
+	}
+	if !errors.Is(derr, ErrEnclaveCorrupted) {
+		t.Fatalf("Destroy = %v, want ErrEnclaveCorrupted", derr)
+	}
+	if e.IsAlive() || e.m != nil {
+		t.Error("the corrupted enclave was not released")
+	}
+	if used := a.InUse(); used != 0 {
+		t.Errorf("InUse = %d after a corrupted Destroy, want 0: the pages went back", used)
+	}
+	if isRegistered(e) {
+		t.Error("the corrupted enclave is still on the ledger after its pages went back")
+	}
+	if again := e.Destroy(); again != nil {
+		t.Errorf("a second Destroy = %v, want nil: nothing is left to release", again)
+	}
+
+	remaining, err := WipeAll(context.Background())
+	var se *SweepError
+	if remaining != 0 || !errors.As(err, &se) || se.Corrupt != 1 {
+		t.Fatalf("WipeAll after a corrupted Destroy = (%d, %v), want (0, SweepError{Corrupt:1})", remaining, err)
+	}
+	if remaining, err := WipeAll(context.Background()); remaining != 0 || err != nil {
+		t.Errorf("a second WipeAll = (%d, %v), want (0, nil): a detection is reported by one sweep", remaining, err)
+	}
+}
+
+// TestDestroy_CorruptionSurvivesAFailedRelease: a corrupted canary whose
+// release is also refused returns an error matching both ErrEnclaveCorrupted
+// and ErrLockedMemoryUnavailable, keeping the mapping and the charge; the retry
+// that releases the pages reports the corruption AGAIN, because the first
+// attempt's wipe zeroed the bytes a second verification would compare.
 func TestDestroy_CorruptionSurvivesAFailedRelease(t *testing.T) {
+	forgetDestroyedCorruption(t)
+
 	a, err := NewAllocator(4 * pageSize)
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
@@ -846,7 +892,7 @@ func TestDestroy_CorruptionSurvivesAFailedRelease(t *testing.T) {
 	t.Cleanup(func() {
 		unmapMemory = prev
 		if e.m != nil {
-			_ = panicValue(func() { _ = e.Destroy() })
+			_ = e.Destroy()
 		}
 	})
 	// VirtualUnlock semantics: the first attempt's munlock succeeds, so a retry
@@ -854,9 +900,10 @@ func TestDestroy_CorruptionSurvivesAFailedRelease(t *testing.T) {
 	installStrictUnlock(t)
 	unmapMemory = func([]byte) error { return denied }
 
-	r := panicValue(func() { _ = e.Destroy() })
-	if rerr, ok := r.(error); !ok || !errors.Is(rerr, ErrEnclaveCorrupted) {
-		t.Fatalf("Destroy over a corrupted canary with a refused munmap panicked with %v, want ErrEnclaveCorrupted", r)
+	derr := e.Destroy()
+	if !errors.Is(derr, ErrEnclaveCorrupted) || !errors.Is(derr, ErrLockedMemoryUnavailable) {
+		t.Fatalf("Destroy over a corrupted canary with a refused munmap = %v, "+
+			"want ErrEnclaveCorrupted and ErrLockedMemoryUnavailable", derr)
 	}
 	if e.m == nil || e.m.memory == nil {
 		t.Fatal("the mapping was dropped although its pages are still mapped")
@@ -869,10 +916,9 @@ func TestDestroy_CorruptionSurvivesAFailedRelease(t *testing.T) {
 	}
 
 	unmapMemory = prev
-	r = panicValue(func() { _ = e.Destroy() })
-	if rerr, ok := r.(error); !ok || !errors.Is(rerr, ErrEnclaveCorrupted) {
-		t.Fatalf("the retry that released the pages panicked with %v, want ErrEnclaveCorrupted: "+
-			"the corruption detected on the first attempt was lost", r)
+	if derr := e.Destroy(); !errors.Is(derr, ErrEnclaveCorrupted) || errors.Is(derr, ErrLockedMemoryUnavailable) {
+		t.Fatalf("the retry that released the pages = %v, want ErrEnclaveCorrupted alone: "+
+			"the corruption detected on the first attempt was lost", derr)
 	}
 	if e.m != nil {
 		t.Error("the mapping is still held after the retry released the pages")
@@ -883,6 +929,18 @@ func TestDestroy_CorruptionSurvivesAFailedRelease(t *testing.T) {
 	if isRegistered(e) {
 		t.Error("the enclave is still on the ledger after its pages went back")
 	}
+}
+
+// forgetDestroyedCorruption clears, at cleanup, the corruption reports a test's
+// Destroy calls leave for the next WipeAll, so they cannot leak into another
+// test's sweep.
+func forgetDestroyedCorruption(t *testing.T) {
+	t.Helper()
+	t.Cleanup(func() {
+		registryMu.Lock()
+		clear(destroyedCorrupt)
+		registryMu.Unlock()
+	})
 }
 
 // TestNewMemoryEnclaveSized_ZeroedAndSized covers the two properties the
@@ -1014,7 +1072,7 @@ func TestNewMemoryEnclaveSized_Lifecycle(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("fill: %v", err)
 	}
-	if !e.EqualTo(material) {
+	if !holds(e, material) {
 		t.Fatal("EqualTo = false immediately after the fill")
 	}
 
@@ -1033,7 +1091,7 @@ func TestNewMemoryEnclaveSized_Lifecycle(t *testing.T) {
 	if _, err := e.Open(); !errors.Is(err, ErrEnclaveDestroyed) {
 		t.Errorf("Open err = %v, want ErrEnclaveDestroyed", err)
 	}
-	if e.EqualTo(material) {
+	if holds(e, material) {
 		t.Error("EqualTo = true on a destroyed enclave")
 	}
 }
@@ -1072,7 +1130,7 @@ func TestNewMemoryEnclaveSized_ConcurrentBorrowsAndDestroy(t *testing.T) {
 					}
 					return nil
 				})
-				_ = e.EqualTo(material)
+				_ = holds(e, material)
 				_ = e.Size()
 				_ = e.IsAlive()
 				_ = e.String()
@@ -1387,7 +1445,7 @@ func TestSizedConstructors_RefuseUnmappableSizes(t *testing.T) {
 		})
 	}
 
-	if !canary.EqualTo([]byte("canary-key-material")) {
+	if !holds(canary, []byte("canary-key-material")) {
 		t.Error("the canary's material did not survive")
 	}
 }
@@ -1574,7 +1632,7 @@ func TestAllocator_NewSized_Concurrent(t *testing.T) {
 				}); err != nil {
 					t.Errorf("fill: %v", err)
 				}
-				if !e.EqualTo(want) {
+				if !holds(e, want) {
 					t.Error("an enclave did not hold what this goroutine generated into it")
 				}
 				e.Destroy()
@@ -1640,7 +1698,7 @@ func TestMemoryEnclave_FreezeProtectsAfterTheFill(t *testing.T) {
 
 	// Freezing is a protection change, not a change to the material. Everything
 	// a caller does with an enclave has to keep working across it.
-	if !e.EqualTo(material) {
+	if !holds(e, material) {
 		t.Error("the material did not survive the freeze")
 	}
 	if got := e.Size(); got != len(material) {
@@ -1711,7 +1769,7 @@ func TestMemoryEnclave_FreezeIsIdempotent(t *testing.T) {
 	if err := moved.Freeze(); err != nil {
 		t.Errorf("Freeze on an already-frozen enclave: %v, want nil", err)
 	}
-	if !moved.EqualTo([]byte("private-key-material")) {
+	if !holds(moved, []byte("private-key-material")) {
 		t.Error("the material did not survive a redundant freeze")
 	}
 
@@ -1729,7 +1787,7 @@ func TestMemoryEnclave_FreezeIsIdempotent(t *testing.T) {
 	if err := copied.Freeze(); err != nil {
 		t.Errorf("Freeze on a copy-constructed enclave: %v, want nil", err)
 	}
-	if !copied.EqualTo(src) {
+	if !holds(copied, src) {
 		t.Error("the material did not survive a redundant freeze on a copy-constructed enclave")
 	}
 	if !bytes.Equal(src, []byte("material the caller keeps")) {
@@ -1959,7 +2017,7 @@ func TestMemoryEnclave_FreezeFailureLeavesTheEnclaveUsable(t *testing.T) {
 	if !e.m.mutable {
 		t.Error("a refused Freeze recorded the enclave as frozen; the next Destroy would melt pages that were never protected")
 	}
-	if !e.EqualTo(material) {
+	if !holds(e, material) {
 		t.Error("the material did not survive a refused Freeze")
 	}
 	// Writable, which is what "usable" means for a sized enclave whose fill was
@@ -1971,7 +2029,7 @@ func TestMemoryEnclave_FreezeFailureLeavesTheEnclaveUsable(t *testing.T) {
 		t.Errorf("writing to an enclave whose Freeze was refused: %v", err)
 	}
 	material[0] ^= 0xFF
-	if !e.EqualTo(material) {
+	if !holds(e, material) {
 		t.Error("the write after a refused Freeze did not take")
 	}
 

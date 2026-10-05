@@ -13,8 +13,8 @@
 //
 // It exercises the lifecycle every consumer depends on: construction takes
 // ownership of the caller's buffer and wipes it, the material is readable
-// inside the borrow window, Destroy releases it, and a destroyed enclave
-// refuses access with the documented sentinel. The value is a fixed,
+// inside the borrow window and comparable with EqualTo, Destroy releases it,
+// and a destroyed enclave refuses access with the documented sentinel. The value is a fixed,
 // non-secret marker; nothing is copied out of the enclave to be compared.
 package main
 
@@ -62,6 +62,9 @@ func run() error {
 	}); err != nil {
 		return fmt.Errorf("WithBytes: %w", err)
 	}
+	if ok, err := e.EqualTo(marker); !ok || err != nil {
+		return fmt.Errorf("EqualTo(marker) = (%t, %v), want (true, nil)", ok, err)
+	}
 
 	if err := e.Destroy(); err != nil {
 		return fmt.Errorf("Destroy: %w", err)
@@ -71,6 +74,9 @@ func run() error {
 	}
 	if err := e.WithBytes(func([]byte) error { return nil }); !errors.Is(err, enclave.ErrEnclaveDestroyed) {
 		return fmt.Errorf("WithBytes after Destroy returned %v, want ErrEnclaveDestroyed", err)
+	}
+	if ok, err := e.EqualTo(marker); ok || !errors.Is(err, enclave.ErrEnclaveDestroyed) {
+		return fmt.Errorf("EqualTo after Destroy = (%t, %v), want (false, ErrEnclaveDestroyed)", ok, err)
 	}
 	return nil
 }

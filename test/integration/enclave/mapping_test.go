@@ -96,6 +96,7 @@ func TestEnclaveMappingsAreLockedUndumpableAndGuarded(t *testing.T) {
 		add("NewMemoryEnclave", 32, false, e, err)
 		e, err = enclave.NewMemoryEnclaveCopy(material(48))
 		add("NewMemoryEnclaveCopy", 48, false, e, err)
+		//lint:ignore SA1019 the deprecated API keeps working until it is removed; this pins that.
 		e, err = enclave.NewMemoryEnclaveFromString("integration-suite-material")
 		add("NewMemoryEnclaveFromString", len("integration-suite-material"), false, e, err)
 		e, err = enclave.NewMemoryEnclaveSized(64)

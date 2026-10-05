@@ -102,7 +102,7 @@ sequenceDiagram
 
 | Concern | File |
 |---|---|
-| `Allocator`, admission, retune, transfer, `BudgetError`, `LimitError` | [admission.go](../../admission.go) |
+| `Allocator`, admission, retune, transfer, `BudgetError`, `BudgetInUseError` | [admission.go](../../admission.go) |
 | Process allocator | [process_allocator.go](../../process_allocator.go) |
 | Ceiling discovery, `NewAllocatorWithinRLimit`, `RLimitError` | [memlock.go](../../memlock.go), [memlock_linux.go](../../memlock_linux.go), [memlock_bsd.go](../../memlock_bsd.go), [memlock_other.go](../../memlock_other.go) |
 | Orphan ledger the refund rides on | [registry.go](../../registry.go) |

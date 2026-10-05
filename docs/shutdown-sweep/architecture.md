@@ -1,6 +1,6 @@
 # Shutdown sweep — architecture
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-01
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-04
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Problem
@@ -76,7 +76,7 @@ only the owed borrows bound the call.
 | Count active sweeps instead of serializing | Needs a second word that must agree with the generation; two concurrent sweeps also break the generation's single-writer parity. |
 | Remember enclaves seen in earlier passes and skip them | A momentary reader (`IsAlive`, `Size`) turned into permanent abandonment at exit. Every pass retries everything still registered. |
 | Tally the count while sweeping | Misses enclaves registered mid-sweep — a fail-open zero. The count is read from the ledgers under their lock. |
-| Panic on corruption, like `Destroy` | A sweep that stopped at the first corrupt enclave would leave every later one mapped at exit. Reported as `*SweepError`. |
+| Panic on corruption | A sweep that stopped at the first corrupt enclave would leave every later one mapped at exit. Reported as `*SweepError`. |
 | Sweep `SealedEnclave` values | They hold no locked pages, and in `ModePerOperation` they stay legitimately openable. `Openable` reports the effect instead. |
 | Treat a nil `ctx` as `context.Background()` | A programming error in a shutdown path would become a shutdown that never ends. Nil never waits. |
 

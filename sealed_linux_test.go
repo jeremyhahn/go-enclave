@@ -142,7 +142,7 @@ func sealLimitChild(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open after the ceiling lifted: %v", err)
 	}
-	if !e.EqualTo(material) {
+	if !holds(e, material) {
 		t.Fatal("the sealed value did not open to its original material after the refusals")
 	}
 	e.Destroy()
@@ -191,7 +191,7 @@ func TestSealedEnclave_OpenedPlaintextIsLocked(t *testing.T) {
 		t.Errorf("opening locked %d bytes, want %d (the page the plaintext should occupy; more means "+
 			"a per-open key enclave outlived the Open)", locked, want)
 	}
-	if !e.EqualTo(sealedMaterial) {
+	if !holds(e, sealedMaterial) {
 		t.Error("the opened enclave does not hold the material")
 	}
 

@@ -427,37 +427,42 @@ func TestWipeAllReportsCanaryCorruptionWithoutPanicking(t *testing.T) {
 	})
 }
 
-// TestDestroyPanicsOnCanaryCorruptionAfterWiping: Destroy's one documented
-// panic. On the same simulated underflow, Destroy wipes the material, releases
-// the pages and THEN panics with a value matching ErrEnclaveCorrupted — the
-// fail-stop the package chose because `defer e.Destroy()` would drop a
-// returned error. The process (here, the test) can observe the panic, and the
-// material is gone and nothing is left locked when it does.
-func TestDestroyPanicsOnCanaryCorruptionAfterWiping(t *testing.T) {
+// TestDestroyReturnsCanaryCorruptionAfterWiping: on the same simulated
+// underflow, Destroy wipes the material, releases the pages and RETURNS an
+// error matching ErrEnclaveCorrupted without panicking; the next WipeAll
+// reports the detection once more, and the one after it is clean.
+func TestDestroyReturnsCanaryCorruptionAfterWiping(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		n := newNeedle(t)
 		e := enclaveFromNeedle(t, n)
 		underflowOneByte(t, e)
 
+		var derr error
 		recovered := func() (r any) {
 			defer func() { r = recover() }()
-			_ = e.Destroy()
+			derr = e.Destroy()
 			return nil
 		}()
-		perr, ok := recovered.(error)
-		if !ok || !errors.Is(perr, enclave.ErrEnclaveCorrupted) {
-			t.Fatalf("Destroy of a corrupted enclave panicked with %v (%T), want an error matching ErrEnclaveCorrupted", recovered, recovered)
+		if recovered != nil {
+			t.Fatalf("Destroy of a corrupted enclave panicked with %v, want a returned error", recovered)
+		}
+		if !errors.Is(derr, enclave.ErrEnclaveCorrupted) {
+			t.Fatalf("Destroy of a corrupted enclave = %v, want an error matching ErrEnclaveCorrupted", derr)
 		}
 		if e.IsAlive() {
-			t.Fatalf("the corrupted enclave is alive after Destroy panicked")
+			t.Fatalf("the corrupted enclave is alive after Destroy")
 		}
 		if got := vmLck(t); got != 0 {
-			t.Fatalf("VmLck = %d after the panicking Destroy, want 0: the pages were not released first", got)
+			t.Fatalf("VmLck = %d after Destroy, want 0: the pages were not released", got)
 		}
 		hits, scanned := sweep(t, n)
-		requireHitsExactly(t, "the corrupted enclave's material after Destroy panicked", hits, scanned)
+		requireHitsExactly(t, "the corrupted enclave's material after Destroy", hits, scanned)
+		var se *enclave.SweepError
+		if count, err := enclave.WipeAll(context.Background()); count != 0 || !errors.As(err, &se) || se.Corrupt != 1 {
+			t.Fatalf("WipeAll = (%d, %v), want (0, SweepError{Corrupt:1}): Destroy's detection must reach the next sweep", count, err)
+		}
 		if count, err := enclave.WipeAll(context.Background()); count != 0 || err != nil {
-			t.Fatalf("WipeAll = (%d, %v), want (0, nil)", count, err)
+			t.Fatalf("the next WipeAll = (%d, %v), want (0, nil)", count, err)
 		}
 	})
 }

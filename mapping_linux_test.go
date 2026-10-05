@@ -251,7 +251,7 @@ func TestMemoryEnclave_MoveConstructedPagesAreReadOnly(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("filling a sized enclave: %v", err)
 	}
-	if !sized.EqualTo(append([]byte{0xFF}, make([]byte, 31)...)) {
+	if !holds(sized, append([]byte{0xFF}, make([]byte, 31)...)) {
 		t.Error("the write into a sized enclave did not take")
 	}
 	sized.Destroy()
@@ -346,104 +346,6 @@ func copyFrozenWriteChild(t *testing.T) {
 	view[0] = 0xFF
 
 	fmt.Println(copyFrozenSurvived)
-	e.Destroy()
-}
-
-const (
-	// corruptMarker selects the child half of the corrupted-Destroy test.
-	corruptMarker = "GO_ENCLAVE_DESTROY_CORRUPT"
-
-	// destroyPanicked is printed by the child from inside the recover, so its
-	// presence is proof that Destroy panicked rather than returning quietly.
-	destroyPanicked = "Destroy panicked with ErrEnclaveCorrupted"
-
-	// destroySurvived is printed if Destroy RETURNED on a corrupted enclave.
-	// Seeing it is the failure: a detected overflow was swallowed.
-	destroySurvived = "Destroy returned on a corrupted enclave"
-)
-
-// TestMemoryEnclave_DestroyPanicsOnCorruption covers the one policy decision in
-// this package that hands a caller something other than an error, and the
-// ordering that goes with it.
-//
-// A failed canary means memory the enclave did not own was written. There is no
-// error return on Destroy to report it through, and there is no state a caller
-// could sensibly act on — the state it would act on is the state that is wrong —
-// so Destroy panics. What it must do FIRST is finish cleaning up: wipe the
-// material, unmap the pages, and return the Allocator reservation. Otherwise one
-// detected overflow permanently shrinks a budget that outlives the enclave.
-//
-// The child asserts exactly that ordering from inside a recover, which is also
-// what proves the panic happened at all.
-func TestMemoryEnclave_DestroyPanicsOnCorruption(t *testing.T) {
-	if os.Getenv(corruptMarker) == "1" {
-		destroyCorruptChild(t)
-		return
-	}
-
-	out, err := runTestChild(t, "TestMemoryEnclave_DestroyPanicsOnCorruption", corruptMarker, "1")
-	if err != nil {
-		t.Fatalf("subprocess failed: %v\n%s", err, out)
-	}
-	if strings.Contains(out, destroySurvived) {
-		t.Fatalf("Destroy swallowed a detected corruption:\n%s", out)
-	}
-	if !strings.Contains(out, destroyPanicked) {
-		t.Fatalf("subprocess did not confirm the panic:\n%s", out)
-	}
-	// The reservation must have come back before the panic unwound.
-	if !strings.Contains(out, "inuse=0") {
-		t.Fatalf("the Allocator reservation was not released before the panic:\n%s", out)
-	}
-}
-
-func destroyCorruptChild(t *testing.T) {
-	t.Helper()
-
-	a, err := NewAllocator(4 * pageSize)
-	if err != nil {
-		t.Fatalf("NewAllocator: %v", err)
-	}
-	// A SIZED enclave, not a move-constructed one: NewMemoryEnclave freezes its
-	// region read-only, so the write below would fault instead of corrupting —
-	// which is the freeze doing its job, and is why this hazard is documented as
-	// specific to sized enclaves in the first place.
-	e, err := a.NewSized(64)
-	if err != nil {
-		t.Fatalf("NewSized: %v", err)
-	}
-	if err := e.WithBytes(func(b []byte) error {
-		copy(b, bytes.Repeat([]byte{0xA5}, len(b)))
-		return nil
-	}); err != nil {
-		t.Fatalf("fill: %v", err)
-	}
-	if a.InUse() == 0 {
-		t.Fatal("nothing was reserved; the test would be vacuous")
-	}
-	if len(e.m.canary) == 0 {
-		t.Fatal("no canary slack for this size; the test would be vacuous")
-	}
-
-	// Exactly what a buffer underflow through a retained slice would do.
-	e.m.canary[0] ^= 0xFF
-
-	defer func() {
-		r := recover()
-		if r == nil {
-			fmt.Println(destroySurvived)
-			return
-		}
-		err, ok := r.(error)
-		if !ok || !errors.Is(err, ErrEnclaveCorrupted) {
-			fmt.Printf("Destroy panicked with the wrong value: %v\n", r)
-			return
-		}
-		// Printed from inside the recover, so reaching this line is itself the
-		// evidence that Destroy panicked. inuse is the ordering assertion.
-		fmt.Printf("%s inuse=%d\n", destroyPanicked, a.InUse())
-	}()
-
 	e.Destroy()
 }
 
@@ -737,7 +639,7 @@ func TestFrozenReleaseKeepsTheMappingWhenTheBypassAlsoFails(t *testing.T) {
 // mapping is deliberately KEPT so Destroy can be retried. Before this it then
 // read as an ordinary live enclave: IsAlive true, a non-zero Size, and Open
 // handing back zeroes from a region whose guard pages the release path had
-// already left READ-WRITE. A caller that recovers from Destroy's panic and reads
+// already left READ-WRITE. A caller that ignores Destroy's error and reads
 // rather than re-destroying would derive from an all-zero secret with the guards
 // off, and nothing would say so.
 func TestKeptMappingReadsAsDestroyedOnceWiped(t *testing.T) {
@@ -780,16 +682,10 @@ func TestKeptMappingReadsAsDestroyedOnceWiped(t *testing.T) {
 	if err := e.WithBytes(func([]byte) error { return nil }); !errors.Is(err, ErrEnclaveDestroyed) {
 		t.Errorf("WithBytes = %v, want ErrEnclaveDestroyed", err)
 	}
-	// Both comparison spellings go through the same withLocked path, and both
-	// are asserted: EqualTo's bare false is indistinguishable from an ordinary
-	// mismatch, so on its own it would pass against an implementation that
-	// compared the caller's bytes with a region of zeroes and simply found them
-	// different. EqualToErr is what shows the comparison did not RUN.
-	if e.EqualTo([]byte("anything")) {
-		t.Error("EqualTo reported a match against wiped memory")
-	}
-	if _, err := e.EqualToErr([]byte("anything")); !errors.Is(err, ErrEnclaveDestroyed) {
-		t.Errorf("EqualToErr = %v, want ErrEnclaveDestroyed: there is no "+
+	// The error, not the bool, is what shows the comparison did not RUN: a
+	// false alone would pass against a compare with a region of zeroes.
+	if _, err := e.EqualTo([]byte("anything")); !errors.Is(err, ErrEnclaveDestroyed) {
+		t.Errorf("EqualTo = %v, want ErrEnclaveDestroyed: there is no "+
 			"material left, so the comparison could not have run", err)
 	}
 }
@@ -922,8 +818,8 @@ func TestKeptMutableMappingReadsAsDestroyedOnceWiped(t *testing.T) {
 	if err := e.WithBytes(func([]byte) error { return nil }); !errors.Is(err, ErrEnclaveDestroyed) {
 		t.Errorf("WithBytes = %v, want ErrEnclaveDestroyed", err)
 	}
-	if _, err := e.EqualToErr([]byte("anything")); !errors.Is(err, ErrEnclaveDestroyed) {
-		t.Errorf("EqualToErr = %v, want ErrEnclaveDestroyed", err)
+	if _, err := e.EqualTo([]byte("anything")); !errors.Is(err, ErrEnclaveDestroyed) {
+		t.Errorf("EqualTo = %v, want ErrEnclaveDestroyed", err)
 	}
 }
 

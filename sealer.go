@@ -1870,7 +1870,7 @@ func (s *Sealer) rotateKEK() error {
 // overlapped or already killed: a just-minted generation that will not be
 // published (newKEK, may be nil), the current KEK and the root. Each Destroy is
 // idempotent on what the sweep already reclaimed, and detected canary
-// corruption panics, as Destroy does.
+// corruption is returned with the rest.
 //
 // WHO OWNS A REFUSED RELEASE (#102). The package has one owner for every
 // release the kernel refuses: the WipeAll ledger. A refused Destroy keeps the

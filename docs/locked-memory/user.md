@@ -1,6 +1,6 @@
 # Locked-memory enclaves — user guide
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-01
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-04
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Prerequisites
@@ -65,13 +65,19 @@ writing at once is a data race.
 
 - `WithBytes(fn)` — the default. Do not retain the slice and do not call back
   into the same enclave from `fn`.
-- `EqualToErr(b)` — constant-time compare that tells "did not match" apart from
-  "enclave already destroyed". `EqualTo(b)` returns `false` for both, which is
-  fail-closed for `if e.EqualTo(x) { grant() }` but wrong if you invert it.
-- `OpenString()` — only for APIs that insist on a `string`; the copy cannot be
-  wiped.
-- `Open()` — returns a slice that is **not** protected by any lock. A concurrent
-  `Destroy` or `WipeAll` unmaps it and a later read crashes the process. Avoid.
+- `EqualTo(b)` — returns `(bool, error)`: `(false, nil)` means "did not
+  match", and a destroyed or nil enclave returns `ErrEnclaveDestroyed`. The time
+  taken does not depend on the contents, but it does reveal whether the lengths
+  differ; compare fixed-length values (digests) if the length is secret.
+- `OpenString()` — **deprecated**. The string cannot be wiped; use `WithBytes`
+  and pass the borrowed bytes on.
+- `Open()` — **deprecated**. The slice is not protected by any lock; a
+  concurrent `Destroy` or `WipeAll` unmaps it and a later read crashes the
+  process. Use `WithBytes`.
+
+`NewMemoryEnclaveFromString` is deprecated too: build the material as a
+`[]byte` and use `NewMemoryEnclave`. All three keep working until they are
+removed; staticcheck reports their callers (SA1019).
 
 ## Release
 
@@ -89,9 +95,11 @@ if err := e.Destroy(); err != nil {
 }
 ```
 
-`Destroy` **panics** with a value matching `ErrEnclaveCorrupted` if the guard
-canary was overwritten. Do not recover from it to keep running: something wrote
-into memory it did not own, and every other key in the process is in its reach.
+`Destroy` returns an error matching `ErrEnclaveCorrupted` if the guard canary
+was overwritten, after wiping the material and releasing the pages. Treat it as
+a security incident: something wrote into memory it did not own, and every
+other key in the process is in its reach. A `defer e.Destroy()` that discards
+the error does not lose it: the next `WipeAll` reports it in its `SweepError`.
 
 ## Check core-dump hardening
 
@@ -148,8 +156,35 @@ On other platforms it returns `ErrProcessHardeningUnsupported`.
 | `ErrReleasedWithoutWipe` from `Destroy` | `mprotect` denied by seccomp or a sandbox | Allow `mprotect` on the process's own memory. The pages were released (never swapped; zeroed by the kernel before reuse), but the in-process wipe was skipped. It does not match `ErrLockedMemoryUnavailable`, which means the pages are still held. |
 | Process crashes (SIGSEGV) reading a slice | A slice from `Open` (or one kept past `WithBytes`) outlived the enclave | Use `WithBytes`; never retain borrowed slices. |
 | Process crashes writing through a slice | Writing to a frozen enclave — including one `SealedEnclave.Open` returned, which is always frozen | Writes are only for sized enclaves, inside `WithBytes`, before `Freeze`; to edit opened plaintext, copy it into your own sized enclave inside the borrow. |
-| Panic matching `ErrEnclaveCorrupted` | Buffer underflow or memory corruption elsewhere | Treat as a security incident; find the writer. |
+| `ErrEnclaveCorrupted` from `Destroy` or `WipeAll` | Buffer underflow or memory corruption elsewhere | Treat as a security incident; find the writer. |
 | Build error `undefined: go_enclave_does_not_support_this_GOOS` | Unsupported GOOS (js, wasip1, plan9) | Not supported by design. |
+
+## Migrating from v0.7
+
+**`EqualTo` returns `(bool, error)`; `EqualToErr` is gone.**
+
+```go
+// v0.7
+if e.EqualTo(x) { grant() }
+ok, err := e.EqualToErr(x)
+
+// v0.8
+ok, err := e.EqualTo(x)
+if err != nil { return err } // ErrEnclaveDestroyed
+if ok { grant() }
+```
+
+**`Destroy` returns `ErrEnclaveCorrupted` instead of panicking.** Remove any
+`recover` around `Destroy`; check the error, or rely on the next `WipeAll`,
+which reports every corruption `Destroy` detected since the previous sweep.
+
+**`Open`, `OpenString` and `NewMemoryEnclaveFromString` are deprecated.** They
+still work. Move readers to `WithBytes` and string sources to
+`NewMemoryEnclave([]byte(...))`.
+
+**`LimitError` is renamed `BudgetInUseError`**, matching `ErrBudgetInUse`; and a
+nil `*Allocator` returns `ErrNilAllocator` instead of panicking. See
+[locked-memory-budget](../locked-memory-budget/user.md).
 
 ## Migrating from v0.6
 
@@ -174,7 +209,7 @@ were gone; in v0.7 it matches only `ErrReleasedWithoutWipe`, and
 `UnwipedReleaseError.Cause` is the raw OS error rather than a
 `*LockedMemoryError`. Code that treated `ErrLockedMemoryUnavailable` from
 `Destroy` as "retry" no longer retries a release that already happened.
-Corruption still panics.
+Corruption still panicked in v0.7; see the section above.
 
 **`CoreDumpsDisabled()` on Windows returns `ErrCoreDumpLimitUnsupported`**
 instead of `nil`. Code that treats any non-nil result as fatal now fails on

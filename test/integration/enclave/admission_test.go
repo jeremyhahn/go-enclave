@@ -164,12 +164,12 @@ func TestAdmissionUnderRealMemlockCeiling(t *testing.T) {
 
 		// SetLimit: never below live reservations, never above the ceiling.
 		err = a.SetLimit(ceiling - page)
-		var le *enclave.LimitError
+		var le *enclave.BudgetInUseError
 		if !errors.Is(err, enclave.ErrBudgetInUse) || !errors.As(err, &le) {
-			t.Fatalf("SetLimit below InUse: err = %v, want a LimitError matching ErrBudgetInUse", err)
+			t.Fatalf("SetLimit below InUse: err = %v, want a BudgetInUseError matching ErrBudgetInUse", err)
 		}
-		if *le != (enclave.LimitError{Requested: ceiling - page, InUse: ceiling, Limit: ceiling}) || a.Limit() != ceiling {
-			t.Fatalf("LimitError = %+v, Limit() = %d; want {Requested:%d InUse:%d Limit:%d} and the budget unchanged", *le, a.Limit(), ceiling-page, ceiling, ceiling)
+		if *le != (enclave.BudgetInUseError{Requested: ceiling - page, InUse: ceiling, Limit: ceiling}) || a.Limit() != ceiling {
+			t.Fatalf("BudgetInUseError = %+v, Limit() = %d; want {Requested:%d InUse:%d Limit:%d} and the budget unchanged", *le, a.Limit(), ceiling-page, ceiling, ceiling)
 		}
 		if err := a.SetLimit(ceiling + page); !errors.Is(err, enclave.ErrBudgetExceedsRLimit) {
 			t.Fatalf("SetLimit above RLIMIT_MEMLOCK on a WithinRLimit allocator: err = %v, want ErrBudgetExceedsRLimit", err)
@@ -687,6 +687,46 @@ func TestAllocatorRefusesInvalidArguments(t *testing.T) {
 		}
 		if a.InUse() != 0 {
 			t.Errorf("InUse = %d after only refusals, want 0", a.InUse())
+		}
+	})
+}
+
+// TestNilAllocatorRefusesEverywhere: a nil *Allocator is a lost configuration
+// step, so every method that can fail refuses with ErrNilAllocator, New still
+// wipes the data it took, nothing is locked, and the observers report zero.
+func TestNilAllocatorRefusesEverywhere(t *testing.T) {
+	isolated(t, childOpts{}, func(t *testing.T) {
+		before := vmLck(t)
+		var a *enclave.Allocator
+
+		data := []byte("handed to a nil allocator")
+		if e, err := a.New(data); e != nil || !errors.Is(err, enclave.ErrNilAllocator) {
+			t.Errorf("New = (%v, %v), want (nil, ErrNilAllocator)", e, err)
+		}
+		if !allZero(data) {
+			t.Error("New on a nil Allocator left the caller's data unwiped")
+		}
+		if e, err := a.NewSized(32); e != nil || !errors.Is(err, enclave.ErrNilAllocator) {
+			t.Errorf("NewSized = (%v, %v), want (nil, ErrNilAllocator)", e, err)
+		}
+		if err := a.SetLimit(1); !errors.Is(err, enclave.ErrNilAllocator) {
+			t.Errorf("SetLimit = %v, want ErrNilAllocator", err)
+		}
+		if excess, err := a.ForceLimit(1); excess != 0 || !errors.Is(err, enclave.ErrNilAllocator) {
+			t.Errorf("ForceLimit = (%d, %v), want (0, ErrNilAllocator)", excess, err)
+		}
+		dst, err := enclave.NewAllocator(enclave.LockedSize(1))
+		if err != nil {
+			t.Fatalf("NewAllocator: %v", err)
+		}
+		if err := a.TransferTo(dst, 1); !errors.Is(err, enclave.ErrNilAllocator) {
+			t.Errorf("TransferTo = %v, want ErrNilAllocator", err)
+		}
+		if a.InUse() != 0 || a.Limit() != 0 || a.Available() != 0 {
+			t.Errorf("InUse, Limit, Available = %d, %d, %d; want 0, 0, 0", a.InUse(), a.Limit(), a.Available())
+		}
+		if after := vmLck(t); after != before {
+			t.Errorf("VmLck = %d after only refusals, want %d", after, before)
 		}
 	})
 }

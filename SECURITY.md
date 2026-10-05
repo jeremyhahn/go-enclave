@@ -87,7 +87,7 @@ show the documentation understates them are in scope):
   that survives the garbage collection after its operation IS in scope.
 - Core dumps on Windows, darwin, NetBSD, AIX, Solaris and illumos, where no
   per-mapping exclusion is available; and copies the caller makes itself
-  (`OpenString`, `Open`, `NewMemoryEnclaveCopy` sources).
+  (the deprecated `OpenString` and `Open`, and `NewMemoryEnclaveCopy` sources).
 - `GOEXPERIMENT=boringcrypto` builds refusing to seal.
 - Defects in third-party providers (TPM, HSM, KMS): report those to their
   authors, unless the seam or the conformance suite is at fault.

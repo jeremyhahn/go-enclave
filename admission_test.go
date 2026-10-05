@@ -66,8 +66,8 @@ func TestAllocator_New_Admits(t *testing.T) {
 	if a.Available() != limit-pageSize {
 		t.Errorf("Available = %d, want %d", a.Available(), limit-pageSize)
 	}
-	if ok, err := e.EqualToErr([]byte("admitted-key-material")); err != nil || !ok {
-		t.Errorf("EqualToErr = %v, %v; want the material held intact", ok, err)
+	if ok, err := e.EqualTo([]byte("admitted-key-material")); err != nil || !ok {
+		t.Errorf("EqualTo = %v, %v; want the material held intact", ok, err)
 	}
 }
 
@@ -536,12 +536,12 @@ func TestAllocator_SetLimit_RefusesBelowInUse(t *testing.T) {
 	if !errors.Is(err, ErrBudgetInUse) {
 		t.Fatalf("SetLimit below in-use = %v, want ErrBudgetInUse", err)
 	}
-	var le *LimitError
+	var le *BudgetInUseError
 	if !errors.As(err, &le) {
-		t.Fatalf("err is not a *LimitError: %v", err)
+		t.Fatalf("err is not a *BudgetInUseError: %v", err)
 	}
 	if le.Requested != pageSize/2 || le.InUse != pageSize || le.Limit != 4*pageSize {
-		t.Errorf("LimitError = %+v, want Requested=%d InUse=%d Limit=%d",
+		t.Errorf("BudgetInUseError = %+v, want Requested=%d InUse=%d Limit=%d",
 			le, pageSize/2, pageSize, 4*pageSize)
 	}
 
@@ -551,8 +551,8 @@ func TestAllocator_SetLimit_RefusesBelowInUse(t *testing.T) {
 			a.Limit(), a.InUse(), a.Available(), 4*pageSize, pageSize, 3*pageSize)
 	}
 	// And the enclave was not silently invalidated by a budget decision.
-	if ok, err := e.EqualToErr([]byte("retune-material")); err != nil || !ok {
-		t.Errorf("EqualToErr after refused lowering = %v, %v; want the material intact", ok, err)
+	if ok, err := e.EqualTo([]byte("retune-material")); err != nil || !ok {
+		t.Errorf("EqualTo after refused lowering = %v, %v; want the material intact", ok, err)
 	}
 
 	// CONTROL: lowering to exactly what is in use is legal and must succeed.
@@ -693,11 +693,11 @@ func TestAllocator_ForceLimit_LowersBeneathLiveReservations(t *testing.T) {
 	}
 
 	// The live enclaves were not invalidated to make the budget fit.
-	if ok, err := e1.EqualToErr([]byte("first-secret")); err != nil || !ok {
-		t.Errorf("e1.EqualToErr = %v, %v; want the material intact", ok, err)
+	if ok, err := e1.EqualTo([]byte("first-secret")); err != nil || !ok {
+		t.Errorf("e1.EqualTo = %v, %v; want the material intact", ok, err)
 	}
-	if ok, err := e2.EqualToErr([]byte("second-secret")); err != nil || !ok {
-		t.Errorf("e2.EqualToErr = %v, %v; want the material intact", ok, err)
+	if ok, err := e2.EqualTo([]byte("second-secret")); err != nil || !ok {
+		t.Errorf("e2.EqualTo = %v, %v; want the material intact", ok, err)
 	}
 
 	// Draining: one Destroy is not enough, because one page of reservations
@@ -901,13 +901,13 @@ func TestAllocator_TransferTo_RefusedWithoutHeadroom(t *testing.T) {
 	if !errors.Is(err, ErrBudgetInUse) {
 		t.Fatalf("TransferTo without headroom = %v, want ErrBudgetInUse", err)
 	}
-	var le *LimitError
+	var le *BudgetInUseError
 	if !errors.As(err, &le) {
-		t.Fatalf("err is not a *LimitError: %v", err)
+		t.Fatalf("err is not a *BudgetInUseError: %v", err)
 	}
 	// Requested is the budget the SOURCE would have been left with.
 	if le.Requested != pageSize || le.InUse != 2*pageSize || le.Limit != 2*pageSize {
-		t.Errorf("LimitError = %+v, want Requested=%d InUse=%d Limit=%d",
+		t.Errorf("BudgetInUseError = %+v, want Requested=%d InUse=%d Limit=%d",
 			le, pageSize, 2*pageSize, 2*pageSize)
 	}
 	if src.Limit() != 2*pageSize || src.Available() != 0 {
@@ -1105,22 +1105,22 @@ func TestAllocator_TransferTo_NeverInBoth(t *testing.T) {
 	t.Logf("samples=%d", samples.Load())
 }
 
-func TestLimitError(t *testing.T) {
+func TestBudgetInUseError(t *testing.T) {
 	t.Run("matches the sentinel", func(t *testing.T) {
-		err := error(&LimitError{Requested: 10, InUse: 20, Limit: 25})
+		err := error(&BudgetInUseError{Requested: 10, InUse: 20, Limit: 25})
 		if !errors.Is(err, ErrBudgetInUse) {
 			t.Error("errors.Is did not match ErrBudgetInUse")
 		}
 	})
 	t.Run("does not match unrelated sentinels", func(t *testing.T) {
-		err := error(&LimitError{})
+		err := error(&BudgetInUseError{})
 		if errors.Is(err, ErrBudgetExhausted) || errors.Is(err, ErrInvalidBudget) ||
 			errors.Is(err, ErrInvalidTransfer) || errors.Is(err, ErrLockedMemoryUnavailable) {
-			t.Error("LimitError matched an unrelated sentinel")
+			t.Error("BudgetInUseError matched an unrelated sentinel")
 		}
 	})
 	t.Run("message carries the figures", func(t *testing.T) {
-		err := error(&LimitError{Requested: 10, InUse: 20, Limit: 25})
+		err := error(&BudgetInUseError{Requested: 10, InUse: 20, Limit: 25})
 		msg := err.Error()
 		for _, want := range []string{"10", "20", "25", "already reserved"} {
 			if !strings.Contains(msg, want) {
@@ -1859,7 +1859,7 @@ func TestAllocator_Retune_LoweringLosesTheContestedPage(t *testing.T) {
 	if lowerErr == nil {
 		t.Error("SetLimit(0) reported success although the page it had decided to take was admitted first: the budget and the enclave both hold it")
 	} else if !errors.Is(lowerErr, ErrBudgetInUse) {
-		t.Errorf("SetLimit(0) = %v, want a LimitError matching ErrBudgetInUse", lowerErr)
+		t.Errorf("SetLimit(0) = %v, want a BudgetInUseError matching ErrBudgetInUse", lowerErr)
 	}
 
 	// And the reservation still returns, so the refusal left nothing behind.
@@ -2620,4 +2620,41 @@ func BenchmarkRefusalParallel(b *testing.B) {
 			}
 		}
 	})
+}
+
+// TestAllocator_NilReceiver pins that a nil *Allocator refuses with
+// ErrNilAllocator from every method that can fail, wipes data New was handed,
+// and reports zero from the observers.
+func TestAllocator_NilReceiver(t *testing.T) {
+	var a *Allocator
+
+	data := []byte("owned-by-new")
+	if e, err := a.New(data); e != nil || !errors.Is(err, ErrNilAllocator) {
+		t.Errorf("New = (%v, %v), want (nil, ErrNilAllocator)", e, err)
+	}
+	if !allZero(data) {
+		t.Error("New on a nil Allocator did not wipe the data it took ownership of")
+	}
+	if e, err := a.NewSized(32); e != nil || !errors.Is(err, ErrNilAllocator) {
+		t.Errorf("NewSized = (%v, %v), want (nil, ErrNilAllocator)", e, err)
+	}
+	if err := a.SetLimit(pageSize); !errors.Is(err, ErrNilAllocator) {
+		t.Errorf("SetLimit = %v, want ErrNilAllocator", err)
+	}
+	if excess, err := a.ForceLimit(pageSize); excess != 0 || !errors.Is(err, ErrNilAllocator) {
+		t.Errorf("ForceLimit = (%d, %v), want (0, ErrNilAllocator)", excess, err)
+	}
+	dst, err := NewAllocator(pageSize)
+	if err != nil {
+		t.Fatalf("NewAllocator: %v", err)
+	}
+	if err := a.TransferTo(dst, pageSize); !errors.Is(err, ErrNilAllocator) {
+		t.Errorf("TransferTo = %v, want ErrNilAllocator", err)
+	}
+	if dst.Limit() != pageSize {
+		t.Errorf("destination Limit = %d after a refused transfer, want %d", dst.Limit(), pageSize)
+	}
+	if got := [3]int64{a.InUse(), a.Limit(), a.Available()}; got != [3]int64{} {
+		t.Errorf("InUse, Limit, Available = %v, want zeros", got)
+	}
 }

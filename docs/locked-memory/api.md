@@ -1,6 +1,6 @@
 # Locked-memory enclaves — API
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-01
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-04
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Transports
@@ -16,10 +16,10 @@ transport own those surfaces.
 |---|---|---|
 | Bring existing material into locked memory (move) | `enclave.NewMemoryEnclave(data)` | N/A |
 | Bring existing material in (copy, source kept) | `enclave.NewMemoryEnclaveCopy(src)` | N/A |
-| Bring a string in | `enclave.NewMemoryEnclaveFromString(s)` | N/A |
+| Bring a string in (deprecated) | `enclave.NewMemoryEnclaveFromString(s)` | N/A |
 | Generate in place | `enclave.NewMemoryEnclaveSized(n)` then `WithBytes`, `Freeze` | N/A |
-| Read under lock | `(*MemoryEnclave).WithBytes(fn)`, `OpenString()`, `EqualTo(b)`, `EqualToErr(b)` | N/A |
-| Unlocked view (unsafe) | `(*MemoryEnclave).Open()` | N/A |
+| Read under lock | `(*MemoryEnclave).WithBytes(fn)`, `EqualTo(b) (bool, error)`, `OpenString()` (deprecated) | N/A |
+| Unlocked view (unsafe, deprecated) | `(*MemoryEnclave).Open()` | N/A |
 | Make read-only | `(*MemoryEnclave).Freeze()` | N/A |
 | Inspect | `(*MemoryEnclave).Size()`, `(*MemoryEnclave).IsAlive()`, `(*MemoryEnclave).String()` | N/A |
 | Release | `(*MemoryEnclave).Destroy() error` | N/A |

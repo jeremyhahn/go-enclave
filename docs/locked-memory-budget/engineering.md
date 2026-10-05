@@ -1,6 +1,6 @@
 # Locked-memory budget and admission — engineering contract
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-01
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-04
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Exported surface
@@ -14,14 +14,14 @@
 | `(*Allocator).SetLimit(newLimit int64) error` | Raise, or lower without going below reservations. All-or-nothing. |
 | `(*Allocator).ForceLimit(newLimit int64) (int64, error)` | Accepts any non-negative budget; returns the over-subscription in bytes. |
 | `(*Allocator).TransferTo(dst *Allocator, n int64) error` | Moves `n` bytes of headroom to `dst` in one operation. |
-| `(*Allocator).InUse() int64` / `Limit() int64` / `Available() int64` | Observability snapshots; never an admission gate. `Available` clamps at 0. |
+| `(*Allocator).InUse() int64` / `Limit() int64` / `Available() int64` | Observability snapshots; never an admission gate. `Available` clamps at 0. A nil `*Allocator` reports 0. |
 | `SetAllocator(a *Allocator) error` | Installs the process allocator. One-shot. Binary only. |
 | `ProcessAllocator() (*Allocator, error)` | Returns the installed allocator, lazily installing the default. Libraries call this. |
 | `DiscoverLockedMemoryLimit() (LockedMemoryLimit, error)` | Snapshot of the ceiling and its source. |
 | `LockedMemoryLimit{Bytes int64; Bounded bool; Source LimitSource}` | `Bytes` is a ceiling only when `Bounded`. |
 | `LimitSource`: `LimitUnknown`, `LimitRLimit`, `LimitUnlimited`, `LimitNotEnforced`, `LimitUnsupported` | Where the figure came from. Only `LimitRLimit` is `Bounded`. |
 | `BudgetError{Requested, InUse, Limit int64}` | Matches `ErrBudgetExhausted`. `InUse` is never negative and may exceed `Limit` after `ForceLimit`. |
-| `LimitError{Requested, InUse, Limit int64}` | Matches `ErrBudgetInUse`. `Limit` is the unchanged budget. |
+| `BudgetInUseError{Requested, InUse, Limit int64}` | Matches `ErrBudgetInUse`. `Limit` is the unchanged budget. |
 | `RLimitError{Requested int64; Limit LockedMemoryLimit}` | Matches `ErrBudgetExceedsRLimit`. |
 | `LimitDiscoveryError{Cause error}` | Matches `ErrLimitDiscoveryFailed`; unwraps to the `getrlimit` failure. |
 
@@ -76,11 +76,11 @@
 |---|---|---|
 | `ErrBudgetExhausted` (`*BudgetError`) | `New`/`NewSized`/`OpenWith` would exceed the budget | Yes — refused before any locked memory is requested. |
 | `ErrInvalidBudget` | `maxBytes <= 0` at construction; negative `SetLimit`/`ForceLimit`; a transfer that would overflow `dst`'s `int64` budget | Yes |
-| `ErrBudgetInUse` (`*LimitError`) | Lowering (or transferring away) below current reservations | Yes — nothing changed. |
+| `ErrBudgetInUse` (`*BudgetInUseError`) | Lowering (or transferring away) below current reservations | Yes — nothing changed. |
 | `ErrInvalidTransfer` | `n <= 0`, `dst == nil`, or `dst` is the source | Yes |
 | `ErrBudgetExceedsRLimit` (`*RLimitError`) | Budget or raise above a bounded ceiling (opted-in allocators) | Yes |
 | `ErrLimitDiscoveryFailed` (`*LimitDiscoveryError`) | `getrlimit` failed: construction, an opted-in raise, or the lazy default | Yes — nothing was compared, so nothing passed. |
-| `ErrNilAllocator` | `SetAllocator(nil)`; `OpenWith(ctx, nil)` | Yes — never falls back to unbudgeted. |
+| `ErrNilAllocator` | `SetAllocator(nil)`; `OpenWith(ctx, nil)`; `New`, `NewSized`, `SetLimit`, `ForceLimit`, `TransferTo` on a nil `*Allocator` (`New` still wipes `data`) | Yes — never falls back to unbudgeted. |
 | `ErrAllocatorInstalled` | Second `SetAllocator`, or `SetAllocator` after a `ProcessAllocator` call that installed the lazy default (a discovery failure installs nothing) | Yes |
 | `ErrLockedMemoryUnavailable` | Admitted, but the kernel refused | Reservation refunded unless locked pages were left behind (invariant 4). |
 
@@ -116,6 +116,6 @@ None. Budgets are set in code. Nothing is persisted.
 
 ## Observability
 
-`InUse`, `Limit`, `Available`, the fields of `BudgetError`/`LimitError`/
+`InUse`, `Limit`, `Available`, the fields of `BudgetError`/`BudgetInUseError`/
 `RLimitError`, the `ForceLimit` excess, and `LockedMemoryLimit.Source`
 (its `String()` is suitable for logs). No logs or metrics are emitted.

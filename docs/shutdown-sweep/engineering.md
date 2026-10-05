@@ -1,6 +1,6 @@
 # Shutdown sweep — engineering contract
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-01
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-04
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Exported surface
@@ -17,7 +17,7 @@
    own `ctx` allows; a nil `ctx` only tries. A free slot is taken even under an
    already-done `ctx`.
 2. **Never unmaps under a reader.** "Reader" is any holder of the enclave's lock:
-   `WithBytes`, `Open`, `OpenString`, `EqualTo`/`EqualToErr`, `Size`, `IsAlive`,
+   `WithBytes`, `Open`, `OpenString`, `EqualTo`, `Size`, `IsAlive`,
    `Freeze`, or a `Destroy` waiting its turn. Such an enclave is waited for while
    `ctx` is live and left mapped (and counted) when it ends. A slice returned by
    `Open` is **not** a lock holder: the sweep can unmap the pages behind it.
@@ -69,7 +69,7 @@ The **error**:
 |---|---|
 | `nil` | Admitted, and found nothing to report. A `ctx` ending during an admitted sweep is not an error. |
 | `ErrSweepInProgress` | Not admitted. The count is still current; the running sweep reports its own findings to its own caller. |
-| `*SweepError` | Admitted, and found canary corruption (`Corrupt`, counted once per entry per sweep) and/or releases that fell back to an unwiped unmap (`Unwiped`). Never a nil `*SweepError` behind a non-nil error. |
+| `*SweepError` | Admitted, and found canary corruption (`Corrupt`, counted once per entry per sweep, including every enclave whose `Destroy` reported corruption since the previous admitted sweep) and/or releases that fell back to an unwiped unmap (`Unwiped`). Never a nil `*SweepError` behind a non-nil error. |
 
 Neither finding is a held page, so neither is in the count — except a corrupt
 entry whose pages the kernel then refused to release, which is in both. A

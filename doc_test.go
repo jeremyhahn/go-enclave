@@ -228,8 +228,6 @@ var docIssueRefLedger = []docIssueRef{
 	{"enclave.go", 83, classHistorical, "653549ee0dff", "and the constructors' refund depends on the difference (#83)."},
 	{"registry.go", 83, classHistorical, "43aec9096d4b", "— the memory-safety event this error exists to surface (#83)."},
 	{"admission.go", 83, classHistorical, "c85d9f81b7c3", "against and the difference is negative without wrapping (#83)."},
-	{"enclave.go", 83, classHistorical, "570f09afdef2", "Before #83 a refused release panicked too, contrary to every"},
-	{"enclave.go", 83, classHistorical, "97ad0733c40d", "failure too, contrary to every statement of the contract (#83)."},
 	{"enclave.go", 83, classHistorical, "00281b3a6391", "Since #83 a release that detects corruption and is then refused"},
 	{"enclave.go", 83, classHistorical, "135e07374702", "— so the reservation behind them cannot be returned (#83)."},
 	{"mapping.go", 83, classHistorical, "5b7d3eb07943", "Before #83 that retry re-verified and reported a clean release;"},

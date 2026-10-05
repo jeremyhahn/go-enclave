@@ -165,14 +165,15 @@ func TestDestroyedEnclaveRefusesEveryAccess(t *testing.T) {
 		if err := e.WithBytes(func([]byte) error { called = true; return nil }); !errors.Is(err, enclave.ErrEnclaveDestroyed) || called {
 			t.Errorf("WithBytes after Destroy: err %v, callback ran %t; want ErrEnclaveDestroyed and no call", err, called)
 		}
+		//lint:ignore SA1019 the deprecated API keeps working until it is removed; this pins that.
 		if _, err := e.Open(); !errors.Is(err, enclave.ErrEnclaveDestroyed) {
 			t.Errorf("Open after Destroy: err %v, want ErrEnclaveDestroyed", err)
 		}
 		if err := e.Freeze(); !errors.Is(err, enclave.ErrEnclaveDestroyed) {
 			t.Errorf("Freeze after Destroy: err %v, want ErrEnclaveDestroyed", err)
 		}
-		if ok, err := e.EqualToErr([]byte{0}); ok || !errors.Is(err, enclave.ErrEnclaveDestroyed) {
-			t.Errorf("EqualToErr after Destroy: (%t, %v), want (false, ErrEnclaveDestroyed)", ok, err)
+		if ok, err := e.EqualTo([]byte{0}); ok || !errors.Is(err, enclave.ErrEnclaveDestroyed) {
+			t.Errorf("EqualTo after Destroy: (%t, %v), want (false, ErrEnclaveDestroyed)", ok, err)
 		}
 		if n, err := enclave.WipeAll(context.Background()); n != 0 || err != nil {
 			t.Fatalf("WipeAll = (%d, %v), want (0, nil)", n, err)
@@ -211,6 +212,7 @@ func TestEnclaveAccessorsTellTheTruth(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		const secret = "accessor material, 32 bytes long"
 
+		//lint:ignore SA1019 the deprecated API keeps working until it is removed; this pins that.
 		fromString, err := enclave.NewMemoryEnclaveFromString(secret)
 		if err != nil {
 			t.Fatalf("NewMemoryEnclaveFromString: %v", err)
@@ -228,14 +230,14 @@ func TestEnclaveAccessorsTellTheTruth(t *testing.T) {
 			if e.Size() != len(secret) {
 				t.Errorf("%s: Size = %d, want %d", name, e.Size(), len(secret))
 			}
-			if !e.EqualTo([]byte(secret)) || e.EqualTo([]byte(strings.ToUpper(secret))) {
-				t.Errorf("%s: EqualTo does not compare by content", name)
+			if ok, err := e.EqualTo([]byte(secret)); !ok || err != nil {
+				t.Errorf("%s: EqualTo = (%t, %v), want (true, nil)", name, ok, err)
 			}
-			if ok, err := e.EqualToErr([]byte(secret)); !ok || err != nil {
-				t.Errorf("%s: EqualToErr = (%t, %v), want (true, nil)", name, ok, err)
+			if ok, err := e.EqualTo([]byte(strings.ToUpper(secret))); ok || err != nil {
+				t.Errorf("%s: EqualTo(same length, different content) = (%t, %v), want (false, nil)", name, ok, err)
 			}
-			if ok, err := e.EqualToErr([]byte("short")); ok || err != nil {
-				t.Errorf("%s: EqualToErr(different length) = (%t, %v), want (false, nil)", name, ok, err)
+			if ok, err := e.EqualTo([]byte("short")); ok || err != nil {
+				t.Errorf("%s: EqualTo(different length) = (%t, %v), want (false, nil)", name, ok, err)
 			}
 			if s := e.String(); strings.Contains(s, secret) || strings.Contains(s, secret[:8]) {
 				t.Errorf("%s: String() leaks the material: %q", name, s)
@@ -244,10 +246,12 @@ func TestEnclaveAccessorsTellTheTruth(t *testing.T) {
 			// read-only pages (a write would fault), so it is read and dropped,
 			// never written. OpenString is the deliberate heap copy for legacy
 			// string APIs.
+			//lint:ignore SA1019 the deprecated API keeps working until it is removed; this pins that.
 			b, err := e.Open()
 			if err != nil || string(b) != secret {
 				t.Errorf("%s: Open = (%d bytes, %v)", name, len(b), err)
 			}
+			//lint:ignore SA1019 the deprecated API keeps working until it is removed; this pins that.
 			if s, err := e.OpenString(); err != nil || s != secret {
 				t.Errorf("%s: OpenString = (%q, %v)", name, s, err)
 			}
@@ -257,15 +261,14 @@ func TestEnclaveAccessorsTellTheTruth(t *testing.T) {
 			if e.IsAlive() {
 				t.Errorf("%s: alive after Destroy", name)
 			}
-			if _, err := e.EqualToErr([]byte(secret)); !errors.Is(err, enclave.ErrEnclaveDestroyed) {
-				t.Errorf("%s: EqualToErr after Destroy = %v, want ErrEnclaveDestroyed", name, err)
+			if ok, err := e.EqualTo([]byte(secret)); ok || !errors.Is(err, enclave.ErrEnclaveDestroyed) {
+				t.Errorf("%s: EqualTo after Destroy = (%t, %v), want (false, ErrEnclaveDestroyed)", name, ok, err)
 			}
-			if e.EqualTo([]byte(secret)) {
-				t.Errorf("%s: EqualTo after Destroy reported a match", name)
-			}
+			//lint:ignore SA1019 the deprecated API keeps working until it is removed; this pins that.
 			if _, err := e.Open(); !errors.Is(err, enclave.ErrEnclaveDestroyed) {
 				t.Errorf("%s: Open after Destroy = %v, want ErrEnclaveDestroyed", name, err)
 			}
+			//lint:ignore SA1019 the deprecated API keeps working until it is removed; this pins that.
 			if _, err := e.OpenString(); !errors.Is(err, enclave.ErrEnclaveDestroyed) {
 				t.Errorf("%s: OpenString after Destroy = %v, want ErrEnclaveDestroyed", name, err)
 			}
@@ -276,6 +279,7 @@ func TestEnclaveAccessorsTellTheTruth(t *testing.T) {
 
 		// Empty material is refused by every constructor, before any locked
 		// memory is requested.
+		//lint:ignore SA1019 the deprecated API keeps working until it is removed; this pins that.
 		if _, err := enclave.NewMemoryEnclaveFromString(""); !errors.Is(err, enclave.ErrEmptyEnclave) {
 			t.Errorf("NewMemoryEnclaveFromString(\"\") = %v, want ErrEmptyEnclave", err)
 		}
@@ -330,6 +334,7 @@ func TestDestroyedAndNilEnclavesAnswerSafely(t *testing.T) {
 		if err := nilEnclave.WithBytes(func([]byte) error { return nil }); !errors.Is(err, enclave.ErrEnclaveDestroyed) {
 			t.Errorf("WithBytes on a nil *MemoryEnclave = %v, want ErrEnclaveDestroyed", err)
 		}
+		//lint:ignore SA1019 the deprecated API keeps working until it is removed; this pins that.
 		if b, err := nilEnclave.Open(); b != nil || !errors.Is(err, enclave.ErrEnclaveDestroyed) {
 			t.Errorf("Open on a nil *MemoryEnclave = (%v, %v), want (nil, ErrEnclaveDestroyed)", b, err)
 		}

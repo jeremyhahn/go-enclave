@@ -237,7 +237,7 @@ func TestSealer_DefaultIsSoftwareRootKey(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 	defer e.Destroy()
-	if !e.EqualTo(want) {
+	if !holds(e, want) {
 		t.Error("default sealer round trip returned the wrong material")
 	}
 
@@ -273,7 +273,7 @@ func TestSealer_PerOperationRoundTrip(t *testing.T) {
 				t.Fatalf("Open: %v", err)
 			}
 			defer e.Destroy()
-			if !e.EqualTo(want) {
+			if !holds(e, want) {
 				t.Error("round trip returned the wrong material")
 			}
 		})
@@ -332,7 +332,7 @@ func TestSealer_RefusesForeignProvider(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open under the sealing provider: %v", err)
 			}
-			if !e.EqualTo(want) {
+			if !holds(e, want) {
 				t.Error("control open returned the wrong material")
 			}
 			e.Destroy()
@@ -422,7 +422,7 @@ func TestSealer_EnvelopeBindsBlobToCiphertext(t *testing.T) {
 	if err != nil {
 		t.Fatalf("control Open: %v", err)
 	}
-	if !e.EqualTo(want) {
+	if !holds(e, want) {
 		t.Error("control open returned the wrong material")
 	}
 	e.Destroy()
@@ -511,7 +511,7 @@ func TestSealer_KEKRotatesAtTheMessageLimit(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: Open after rotation: %v", name, err)
 		}
-		if !e.EqualTo(older) {
+		if !holds(e, older) {
 			t.Errorf("%s: opened to the wrong material after rotation", name)
 		}
 		e.Destroy()
@@ -522,7 +522,7 @@ func TestSealer_KEKRotatesAtTheMessageLimit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open under the new generation: %v", err)
 	}
-	if !e.EqualTo(older) {
+	if !holds(e, older) {
 		t.Error("the value sealed under the new generation opened to the wrong material")
 	}
 	e.Destroy()
@@ -571,7 +571,7 @@ func TestSealer_ConcurrentSealsAcrossRotation(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open(%d,%d): %v", g, i, err)
 			}
-			if !e.EqualTo(fmt.Appendf(nil, "concurrent-rotation-%d-%d", g, i)) {
+			if !holds(e, fmt.Appendf(nil, "concurrent-rotation-%d-%d", g, i)) {
 				t.Errorf("value (%d,%d) opened to the wrong material", g, i)
 			}
 			e.Destroy()
@@ -747,7 +747,7 @@ func TestSealer_WipedFailsClosedPerMode(t *testing.T) {
 			t.Fatalf("Open after sweep with a device-held key = %v; "+
 				"a sweep must not invalidate values whose keys the process never held", err)
 		}
-		if !e.EqualTo(material) {
+		if !holds(e, material) {
 			t.Error("post-sweep open returned the wrong material")
 		}
 		e.Destroy()
@@ -1103,7 +1103,7 @@ func TestSealer_RootUnsealFailureSurfacesAndRetries(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	if !e.EqualTo(want) {
+	if !holds(e, want) {
 		t.Error("round trip after the retry returned the wrong material")
 	}
 	e.Destroy()
@@ -1787,7 +1787,7 @@ func TestSealer_RotatesAtTheConfiguredLimit(t *testing.T) {
 			t.Fatalf("Open of value %d: %v", i, err)
 		}
 		want := []byte(fmt.Sprintf("value-%02d", i))
-		if !e.EqualTo(want) {
+		if !holds(e, want) {
 			t.Errorf("value %d opened to the wrong material", i)
 		}
 		if err := e.Destroy(); err != nil {
@@ -1981,7 +1981,7 @@ func TestSealer_ConcurrentSealsRotateWithoutLosingAValue(t *testing.T) {
 					if err != nil {
 						t.Fatalf("Open worker %d value %d: %v", w, i, err)
 					}
-					if !e.EqualTo([]byte(fmt.Sprintf("worker-%d-value-%02d", w, i))) {
+					if !holds(e, []byte(fmt.Sprintf("worker-%d-value-%02d", w, i))) {
 						t.Errorf("worker %d value %d opened to the wrong material", w, i)
 					}
 					_ = e.Destroy()
@@ -2020,7 +2020,7 @@ func TestSealer_SealersSharingARootWrapUnderDistinctKeys(t *testing.T) {
 	if len(*salts) != 2 || bytes.Equal((*salts)[0], (*salts)[1]) {
 		t.Fatal("two sealers drew the same wrapping salt")
 	}
-	if ok, err := a.root.EqualToErr(mustBytes(t, b.root)); ok || err != nil {
+	if ok, err := a.root.EqualTo(mustBytes(t, b.root)); ok || err != nil {
 		t.Fatalf("two sealers over one root wrap under the same key (equal=%t, err=%v)", ok, err)
 	}
 	blob := a.kekBlobs[1]
@@ -2165,7 +2165,7 @@ func TestSealer_KEKFailureDoesNotReunsealTheRoot(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 	defer e.Destroy()
-	if !e.EqualTo(want) {
+	if !holds(e, want) {
 		t.Error("the round trip after the retry returned the wrong material")
 	}
 }
@@ -2463,7 +2463,7 @@ func TestSealer_EndedContextIsRefusedBeforeAnyWork(t *testing.T) {
 					t.Fatalf("Open with a live context after the refusals: %v", err)
 				}
 				defer e.Destroy()
-				if !e.EqualTo(sealedMaterial) {
+				if !holds(e, sealedMaterial) {
 					t.Error("the value opened to the wrong material after an abandoned open")
 				}
 			})
@@ -2966,7 +2966,7 @@ func TestSealedEnclave_DestroyDoesNotWaitForABlockedOpen(t *testing.T) {
 		t.Fatalf("the open in flight across Destroy: %v", err)
 	}
 	defer e.Destroy()
-	if !e.EqualTo(sealedMaterial) {
+	if !holds(e, sealedMaterial) {
 		t.Error("the open in flight across Destroy recovered the wrong material")
 	}
 	if !bytes.Equal(sealed, make([]byte, len(sealed))) || !bytes.Equal(blob, make([]byte, len(blob))) {
@@ -3401,7 +3401,7 @@ func TestSealedEnclave_OnlyTheLastOpenOutWipes(t *testing.T) {
 	if r.err != nil {
 		t.Fatalf("the first open in flight across Destroy: %v", r.err)
 	}
-	if !r.e.EqualTo(sealedMaterial) {
+	if !holds(r.e, sealedMaterial) {
 		t.Error("the first open recovered the wrong material")
 	}
 	r.e.Destroy()

@@ -80,7 +80,7 @@ func TestSealedEnclave_RoundTrip(t *testing.T) {
 	}
 	defer e.Destroy()
 
-	if !e.EqualTo(sealedMaterial) {
+	if !holds(e, sealedMaterial) {
 		t.Error("the opened enclave does not hold the sealed material")
 	}
 	if e.Size() != len(sealedMaterial) {
@@ -163,7 +163,7 @@ func TestSealedEnclave_SealIsNonDeterministic(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Open: %v", err)
 		}
-		if !e.EqualTo(sealedMaterial) {
+		if !holds(e, sealedMaterial) {
 			t.Error("an independently sealed copy did not open to the original material")
 		}
 		e.Destroy()
@@ -225,7 +225,7 @@ func TestSealedEnclave_DetectsTampering(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open after restoring the byte: %v", err)
 			}
-			if !e.EqualTo(sealedMaterial) {
+			if !holds(e, sealedMaterial) {
 				t.Error("restored value opened to the wrong material")
 			}
 			e.Destroy()
@@ -314,7 +314,7 @@ func TestSealedEnclave_OpensAreIndependent(t *testing.T) {
 	if second.IsAlive() != true {
 		t.Error("destroying one opened enclave destroyed the other")
 	}
-	if !second.EqualTo(sealedMaterial) {
+	if !holds(second, sealedMaterial) {
 		t.Error("destroying one opened enclave corrupted the other")
 	}
 	if !s.IsAlive() {
@@ -326,7 +326,7 @@ func TestSealedEnclave_OpensAreIndependent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open after destroying an earlier result: %v", err)
 	}
-	if !third.EqualTo(sealedMaterial) {
+	if !holds(third, sealedMaterial) {
 		t.Error("a later Open did not return the material")
 	}
 	third.Destroy()
@@ -426,7 +426,7 @@ func TestSealedEnclave_Sizes(t *testing.T) {
 			if e.Size() != n {
 				t.Errorf("Size = %d, want %d", e.Size(), n)
 			}
-			if !e.EqualTo(want) {
+			if !holds(e, want) {
 				t.Errorf("round trip failed at %d bytes", n)
 			}
 			// Only search for needles long enough that a chance match is
@@ -474,7 +474,7 @@ func TestSealedEnclave_Concurrent(t *testing.T) {
 					}
 					return
 				}
-				if !e.EqualTo(sealedMaterial) {
+				if !holds(e, sealedMaterial) {
 					t.Error("a concurrent Open returned the wrong material")
 				}
 				e.Destroy()
@@ -733,7 +733,7 @@ func TestSealedEnclave_WipeAllFailsClosed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open before the sweep: %v", err)
 	}
-	if !e.EqualTo(sealedMaterial) {
+	if !holds(e, sealedMaterial) {
 		t.Fatal("opened to the wrong material before the sweep")
 	}
 	e.Destroy()
@@ -793,7 +793,7 @@ func TestSealedEnclave_WipeAllFailsClosed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open on the fresh Sealer's value: %v", err)
 	}
-	if !e.EqualTo(sealedMaterial) {
+	if !holds(e, sealedMaterial) {
 		t.Error("the fresh Sealer's value opened to the wrong material")
 	}
 	e.Destroy()
@@ -818,7 +818,7 @@ func TestSealedEnclave_KeysAreDrawnFromTheCSPRNG(t *testing.T) {
 	defer b.Destroy()
 
 	if err := a.WithBytes(func(ka []byte) error {
-		if b.EqualTo(ka) {
+		if holds(b, ka) {
 			t.Error("two generated keys are identical; the CSPRNG is not being consulted per key")
 		}
 		if bytes.Equal(ka, make([]byte, dekBytes)) {
@@ -1023,7 +1023,7 @@ func TestSealedEnclave_OpenableSplitsByMode(t *testing.T) {
 			t.Fatalf("Open after a sweep with a device-held key = %v; Openable said nil, so one "+
 				"of the two is wrong", err)
 		}
-		if !e.EqualTo(sealedMaterial) {
+		if !holds(e, sealedMaterial) {
 			t.Error("post-sweep open returned the wrong material")
 		}
 		e.Destroy()
@@ -1726,7 +1726,7 @@ func TestSealedEnclave_OpenableBelievesTheInPackageHealthSeam(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open after the sweep = %v; Openable said nil, so one of the two is wrong", err)
 	}
-	if !e.EqualTo(sealedMaterial) {
+	if !holds(e, sealedMaterial) {
 		t.Error("post-sweep open returned the wrong material")
 	}
 	e.Destroy()
@@ -1782,7 +1782,7 @@ func TestSealedEnclave_OpenWithAdmitsTheDestination(t *testing.T) {
 	defer e.Destroy()
 
 	// The material is right — an admitted open is still an open.
-	if !e.EqualTo(sealedMaterial) {
+	if !holds(e, sealedMaterial) {
 		t.Error("OpenWith returned the wrong material")
 	}
 
@@ -1819,7 +1819,7 @@ func TestSealedEnclave_OpenWithReturnsTheReservationOnDestroy(t *testing.T) {
 			t.Fatalf("OpenWith on round %d of %d: %v (a budget sized for one open cannot "+
 				"serve the next unless Destroy returns the reservation)", i+1, rounds, err)
 		}
-		if !e.EqualTo(sealedMaterial) {
+		if !holds(e, sealedMaterial) {
 			t.Fatalf("round %d returned the wrong material", i+1)
 		}
 		e.Destroy()
@@ -1949,7 +1949,7 @@ func TestSealedEnclave_OpenWithRefusesWhatTheBudgetCannotCover(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open after a budget refusal: %v (a refusal must not consume the value)", err)
 	}
-	if !o.EqualTo(sealedMaterial) {
+	if !holds(o, sealedMaterial) {
 		t.Error("the material changed across a budget refusal")
 	}
 	o.Destroy()
@@ -2043,7 +2043,7 @@ func TestSealedEnclave_OpenWithGatesOnTheDestination(t *testing.T) {
 		t.Fatalf("OpenWith under a budget of exactly one destination = %v, want success: an open "+
 			"takes ONE reservation, so this is the smallest budget that serves it", err)
 	}
-	if !admitted.EqualTo(material) {
+	if !holds(admitted, material) {
 		t.Error("the admitted open returned the wrong material")
 	}
 	if got, want := exact.InUse(), LockedSize(len(material)); got != want {
@@ -2104,7 +2104,7 @@ func TestSealedEnclave_OpenWithConcurrentCallersDoNotStarveEachOther(t *testing.
 		wins := 0
 		for e := range opened {
 			wins++
-			if !e.EqualTo(sealedMaterial) {
+			if !holds(e, sealedMaterial) {
 				t.Fatal("a concurrent open returned the wrong material")
 			}
 			e.Destroy()
@@ -2177,7 +2177,7 @@ func TestSealedEnclave_OpenWithOnARetiredGeneration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenWith on a retired-generation value under a one-destination budget: %v", err)
 	}
-	if !e.EqualTo(short) {
+	if !holds(e, short) {
 		t.Error("the retired-generation value opened to the wrong material")
 	}
 	if got, want := a.InUse(), LockedSize(len(short)); got != want {
@@ -2214,7 +2214,7 @@ func TestSealedEnclave_OpenWithIsConcurrencySafe(t *testing.T) {
 				errs <- err
 				return
 			}
-			if !e.EqualTo(sealedMaterial) {
+			if !holds(e, sealedMaterial) {
 				errs <- errors.New("concurrent OpenWith returned the wrong material")
 			}
 			e.Destroy()
@@ -2278,7 +2278,7 @@ func TestSealedEnclave_OpenWithPerOperationMode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenWith in ModePerOperation: %v", err)
 	}
-	if !e.EqualTo(sealedMaterial) {
+	if !holds(e, sealedMaterial) {
 		t.Error("opened to the wrong material")
 	}
 	if got, want := a.InUse(), LockedSize(len(sealedMaterial)); got != want {

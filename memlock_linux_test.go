@@ -228,7 +228,7 @@ func enforcedContract(t *testing.T, target uint64) {
 	if err != nil {
 		t.Fatalf("allocating through the accepted allocator: %v", err)
 	}
-	if !e.EqualTo([]byte(material)) {
+	if !holds(e, []byte(material)) {
 		t.Fatal("material did not survive into an enclave from the accepted allocator")
 	}
 	e.Destroy()
@@ -477,7 +477,7 @@ func retuneEnforcedContract(t *testing.T, high, low uint64, setCeiling func(uint
 	if err != nil {
 		t.Fatalf("allocating after an accepted raise: %v", err)
 	}
-	if !e.EqualTo([]byte(material)) {
+	if !holds(e, []byte(material)) {
 		t.Fatal("material did not survive into an enclave after an accepted raise")
 	}
 	e.Destroy()

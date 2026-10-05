@@ -35,16 +35,13 @@
 // made read-only with [MemoryEnclave.Freeze]. [MemoryEnclave.Open] returns a
 // slice no lock protects; prefer WithBytes.
 //
-// # The one panic
+// # Corruption
 //
-// [MemoryEnclave.Destroy] returns what went wrong with a release, and panics
-// with a value matching [ErrEnclaveCorrupted] only when the canary did not
-// verify — after wiping the material and, unless the kernel refuses, releasing
-// the pages. It is the
-// package's single deliberate exception to returning errors: a process whose
-// key memory was written by something that did not own it must not carry on,
-// and an error returned to `defer e.Destroy()` would be silently dropped.
-// [WipeAll] reports the same condition as a [SweepError] instead.
+// [MemoryEnclave.Destroy] verifies a canary ahead of the material and returns
+// [ErrEnclaveCorrupted] when it does not match, after wiping the material and,
+// unless the kernel refuses, releasing the pages. Nothing in this package
+// panics. The next [WipeAll] reports every such detection again in its
+// [SweepError], so a discarded Destroy error does not lose it.
 //
 // # Budgets
 //

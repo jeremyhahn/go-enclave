@@ -397,7 +397,7 @@ func foreignFailureChild(t *testing.T) {
 	if !a.IsAlive() {
 		t.Fatal("the unrelated enclave was destroyed by a foreign allocation failure")
 	}
-	if !a.EqualTo([]byte(material)) {
+	if !holds(a, []byte(material)) {
 		t.Fatal("the unrelated enclave's material did not survive a foreign allocation failure")
 	}
 	if a.Size() != len(material) {
@@ -749,7 +749,7 @@ func sizedAdmissionChild(t *testing.T) {
 	if !canary.IsAlive() {
 		t.Fatal("an unrelated enclave died during a refusal")
 	}
-	if !canary.EqualTo([]byte(material)) {
+	if !holds(canary, []byte(material)) {
 		t.Fatal("the canary's material did not survive the refusals")
 	}
 	t.Log(sizedNoCollateral)
@@ -823,7 +823,7 @@ func TestMemoryEnclave_FrozenSizedPagesFault(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 	view[0] = 0xFF // must not fault: nothing has frozen these pages
-	if !unfrozen.EqualTo(append([]byte{0xFF}, make([]byte, 31)...)) {
+	if !holds(unfrozen, append([]byte{0xFF}, make([]byte, 31)...)) {
 		t.Error("the write into an unfrozen sized enclave did not take")
 	}
 	unfrozen.Destroy()

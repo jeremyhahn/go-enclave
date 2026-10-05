@@ -64,7 +64,7 @@ var (
 //
 // It is deliberately NOT [ErrEnclaveCorrupted]: no memory was corrupted, and the
 // invariant this package exists to hold -- material does not outlive its enclave
-// -- was kept. [MemoryEnclave.Destroy] therefore does not panic on it.
+// -- was kept.
 var ErrReleasedWithoutWipe = errors.New("enclave: pages unmapped without an in-process wipe; mprotect was denied")
 
 // UnwipedReleaseError reports a release that fell back to unmapping because the
@@ -475,6 +475,9 @@ func newMemoryEnclaveSized(n int) (*MemoryEnclave, error) {
 // only for the boundary with APIs that hand out strings — configuration
 // loaders, flag parsers — and callers with a []byte must prefer
 // NewMemoryEnclave, which leaves nothing behind.
+//
+// Deprecated: the source string cannot be wiped. Build the material as a
+// []byte and use [NewMemoryEnclave], which wipes its input.
 func NewMemoryEnclaveFromString(s string) (*MemoryEnclave, error) {
 	return NewMemoryEnclave([]byte(s))
 }
@@ -549,6 +552,10 @@ func (e *MemoryEnclave) withLocked(fn func([]byte) error) error {
 // establish from their own structure that no Destroy can run concurrently —
 // single-goroutine setup code, or a value the caller alone owns — and the
 // slice must never be retained past that window.
+//
+// Deprecated: the returned slice is covered by no lock, and a concurrent
+// Destroy or [WipeAll] faults a reader holding it. Use
+// [MemoryEnclave.WithBytes], which holds the read lock for the whole borrow.
 func (e *MemoryEnclave) Open() ([]byte, error) {
 	if e == nil {
 		return nil, ErrEnclaveDestroyed
@@ -573,6 +580,9 @@ func (e *MemoryEnclave) Open() ([]byte, error) {
 //
 // The copy is taken under the read lock, so it is safe against a concurrent
 // Destroy.
+//
+// Deprecated: the returned string cannot be wiped and outlives the enclave.
+// Use [MemoryEnclave.WithBytes] and pass the borrowed bytes on directly.
 func (e *MemoryEnclave) OpenString() (string, error) {
 	var s string
 	if err := e.withLocked(func(b []byte) error {
@@ -749,34 +759,17 @@ func (e *MemoryEnclave) IsAlive() bool {
 	return e.m != nil && !e.m.wiped
 }
 
-// EqualTo reports whether the enclave holds exactly other, comparing in
-// constant time under the read lock.
+// EqualTo reports whether the enclave holds exactly other, comparing under the
+// read lock so a concurrent Destroy waits rather than unmapping mid-compare.
 //
-// A destroyed or nil enclave reports false. That is deliberate and it is
-// FAIL-CLOSED for the shape this is nearly always used in —
-// `if e.EqualTo(secret) { grant() }` — but it means false carries two different
-// facts: the material did not match, and there was no material to compare.
-// Callers that need to tell those apart, or that invert the test, must use
-// [MemoryEnclave.EqualToErr]; inverting this one treats a destroyed enclave as
-// a mismatch, which is the opposite of fail-closed.
-func (e *MemoryEnclave) EqualTo(other []byte) bool {
-	equal, err := e.EqualToErr(other)
-	return err == nil && equal
-}
-
-// EqualToErr reports whether the enclave holds exactly other, distinguishing a
-// comparison that ran and said no from one that could not run at all.
+// It returns [ErrEnclaveDestroyed] for a nil or destroyed enclave: "the
+// material differs" and "there was no material to compare" are different
+// answers, and false is only ever the first.
 //
-// It returns [ErrEnclaveDestroyed] for a destroyed or nil enclave, where
-// [MemoryEnclave.EqualTo] returns a bare false. "I compared them and they
-// differ" and "there was nothing to compare" are different answers, and a
-// caller that acts on the first when it was handed the second is acting on a
-// fact it does not have. That collapse is invisible at the call site precisely
-// because the safe-looking spelling is the common one.
-//
-// The comparison itself is constant time and runs under the read lock, so a
-// concurrent Destroy waits rather than unmapping the pages mid-compare.
-func (e *MemoryEnclave) EqualToErr(other []byte) (bool, error) {
+// The time taken does not depend on the contents of either slice, but it does
+// reveal whether their lengths differ; a caller that must hide the length of
+// the secret compares fixed-length values, such as digests.
+func (e *MemoryEnclave) EqualTo(other []byte) (bool, error) {
 	equal := false
 	if err := e.withLocked(func(b []byte) error {
 		equal = subtle.ConstantTimeCompare(b, other) == 1
@@ -825,49 +818,18 @@ func (e *MemoryEnclave) EqualToErr(other []byte) (bool, error) {
 // error. Until #88 this method returned nothing and the report needed a second
 // method, DestroyErr, which is gone.
 //
-// # When the canary fails: the one panic in this package
+// [ErrEnclaveCorrupted] when the canary ahead of the data did not verify:
+// something wrote into memory it did not own, such as a buffer underflow
+// through a retained slice. The material is wiped, the pages are released and
+// any [Allocator] reservation is returned before it is reported. If the kernel
+// also refused the unlock or unmap, the error matches both ErrEnclaveCorrupted
+// and [ErrLockedMemoryUnavailable], the pages are kept for a retry as above, and
+// the retry reports the corruption again.
 //
-// Releasing the pages verifies the canary sitting ahead of the data. If it does
-// not match, something wrote into memory it did not own — a buffer underflow
-// through a retained slice, or corruption from elsewhere in the process — and
-// Destroy PANICS with a value matching [ErrEnclaveCorrupted], after wiping the
-// material, releasing the pages and returning any [Allocator] reservation.
-//
-// That is FAIL-STOP by design, and it is the single deliberate exception to
-// this package's rule that library code returns its failures rather than
-// panicking. Two reasons, and both are about security rather than style:
-//
-//   - A process that holds secrets, and whose memory has been written by
-//     something that did not own it, must not carry on. Whatever did the
-//     writing is still in the process, every other key the process holds is
-//     within its reach, and the state a caller would consult to handle an
-//     error is the state that is already wrong. There is no correct recovery
-//     for a caller to choose, so the library does not offer one.
-//   - A returned error would be dropped. `defer e.Destroy()` is how this type
-//     is used, and a deferred call's result goes nowhere: the evidence of a
-//     memory-safety event would vanish on exactly the path that meets it most
-//     often. A panic cannot be ignored by omission.
-//
-// Nothing else panics. A refused release is a resource condition with a remedy
-// — retry — and a denied mprotect is a report about the environment; both are
-// returned. Before #83 a refused release panicked too, contrary to every
-// statement of this contract.
-//
-// Nothing leaks on the way out: the material is wiped and, unless the kernel
-// refuses, the pages are returned before the panic. If the kernel DOES refuse
-// the unlock or unmap after a failed canary, the panic value carries both — it
-// matches ErrEnclaveCorrupted and the refusal's [ErrLockedMemoryUnavailable] —
-// the material is still wiped, the pages are kept for a retry as described
-// above, and the retry that finally releases them panics with
-// ErrEnclaveCorrupted again, because the detection is not lost between
-// attempts.
-//
-// It is also what this method has always done: before v0.3.0-alpha memguard's
-// canary check called core.Panic, which additionally destroyed every other
-// enclave in the process on its way out. That part is gone. [WipeAll] meets
-// the same condition differently, and deliberately: a sweep reports it as a
-// [SweepError] and never panics, because a sweep that stopped at the first
-// corrupt enclave would leave every enclave after it mapped at exit.
+// Destroy never panics. Treat a corruption report as a memory-safety event:
+// whatever wrote the canary is still in the process. A detected corruption is
+// also reported by the next [WipeAll], so a deferred Destroy whose result was
+// discarded does not lose it.
 func (e *MemoryEnclave) Destroy() error {
 	if e == nil {
 		return nil
@@ -885,26 +847,16 @@ func (e *MemoryEnclave) Destroy() error {
 		e.releaseOnce.Do(e.release)
 	}
 
+	// Noted BEFORE deregistering, so a sweep running in between sees either
+	// the enclave on the ledger or the note.
+	if errors.Is(err, ErrEnclaveCorrupted) {
+		noteCorrupted(e)
+	}
+
 	// Off the registry once the pages are actually gone. A release that failed
 	// leaves it registered so a later WipeAll still tries.
 	if releasedPages(err) {
 		deregister(e)
-	}
-
-	// ONLY detected corruption panics, because there the state a caller would
-	// act on is the state that is wrong. ErrReleasedWithoutWipe is not a panic:
-	// the pages are gone and nothing leaked, and what it reports is a denied
-	// mprotect in the environment, an operator's problem. Nor is a refused
-	// munlock or munmap: the pages are held for a retry, which the caller can
-	// make. This test was once "anything but ErrReleasedWithoutWipe", which
-	// panicked on that second, ordinary resource failure too, contrary to every
-	// statement of the contract (#83).
-	//
-	// A corruption that was detected on an attempt whose release was ALSO
-	// refused still panics here — the value matches both — and the bookkeeping
-	// above has already declined to treat those pages as released.
-	if errors.Is(err, ErrEnclaveCorrupted) {
-		panic(err)
 	}
 
 	return err
@@ -922,7 +874,8 @@ func (e *MemoryEnclave) Destroy() error {
 // returns — a sealed value, an opened enclave, the error that ended it — is
 // the same either way, and turning a successful seal into a failure because a
 // scratch key's munmap was refused would hand the caller an error with no
-// remedy. Detected corruption still panics, from Destroy, as everywhere.
+// remedy. Detected corruption is not lost: Destroy records it for the next
+// [WipeAll].
 func destroyTransient(e *MemoryEnclave) {
 	_ = e.Destroy()
 }
@@ -1015,7 +968,7 @@ func lockedPagesHeld(err error) bool {
 
 // releaseMapping wipes, verifies and unmaps the pages under the write lock, and
 // is idempotent. It is the memory half of Destroy, split out so Destroy can run
-// the reservation release and the panic in the right order around it.
+// the reservation release and the deregistration after it.
 //
 // The handle is dropped only when the pages are actually gone. If the region
 // could not be unmapped — or could not be made writable, so it was never wiped —
@@ -1023,8 +976,7 @@ func lockedPagesHeld(err error) bool {
 // the only reference to it would strand it for the process lifetime with no way
 // to retry. The enclave reports itself alive in that case only if the wipe never
 // ran, which is the truth either way, and the caller can call Destroy again to
-// retry the release — it is returned by Destroy, not panicked, unless the same
-// attempt also detected corruption.
+// retry the release.
 func (e *MemoryEnclave) releaseMapping() error {
 	e.lock()
 	defer e.unlock()

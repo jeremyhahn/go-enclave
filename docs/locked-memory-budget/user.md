@@ -1,6 +1,6 @@
 # Locked-memory budget and admission — user guide
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-01
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-04
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Who does what
@@ -103,7 +103,15 @@ refused there and authenticated work keeps its headroom.
 | `ErrBudgetExceedsRLimit` at startup | Configured budget above `ulimit -l` | Lower the budget or raise the limit. |
 | `ErrAllocatorInstalled` | `SetAllocator` after a library's `ProcessAllocator` call succeeded and installed the default | Install earlier in `main`. |
 | `Available()` is 0, `InUse() > Limit()` | `ForceLimit` over-subscribed the allocator | Wait for enclaves to be destroyed, or raise the budget. |
+| `ErrNilAllocator` from `New`, `NewSized` or a retune | The `*Allocator` is nil: an unset field or a skipped configuration step | Construct the allocator, or use `ProcessAllocator()`. `New` has already wiped the data. |
 | Budget not returned after a failed allocation | The kernel refused to unlock the rolled-back pages; the charge is kept until a `WipeAll` reclaims them | Expected; the shutdown sweep refunds it. |
+
+## Migrating from v0.7
+
+`LimitError` is renamed `BudgetInUseError`; code that matches the
+`ErrBudgetInUse` sentinel with `errors.Is` needs no change, and code using
+`errors.As` changes the type name only. A nil `*Allocator` now returns
+`ErrNilAllocator` instead of panicking.
 
 ## Migrating from v0.6
 

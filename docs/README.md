@@ -1,6 +1,6 @@
 # go-enclave documentation
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-01
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-04
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 One folder per capability, each with the same five files: `architecture.md`
@@ -12,11 +12,24 @@ legacy documents to migrate.
 
 | Feature | What it covers |
 |---|---|
-| [locked-memory](locked-memory/user.md) | `MemoryEnclave`: constructors, borrowing, `Freeze`, `Destroy` and its one panic, guard pages and canary, platform and core-dump matrix |
+| [locked-memory](locked-memory/user.md) | `MemoryEnclave`: constructors, borrowing, `Freeze`, `Destroy` and canary corruption, guard pages and canary, platform and core-dump matrix |
 | [locked-memory-budget](locked-memory-budget/user.md) | `Allocator`, `RLIMIT_MEMLOCK` discovery, retuning, the process allocator, refunds for failed constructions |
 | [sealing](sealing/user.md) | `SealedEnclave`, `Sealer` modes, the `KeyProtector`/`RootUnsealer` seam, contexts, `Openable`, FIPS, the key-schedule heap exposure and its erasure under `runtime/secret` |
 | [shutdown-sweep](shutdown-sweep/user.md) | `WipeAll(ctx)`: admission, waiting for borrows, termination, the count and `SweepError` |
 | [provider-conformance](provider-conformance/user.md) | `providertest.TestProvider(ctx, cfg)` for TPM/HSM/KMS provider authors |
+
+## Upgrading from v0.7
+
+Breaking changes since v0.7, pre-1.0. Before/after code is in the linked
+sections.
+
+| Change | Before (v0.7) | After | Details |
+|---|---|---|---|
+| Comparison | `EqualTo(b) bool`, `EqualToErr(b) (bool, error)` | `EqualTo(b) (bool, error)` | [locked-memory](locked-memory/user.md#migrating-from-v07) |
+| Canary corruption | `Destroy` panicked | `Destroy` returns `ErrEnclaveCorrupted`; the next `WipeAll` reports it too | [locked-memory](locked-memory/user.md#migrating-from-v07) |
+| Unlocked and string accessors | `Open`, `OpenString`, `NewMemoryEnclaveFromString` | deprecated (still work); use `WithBytes`, `NewMemoryEnclave` | [locked-memory](locked-memory/user.md#migrating-from-v07) |
+| Retune refusal type | `*LimitError` | `*BudgetInUseError` | [locked-memory-budget](locked-memory-budget/user.md#migrating-from-v07) |
+| Nil `*Allocator` | `New`/`NewSized` panicked | `ErrNilAllocator` from every method that can fail | [locked-memory-budget](locked-memory-budget/user.md#migrating-from-v07) |
 
 ## Upgrading from v0.6 to v0.7
 
