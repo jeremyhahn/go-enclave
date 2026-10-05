@@ -72,7 +72,7 @@ func TestWipeAllReclaimsEverythingAndLeavesNoResidue(t *testing.T) {
 
 		var sealedValues []*enclave.SealedEnclave
 		for _, mode := range sealerModes {
-			s, err := enclave.NewSealer(enclave.WithProvider(enclave.NewSoftwareProvider()), enclave.WithMode(mode))
+			s, err := enclave.NewSealer(providerOption(enclave.NewSoftwareProvider(), mode))
 			if err != nil {
 				t.Fatalf("NewSealer(%v): %v", mode, err)
 			}

@@ -70,9 +70,8 @@ func failNthRandRead(t *testing.T, n int) {
 
 func TestSealer_DestroyReleasesEverythingAndFailsClosed(t *testing.T) {
 	cases := map[string][]SealerOption{
-		"root key, default provider":      nil,
-		"per operation, default provider": {WithMode(ModePerOperation)},
-		"root key, rotated generations":   {WithKEKRotationLimit(1)},
+		"root key, default provider":    nil,
+		"root key, rotated generations": {WithKEKRotationLimit(1)},
 	}
 	for name, opts := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -101,7 +100,7 @@ func TestSealer_DestroyReleasesEverythingAndFailsClosed(t *testing.T) {
 			if got := ledgerCount(); got != base {
 				t.Errorf("ledger holds %d entries after Destroy, want %d: the sealer's keys were not released", got, base)
 			}
-			if s.owned == nil || s.owned.openable() == nil {
+			if s.owned == nil || s.owned.Health() == nil {
 				t.Error("the default provider the sealer created was not destroyed with it")
 			}
 			if s.kekBlobs != nil {
@@ -179,7 +178,7 @@ func TestSealer_DestroyNeverDestroysAnInjectedProvider(t *testing.T) {
 		t.Run(mode.String(), func(t *testing.T) {
 			p := NewSoftwareProvider()
 			t.Cleanup(func() { _ = p.Destroy() })
-			s, err := NewSealer(WithProvider(p), WithMode(mode))
+			s, err := NewSealer(providerOption(p, mode))
 			if err != nil {
 				t.Fatalf("NewSealer: %v", err)
 			}
@@ -209,7 +208,7 @@ func TestSealer_DestroyDuringABlockedUnsealReleasesThePendingRoot(t *testing.T) 
 	ctx := t.Context()
 	base := ledgerCount()
 	u := &gatedRootUnsealer{entered: make(chan struct{}), release: make(chan struct{})}
-	s, err := NewSealer(WithProvider(u), WithMode(ModeRootKey))
+	s, err := NewSealer(WithRootUnsealer(u))
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
@@ -245,7 +244,7 @@ func TestSealer_DestroyDuringABlockedUnsealReleasesThePendingRoot(t *testing.T) 
 func TestSealer_DestroyReleasesAPendingRootLeftByAFailedMint(t *testing.T) {
 	ctx := t.Context()
 	base := ledgerCount()
-	s, err := NewSealer(WithProvider(&fixedRootUnsealer{fill: 0x11}))
+	s, err := NewSealer(WithRootUnsealer(&fixedRootUnsealer{fill: 0x11}))
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
@@ -316,7 +315,7 @@ func TestSealer_DestroyDuringAProviderCallFailsTheCall(t *testing.T) {
 		t.Helper()
 		p := newBlockingProvider()
 		t.Cleanup(func() { _ = p.inner.Destroy() })
-		s, err := NewSealer(WithProvider(p), WithMode(ModePerOperation))
+		s, err := NewSealer(WithKeyProtector(p))
 		if err != nil {
 			t.Fatalf("NewSealer: %v", err)
 		}
@@ -386,8 +385,8 @@ func TestSoftwareProvider_Destroy(t *testing.T) {
 	if err := p.UnsealRoot(ctx, make([]byte, RootKeyBytes)); !errors.Is(err, ErrSealerDestroyed) {
 		t.Errorf("UnsealRoot after Destroy = %v, want ErrSealerDestroyed", err)
 	}
-	if err := p.openable(); !errors.Is(err, ErrSealerDestroyed) {
-		t.Errorf("openable after Destroy = %v, want ErrSealerDestroyed", err)
+	if err := p.Health(); !errors.Is(err, ErrSealerDestroyed) {
+		t.Errorf("Health after Destroy = %v, want ErrSealerDestroyed", err)
 	}
 	if err := p.Destroy(); err != nil {
 		t.Errorf("second Destroy = %v, want nil", err)
@@ -438,7 +437,7 @@ func TestSealer_ProviderBlobIsCopied(t *testing.T) {
 	ctx := t.Context()
 	p := &reusingProtector{inner: NewSoftwareProvider(), buf: make([]byte, 0, 256)}
 	t.Cleanup(func() { _ = p.inner.Destroy() })
-	s, err := NewSealer(WithProvider(p), WithMode(ModePerOperation))
+	s, err := NewSealer(WithKeyProtector(p))
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
@@ -561,7 +560,7 @@ func TestSealer_InitializationFailurePaths(t *testing.T) {
 
 	t.Run("salt draw fails before the provider is asked", func(t *testing.T) {
 		u := &countingRootUnsealer{inner: fixedRootUnsealer{fill: 1}}
-		s, err := NewSealer(WithProvider(u))
+		s, err := NewSealer(WithRootUnsealer(u))
 		if err != nil {
 			t.Fatalf("NewSealer: %v", err)
 		}
@@ -580,7 +579,7 @@ func TestSealer_InitializationFailurePaths(t *testing.T) {
 
 	t.Run("derivation fails after a successful unseal", func(t *testing.T) {
 		u := &countingRootUnsealer{inner: fixedRootUnsealer{fill: 2}}
-		s, err := NewSealer(WithProvider(u))
+		s, err := NewSealer(WithRootUnsealer(u))
 		if err != nil {
 			t.Fatalf("NewSealer: %v", err)
 		}
@@ -641,7 +640,7 @@ func TestSealer_RotationAndRetiredGenerationFailurePaths(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Seal: %v", err)
 		}
-		t.Cleanup(v.Destroy)
+		t.Cleanup(func() { _ = v.Destroy() })
 		return v
 	}
 

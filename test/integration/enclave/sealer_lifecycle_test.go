@@ -34,17 +34,23 @@ func TestDestroyedSealersReturnTheirLockedMemory(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewAllocator: %v", err)
 		}
-		shapes := map[string]func() []enclave.SealerOption{
-			"default": func() []enclave.SealerOption { return nil },
-			"per-operation": func() []enclave.SealerOption {
-				return []enclave.SealerOption{enclave.WithMode(enclave.ModePerOperation)}
+		// Each shape returns its options and, for an injected provider the
+		// sealer does not own, the provider's own release.
+		shapes := map[string]func() ([]enclave.SealerOption, func() error){
+			"default": func() ([]enclave.SealerOption, func() error) { return nil, nil },
+			"per-operation": func() ([]enclave.SealerOption, func() error) {
+				p := enclave.NewSoftwareProvider()
+				return []enclave.SealerOption{enclave.WithKeyProtector(p)}, p.Destroy
 			},
-			"rotating root key": func() []enclave.SealerOption { return []enclave.SealerOption{enclave.WithKEKRotationLimit(1)} },
+			"rotating root key": func() ([]enclave.SealerOption, func() error) {
+				return []enclave.SealerOption{enclave.WithKEKRotationLimit(1)}, nil
+			},
 		}
 		base := vmLck(t)
-		for name, opts := range shapes {
+		for name, shape := range shapes {
 			for i := range 64 {
-				s, err := enclave.NewSealer(opts()...)
+				opts, release := shape()
+				s, err := enclave.NewSealer(opts...)
 				if err != nil {
 					t.Fatalf("%s: NewSealer: %v", name, err)
 				}
@@ -72,8 +78,15 @@ func TestDestroyedSealersReturnTheirLockedMemory(t *testing.T) {
 				if err := s.Destroy(); err != nil {
 					t.Errorf("%s: second Destroy = %v", name, err)
 				}
-				v.Destroy()
-				w.Destroy()
+				if err := v.Destroy(); err != nil {
+					t.Errorf("%s: SealedEnclave.Destroy = %v", name, err)
+				}
+				_ = w.Destroy()
+				if release != nil {
+					if err := release(); err != nil {
+						t.Errorf("%s: provider Destroy = %v", name, err)
+					}
+				}
 			}
 		}
 		if got := vmLck(t); got != base {
@@ -93,7 +106,7 @@ func TestSealerDestroyLeavesAnInjectedProviderToItsOwner(t *testing.T) {
 		ctx := context.Background()
 		p := enclave.NewSoftwareProvider()
 
-		first, err := enclave.NewSealer(enclave.WithProvider(p), enclave.WithMode(enclave.ModePerOperation))
+		first, err := enclave.NewSealer(enclave.WithKeyProtector(p))
 		if err != nil {
 			t.Fatalf("NewSealer: %v", err)
 		}
@@ -102,7 +115,7 @@ func TestSealerDestroyLeavesAnInjectedProviderToItsOwner(t *testing.T) {
 			t.Fatalf("Destroy: %v", err)
 		}
 
-		perOp, err := enclave.NewSealer(enclave.WithProvider(p), enclave.WithMode(enclave.ModePerOperation))
+		perOp, err := enclave.NewSealer(enclave.WithKeyProtector(p))
 		if err != nil {
 			t.Fatalf("NewSealer: %v", err)
 		}
@@ -111,7 +124,7 @@ func TestSealerDestroyLeavesAnInjectedProviderToItsOwner(t *testing.T) {
 		defer v.Destroy()
 		requireOpensTo(t, ctx, v, n)
 
-		rootKey, err := enclave.NewSealer(enclave.WithProvider(p))
+		rootKey, err := enclave.NewSealer(enclave.WithRootUnsealer(p))
 		if err != nil {
 			t.Fatalf("NewSealer: %v", err)
 		}
@@ -147,7 +160,7 @@ func TestSealerDestroyDuringABlockedUnseal(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		ctx := context.Background()
 		g := &gatedUnsealer{soft: enclave.NewSoftwareProvider(), entered: make(chan struct{}), release: make(chan struct{})}
-		s, err := enclave.NewSealer(enclave.WithProvider(g))
+		s, err := enclave.NewSealer(enclave.WithRootUnsealer(g))
 		if err != nil {
 			t.Fatalf("NewSealer: %v", err)
 		}

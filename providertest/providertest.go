@@ -145,17 +145,15 @@ type Config struct {
 	// never requires that one instance refuse a blob another instance produced,
 	// because for a TPM or a KMS that blob IS its own.
 	//
-	// The returned value is typed any for the same reason
-	// [enclave.WithProvider] takes any: which of the two seam interfaces a
-	// provider implements is a capability the seam discovers, not something a
-	// signature can pin.
+	// The returned value is typed any because a provider implements
+	// [enclave.KeyProtector], [enclave.RootUnsealer], or both.
 	New func() (any, error)
 
 	// Modes lists the sealing modes this provider claims to serve, and it is a
 	// CLAIM the suite checks rather than a description it trusts. Each named
-	// mode must be accepted by [enclave.NewSealer], and — the half that catches
-	// something — each UNNAMED mode must be refused with
-	// [enclave.ErrProviderMode].
+	// mode's interface must be implemented and accepted by [enclave.NewSealer],
+	// and — the half that catches something — each UNNAMED mode's interface
+	// must NOT be implemented.
 	//
 	// That second direction is what finds a stub. A provider built for
 	// ModePerOperation that also carries an UnsealRoot method — added by a
@@ -420,8 +418,8 @@ func modeInterface(m enclave.Mode) string {
 // a nil receiver — inside the conformance suite, which then reports nothing at
 // all. A suite that crashes instead of reporting is the certifying failure in
 // another costume. [enclave.NewSealer] refuses the same value with
-// [enclave.ErrProviderMode] for the same reason: a typed nil is a lost pointer,
-// not a request for the default.
+// [enclave.ErrInvalidProvider] for the same reason: a typed nil is a lost
+// pointer, not a request for the default.
 func newProvider(cfg Config) (any, error) {
 	p, err := cfg.New()
 	if err != nil {
@@ -528,26 +526,32 @@ func checkModePairing(r *report, cfg Config, claims map[enclave.Mode]bool) {
 			r.fail(property, "%v", err)
 			return
 		}
-		_, serr := enclave.NewSealer(enclave.WithProvider(p), enclave.WithMode(m))
-
+		opt, serves := sealerOption(p, m)
 		switch {
-		case claims[m] && serr != nil:
-			r.fail(property, "NewSealer refused this provider in %v, which Config.Modes claims it serves: %v "+
-				"(the provider's method set does not satisfy %s)", m, serr, modeInterface(m))
-		case !claims[m] && serr == nil:
-			r.fail(property, "NewSealer ACCEPTED this provider in %v, which Config.Modes does not claim: "+
-				"the type satisfies %s, so a caller can select a mode this provider was never built to serve "+
-				"and a Sealer has no way to tell the method apart from a real implementation", m, modeInterface(m))
-		// serr != nil is redundant against the arm above and stated anyway:
-		// without it, deleting that arm makes THIS one fire on a nil error
-		// and report an acceptance as "refused ... with <nil>", which is the
-		// wrong diagnosis and also masks the deletion from a mutant.
-		case !claims[m] && serr != nil && !errors.Is(serr, enclave.ErrProviderMode):
-			r.fail(property, "NewSealer refused this provider in %v with %v, want an error matching "+
-				"ErrProviderMode so a misconfiguration is distinguishable from a device fault", m, serr)
+		case claims[m] && !serves:
+			r.fail(property, "this provider cannot serve %v, which Config.Modes claims: it does not implement %s",
+				m, modeInterface(m))
+		case !claims[m] && serves:
+			r.fail(property, "the provider implements %s, so a caller can select %v, which Config.Modes does not "+
+				"claim: a Sealer has no way to tell the method apart from a real implementation", modeInterface(m), m)
+		case claims[m]:
+			if _, err := enclave.NewSealer(opt); err != nil {
+				r.fail(property, "NewSealer refused this provider in %v, which Config.Modes claims it serves: %v", m, err)
+			}
 		}
 	}
 	r.note("providertest: mode/interface pairing checked for ModeRootKey and ModePerOperation against the claim %v", cfg.Modes)
+}
+
+// sealerOption returns the [enclave.SealerOption] that injects p for m, and
+// whether p implements the interface m requires.
+func sealerOption(p any, m enclave.Mode) (enclave.SealerOption, bool) {
+	if m == enclave.ModePerOperation {
+		kp, ok := p.(enclave.KeyProtector)
+		return enclave.WithKeyProtector(kp), ok
+	}
+	ru, ok := p.(enclave.RootUnsealer)
+	return enclave.WithRootUnsealer(ru), ok
 }
 
 // keyProtectorChecks are the ModePerOperation half of the suite. Each check

@@ -786,7 +786,7 @@ func TestSuiteCatchesAClaimedModeTheProviderCannotServe(t *testing.T) {
 	if err == nil {
 		t.Fatal("the suite PASSED a provider claiming a mode its method set cannot serve")
 	}
-	if !strings.Contains(err.Error(), "NewSealer refused this provider in ModeRootKey") {
+	if !strings.Contains(err.Error(), "this provider cannot serve ModeRootKey") {
 		t.Fatalf("the suite failed, but not on the claimed mode:\n%v", err)
 	}
 }
@@ -1082,7 +1082,7 @@ func TestPropertyFailuresAreTyped(t *testing.T) {
 // crash on, found by review: a (*SoftwareProvider)(nil) SATISFIES both seam
 // interfaces, so an unchecked type assertion succeeds and the first Protect
 // panics on a nil receiver — inside the suite, which then reports nothing.
-// NewSealer refuses the same value with ErrProviderMode, and so must this.
+// NewSealer refuses the same value with ErrInvalidProvider, and so must this.
 //
 // The subtests cover both entry paths, because the KeyProtector and
 // RootUnsealer halves assert separately.
@@ -1955,7 +1955,7 @@ func TestSuiteReportsAProviderThatCannotBeConstructed(t *testing.T) {
 func TestSuiteReportsAKeyProtectorClaimTheProviderCannotServe(t *testing.T) {
 	cfg := perOp(func() (any, error) { return &failingUnsealer{inner: software()}, nil })
 	requireOnlyPropertyFailures(t, cfg,
-		"mode/interface pairing: NewSealer refused this provider in ModePerOperation",
+		"mode/interface pairing: this provider cannot serve ModePerOperation",
 		"Protect/Unprotect round trip: *providertest.failingUnsealer does not implement enclave.KeyProtector, "+
 			"which Config.Modes claims it serves ModePerOperation with",
 	)

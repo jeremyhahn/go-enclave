@@ -13,7 +13,6 @@ import (
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
-	"crypto/rand"
 	"errors"
 	"fmt"
 	"go/ast"
@@ -992,14 +991,12 @@ func TestSealedEnclave_OpenableSplitsByMode(t *testing.T) {
 	t.Run("deviceHeldKeySurvivesTheSweep", func(t *testing.T) {
 		// The provider REPORTS its health, so its answer is authoritative and
 		// the sweep-generation fallback must not override it. Without
-		// WithProviderHealth this same value now reports
+		// HealthReporter this same value now reports
 		// ErrOpenabilityUnknown — see reportsNothingAfterASweep below — and
 		// the difference between the two subtests is the whole of what
 		// opting in buys.
 		s, err := NewSealer(
-			WithProvider(newMapKeyProtector(t)),
-			WithMode(ModePerOperation),
-			WithProviderHealth(func() error { return nil }),
+			WithKeyProtector(healthyProtector{newMapKeyProtector(t)}),
 		)
 		if err != nil {
 			t.Fatalf("NewSealer: %v", err)
@@ -1030,7 +1027,7 @@ func TestSealedEnclave_OpenableSplitsByMode(t *testing.T) {
 	})
 
 	t.Run("softwareProviderRootDoesNot", func(t *testing.T) {
-		s, err := NewSealer(WithProvider(NewSoftwareProvider()), WithMode(ModePerOperation))
+		s, err := NewSealer(WithKeyProtector(NewSoftwareProvider()))
 		if err != nil {
 			t.Fatalf("NewSealer: %v", err)
 		}
@@ -1067,8 +1064,8 @@ func TestSealedEnclave_OpenableSplitsByMode(t *testing.T) {
 func TestSoftwareProvider_OpenableDoesNotGenerateARoot(t *testing.T) {
 	p := NewSoftwareProvider()
 
-	if err := p.openable(); err != nil {
-		t.Errorf("openable on a fresh provider = %v, want nil: nothing was sealed through it, "+
+	if err := p.Health(); err != nil {
+		t.Errorf("Health on a fresh provider = %v, want nil: nothing was sealed through it, "+
 			"so nothing it holds is unopenable", err)
 	}
 
@@ -1139,9 +1136,8 @@ func TestWipeAll_DoesNotSweepSealedEnclaves(t *testing.T) {
 
 // enclaveBackedProtector is the provider shape that made the opt-in necessary:
 // an OUT-OF-PACKAGE KeyProtector keeping its key in this process's locked
-// memory. It deliberately does not implement the unexported sealHealth
-// interface — no external package can, which is the defect — so it stands in
-// for a real third-party provider exactly.
+// memory. It deliberately does not implement [HealthReporter], so it stands
+// in for a third-party provider that reports nothing.
 type enclaveBackedProtector struct{ key *MemoryEnclave }
 
 func newEnclaveBackedProtector(t *testing.T) *enclaveBackedProtector {
@@ -1161,13 +1157,21 @@ func (p *enclaveBackedProtector) Unprotect(ctx context.Context, blob []byte, key
 	return openWithKeyInto(p.key, blob, nil, key)
 }
 
-// health is what the provider author would pass to WithProviderHealth.
-func (p *enclaveBackedProtector) health() error {
+// reportingProtector is enclaveBackedProtector opted in to [HealthReporter].
+type reportingProtector struct{ *enclaveBackedProtector }
+
+func (p reportingProtector) Health() error {
 	if !p.key.IsAlive() {
 		return ErrSealerWiped
 	}
 	return nil
 }
+
+// healthyProtector reports healthy unconditionally, standing in for a provider
+// whose key lives outside this process.
+type healthyProtector struct{ KeyProtector }
+
+func (healthyProtector) Health() error { return nil }
 
 // TestSealedEnclave_OpenableClosesTheExternalProviderFailOpen is the
 // regression this pair of changes exists for.
@@ -1183,11 +1187,11 @@ func TestSealedEnclave_OpenableClosesTheExternalProviderFailOpen(t *testing.T) {
 	// The premise, asserted rather than assumed: this provider is invisible to
 	// the in-package health seam. If it ever stops being so, this test is
 	// measuring something else and must be rewritten, not deleted.
-	if _, ok := interface{}(p).(sealHealth); ok {
-		t.Fatal("provider satisfies sealHealth; it no longer stands in for an external one")
+	if _, ok := interface{}(p).(HealthReporter); ok {
+		t.Fatal("provider satisfies HealthReporter; it no longer stands in for one that reports nothing")
 	}
 
-	s, err := NewSealer(WithProvider(p), WithMode(ModePerOperation))
+	s, err := NewSealer(WithKeyProtector(p))
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
@@ -1215,7 +1219,7 @@ func TestSealedEnclave_OpenableClosesTheExternalProviderFailOpen(t *testing.T) {
 
 	if err := v.Openable(); err == nil {
 		t.Error("Openable returned nil for a value that cannot be opened: an external provider " +
-			"cannot implement the unexported health seam, and assuming it healthy is the " +
+			"that reports no health must not be assumed healthy; that is the " +
 			"fail-open this change closes")
 	} else if !errors.Is(err, ErrOpenabilityUnknown) {
 		t.Errorf("Openable after the sweep = %v, want ErrOpenabilityUnknown: this package cannot "+
@@ -1235,9 +1239,7 @@ func TestSealedEnclave_OpenableClosesTheExternalProviderFailOpen(t *testing.T) {
 func TestSealedEnclave_OpenableBelievesAProviderThatReports(t *testing.T) {
 	t.Run("reportsHealthyAfterASweep", func(t *testing.T) {
 		s, err := NewSealer(
-			WithProvider(newMapKeyProtector(t)),
-			WithMode(ModePerOperation),
-			WithProviderHealth(func() error { return nil }),
+			WithKeyProtector(healthyProtector{newMapKeyProtector(t)}),
 		)
 		if err != nil {
 			t.Fatalf("NewSealer: %v", err)
@@ -1266,8 +1268,7 @@ func TestSealedEnclave_OpenableBelievesAProviderThatReports(t *testing.T) {
 	t.Run("reportsWipedAfterASweep", func(t *testing.T) {
 		p := newEnclaveBackedProtector(t)
 		s, err := NewSealer(
-			WithProvider(p), WithMode(ModePerOperation),
-			WithProviderHealth(p.health),
+			WithKeyProtector(reportingProtector{p}),
 		)
 		if err != nil {
 			t.Fatalf("NewSealer: %v", err)
@@ -1305,7 +1306,7 @@ func TestSealedEnclave_OpenableBelievesAProviderThatReports(t *testing.T) {
 // one event it exists to report.
 func TestSealedEnclave_OpenableUnknownOnlyAfterASweep(t *testing.T) {
 	p := newEnclaveBackedProtector(t)
-	s, err := NewSealer(WithProvider(p), WithMode(ModePerOperation))
+	s, err := NewSealer(WithKeyProtector(p))
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
@@ -1469,7 +1470,7 @@ func TestSealedEnclave_OpenableSuspectsASealThatOverlappedASweep(t *testing.T) {
 	freshProcessSealer(t)
 
 	p := newEnclaveBackedProtector(t)
-	s, err := NewSealer(WithProvider(p), WithMode(ModePerOperation))
+	s, err := NewSealer(WithKeyProtector(p))
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
@@ -1543,21 +1544,26 @@ func TestSealedEnclave_OpenableSuspectsASealThatOverlappedASweep(t *testing.T) {
 	}
 }
 
-// TestSealer_ProviderHealthIsIgnoredInRootKeyMode pins the option against its
-// own documentation, which says it is ignored in [ModeRootKey].
-//
-// Without the mode gate a caller reusing one health callback across both modes
-// gets the callback's error from a sealer whose root and KEK are demonstrably
-// alive and whose Open succeeds — a provider callback overruling the
-// authoritative in-process hierarchy.
+// wipedReportingUnsealer is a RootUnsealer whose HealthReporter always
+// reports wiped and records that it was asked.
+type wipedReportingUnsealer struct {
+	RootUnsealer
+	called *bool
+}
+
+func (u wipedReportingUnsealer) Health() error {
+	*u.called = true
+	return ErrSealerWiped
+}
+
+// TestSealer_ProviderHealthIsIgnoredInRootKeyMode pins that a RootUnsealer's
+// HealthReporter is not consulted: the sealer's own hierarchy is alive and
+// authoritative, and a provider report must not overrule it.
 func TestSealer_ProviderHealthIsIgnoredInRootKeyMode(t *testing.T) {
 	freshProcessSealer(t)
 
 	called := false
-	s, err := NewSealer(WithProviderHealth(func() error {
-		called = true
-		return ErrSealerWiped
-	}))
+	s, err := NewSealer(WithRootUnsealer(wipedReportingUnsealer{NewSoftwareProvider(), &called}))
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
@@ -1569,10 +1575,10 @@ func TestSealer_ProviderHealthIsIgnoredInRootKeyMode(t *testing.T) {
 
 	if err := v.Openable(); err != nil {
 		t.Errorf("Openable = %v, want nil: this sealer's own hierarchy is alive and "+
-			"authoritative, and WithProviderHealth is documented as ignored in ModeRootKey", err)
+			"authoritative, and HealthReporter is documented as ignored in ModeRootKey", err)
 	}
 	if called {
-		t.Error("the health callback was consulted in ModeRootKey, which its documentation " +
+		t.Error("HealthReporter was consulted in ModeRootKey, which its documentation " +
 			"says it is not")
 	}
 
@@ -1646,92 +1652,6 @@ func TestWipeAll_ConcurrentSweepsKeepTheParityInvariant(t *testing.T) {
 	}
 }
 
-// deviceBackedInPackageProtector implements the IN-PACKAGE health seam and
-// reports healthy unconditionally, standing in for a provider whose key lives
-// outside this process. SoftwareProvider is the only real implementor of that
-// seam and its root is destroyed by a sweep, so without this type there is no
-// case where the sealHealth arm returns nil AFTER a sweep — and the precedence
-// on that arm is therefore unobservable. Measured: a mutant applying the
-// fallback on top of it survived the whole suite.
-type deviceBackedInPackageProtector struct{ m map[string]*mapping }
-
-func newDeviceBackedInPackageProtector(t testing.TB) *deviceBackedInPackageProtector {
-	p := &deviceBackedInPackageProtector{m: make(map[string]*mapping)}
-	t.Cleanup(func() { releaseDeviceStore(t, p.m) })
-	return p
-}
-
-func (p *deviceBackedInPackageProtector) Protect(ctx context.Context, key []byte) ([]byte, error) {
-	blob := make([]byte, 16)
-	if _, err := rand.Read(blob); err != nil {
-		return nil, err
-	}
-	stored, err := deviceCopy(key)
-	if err != nil {
-		return nil, err
-	}
-	p.m[string(blob)] = stored
-	return blob, nil
-}
-
-func (p *deviceBackedInPackageProtector) Unprotect(ctx context.Context, blob []byte, key []byte) error {
-	stored, ok := p.m[string(blob)]
-	if !ok || len(stored.data) != len(key) {
-		return ErrSealedAuthentication
-	}
-	copy(key, stored.data)
-	return nil
-}
-
-// openable implements sealHealth: the key is held outside this process's
-// locked memory, so a sweep does not touch it.
-func (p *deviceBackedInPackageProtector) openable() error { return nil }
-
-// TestSealedEnclave_OpenableBelievesTheInPackageHealthSeam covers the arm the
-// other precedence test cannot reach.
-//
-// Both arms of Sealer.openable return the provider's answer TERMINALLY, and the
-// sweep-generation fallback must not be applied on top of either. The callback
-// arm is covered by OpenableBelievesAProviderThatReports; this is the
-// sealHealth arm, which no other test can exercise in the healthy-after-sweep
-// state because SoftwareProvider — its only production implementor — always
-// reports wiped after a sweep.
-func TestSealedEnclave_OpenableBelievesTheInPackageHealthSeam(t *testing.T) {
-	p := newDeviceBackedInPackageProtector(t)
-
-	// The premise, asserted rather than assumed.
-	if _, ok := interface{}(p).(sealHealth); !ok {
-		t.Fatal("this provider does not implement sealHealth, so it exercises the wrong arm")
-	}
-
-	s, err := NewSealer(WithProvider(p), WithMode(ModePerOperation))
-	if err != nil {
-		t.Fatalf("NewSealer: %v", err)
-	}
-	v, err := s.Seal(t.Context(), append([]byte(nil), sealedMaterial...))
-	if err != nil {
-		t.Fatalf("Seal: %v", err)
-	}
-	defer v.Destroy()
-
-	sweepForOpenableTest(t)
-
-	if err := v.Openable(); err != nil {
-		t.Errorf("Openable after the sweep = %v, want nil: this provider reported healthy "+
-			"through the in-package seam and its answer is terminal; the generation "+
-			"fallback must not be applied on top of it", err)
-	}
-	// The control that makes the nil meaningful: the value really does open.
-	e, err := v.Open(t.Context())
-	if err != nil {
-		t.Fatalf("Open after the sweep = %v; Openable said nil, so one of the two is wrong", err)
-	}
-	if !holds(e, sealedMaterial) {
-		t.Error("post-sweep open returned the wrong material")
-	}
-	e.Destroy()
-}
-
 // openBudget is a budget generous enough for one open of sealedMaterial —
 // destination plus the transient key page, with slack — expressed in pages so
 // it is correct on any page size.
@@ -1751,7 +1671,7 @@ func sealForBudgetTest(t *testing.T) *SealedEnclave {
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
-	t.Cleanup(v.Destroy)
+	t.Cleanup(func() { _ = v.Destroy() })
 	return v
 }
 
@@ -1983,7 +1903,7 @@ func TestSealedEnclave_OpenWithRefusesWhatTheBudgetCannotCover(t *testing.T) {
 // zero unprotects on a refused open means the refusal came first.
 func TestSealedEnclave_OpenWithGatesOnTheDestination(t *testing.T) {
 	kp := newMapKeyProtector(t)
-	s, err := NewSealer(WithProvider(kp), WithMode(ModePerOperation))
+	s, err := NewSealer(WithKeyProtector(kp))
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
@@ -2260,7 +2180,7 @@ func TestSealedEnclave_OpenWithOnADestroyedValue(t *testing.T) {
 // what this proves is that the DEK and the destination are still admitted when
 // a device — not an in-process hierarchy — supplies the key.
 func TestSealedEnclave_OpenWithPerOperationMode(t *testing.T) {
-	s, err := NewSealer(WithProvider(newMapKeyProtector(t)), WithMode(ModePerOperation))
+	s, err := NewSealer(WithKeyProtector(newMapKeyProtector(t)))
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}

@@ -41,7 +41,7 @@ func TestSealedValueHoldsNoPlaintextBetweenOpens(t *testing.T) {
 		t.Run(mode.String(), func(t *testing.T) {
 			isolated(t, childOpts{}, func(t *testing.T) {
 				ctx := context.Background()
-				s, err := enclave.NewSealer(enclave.WithProvider(enclave.NewSoftwareProvider()), enclave.WithMode(mode))
+				s, err := enclave.NewSealer(providerOption(enclave.NewSoftwareProvider(), mode))
 				if err != nil {
 					t.Fatalf("NewSealer: %v", err)
 				}

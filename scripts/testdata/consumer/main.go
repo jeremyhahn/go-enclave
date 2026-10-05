@@ -14,12 +14,15 @@
 // It exercises the lifecycle every consumer depends on: construction takes
 // ownership of the caller's buffer and wipes it, the material is readable
 // inside the borrow window and comparable with EqualTo, Destroy releases it,
-// and a destroyed enclave refuses access with the documented sentinel. The value is a fixed,
-// non-secret marker; nothing is copied out of the enclave to be compared.
+// and a destroyed enclave refuses access with the documented sentinel. It then
+// seals the marker through a typed provider option and opens it again. The
+// value is a fixed, non-secret marker; nothing is copied out of the enclave to
+// be compared.
 package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -36,6 +39,13 @@ func main() {
 }
 
 func run() error {
+	if err := lifecycle(); err != nil {
+		return err
+	}
+	return sealing()
+}
+
+func lifecycle() error {
 	marker := []byte("go-enclave consumer check")
 	material := bytes.Clone(marker)
 
@@ -77,6 +87,41 @@ func run() error {
 	}
 	if ok, err := e.EqualTo(marker); ok || !errors.Is(err, enclave.ErrEnclaveDestroyed) {
 		return fmt.Errorf("EqualTo after Destroy = (%t, %v), want (false, ErrEnclaveDestroyed)", ok, err)
+	}
+	return nil
+}
+
+// sealing round-trips the marker through a per-operation sealer over the
+// software provider.
+func sealing() error {
+	ctx := context.Background()
+	marker := []byte("go-enclave consumer check")
+	p := enclave.NewSoftwareProvider()
+	defer func() { _ = p.Destroy() }()
+
+	s, err := enclave.NewSealer(enclave.WithKeyProtector(p))
+	if err != nil {
+		return fmt.Errorf("NewSealer: %w", err)
+	}
+	defer func() { _ = s.Destroy() }()
+	if s.Mode() != enclave.ModePerOperation {
+		return fmt.Errorf("Mode() = %v, want ModePerOperation", s.Mode())
+	}
+
+	v, err := s.Seal(ctx, bytes.Clone(marker))
+	if err != nil {
+		return fmt.Errorf("Seal: %w", err)
+	}
+	o, err := v.Open(ctx)
+	if err != nil {
+		return fmt.Errorf("Open: %w", err)
+	}
+	defer func() { _ = o.Destroy() }()
+	if ok, err := o.EqualTo(marker); !ok || err != nil {
+		return fmt.Errorf("opened EqualTo(marker) = (%t, %v), want (true, nil)", ok, err)
+	}
+	if err := v.Destroy(); err != nil {
+		return fmt.Errorf("SealedEnclave.Destroy: %w", err)
 	}
 	return nil
 }

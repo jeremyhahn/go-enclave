@@ -116,7 +116,7 @@ type nilProviderError struct{ provider any }
 
 func (e *nilProviderError) Error() string {
 	return fmt.Sprintf("Config.New returned a nil provider (%T); a typed nil satisfies the seam "+
-		"interfaces and panics at the first call, which is why NewSealer refuses it with ErrProviderMode", e.provider)
+		"interfaces and panics at the first call, which is why NewSealer refuses it with ErrInvalidProvider", e.provider)
 }
 
 // missingSeamError is a provider that lacks the interface a mode it claims in

@@ -216,7 +216,6 @@ var docIssueRefLedger = []docIssueRef{
 	{"registry.go", 33, classHistorical, "7cc13ef4b8e8", "NOT be extended to cover them (#33, decided), for three reasons"},
 	{"sealed.go", 33, classHistorical, "30c3a6a7d81a", "and will not cover this type (#33, decided): its count means"},
 	{"sealed.go", 34, classHistorical, "08a2e0f591db", "instead, so this call fails on every seal (#34, closed)."},
-	{"sealer.go", 50, classHistorical, "2460085c0048", "(the Decrypter/Signer adapter, since split out to issue #50)."},
 	{"sealer.go", 50, classHistorical, "7ae0030527d1", "split out of the initial seam PR to its own decision (issue #50)."},
 
 	// #83 — the release-readiness review fixes: a negative BudgetError.InUse,

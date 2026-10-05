@@ -24,7 +24,7 @@ Package `providertest` (import path `github.com/jeremyhahn/go-enclave/providerte
 
 | Property (as reported) | Mode | Evidence the suite collects |
 |---|---|---|
-| mode/interface pairing | both | `NewSealer` must accept each claimed mode and refuse each unclaimed one with `ErrProviderMode`. |
+| mode/interface pairing | both | The provider must implement each claimed mode's interface (and `NewSealer` must accept it through `WithKeyProtector`/`WithRootUnsealer`), and must NOT implement an unclaimed mode's. |
 | Protect/Unprotect round trip | per-operation | Recovers the key (exact compare); `Protect` does not mutate its input; the blob contains no run of 8 consecutive key bytes. |
 | Protect does not retain the caller's key slice | per-operation | Spy |
 | Unprotect does not write into a destination the caller has finished with | per-operation | Spy, with populated-destination control |

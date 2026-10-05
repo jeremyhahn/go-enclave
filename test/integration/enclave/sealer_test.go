@@ -54,7 +54,7 @@ func TestSealerRoundTripsManyValuesInBothModes(t *testing.T) {
 			isolated(t, childOpts{}, func(t *testing.T) {
 				ctx := context.Background()
 				dev := newDevice()
-				s, err := enclave.NewSealer(enclave.WithProvider(dev), enclave.WithMode(mode))
+				s, err := enclave.NewSealer(providerOption(dev, mode))
 				if err != nil {
 					t.Fatalf("NewSealer: %v", err)
 				}
@@ -159,7 +159,7 @@ func TestSealerRoundTripsManyValuesInBothModes(t *testing.T) {
 				// What Openable can KNOW differs by mode, and the difference is the
 				// contract: in ModeRootKey the sealer owns the keys and answers
 				// ErrSealerWiped; in ModePerOperation the keys are the provider's,
-				// this provider supplies no health report (WithProviderHealth), so
+				// this provider implements no HealthReporter, so
 				// the honest answer is ErrOpenabilityUnknown — and never nil, which
 				// would be the fail-open.
 				if n, err := enclave.WipeAll(ctx); n != 0 || err != nil {
@@ -208,7 +208,7 @@ func TestSealerContextReachesTheProvider(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		live := context.Background()
 		dev := newDevice()
-		s, err := enclave.NewSealer(enclave.WithProvider(dev), enclave.WithMode(enclave.ModePerOperation))
+		s, err := enclave.NewSealer(enclave.WithKeyProtector(dev))
 		if err != nil {
 			t.Fatalf("NewSealer: %v", err)
 		}
@@ -317,7 +317,7 @@ func TestSealerRootUnsealIsSerializedAndAbandonable(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		live := context.Background()
 		dev := newDevice()
-		s, err := enclave.NewSealer(enclave.WithProvider(dev), enclave.WithMode(enclave.ModeRootKey))
+		s, err := enclave.NewSealer(enclave.WithRootUnsealer(dev))
 		if err != nil {
 			t.Fatalf("NewSealer: %v", err)
 		}
@@ -378,7 +378,7 @@ func TestProcessSealerIsInstalledOnce(t *testing.T) {
 			requireContextFailure(t, "NewSealed with an ended context", err, enclave.ErrSealFailed, context.Canceled)
 
 			dev := newDevice()
-			s, err := enclave.NewSealer(enclave.WithProvider(dev), enclave.WithMode(enclave.ModePerOperation))
+			s, err := enclave.NewSealer(enclave.WithKeyProtector(dev))
 			if err != nil {
 				t.Fatalf("NewSealer: %v", err)
 			}
@@ -446,7 +446,7 @@ func TestSealerRotatesKEKGenerationsUnderRealLockedMemory(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		ctx := context.Background()
 		dev := newDevice()
-		s, err := enclave.NewSealer(enclave.WithProvider(dev), enclave.WithMode(enclave.ModeRootKey), enclave.WithKEKRotationLimit(3))
+		s, err := enclave.NewSealer(enclave.WithRootUnsealer(dev), enclave.WithKEKRotationLimit(3))
 		if err != nil {
 			t.Fatalf("NewSealer: %v", err)
 		}
@@ -514,7 +514,7 @@ func TestSealerIsWipedForGoodAfterASweep(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		ctx := context.Background()
 		dev := newDevice()
-		s, err := enclave.NewSealer(enclave.WithProvider(dev), enclave.WithMode(enclave.ModeRootKey), enclave.WithKEKRotationLimit(1))
+		s, err := enclave.NewSealer(enclave.WithRootUnsealer(dev), enclave.WithKEKRotationLimit(1))
 		if err != nil {
 			t.Fatalf("NewSealer: %v", err)
 		}
@@ -558,7 +558,7 @@ func TestSealerFailsCleanlyWhenLockedMemoryRunsOutMidHierarchy(t *testing.T) {
 		ctx := context.Background()
 		f := installFaultInjector(t, 0)
 		dev := newDevice()
-		s, err := enclave.NewSealer(enclave.WithProvider(dev), enclave.WithMode(enclave.ModeRootKey), enclave.WithKEKRotationLimit(1))
+		s, err := enclave.NewSealer(enclave.WithRootUnsealer(dev), enclave.WithKEKRotationLimit(1))
 		if err != nil {
 			t.Fatalf("NewSealer: %v", err)
 		}
@@ -705,7 +705,7 @@ func TestSealerOverlappingASweepIsWiped(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		ctx := context.Background()
 		g := &gatedUnsealer{soft: enclave.NewSoftwareProvider(), entered: make(chan struct{}), release: make(chan struct{})}
-		s, err := enclave.NewSealer(enclave.WithProvider(g), enclave.WithMode(enclave.ModeRootKey))
+		s, err := enclave.NewSealer(enclave.WithRootUnsealer(g))
 		if err != nil {
 			t.Fatalf("NewSealer: %v", err)
 		}
@@ -789,7 +789,7 @@ func TestSealerKeyUseOverlappingASweepIsWiped(t *testing.T) {
 				// Every hierarchy key and DEK has this one mapping length.
 				f := installFaultInjector(t, mappingLen(enclave.RootKeyBytes))
 				dev := newDevice()
-				s, err := enclave.NewSealer(enclave.WithProvider(dev), enclave.WithMode(enclave.ModeRootKey), enclave.WithKEKRotationLimit(1))
+				s, err := enclave.NewSealer(enclave.WithRootUnsealer(dev), enclave.WithKEKRotationLimit(1))
 				if err != nil {
 					t.Fatalf("NewSealer: %v", err)
 				}
@@ -846,7 +846,7 @@ func TestSealerQueuedFirstSealUsesThePublishedRoot(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		ctx := context.Background()
 		g := &gatedUnsealer{soft: enclave.NewSoftwareProvider(), entered: make(chan struct{}), release: make(chan struct{})}
-		s, err := enclave.NewSealer(enclave.WithProvider(g), enclave.WithMode(enclave.ModeRootKey))
+		s, err := enclave.NewSealer(enclave.WithRootUnsealer(g))
 		if err != nil {
 			t.Fatalf("NewSealer: %v", err)
 		}
@@ -905,7 +905,7 @@ func TestSealerAbandonedInitReportsBothCauses(t *testing.T) {
 		f := installFaultInjector(t, 0)
 		ctx, cancel := context.WithCancel(context.Background())
 		dev := newDevice()
-		s, err := enclave.NewSealer(enclave.WithProvider(cancelAfterUnseal{dev, cancel}), enclave.WithMode(enclave.ModeRootKey))
+		s, err := enclave.NewSealer(enclave.WithRootUnsealer(cancelAfterUnseal{dev, cancel}))
 		if err != nil {
 			t.Fatalf("NewSealer: %v", err)
 		}
@@ -1035,24 +1035,28 @@ func (c *deadlineContext) Err() error {
 	return nil
 }
 
+// reportingDevice is a device that implements enclave.HealthReporter with a
+// report the test controls.
+type reportingDevice struct {
+	*device
+	healthy bool
+}
+
+func (d *reportingDevice) Health() error {
+	if d.healthy {
+		return nil
+	}
+	return enclave.ErrSealerWiped
+}
+
 // TestSealerReportsItsConfiguration covers what a sealer and a sealed value
 // tell an operator: the mode it was built in, a provider health report it
 // believes, and a String that never prints the envelope.
 func TestSealerReportsItsConfiguration(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		ctx := context.Background()
-		dev := newDevice()
-		healthy := true
-		s, err := enclave.NewSealer(
-			enclave.WithProvider(dev),
-			enclave.WithMode(enclave.ModePerOperation),
-			enclave.WithProviderHealth(func() error {
-				if healthy {
-					return nil
-				}
-				return enclave.ErrSealerWiped
-			}),
-		)
+		dev := &reportingDevice{device: newDevice(), healthy: true}
+		s, err := enclave.NewSealer(enclave.WithKeyProtector(dev))
 		if err != nil {
 			t.Fatalf("NewSealer: %v", err)
 		}
@@ -1083,7 +1087,7 @@ func TestSealerReportsItsConfiguration(t *testing.T) {
 		if err := v.Openable(); err != nil {
 			t.Errorf("Openable with a provider reporting healthy = %v, want nil", err)
 		}
-		healthy = false
+		dev.healthy = false
 		if err := v.Openable(); !errors.Is(err, enclave.ErrSealerWiped) {
 			t.Errorf("Openable with a provider reporting wiped = %v, want ErrSealerWiped", err)
 		}
@@ -1133,15 +1137,19 @@ func TestSealerRefusesInvalidArgumentsBeforeAnyLockedMemory(t *testing.T) {
 				t.Errorf("WithKEKRotationLimit(%d) = %v, want ErrInvalidRotationLimit", n, err)
 			}
 		}
-		if _, err := enclave.NewSealer(enclave.WithMode(enclave.ModePerOperation), enclave.WithKEKRotationLimit(1)); !errors.Is(err, enclave.ErrInvalidRotationLimit) {
+		if _, err := enclave.NewSealer(enclave.WithKeyProtector(enclave.NewSoftwareProvider()), enclave.WithKEKRotationLimit(1)); !errors.Is(err, enclave.ErrInvalidRotationLimit) {
 			t.Errorf("WithKEKRotationLimit with ModePerOperation = %v, want ErrInvalidRotationLimit", err)
 		}
-		if _, err := enclave.NewSealer(enclave.WithProvider(nil)); !errors.Is(err, enclave.ErrProviderMode) {
-			t.Errorf("NewSealer(nil provider) = %v, want ErrProviderMode", err)
-		}
 		var typedNil *enclave.SoftwareProvider
-		if _, err := enclave.NewSealer(enclave.WithProvider(typedNil)); !errors.Is(err, enclave.ErrProviderMode) {
-			t.Errorf("NewSealer(typed-nil provider) = %v, want ErrProviderMode", err)
+		for name, opt := range map[string]enclave.SealerOption{
+			"nil RootUnsealer":       enclave.WithRootUnsealer(nil),
+			"nil KeyProtector":       enclave.WithKeyProtector(nil),
+			"typed-nil RootUnsealer": enclave.WithRootUnsealer(typedNil),
+			"typed-nil KeyProtector": enclave.WithKeyProtector(typedNil),
+		} {
+			if _, err := enclave.NewSealer(opt); !errors.Is(err, enclave.ErrInvalidProvider) {
+				t.Errorf("NewSealer(%s) = %v, want ErrInvalidProvider", name, err)
+			}
 		}
 
 		if after := vmLck(t); after != before {
@@ -1150,21 +1158,19 @@ func TestSealerRefusesInvalidArgumentsBeforeAnyLockedMemory(t *testing.T) {
 	})
 }
 
-// TestNewSealerRefusesMisconfiguration: a provider that cannot serve the
-// selected mode, or a mode that names nothing, fails at CONSTRUCTION — at
-// boot, not at the first credential.
+// TestNewSealerRefusesMisconfiguration: the provider option fixes the mode,
+// and two providers are refused at CONSTRUCTION rather than resolved by order.
 func TestNewSealerRefusesMisconfiguration(t *testing.T) {
-	if _, err := enclave.NewSealer(enclave.WithMode(enclave.Mode(200))); !errors.Is(err, enclave.ErrInvalidMode) {
-		t.Errorf("NewSealer(Mode(200)): err = %v, want ErrInvalidMode", err)
-	}
-	if _, err := enclave.NewSealer(enclave.WithProvider(struct{}{})); !errors.Is(err, enclave.ErrProviderMode) {
-		t.Errorf("NewSealer(non-provider): err = %v, want ErrProviderMode", err)
-	}
 	ro := rootOnly{soft: enclave.NewSoftwareProvider()}
-	if _, err := enclave.NewSealer(enclave.WithProvider(ro), enclave.WithMode(enclave.ModePerOperation)); !errors.Is(err, enclave.ErrProviderMode) {
-		t.Errorf("NewSealer(RootUnsealer-only provider, ModePerOperation): err = %v, want ErrProviderMode", err)
+	if s, err := enclave.NewSealer(enclave.WithRootUnsealer(ro)); err != nil || s.Mode() != enclave.ModeRootKey {
+		t.Errorf("NewSealer(WithRootUnsealer) = (%v, %v), want a ModeRootKey sealer", s, err)
 	}
-	if s, err := enclave.NewSealer(enclave.WithProvider(ro), enclave.WithMode(enclave.ModeRootKey)); err != nil || s.Mode() != enclave.ModeRootKey {
-		t.Errorf("NewSealer(RootUnsealer-only provider, ModeRootKey) = (%v, %v), want a ModeRootKey sealer", s, err)
+	soft := enclave.NewSoftwareProvider()
+	if s, err := enclave.NewSealer(enclave.WithKeyProtector(soft)); err != nil || s.Mode() != enclave.ModePerOperation {
+		t.Errorf("NewSealer(WithKeyProtector) = (%v, %v), want a ModePerOperation sealer", s, err)
+	}
+	s, err := enclave.NewSealer(enclave.WithKeyProtector(soft), enclave.WithRootUnsealer(ro))
+	if !errors.Is(err, enclave.ErrInvalidProvider) || s != nil {
+		t.Errorf("NewSealer(two providers) = (%v, %v), want (nil, ErrInvalidProvider)", s, err)
 	}
 }

@@ -27,9 +27,19 @@ import (
 // author is told to use — inside the devcontainer, where its residue sweep can
 // run; and the provider seam as a consumer injects into it.
 
-// device is a provider a consumer injects through WithProvider: the shipped
-// SoftwareProvider doing all of the cryptography, behind the seam exactly as a
-// hardware provider would sit. It adds two things a real device has and the
+// providerOption injects p in mode m, for tests that range over both modes.
+func providerOption(p any, m enclave.Mode) enclave.SealerOption {
+	if m == enclave.ModePerOperation {
+		kp, _ := p.(enclave.KeyProtector)
+		return enclave.WithKeyProtector(kp)
+	}
+	ru, _ := p.(enclave.RootUnsealer)
+	return enclave.WithRootUnsealer(ru)
+}
+
+// device is a provider a consumer injects through WithKeyProtector or
+// WithRootUnsealer: the shipped SoftwareProvider doing all of the
+// cryptography, behind the seam exactly as a hardware provider would sit. It adds two things a real device has and the
 // software provider does not:
 //
 //   - it can STALL. A context carrying a stall request makes the call block

@@ -70,9 +70,9 @@ var (
 	// Only in [ModePerOperation], only after a [WipeAll], and only with a
 	// provider that supplies no health report. A provider that keeps its
 	// sealing key wholly outside this process is unaffected by a sweep and
-	// should say so with [WithProviderHealth]; one that does gets a precise
-	// answer instead of this one. Until it does, the honest report is that
-	// this package cannot see far enough to answer.
+	// should say so by implementing [HealthReporter]; one that does gets a
+	// precise answer instead of this one. Until it does, the honest report is
+	// that this package cannot see far enough to answer.
 	//
 	// The action is to OPEN THE VALUE and let the result decide. Open is the
 	// operation that knows; this is a diagnostic, and an inconclusive
@@ -84,16 +84,11 @@ var (
 	// implementation detail.
 	ErrOpenabilityUnknown = errors.New("enclave: a shutdown sweep has run since this value was sealed and its provider reports no sealing-state health, so openability cannot be determined; open the value to find out")
 
-	// ErrProviderMode is returned by [NewSealer] when the injected provider
-	// does not implement the interface the selected [Mode] requires —
-	// [KeyProtector] for ModePerOperation, [RootUnsealer] for ModeRootKey.
-	//
-	// The refusal is at CONSTRUCTION on purpose. The capability check could be
-	// deferred to the first seal, but a misconfiguration that fails at boot is
-	// worth a great deal more than one that fails at the first credential
-	// read; this error existing is the reason the seam is two interfaces
-	// instead of one.
-	ErrProviderMode = errors.New("enclave: provider does not implement the interface the selected sealing mode requires")
+	// ErrInvalidProvider is returned by [NewSealer] when a provider option is
+	// given a nil or typed-nil provider, or when both [WithKeyProtector] and
+	// [WithRootUnsealer] are given. A nil provider is a lost configuration
+	// step, not a request for the software default.
+	ErrInvalidProvider = errors.New("enclave: a sealer takes exactly one non-nil provider, from WithKeyProtector or WithRootUnsealer")
 
 	// ErrSealerExhausted is returned, joined with [ErrSealFailed], by a seal
 	// on a [ModeRootKey] sealer that would need a KEK generation past
@@ -115,11 +110,6 @@ var (
 	// [ModePerOperation], which has no KEK to rotate. Like the other
 	// construction errors it reports a configuration mistake, at boot.
 	ErrInvalidRotationLimit = errors.New("enclave: KEK rotation limit must be between 1 and 2^31 and applies only to ModeRootKey")
-
-	// ErrInvalidMode is returned by [NewSealer] for a [Mode] value that names
-	// no mode. It reports a programming mistake, not a runtime condition —
-	// the two valid modes are compile-time constants.
-	ErrInvalidMode = errors.New("enclave: unknown sealing mode")
 
 	// ErrSealerInstalled is returned by [SetSealer] when the process sealer is
 	// already set — by an earlier SetSealer, or by the first seal lazily
@@ -209,8 +199,7 @@ const (
 	ModePerOperation
 )
 
-// modeNames drives [Mode.String]; a mode missing here is exactly the
-// condition [ErrInvalidMode] reports.
+// modeNames drives [Mode.String].
 var modeNames = map[Mode]string{
 	ModeRootKey:      "ModeRootKey",
 	ModePerOperation: "ModePerOperation",
@@ -408,12 +397,6 @@ type Sealer struct {
 	kp KeyProtector
 	ru RootUnsealer
 
-	// health is the provider's optional report on its own IN-PROCESS sealing
-	// state, supplied with [WithProviderHealth]. nil when the provider
-	// offered none, which is the case the sweep-generation fallback covers.
-	// Set once at construction and never written again, so it is read without
-	// the lock like kp and ru.
-	health    func() error
 	protect   func(ctx context.Context, dek *MemoryEnclave) ([]byte, error)
 	unprotect func(ctx context.Context, blob []byte, dek *MemoryEnclave) error
 
@@ -501,13 +484,11 @@ type Sealer struct {
 
 // sealerConfig collects what the options set; see [NewSealer].
 type sealerConfig struct {
-	provider any
-	// providerSet distinguishes "option absent" (default the software
-	// provider) from "option passed nil" (refuse) — an untyped nil provider
-	// is indistinguishable from absence by value alone.
-	providerSet bool
-	mode        Mode
-	health      func() error
+	kp KeyProtector
+	ru RootUnsealer
+	// providers counts the provider options given, so a nil provider and two
+	// providers are both refused rather than defaulted or overridden.
+	providers int
 	// kekLimit is WithKEKRotationLimit's value; zero means "not set" (the
 	// option itself refuses zero).
 	kekLimit    uint64
@@ -517,83 +498,22 @@ type sealerConfig struct {
 // SealerOption configures [NewSealer].
 type SealerOption func(*sealerConfig)
 
-// WithProvider injects the crypto provider the sealer roots its sealing in.
-//
-// p is typed any because the seam is TWO capabilities, not one: a provider
-// implements [KeyProtector], [RootUnsealer], or both, and which one the
-// sealer requires depends on the [Mode] selected alongside it. The static
-// typing this gives up is bought back at construction: [NewSealer] refuses,
-// with [ErrProviderMode], any provider that does not implement the selected
-// mode's interface, so a mismatch cannot survive past boot.
-//
-// Omitting this option selects the pure-software [SoftwareProvider], which
-// serves either mode. PASSING a nil provider — typed or untyped — is refused
-// at construction with [ErrProviderMode] instead: a nil here is a lost
-// configuration step (a provider variable that was never assigned), and the
-// two ways of getting it wrong are both fail-open. Defaulting would silently
-// swap the hardware provider a deployment configured for the software one;
-// accepting it would pass the interface assertions — a typed nil satisfies
-// the TYPE — and panic at the first seal, where a construction-time typed
-// error belongs.
-func WithProvider(p any) SealerOption {
-	return func(c *sealerConfig) { c.provider, c.providerSet = p, true }
+// WithKeyProtector selects [ModePerOperation] over kp: every seal and open
+// calls kp on the per-value data key. If kp implements [HealthReporter], the
+// sealer consults it from [SealedEnclave.Openable]. kp must be non-nil; see
+// [ErrInvalidProvider].
+func WithKeyProtector(kp KeyProtector) SealerOption {
+	return func(c *sealerConfig) { c.kp, c.providers = kp, c.providers+1 }
 }
 
-// WithProviderHealth supplies a callback reporting whether the provider's
-// IN-PROCESS sealing state is still intact: nil if this provider can still
-// unprotect what it protected, [ErrSealerWiped] if a shutdown [WipeAll]
-// destroyed key material it depends on.
+// WithRootUnsealer selects [ModeRootKey] over ru: ru is asked for the root
+// once and the sealer runs an in-memory KEK hierarchy under it. ru must be
+// non-nil; see [ErrInvalidProvider].
 //
-// # What it is for, and what it is NOT for
-//
-// It answers ONE question: did a sweep of THIS PROCESS's memory take
-// something this provider needs. It is not a device liveness probe. A
-// provider whose key lives in a TPM, an HSM or a cloud KMS is unaffected by a
-// sweep and should report nil unconditionally — reporting a momentarily
-// unreachable device here would make [SealedEnclave.Openable] mean two
-// different things depending on which provider is installed, and a caller
-// could no longer read its result without knowing the deployment. A liveness
-// probe for a device is a different API, and should be designed as one.
-//
-// That is also why the callback takes no context and MUST NOT block: the
-// question is answered from this process's own state, so there is nothing to
-// wait for, and [SealedEnclave.Openable] — which calls it — is a diagnostic
-// with no context to bound a wait by. It is called with no lock of this
-// package's held.
-//
-// # Why a callback rather than an interface
-//
-// The health seam inside this package is an unexported interface, which by
-// Go's rules NO out-of-package type can satisfy — so before this option, an
-// external provider had no way to report a sweep at all and
-// [SealedEnclave.Openable] silently assumed it was fine. Exporting that
-// interface would have invited the device-liveness confusion above; a
-// callback keeps the question narrow and makes opting in explicit.
-//
-// # It is authoritative
-//
-// A provider that supplies this is BELIEVED: its answer is terminal, and the
-// sweep-generation fallback behind [ErrOpenabilityUnknown] does not
-// second-guess it. That is deliberate — a provider volunteering a health
-// report is asserting knowledge about its own key storage, and this package
-// has no better source. Supplying a callback that lies is therefore worse
-// than supplying none.
-//
-// The trade is deliberate: a provider that opts in and answers wrongly is
-// believed. It is still strictly better than the alternative it replaced,
-// where EVERY out-of-package provider was silently assumed healthy and had no
-// way to say otherwise.
-//
-// Ignored in [ModeRootKey], where the sealer's own hierarchy is in-process
-// and this package can and does inspect it directly.
-func WithProviderHealth(fn func() error) SealerOption {
-	return func(c *sealerConfig) { c.health = fn }
-}
-
-// WithMode selects the [Mode]. Omitting it selects [ModeRootKey], which with
-// the default provider reproduces plain software sealing.
-func WithMode(m Mode) SealerOption {
-	return func(c *sealerConfig) { c.mode = m }
+// Omitting both provider options selects ModeRootKey over a
+// [SoftwareProvider] the sealer creates and destroys with itself.
+func WithRootUnsealer(ru RootUnsealer) SealerOption {
+	return func(c *sealerConfig) { c.ru, c.providers = ru, c.providers+1 }
 }
 
 // WithKEKRotationLimit sets how many DEKs one KEK generation wraps before the
@@ -613,81 +533,66 @@ func WithKEKRotationLimit(n uint64) SealerOption {
 	return func(c *sealerConfig) { c.kekLimit, c.kekLimitSet = n, true }
 }
 
-// modeBindings maps each mode to the constructor step that checks the
-// provider's capability and binds the mode's protect/unprotect paths. A mode
-// absent from this map is invalid by definition, which makes the map the
-// validator as well as the dispatcher.
-var modeBindings = map[Mode]func(*Sealer, any) error{
-	ModeRootKey:      bindRootKey,
-	ModePerOperation: bindPerOperation,
-}
-
-// NewSealer returns a Sealer for the given provider and mode.
+// NewSealer returns a Sealer over the provider its options name; the
+// option chosen fixes the [Mode].
 //
 // With no options it is the pure-software default — [SoftwareProvider],
-// [ModeRootKey] — and cannot fail. With options it returns [ErrInvalidMode]
-// for a mode that names nothing and [ErrProviderMode] for a provider that
-// does not implement the selected mode's interface; both are construction
-// failures on purpose, so a misconfigured deployment dies at boot rather
-// than at its first credential.
+// [ModeRootKey] — and cannot fail. It returns [ErrInvalidProvider] for a nil
+// provider or for two providers, and [ErrInvalidRotationLimit] for a rotation
+// limit it cannot honor: construction failures, so a misconfigured deployment
+// dies at boot rather than at its first credential.
 //
 // The returned Sealer performs no crypto and touches no locked memory until
 // its first Seal; a hardware provider is therefore not consulted at
 // construction, and a device problem surfaces from the first operation that
 // needs it.
 func NewSealer(opts ...SealerOption) (*Sealer, error) {
-	cfg := sealerConfig{mode: ModeRootKey}
+	var cfg sealerConfig
 	for _, opt := range opts {
 		opt(&cfg)
 	}
 
-	bind, ok := modeBindings[cfg.mode]
-	if !ok {
-		return nil, ErrInvalidMode
-	}
-	var owned *SoftwareProvider
-	if !cfg.providerSet {
-		owned = NewSoftwareProvider()
-		cfg.provider = owned
-	} else if isNilInterface(cfg.provider) {
-		// Refused HERE, not defaulted and not deferred: see [WithProvider].
-		// The typed-nil half is the treacherous one — it satisfies the
-		// interface assertions below and detonates at the first seal.
-		return nil, ErrProviderMode
+	s := &Sealer{initSlot: make(chan struct{}, 1), kekLimit: kekMessageLimit}
+	switch {
+	case cfg.providers > 1:
+		return nil, ErrInvalidProvider
+	case cfg.kp != nil:
+		// A typed nil satisfies the interface and would panic at the first
+		// seal; it is refused here with the untyped one.
+		if isNilInterface(cfg.kp) {
+			return nil, ErrInvalidProvider
+		}
+		s.mode, s.kp = ModePerOperation, cfg.kp
+		s.protect, s.unprotect = s.protectPerOperation, s.unprotectPerOperation
+	case cfg.ru != nil:
+		if isNilInterface(cfg.ru) {
+			return nil, ErrInvalidProvider
+		}
+		s.mode, s.ru = ModeRootKey, cfg.ru
+		s.protect, s.unprotect = s.protectRootKey, s.unprotectRootKey
+	case cfg.providers == 1:
+		return nil, ErrInvalidProvider
+	default:
+		s.owned = NewSoftwareProvider()
+		s.mode, s.ru = ModeRootKey, s.owned
+		s.protect, s.unprotect = s.protectRootKey, s.unprotectRootKey
 	}
 
-	kekLimit := uint64(kekMessageLimit)
 	if cfg.kekLimitSet {
-		if cfg.mode != ModeRootKey || cfg.kekLimit == 0 || cfg.kekLimit > kekMessageLimit {
+		if s.mode != ModeRootKey || cfg.kekLimit == 0 || cfg.kekLimit > kekMessageLimit {
 			return nil, ErrInvalidRotationLimit
 		}
-		kekLimit = cfg.kekLimit
-	}
-
-	s := &Sealer{mode: cfg.mode, health: cfg.health, initSlot: make(chan struct{}, 1), kekLimit: kekLimit, owned: owned}
-	if err := bind(s, cfg.provider); err != nil {
-		return nil, err
+		s.kekLimit = cfg.kekLimit
 	}
 	return s, nil
 }
 
 // isNilInterface reports whether v is nil in either of Go's two spellings:
 // the untyped nil interface, or a non-nil interface wrapping a nil value of a
-// nil-capable kind. The second is the one that `== nil` and interface
-// assertions cannot catch — (*SoftwareProvider)(nil) type-asserts
-// successfully to both seam interfaces, and a nil *rsa.PrivateKey is a
-// perfectly typed crypto.Decrypter — and calling any method on it panics.
-//
-// It is THE check for every interface-typed input this package will call
-// methods on — today that is the injected provider ([NewSealer]). Guarding
-// one constructor and not the next is how the class survives its instances:
-// the typed-nil defect was found and fixed on WithProvider first, then found
-// AGAIN, identical, in the very next interface-taking constructor one review
-// round later (the Decrypter/Signer adapter, since split out to issue #50).
-// New interface-typed inputs route through here, not through `== nil`. The
-// kind switch is scoped to exactly the kinds
-// reflect.Value.IsNil accepts, so a legitimate value-typed implementation is
-// never probed with a call that would panic on it.
+// nil-capable kind. The second passes `== nil` and the interface's type, and
+// panics at its first method call. The kind switch is scoped to exactly the
+// kinds reflect.Value.IsNil accepts, so a value-typed implementation is never
+// probed with a call that would panic on it.
 func isNilInterface(v any) bool {
 	if v == nil {
 		return true
@@ -699,30 +604,6 @@ func isNilInterface(v any) bool {
 	default:
 		return false
 	}
-}
-
-// bindRootKey checks and installs a [RootUnsealer]; see [modeBindings].
-func bindRootKey(s *Sealer, p any) error {
-	ru, ok := p.(RootUnsealer)
-	if !ok {
-		return ErrProviderMode
-	}
-	s.ru = ru
-	s.protect = s.protectRootKey
-	s.unprotect = s.unprotectRootKey
-	return nil
-}
-
-// bindPerOperation checks and installs a [KeyProtector]; see [modeBindings].
-func bindPerOperation(s *Sealer, p any) error {
-	kp, ok := p.(KeyProtector)
-	if !ok {
-		return ErrProviderMode
-	}
-	s.kp = kp
-	s.protect = s.protectPerOperation
-	s.unprotect = s.unprotectPerOperation
-	return nil
 }
 
 // Mode reports the mode this sealer was constructed with.
@@ -986,23 +867,6 @@ func (s *Sealer) open(ctx context.Context, a *Allocator, blob, sealed []byte, si
 	return out, nil
 }
 
-// sealHealth is the optional capability a provider implements to report that
-// it can no longer unprotect — today only [SoftwareProvider], whose root is an
-// in-process enclave a shutdown sweep destroys.
-//
-// It is UNEXPORTED, and that is a decision rather than an oversight. A
-// provider outside this package protects keys in a device, and a device
-// survives a sweep of this process's memory: "still openable" is the correct
-// answer for every such provider, so there is nothing for one to opt into.
-// Exporting it would instead invite a provider to report transient
-// infrastructure health (a device momentarily unreachable) through a question
-// that is about THIS process's memory, and [SealedEnclave.Openable] would
-// start meaning two different things depending on the provider. A liveness
-// probe for a device is a different API, designed as one if it is ever wanted.
-type sealHealth interface {
-	openable() error
-}
-
 // openable reports whether this sealer could still open a value it sealed,
 // answering only the question [SealedEnclave.Openable] documents: is the
 // in-process key material this sealer depends on still there. It performs no
@@ -1020,9 +884,9 @@ func (s *Sealer) openable(sealedAtGen uint64) error {
 		return err
 	}
 
-	// AN EXPLICIT ANSWER IS AUTHORITATIVE AND TERMINAL. Both arms below
-	// return whatever the provider says, including nil, and the
-	// sweep-generation fallback beneath them does not get to second-guess it.
+	// AN EXPLICIT ANSWER IS AUTHORITATIVE AND TERMINAL. A [HealthReporter]'s
+	// answer is returned as is, including nil, and the sweep-generation
+	// fallback beneath it does not get to second-guess it.
 	//
 	// That precedence is the whole design, not a convenience, and the argument
 	// matters more than the rule: a reader holding only "explicit wins" will
@@ -1039,31 +903,17 @@ func (s *Sealer) openable(sealedAtGen uint64) error {
 	// for exactly this reason: an answer that reads the same whatever the
 	// truth is cannot report anything.
 	//
-	// Both arms below are terminal, and each needs its own check because the
-	// two are reached by different providers:
+	// Pinned by:
 	//
-	//	callback arm    TestSealedEnclave_OpenableBelievesAProviderThatReports
-	//	                OpenableSplitsByMode/deviceHeldKeySurvivesTheSweep
-	//	sealHealth arm  TestSealedEnclave_OpenableBelievesTheInPackageHealthSeam
+	//	TestSealedEnclave_OpenableBelievesAProviderThatReports
+	//	TestSealedEnclave_OpenableSplitsByMode/deviceHeldKeySurvivesTheSweep
 	//
-	// All three go RED if the fallback is allowed to override an explicit
-	// answer. Run them before concluding that the extra check is free. The
-	// sealHealth one had to be written specially: SoftwareProvider is that
-	// seam's only production implementor and always reports wiped after a
-	// sweep, so without a provider that reports HEALTHY after one, that arm's
-	// precedence is unobservable — measured, by a mutant that survived the
-	// entire suite until the test existed.
-	if h, ok := s.kp.(sealHealth); ok {
-		return h.openable()
-	}
-	// Gated on kp so the option is IGNORED in ModeRootKey exactly as it is
-	// documented to be. Without the gate a caller reusing one health callback
-	// across both modes could get ErrSealerWiped from a sealer whose own root
-	// and KEK are demonstrably alive and whose Open would succeed — the
-	// hierarchy above is authoritative in that mode, and a provider callback
-	// must not be able to overrule it.
-	if s.kp != nil && s.health != nil {
-		return s.health()
+	// Both go RED if the fallback is allowed to override an explicit answer.
+	//
+	// Only kp is consulted: in ModeRootKey the hierarchy above is
+	// authoritative, and a RootUnsealer's report must not overrule it.
+	if h, ok := s.kp.(HealthReporter); ok {
+		return h.Health()
 	}
 
 	// Nothing can answer. Fall back to whether a sweep has happened at all.

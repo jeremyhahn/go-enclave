@@ -13,15 +13,15 @@ transport itself, behind the `KeyProtector`/`RootUnsealer` interfaces.
 | Capability | Embedded Go call | REST / gRPC / QUIC / MCP / Unix socket |
 |---|---|---|
 | Seal under the process sealer | `enclave.NewSealed(ctx, data)` | N/A |
-| Configure a sealer | `enclave.NewSealer(enclave.WithProvider(p), enclave.WithMode(m), enclave.WithProviderHealth(fn), enclave.WithKEKRotationLimit(n))` | N/A |
+| Configure a sealer | `enclave.NewSealer(enclave.WithKeyProtector(kp))` or `enclave.NewSealer(enclave.WithRootUnsealer(ru), enclave.WithKEKRotationLimit(n))` | N/A |
 | Install the process sealer | `enclave.SetSealer(s)` | N/A |
 | Seal under an explicit sealer | `(*Sealer).Seal(ctx, data)` | N/A |
 | Open (unbudgeted / budgeted) | `(*SealedEnclave).Open(ctx)`, `(*SealedEnclave).OpenWith(ctx, a)` | N/A |
 | Probe openability | `(*SealedEnclave).Openable()` | N/A |
-| Release ciphertext | `(*SealedEnclave).Destroy()` | N/A |
+| Release ciphertext | `(*SealedEnclave).Destroy() error` | N/A |
 | Release a sealer's keys | `(*Sealer).Destroy() error` | N/A |
 | Release the software provider's root | `(*SoftwareProvider).Destroy() error` | N/A |
-| Implement a provider | `KeyProtector`, `RootUnsealer`, `RootKeyBytes` | N/A |
+| Implement a provider | `KeyProtector`, `RootUnsealer`, optional `HealthReporter`, `RootKeyBytes` | N/A |
 | Software provider | `enclave.NewSoftwareProvider()` | N/A |
 | Check key-schedule erasure | `enclave.KeyScheduleErasure()` | N/A |
 

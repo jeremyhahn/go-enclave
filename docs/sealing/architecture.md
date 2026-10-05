@@ -44,9 +44,11 @@ flowchart TB
 ```
 
 The provider seam is **two interfaces**, `KeyProtector` and `RootUnsealer`,
-so `NewSealer` can refuse a provider that does not implement the selected
-mode at construction (`ErrProviderMode`), instead of at the first credential
-read. go-enclave ships one provider, `SoftwareProvider`, which implements both.
+injected through typed options (`WithKeyProtector`, `WithRootUnsealer`) that
+also select the mode, so a provider that cannot serve a mode does not compile.
+A `KeyProtector` may also implement `HealthReporter`, found by type assertion,
+to report whether a sweep took its in-process key material. go-enclave ships
+one provider, `SoftwareProvider`, which implements all three.
 
 ### What each mode buys against a live-memory reader
 
@@ -140,7 +142,8 @@ sequenceDiagram
 | Unmarshalling foreign sealed bytes | Would make an internal, unversioned, process-scoped format accidentally permanent. There is no constructor that accepts sealed bytes. |
 | Re-keying silently after a shutdown sweep | The next seal would succeed and old values would fail as `ErrSealedAuthentication`, presenting a lifecycle bug as an attack. The sealer fails closed with `ErrSealerWiped`. |
 | Sweeping `SealedEnclave` values in `WipeAll` | They hold no locked pages; in `ModePerOperation` they remain legitimately openable. `Openable` reports the state instead. |
-| Exporting the provider-health interface | Invites device-liveness answers to a question about this process's memory. `WithProviderHealth` takes a narrow callback instead. |
+| `WithProvider(any)` + `WithMode`, checked at construction | A mode/interface mismatch compiled and surfaced only at boot as an error. Typed options make it a compile error and leave one way to configure a sealer. |
+| A `WithProviderHealth(func() error)` callback | Kept health separate from the provider that knows it. `HealthReporter` is narrowed by its contract instead: in-process sealing state only, never device liveness. |
 | Charging `OpenWith`'s transient key pages to the budget | Two reservations per open let concurrent callers fragment the budget so every open fails under load. One reservation (the destination) gates the transients. |
 
 ## Component boundaries
@@ -154,7 +157,8 @@ sequenceDiagram
 | Conformance suite for providers | [providertest](../../providertest/providertest.go) — see [provider-conformance](../provider-conformance/architecture.md) |
 
 TPM, HSM and KMS providers live in higher layers and are injected through
-`NewSealer(WithProvider(p), WithMode(m))` or `SetSealer`.
+`NewSealer(WithKeyProtector(p))`, `NewSealer(WithRootUnsealer(p))`, or
+`SetSealer`.
 
 ## Trust boundaries
 

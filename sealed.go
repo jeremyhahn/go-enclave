@@ -808,12 +808,8 @@ func (s *SealedEnclave) IsAlive() bool {
 // nil and ErrOpenabilityUnknown are NOT variations of each other. nil is a
 // positive claim that nothing known prevents an open; the sentinel says this
 // package cannot see far enough to make that claim. Collapsing the second
-// into the first is a fail-open, and it is what this method did before
-// providers could report their own health: an out-of-package [KeyProtector]
-// cannot implement an unexported interface, so one keeping its key in this
-// process's locked memory was silently assumed healthy, reported nil, and
-// then failed to Open. Supply [WithProviderHealth] and the answer becomes
-// precise again.
+// into the first is a fail-open. A [KeyProtector] that implements
+// [HealthReporter] gets a precise answer instead of the sentinel.
 //
 // It exists because [SealedEnclave.IsAlive] cannot answer this and must not
 // try. IsAlive reports on the ciphertext, which survives a sweep; the keys do
@@ -840,8 +836,8 @@ func (s *SealedEnclave) IsAlive() bool {
 // deliberately not answered here). In [ModePerOperation] with a real
 // hardware provider, nil is the correct answer: the device holds the key, a
 // sweep of this process's memory does not invalidate it, and values stay
-// openable. Say so with [WithProviderHealth] — a provider that reports its
-// health is BELIEVED, and its answer is terminal. Without it, this package
+// openable. Say so by implementing [HealthReporter] — a provider that reports
+// its health is BELIEVED, and its answer is terminal. Without it, this package
 // falls back to whether a sweep has happened at all and returns
 // ErrOpenabilityUnknown, because it has no way to tell that provider apart
 // from one keeping its key in memory the sweep just destroyed.
@@ -855,11 +851,11 @@ func (s *SealedEnclave) IsAlive() bool {
 //
 // It takes no context, and the reason is the question it asks: whether a
 // sweep of THIS PROCESS's memory took something. Nothing in answering that
-// touches a device — the hierarchy is inspected in place, and a
-// [WithProviderHealth] callback is required to answer the same in-process
-// question without blocking. The value's lock is released before the sealer
-// is consulted all the same, so not even a misbehaving callback can hold up
-// this value's Open or Destroy.
+// touches a device — the hierarchy is inspected in place, and
+// [HealthReporter.Health] is required to answer the same in-process question
+// without blocking. The value's lock is released before the sealer is
+// consulted all the same, so not even a misbehaving provider can hold up this
+// value's Open or Destroy.
 func (s *SealedEnclave) Openable() error {
 	if s == nil {
 		return ErrEnclaveDestroyed
@@ -905,16 +901,19 @@ func (s *SealedEnclave) openableSnapshot() (*Sealer, uint64, bool) {
 //
 // Wiping ciphertext is belt and braces — without its keys it reveals nothing
 // — but it costs one pass over two heap slices and removes the question.
-func (s *SealedEnclave) Destroy() {
+//
+// It returns an error to match [MemoryEnclave.Destroy] and [Sealer.Destroy];
+// the sealed form holds only heap memory, so today that error is always nil.
+func (s *SealedEnclave) Destroy() error {
 	if s == nil {
-		return
+		return nil
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if s.sealed == nil {
-		return
+		return nil
 	}
 
 	// With an open in flight the halves are still being read; unpin wipes
@@ -930,6 +929,7 @@ func (s *SealedEnclave) Destroy() {
 	// and, in ModeRootKey, the retired-generation blobs it retains — for as
 	// long as the handle happens to live.
 	s.sealer = nil
+	return nil
 }
 
 // String masks the contents. It exists so that a sealed enclave reached by an

@@ -173,40 +173,52 @@ func (emptyBlobProtector) Unprotect(context.Context, []byte, []byte) error {
 	return ErrSealedAuthentication
 }
 
-// TestSealer_ModeProviderMismatchIsRefusedAtConstruction pins the reason the
-// seam is two interfaces: a provider that cannot serve the selected mode is
-// refused by NewSealer, so the misconfiguration dies at boot instead of at
-// the first credential.
-func TestSealer_ModeProviderMismatchIsRefusedAtConstruction(t *testing.T) {
-	// A KeyProtector-only provider cannot serve ModeRootKey.
-	if _, err := NewSealer(WithProvider(newMapKeyProtector(t)), WithMode(ModeRootKey)); !errors.Is(err, ErrProviderMode) {
-		t.Errorf("NewSealer(KeyProtector-only, ModeRootKey) = %v, want ErrProviderMode", err)
+// providerOption injects p in mode m, for tests that range over both modes.
+func providerOption(p any, m Mode) SealerOption {
+	if m == ModePerOperation {
+		kp, _ := p.(KeyProtector)
+		return WithKeyProtector(kp)
 	}
-	// A RootUnsealer-only provider cannot serve ModePerOperation.
-	if _, err := NewSealer(WithProvider(&fixedRootUnsealer{}), WithMode(ModePerOperation)); !errors.Is(err, ErrProviderMode) {
-		t.Errorf("NewSealer(RootUnsealer-only, ModePerOperation) = %v, want ErrProviderMode", err)
-	}
-	// A mode that names nothing is invalid whatever the provider offers.
-	if _, err := NewSealer(WithMode(Mode(99))); !errors.Is(err, ErrInvalidMode) {
-		t.Errorf("NewSealer(Mode(99)) = %v, want ErrInvalidMode", err)
-	}
+	ru, _ := p.(RootUnsealer)
+	return WithRootUnsealer(ru)
+}
 
-	// Controls: each refused pairing succeeds the right way around, and the
-	// dual-capability software provider serves both.
-	if _, err := NewSealer(WithProvider(newMapKeyProtector(t)), WithMode(ModePerOperation)); err != nil {
-		t.Errorf("NewSealer(KeyProtector, ModePerOperation): %v", err)
-	}
-	if _, err := NewSealer(WithProvider(&fixedRootUnsealer{fill: 0x42}), WithMode(ModeRootKey)); err != nil {
-		t.Errorf("NewSealer(RootUnsealer, ModeRootKey): %v", err)
-	}
-	for _, m := range []Mode{ModeRootKey, ModePerOperation} {
-		s, err := NewSealer(WithProvider(NewSoftwareProvider()), WithMode(m))
+// TestSealer_ProviderOptionSelectsTheMode pins that the provider option fixes
+// the mode, and that two provider options are refused rather than resolved by
+// order.
+func TestSealer_ProviderOptionSelectsTheMode(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		opt  SealerOption
+		want Mode
+	}{
+		{"KeyProtector", WithKeyProtector(newMapKeyProtector(t)), ModePerOperation},
+		{"RootUnsealer", WithRootUnsealer(&fixedRootUnsealer{fill: 0x42}), ModeRootKey},
+		{"software as KeyProtector", WithKeyProtector(NewSoftwareProvider()), ModePerOperation},
+		{"software as RootUnsealer", WithRootUnsealer(NewSoftwareProvider()), ModeRootKey},
+	} {
+		s, err := NewSealer(tc.opt)
 		if err != nil {
-			t.Errorf("NewSealer(SoftwareProvider, %v): %v", m, err)
+			t.Errorf("NewSealer(%s): %v", tc.name, err)
 			continue
 		}
-		if s.Mode() != m {
-			t.Errorf("Mode() = %v, want %v", s.Mode(), m)
+		if s.Mode() != tc.want {
+			t.Errorf("NewSealer(%s).Mode() = %v, want %v", tc.name, s.Mode(), tc.want)
+		}
+		if s.owned != nil {
+			t.Errorf("NewSealer(%s) owns a provider it was given", tc.name)
+		}
+	}
+
+	sp := NewSoftwareProvider()
+	for name, opts := range map[string][]SealerOption{
+		"both":                 {WithKeyProtector(sp), WithRootUnsealer(sp)},
+		"KeyProtector twice":   {WithKeyProtector(sp), WithKeyProtector(sp)},
+		"RootUnsealer twice":   {WithRootUnsealer(sp), WithRootUnsealer(sp)},
+		"nil after a live one": {WithRootUnsealer(sp), WithKeyProtector(nil)},
+	} {
+		if s, err := NewSealer(opts...); !errors.Is(err, ErrInvalidProvider) || s != nil {
+			t.Errorf("NewSealer(%s) = (%v, %v), want (nil, ErrInvalidProvider)", name, s, err)
 		}
 	}
 }
@@ -258,7 +270,7 @@ func TestSealer_DefaultIsSoftwareRootKey(t *testing.T) {
 func TestSealer_PerOperationRoundTrip(t *testing.T) {
 	for _, m := range []Mode{ModePerOperation, ModeRootKey} {
 		t.Run(m.String(), func(t *testing.T) {
-			s, err := NewSealer(WithProvider(NewSoftwareProvider()), WithMode(m))
+			s, err := NewSealer(providerOption(NewSoftwareProvider(), m))
 			if err != nil {
 				t.Fatalf("NewSealer: %v", err)
 			}
@@ -288,11 +300,11 @@ func TestSealer_PerOperationRoundTrip(t *testing.T) {
 func TestSealer_RefusesForeignProvider(t *testing.T) {
 	build := func(t *testing.T, m Mode) (*Sealer, *Sealer) {
 		t.Helper()
-		a, err := NewSealer(WithProvider(NewSoftwareProvider()), WithMode(m))
+		a, err := NewSealer(providerOption(NewSoftwareProvider(), m))
 		if err != nil {
 			t.Fatalf("NewSealer A: %v", err)
 		}
-		b, err := NewSealer(WithProvider(NewSoftwareProvider()), WithMode(m))
+		b, err := NewSealer(providerOption(NewSoftwareProvider(), m))
 		if err != nil {
 			t.Fatalf("NewSealer B: %v", err)
 		}
@@ -356,7 +368,7 @@ func TestSealer_RefusesForeignProvider(t *testing.T) {
 // exists to catch.
 func TestSealer_EnvelopeBindsBlobToCiphertext(t *testing.T) {
 	kp := newMapKeyProtector(t)
-	s, err := NewSealer(WithProvider(kp), WithMode(ModePerOperation))
+	s, err := NewSealer(WithKeyProtector(kp))
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
@@ -589,7 +601,7 @@ func TestSealer_ConcurrentSealsAcrossRotation(t *testing.T) {
 // binding at the same time.
 func TestSealer_ProviderRootReachesTheHierarchy(t *testing.T) {
 	salts := recordWrapSalts(t)
-	s, err := NewSealer(WithProvider(&fixedRootUnsealer{fill: 0x5A}), WithMode(ModeRootKey))
+	s, err := NewSealer(WithRootUnsealer(&fixedRootUnsealer{fill: 0x5A}))
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
@@ -706,7 +718,7 @@ func TestSealer_WipedFailsClosedPerMode(t *testing.T) {
 	})
 
 	t.Run("ModePerOperation_software", func(t *testing.T) {
-		s, err := NewSealer(WithProvider(NewSoftwareProvider()), WithMode(ModePerOperation))
+		s, err := NewSealer(WithKeyProtector(NewSoftwareProvider()))
 		if err != nil {
 			t.Fatalf("NewSealer: %v", err)
 		}
@@ -727,7 +739,7 @@ func TestSealer_WipedFailsClosedPerMode(t *testing.T) {
 	})
 
 	t.Run("ModePerOperation_deviceHeld", func(t *testing.T) {
-		s, err := NewSealer(WithProvider(newMapKeyProtector(t)), WithMode(ModePerOperation))
+		s, err := NewSealer(WithKeyProtector(newMapKeyProtector(t)))
 		if err != nil {
 			t.Fatalf("NewSealer: %v", err)
 		}
@@ -768,7 +780,7 @@ func TestSealer_WipedFailsClosedPerMode(t *testing.T) {
 // cause still reachable.
 func TestSealer_ProviderErrorsSurfaceHonestly(t *testing.T) {
 	deviceDown := errors.New("device unreachable: session pool exhausted")
-	s, err := NewSealer(WithProvider(&erroringProvider{err: deviceDown}), WithMode(ModePerOperation))
+	s, err := NewSealer(WithKeyProtector(&erroringProvider{err: deviceDown}))
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
@@ -789,7 +801,7 @@ func TestSealer_ProviderErrorsSurfaceHonestly(t *testing.T) {
 	// join it under ErrOpenFailed — the open-side "could not", never a
 	// forgery verdict.
 	kp := newMapKeyProtector(t)
-	healthy, err := NewSealer(WithProvider(kp), WithMode(ModePerOperation))
+	healthy, err := NewSealer(WithKeyProtector(kp))
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
@@ -814,7 +826,7 @@ func TestSealer_ProviderErrorsSurfaceHonestly(t *testing.T) {
 
 	// A provider returning an empty blob is a contract violation caught at
 	// seal time, not at the first failed open months later.
-	eb, err := NewSealer(WithProvider(emptyBlobProtector{}), WithMode(ModePerOperation))
+	eb, err := NewSealer(WithKeyProtector(emptyBlobProtector{}))
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
@@ -836,7 +848,7 @@ func TestSealer_SetSealerIsOneShot(t *testing.T) {
 	}
 
 	kp := newMapKeyProtector(t)
-	own, err := NewSealer(WithProvider(kp), WithMode(ModePerOperation))
+	own, err := NewSealer(WithKeyProtector(kp))
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
@@ -892,9 +904,8 @@ func TestSealer_NilReceiver(t *testing.T) {
 	}
 }
 
-// TestSealer_ModeString covers the diagnostic surface, including the value
-// ErrInvalidMode refuses, so a log line during that refusal names the number
-// rather than printing garbage.
+// TestSealer_ModeString covers the diagnostic surface, including a value that
+// names no mode, which prints its number rather than garbage.
 func TestSealer_ModeString(t *testing.T) {
 	for want, m := range map[string]Mode{
 		"ModeRootKey":      ModeRootKey,
@@ -1078,7 +1089,7 @@ func (f *flakyRootUnsealer) UnsealRoot(ctx context.Context, dst []byte) error {
 // initHierarchy for the design note this pins.
 func TestSealer_RootUnsealFailureSurfacesAndRetries(t *testing.T) {
 	flaky := &flakyRootUnsealer{failures: 1, inner: fixedRootUnsealer{fill: 0x33}}
-	s, err := NewSealer(WithProvider(flaky), WithMode(ModeRootKey))
+	s, err := NewSealer(WithRootUnsealer(flaky))
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
@@ -1113,7 +1124,7 @@ func TestSealer_RootUnsealFailureSurfacesAndRetries(t *testing.T) {
 
 	// A permanently failing provider fails every seal, typed, with no panic
 	// and no fallback root.
-	dead, err := NewSealer(WithProvider(&erroringProvider{err: errors.New("device gone")}), WithMode(ModeRootKey))
+	dead, err := NewSealer(WithRootUnsealer(&erroringProvider{err: errors.New("device gone")}))
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
@@ -1249,7 +1260,7 @@ func TestSealer_PerCallLossDuringRotationIsNotAWipe(t *testing.T) {
 // the sealer.
 func TestSealer_WipedDoesNotReconsultAWillingProvider(t *testing.T) {
 	willing := &flakyRootUnsealer{failures: 0, inner: fixedRootUnsealer{fill: 0x66}}
-	s, err := NewSealer(WithProvider(willing), WithMode(ModeRootKey))
+	s, err := NewSealer(WithRootUnsealer(willing))
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
@@ -1278,15 +1289,11 @@ func TestSealer_WipedDoesNotReconsultAWillingProvider(t *testing.T) {
 	}
 }
 
-// TestSealer_NilProvidersAreRefusedAtConstruction pins the typed-nil trap
-// found by review on PR #45: (*SoftwareProvider)(nil) is a NON-nil interface
-// that satisfies both seam type assertions, so without a value-level check
-// NewSealer succeeded and the first Seal panicked dereferencing the
-// provider — a panic where a typed construction error belongs, in a library
-// that fails closed. Untyped nil is refused too rather than defaulted:
-// WithProvider(nil) is a lost configuration step, and silently substituting
-// the software provider for the hardware one somebody meant to pass is the
-// fail-open this constructor exists to prevent.
+// TestSealer_NilProvidersAreRefusedAtConstruction pins the typed-nil trap:
+// (*SoftwareProvider)(nil) is a NON-nil interface value, so without a
+// value-level check NewSealer would succeed and the first Seal would panic.
+// Untyped nil is refused too rather than defaulted: silently substituting the
+// software provider for the hardware one somebody meant to pass is fail-open.
 func TestSealer_NilProvidersAreRefusedAtConstruction(t *testing.T) {
 	providers := map[string]any{
 		"untyped nil":            nil,
@@ -1297,9 +1304,9 @@ func TestSealer_NilProvidersAreRefusedAtConstruction(t *testing.T) {
 	for _, m := range []Mode{ModeRootKey, ModePerOperation} {
 		for name, p := range providers {
 			t.Run(m.String()+"/"+name, func(t *testing.T) {
-				s, err := NewSealer(WithProvider(p), WithMode(m))
-				if !errors.Is(err, ErrProviderMode) {
-					t.Errorf("NewSealer(%s, %v) = %v, want ErrProviderMode", name, m, err)
+				s, err := NewSealer(providerOption(p, m))
+				if !errors.Is(err, ErrInvalidProvider) {
+					t.Errorf("NewSealer(%s, %v) = %v, want ErrInvalidProvider", name, m, err)
 				}
 				if s != nil {
 					t.Errorf("NewSealer(%s, %v) returned a sealer alongside its refusal", name, m)
@@ -1311,7 +1318,7 @@ func TestSealer_NilProvidersAreRefusedAtConstruction(t *testing.T) {
 	// Control: the refusal is about nil, not about the option — the same
 	// call with live providers still constructs (the mismatch test covers
 	// the wrong-interface cases).
-	if _, err := NewSealer(WithProvider(NewSoftwareProvider()), WithMode(ModeRootKey)); err != nil {
+	if _, err := NewSealer(WithRootUnsealer(NewSoftwareProvider())); err != nil {
 		t.Errorf("NewSealer(live provider): %v", err)
 	}
 }
@@ -1733,7 +1740,7 @@ func TestSealer_WithKEKRotationLimitIsValidated(t *testing.T) {
 	}{
 		{"zero", []SealerOption{WithKEKRotationLimit(0)}, false},
 		{"above the safe bound", []SealerOption{WithKEKRotationLimit(kekMessageLimit + 1)}, false},
-		{"per-operation mode has no KEK", []SealerOption{WithMode(ModePerOperation), WithKEKRotationLimit(10)}, false},
+		{"per-operation mode has no KEK", []SealerOption{WithKeyProtector(NewSoftwareProvider()), WithKEKRotationLimit(10)}, false},
 		{"one", []SealerOption{WithKEKRotationLimit(1)}, true},
 		{"the safe bound", []SealerOption{WithKEKRotationLimit(kekMessageLimit)}, true},
 	} {
@@ -2005,7 +2012,7 @@ func TestSealer_SealersSharingARootWrapUnderDistinctKeys(t *testing.T) {
 	salts := recordWrapSalts(t)
 	var sealers [2]*Sealer
 	for i := range sealers {
-		s, err := NewSealer(WithProvider(p), WithMode(ModeRootKey))
+		s, err := NewSealer(WithRootUnsealer(p))
 		if err != nil {
 			t.Fatalf("NewSealer: %v", err)
 		}
@@ -2134,7 +2141,7 @@ func TestSealer_KEKFailureDoesNotReunsealTheRoot(t *testing.T) {
 			failNextLock(t)
 		}
 	}
-	s, err := NewSealer(WithProvider(ru), WithMode(ModeRootKey))
+	s, err := NewSealer(WithRootUnsealer(ru))
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
@@ -2183,7 +2190,7 @@ func TestSealer_SweptPendingRootIsWipedNotReunsealed(t *testing.T) {
 			failNextLock(t)
 		}
 	}
-	s, err := NewSealer(WithProvider(ru), WithMode(ModeRootKey))
+	s, err := NewSealer(WithRootUnsealer(ru))
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
@@ -2419,7 +2426,7 @@ func TestSealer_EndedContextIsRefusedBeforeAnyWork(t *testing.T) {
 		for name, ec := range endedContexts(t) {
 			t.Run(m.String()+"/"+name, func(t *testing.T) {
 				p := newBlockingProvider()
-				s, err := NewSealer(WithProvider(p), WithMode(m))
+				s, err := NewSealer(providerOption(p, m))
 				if err != nil {
 					t.Fatalf("NewSealer: %v", err)
 				}
@@ -2494,7 +2501,7 @@ func TestSealer_CancellationReachesTheProvider(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Seal: %v", err)
 		}
-		t.Cleanup(v.Destroy)
+		t.Cleanup(func() { _ = v.Destroy() })
 		return func(ctx context.Context) error {
 			e, err := v.Open(ctx)
 			if e != nil {
@@ -2513,7 +2520,7 @@ func TestSealer_CancellationReachesTheProvider(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			p := newBlockingProvider()
 			p.honor = true
-			s, err := NewSealer(WithProvider(p), WithMode(tc.mode))
+			s, err := NewSealer(providerOption(p, tc.mode))
 			if err != nil {
 				t.Fatalf("NewSealer: %v", err)
 			}
@@ -2568,7 +2575,7 @@ func TestSealer_CancellationReachesTheProvider(t *testing.T) {
 func TestSealer_ContextEndingDuringASuccessfulCallIsHonoured(t *testing.T) {
 	t.Run("Protect", func(t *testing.T) {
 		p := newBlockingProvider()
-		s, err := NewSealer(WithProvider(p), WithMode(ModePerOperation))
+		s, err := NewSealer(WithKeyProtector(p))
 		if err != nil {
 			t.Fatalf("NewSealer: %v", err)
 		}
@@ -2580,7 +2587,7 @@ func TestSealer_ContextEndingDuringASuccessfulCallIsHonoured(t *testing.T) {
 
 	t.Run("Unprotect", func(t *testing.T) {
 		p := newBlockingProvider()
-		s, err := NewSealer(WithProvider(p), WithMode(ModePerOperation))
+		s, err := NewSealer(WithKeyProtector(p))
 		if err != nil {
 			t.Fatalf("NewSealer: %v", err)
 		}
@@ -2598,7 +2605,7 @@ func TestSealer_ContextEndingDuringASuccessfulCallIsHonoured(t *testing.T) {
 
 	t.Run("UnsealRoot", func(t *testing.T) {
 		p := newBlockingProvider()
-		s, err := NewSealer(WithProvider(p), WithMode(ModeRootKey))
+		s, err := NewSealer(WithRootUnsealer(p))
 		if err != nil {
 			t.Fatalf("NewSealer: %v", err)
 		}
@@ -2637,7 +2644,7 @@ func TestSealer_ContextEndingDuringASuccessfulCallIsHonoured(t *testing.T) {
 func TestSealer_BlockedUnsealDoesNotStallOthers(t *testing.T) {
 	stuck := newBlockingProvider()
 	stuck.release = make(chan struct{})
-	s, err := NewSealer(WithProvider(stuck), WithMode(ModeRootKey))
+	s, err := NewSealer(WithRootUnsealer(stuck))
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
@@ -2709,7 +2716,7 @@ func TestSealer_UnsealRootAtMostOnceUnderConcurrentFirstUse(t *testing.T) {
 	const callers = 8
 	p := newBlockingProvider()
 	p.release = make(chan struct{})
-	s, err := NewSealer(WithProvider(p), WithMode(ModeRootKey))
+	s, err := NewSealer(WithRootUnsealer(p))
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
@@ -2749,7 +2756,7 @@ func TestSealer_CanceledUnsealIsRetriedByTheNextCaller(t *testing.T) {
 	p := newBlockingProvider()
 	p.honor = true
 	p.release = make(chan struct{})
-	s, err := NewSealer(WithProvider(p), WithMode(ModeRootKey))
+	s, err := NewSealer(WithRootUnsealer(p))
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
@@ -2865,7 +2872,7 @@ func TestSealer_SweepDuringABlockedUnsealLeavesTheSealerWiped(t *testing.T) {
 			// destroy the provider's enclave before the provider borrows it —
 			// an unseal failure decided by the scheduler, not by the sealer.
 			p := &gatedRootUnsealer{entered: make(chan struct{}, 1), release: make(chan struct{})}
-			s, err := NewSealer(WithProvider(p), WithMode(ModeRootKey))
+			s, err := NewSealer(WithRootUnsealer(p))
 			if err != nil {
 				t.Fatalf("NewSealer: %v", err)
 			}
@@ -2904,7 +2911,7 @@ func TestSealer_SweepDuringABlockedUnsealLeavesTheSealerWiped(t *testing.T) {
 // reach the provider, and both must report the cancellation.
 func TestSealer_InitSlotRefusesAnEndedContext(t *testing.T) {
 	p := newBlockingProvider()
-	s, err := NewSealer(WithProvider(p), WithMode(ModeRootKey))
+	s, err := NewSealer(WithRootUnsealer(p))
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
@@ -2925,7 +2932,7 @@ func TestSealer_InitSlotRefusesAnEndedContext(t *testing.T) {
 // opens after the Destroy are refused.
 func TestSealedEnclave_DestroyDoesNotWaitForABlockedOpen(t *testing.T) {
 	p := newBlockingProvider()
-	s, err := NewSealer(WithProvider(p), WithMode(ModePerOperation))
+	s, err := NewSealer(WithKeyProtector(p))
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
@@ -3099,7 +3106,7 @@ func TestProviderOpenFailure(t *testing.T) {
 // absent and unseal again.
 func TestSealer_InitAfterASweepOfThePublishedHierarchyIsWiped(t *testing.T) {
 	p := newBlockingProvider()
-	s, err := NewSealer(WithProvider(p), WithMode(ModeRootKey))
+	s, err := NewSealer(WithRootUnsealer(p))
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
@@ -3163,7 +3170,7 @@ func (u *gatedRootUnsealer) callCount() int {
 // resident behind an allocation error.
 func TestSealer_SweepOverlapIsCheckedBeforeTheMint(t *testing.T) {
 	u := &gatedRootUnsealer{entered: make(chan struct{}, 1), release: make(chan struct{})}
-	s, err := NewSealer(WithProvider(u), WithMode(ModeRootKey))
+	s, err := NewSealer(WithRootUnsealer(u))
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
@@ -3214,7 +3221,7 @@ func TestSealer_SweepDuringAFailedMintIsWiped(t *testing.T) {
 			return errors.New("mlock: cannot allocate memory")
 		}
 	}
-	s, err := NewSealer(WithProvider(u), WithMode(ModeRootKey))
+	s, err := NewSealer(WithRootUnsealer(u))
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
@@ -3241,7 +3248,7 @@ func TestSealer_CancellationShapesAFailedMint(t *testing.T) {
 		failNextLock(t)
 		cancel(why)
 	}
-	s, err := NewSealer(WithProvider(u), WithMode(ModeRootKey))
+	s, err := NewSealer(WithRootUnsealer(u))
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
@@ -3283,7 +3290,7 @@ func TestNewSealed_EndedContextInstallsNothing(t *testing.T) {
 				t.Error("a refused NewSealed left the caller's material in place")
 			}
 
-			own, err := NewSealer(WithProvider(newMapKeyProtector(t)), WithMode(ModePerOperation))
+			own, err := NewSealer(WithKeyProtector(newMapKeyProtector(t)))
 			if err != nil {
 				t.Fatalf("NewSealer: %v", err)
 			}
@@ -3318,7 +3325,7 @@ func (p *authThenCancelProtector) Unprotect(context.Context, []byte, []byte) err
 // kept clear of ErrSealedAuthentication.
 func TestSealer_AuthenticationVerdictSurvivesCancellation(t *testing.T) {
 	p := &authThenCancelProtector{inner: NewSoftwareProvider()}
-	s, err := NewSealer(WithProvider(p), WithMode(ModePerOperation))
+	s, err := NewSealer(WithKeyProtector(p))
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
@@ -3370,7 +3377,7 @@ func (p *parkingProtector) Unprotect(ctx context.Context, blob, key []byte) erro
 // open is still reading it, and be wiped by the second.
 func TestSealedEnclave_OnlyTheLastOpenOutWipes(t *testing.T) {
 	p := &parkingProtector{inner: NewSoftwareProvider(), arrivals: make(chan chan error)}
-	s, err := NewSealer(WithProvider(p), WithMode(ModePerOperation))
+	s, err := NewSealer(WithKeyProtector(p))
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
@@ -3452,7 +3459,7 @@ func TestSealer_PassThroughSentinelsAreJoinedWhenTheContextEnds(t *testing.T) {
 	for _, sentinel := range []error{ErrSealerWiped, ErrLockedMemoryUnavailable} {
 		t.Run("open/"+sentinel.Error(), func(t *testing.T) {
 			p := &errorThenCancelProtector{inner: NewSoftwareProvider()}
-			s, err := NewSealer(WithProvider(p), WithMode(ModePerOperation))
+			s, err := NewSealer(WithKeyProtector(p))
 			if err != nil {
 				t.Fatalf("NewSealer: %v", err)
 			}
@@ -3491,7 +3498,7 @@ func TestSealer_PassThroughSentinelsAreJoinedWhenTheContextEnds(t *testing.T) {
 		t.Run("seal/"+sentinel.Error(), func(t *testing.T) {
 			ctx, cancel := context.WithCancel(t.Context())
 			p := &errorThenCancelProtector{inner: NewSoftwareProvider(), cancel: cancel, protectErr: sentinel}
-			s, err := NewSealer(WithProvider(p), WithMode(ModePerOperation))
+			s, err := NewSealer(WithKeyProtector(p))
 			if err != nil {
 				t.Fatalf("NewSealer: %v", err)
 			}
@@ -3517,7 +3524,7 @@ func TestSealer_PassThroughSentinelsAreJoinedWhenTheContextEnds(t *testing.T) {
 // state is wiped for good — retries the release.
 func TestSealer_RefusedReleaseOfASweptRootIsReportedAndRetried(t *testing.T) {
 	u := &gatedRootUnsealer{entered: make(chan struct{}, 1), release: make(chan struct{})}
-	s, err := NewSealer(WithProvider(u), WithMode(ModeRootKey))
+	s, err := NewSealer(WithRootUnsealer(u))
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
@@ -3585,7 +3592,7 @@ func regionContains(region []byte, addr uintptr) bool {
 // sequence moves, the root survives, and the mint then completes under it.
 func TestSealer_RefusedReleaseOfADiscardedKEKIsRetried(t *testing.T) {
 	u := &gatedRootUnsealer{}
-	s, err := NewSealer(WithProvider(u), WithMode(ModeRootKey))
+	s, err := NewSealer(WithRootUnsealer(u))
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}

@@ -98,15 +98,11 @@ type SoftwareProvider struct {
 	destroyed bool
 }
 
-// SoftwareProvider is the default provider for both modes — [NewSealer] uses it
-// as a [KeyProtector] under [ModePerOperation] and as a [RootUnsealer] under
-// [ModeRootKey]. The provider reaches the Sealer untyped and is matched against
-// the seam at run time, so without these a signature drift on either interface
-// would still compile and surface only as [ErrProviderMode] from the DEFAULT
-// constructor. They make it fail the build here instead.
+// SoftwareProvider serves both modes and reports its own sweep state.
 var (
-	_ KeyProtector = (*SoftwareProvider)(nil)
-	_ RootUnsealer = (*SoftwareProvider)(nil)
+	_ KeyProtector   = (*SoftwareProvider)(nil)
+	_ RootUnsealer   = (*SoftwareProvider)(nil)
+	_ HealthReporter = (*SoftwareProvider)(nil)
 )
 
 // NewSoftwareProvider returns a software provider with no root yet; the root
@@ -136,7 +132,7 @@ func (p *SoftwareProvider) rootLocked() (*MemoryEnclave, error) {
 	return root, nil
 }
 
-// openable implements sealHealth: it reports [ErrSealerDestroyed] after
+// Health implements [HealthReporter]: it reports [ErrSealerDestroyed] after
 // Destroy, [ErrSealerWiped] once a shutdown sweep has destroyed this
 // provider's root, and nil otherwise.
 //
@@ -145,7 +141,7 @@ func (p *SoftwareProvider) rootLocked() (*MemoryEnclave, error) {
 // exist — that would turn a diagnostic into an allocation of locked memory
 // and a call to the CSPRNG. A nil root therefore reports nil: nothing was
 // sealed through this provider, so nothing it holds is unopenable.
-func (p *SoftwareProvider) openable() error {
+func (p *SoftwareProvider) Health() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 

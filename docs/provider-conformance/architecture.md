@@ -27,7 +27,7 @@ dependency on any provider, and nothing in go-enclave depends on it.
 flowchart TD
   T["TestProvider(ctx, cfg)"] --> V{cfg valid?}
   V -- no --> CE["*ConfigError (ErrInvalidConfig)"]
-  V -- yes --> MP["mode/interface pairing:<br/>claimed modes accepted, unclaimed refused with ErrProviderMode"]
+  V -- yes --> MP["mode/interface pairing:<br/>claimed modes implemented and accepted, unclaimed not implemented"]
   MP --> KP{"claims ModePerOperation?"}
   KP -- yes --> KPC["KeyProtector checks:<br/>round trip · Protect retains no slice ·<br/>no write after caller wiped dst ·<br/>no disturbance by a later call ·<br/>tampered blob refused · wrong length refused ·<br/>ended context refused · residue sweep"]
   KP -- no --> RU

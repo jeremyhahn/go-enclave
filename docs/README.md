@@ -30,6 +30,9 @@ sections.
 | Unlocked and string accessors | `Open`, `OpenString`, `NewMemoryEnclaveFromString` | deprecated (still work); use `WithBytes`, `NewMemoryEnclave` | [locked-memory](locked-memory/user.md#migrating-from-v07) |
 | Retune refusal type | `*LimitError` | `*BudgetInUseError` | [locked-memory-budget](locked-memory-budget/user.md#migrating-from-v07) |
 | Nil `*Allocator` | `New`/`NewSized` panicked | `ErrNilAllocator` from every method that can fail | [locked-memory-budget](locked-memory-budget/user.md#migrating-from-v07) |
+| Sealer provider | `WithProvider(p)`, `WithMode(m)`; `ErrProviderMode`, `ErrInvalidMode` | `WithKeyProtector(kp)` or `WithRootUnsealer(ru)`; `ErrInvalidProvider` | [sealing](sealing/user.md#migrating-from-v07) |
+| Provider health | `WithProviderHealth(fn)` | provider implements `HealthReporter` | [sealing](sealing/user.md#migrating-from-v07) |
+| Sealed release | `SealedEnclave.Destroy()` | `SealedEnclave.Destroy() error` | [sealing](sealing/user.md#migrating-from-v07) |
 
 ## Upgrading from v0.6 to v0.7
 

@@ -23,11 +23,9 @@ import "context"
 // and the reason is where a mismatch is caught. A provider implements only
 // what its mode needs — an HSM built for per-operation work has no root to
 // unseal, and a TPM used only to gate a root key need not expose per-value
-// protection. With the capabilities split, [NewSealer] checks the provider
-// against the selected [Mode] at CONSTRUCTION and refuses a mismatch with
-// [ErrProviderMode] — a misconfiguration that fails at boot, instead of at the
-// first credential read hours later under a mode the provider silently could
-// not serve.
+// protection. With the capabilities split, the option that injects a provider
+// ([WithKeyProtector] or [WithRootUnsealer]) is typed by the interface its
+// mode needs, so a provider that cannot serve a mode does not compile.
 
 // RootKeyBytes is the size of the buffer [RootUnsealer.UnsealRoot] receives,
 // and therefore the size of every root key in this package: 32 bytes, an
@@ -166,4 +164,26 @@ type KeyProtector interface {
 // visible alongside the cancellation rather than overwritten by it.
 type RootUnsealer interface {
 	UnsealRoot(ctx context.Context, dst []byte) error
+}
+
+// HealthReporter is an optional capability of a [KeyProtector]: a provider
+// that implements it is asked by [SealedEnclave.Openable] whether its
+// IN-PROCESS sealing state is still intact.
+//
+// Health returns nil if the provider can still unprotect what it protected,
+// and an error matching [ErrSealerWiped] (or [ErrSealerDestroyed]) if a
+// shutdown [WipeAll] or Destroy took key material it depends on. It answers
+// only that question; it is not a device liveness probe. A provider whose key
+// lives in a TPM, HSM or cloud KMS survives a sweep of this process's memory
+// and should return nil unconditionally, so Openable means the same thing
+// whichever provider is installed. Health must not block: it takes no
+// context, and it is called with no lock of this package's held.
+//
+// The answer is authoritative: a sealer believes it and does not fall back
+// to [ErrOpenabilityUnknown]. A KeyProtector that does not implement
+// HealthReporter gets that fallback after a sweep. In [ModeRootKey] the
+// sealer inspects its own in-process hierarchy instead, so a [RootUnsealer]'s
+// HealthReporter is not consulted.
+type HealthReporter interface {
+	Health() error
 }

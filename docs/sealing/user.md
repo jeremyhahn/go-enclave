@@ -133,24 +133,24 @@ Install once in `main`, before anything seals (the first `NewSealed` otherwise
 installs the software default and locks the configuration):
 
 ```go
-p := newTPMProvider() // your KeyProtector and/or RootUnsealer
-s, err := enclave.NewSealer(
-	enclave.WithProvider(p),
-	enclave.WithMode(enclave.ModePerOperation),
-	enclave.WithProviderHealth(func() error { return nil }), // key lives in the device
-)
+p := newTPMProvider() // an enclave.KeyProtector
+s, err := enclave.NewSealer(enclave.WithKeyProtector(p)) // ModePerOperation
 if err != nil {
-	log.Fatal(err) // ErrProviderMode: p does not implement KeyProtector
+	log.Fatal(err) // ErrInvalidProvider: p is nil
 }
 if err := enclave.SetSealer(s); err != nil {
 	log.Fatal(err) // ErrSealerInstalled
 }
 ```
 
-Supply `WithProviderHealth` when the provider's key is not in this process's
-memory (report `nil`) or can tell that a sweep destroyed it (report
-`ErrSealerWiped`). The callback must not block. To write a provider, see
-[provider-conformance](../provider-conformance/user.md).
+`WithKeyProtector` selects `ModePerOperation`; `WithRootUnsealer` selects
+`ModeRootKey`. The option is typed by the interface its mode needs, so a
+provider that cannot serve the mode does not compile.
+
+Implement `HealthReporter` (`Health() error`) on a `KeyProtector` when its key
+is not in this process's memory (return `nil`) or when it can tell that a sweep
+destroyed it (return `ErrSealerWiped`). `Health` must not block. To write a
+provider, see [provider-conformance](../provider-conformance/user.md).
 
 ## After a shutdown sweep
 
@@ -162,10 +162,10 @@ value keeps reporting `IsAlive() == true` (its ciphertext is still there); ask
 | `Openable()` | Meaning |
 |---|---|
 | `nil` | Nothing known prevents an open. |
-| `ErrSealerWiped` | A sweep destroyed in-process keys this sealer needs (in `ModeRootKey`, its root or current KEK), or the provider's health callback reports it; the value can never be opened. |
+| `ErrSealerWiped` | A sweep destroyed in-process keys this sealer needs (in `ModeRootKey`, its root or current KEK), or the provider's `HealthReporter` reports it; the value can never be opened. |
 | `ErrSealerDestroyed` | `(*Sealer).Destroy` ran; the value can never be opened. |
 | `ErrEnclaveDestroyed` | The value itself was destroyed. |
-| `ErrOpenabilityUnknown` | A sweep ran and the provider reports no health; open it to find out. |
+| `ErrOpenabilityUnknown` | A sweep ran and the provider does not implement `HealthReporter`; open it to find out. |
 
 A wiped sealer never re-keys. Construct a new `Sealer` and re-seal from source.
 
@@ -175,13 +175,59 @@ A wiped sealer never re-keys. Construct a new `Sealer` and re-seal from source.
 |---|---|---|
 | Every seal fails with `ErrSealFailed` wrapping `NewGCMWithRandomNonce requires aes.Block` | Built with `GOEXPERIMENT=boringcrypto` | Not supported; use Go's native FIPS 140-3 module (`GOFIPS140`; see [engineering.md](engineering.md#fips-140-3)). |
 | `ErrSealerInstalled` from `SetSealer` | Something sealed first | Install earlier in `main`. |
-| `ErrProviderMode` from `NewSealer` | Provider lacks the mode's interface, or is nil/typed nil | Pick the mode the provider implements; check the provider variable is set. |
+| `ErrInvalidProvider` from `NewSealer` | A provider option got nil or a typed nil, or both provider options were given | Check the provider variable is set; pass exactly one of `WithKeyProtector` or `WithRootUnsealer`. |
 | `ErrOpenFailed` intermittently | Deadline too short, or device/KMS unavailable | If the error matches none of `ErrSealedAuthentication`, `ErrSealerWiped` or `ErrEnclaveDestroyed`, the value is intact. Classify any provider cause first (`errors.As` on its types): never retry a permanent one, even if a cancellation is joined with it; retry a transient one; retry a bare cancellation with a live context. |
 | `ErrSealerWiped` | A shutdown `WipeAll` destroyed this sealer's own keys (its root or current KEK in `ModeRootKey`), or the provider returned it. A sweep that destroys only one call's working key gives `ErrEnclaveDestroyed` instead | Check `Openable()` on a value: `ErrSealerWiped` there means the sealer is dead (expected at exit; mid-run, something called `WipeAll` too early). |
 | `ErrSealerDestroyed` | Something called `Destroy` on this sealer (or on the `SoftwareProvider` it uses) | Destroy a sealer only after its last use; construct a new one and re-seal from source. |
 | `ErrSealerNotConstructed` | A `Sealer` not built by `NewSealer` (for example a zero value) | Construct it with `NewSealer`. |
 | `ErrProviderMessageLimit` | `SoftwareProvider` used in `ModePerOperation` past 2^31 seals | Use `ModeRootKey` (rotates KEKs) or a hardware provider. |
 | Locked memory grows with traffic | Each `Open` takes a locked page | Destroy opened enclaves promptly; use `OpenWith` so the budget sees it. |
+
+## Migrating from v0.7
+
+**Typed provider options replace `WithProvider` and `WithMode`.** The option
+now selects the mode, and `ErrProviderMode` and `ErrInvalidMode` are gone: a
+mismatch no longer compiles.
+
+```go
+// v0.7
+s, err := enclave.NewSealer(enclave.WithProvider(p), enclave.WithMode(enclave.ModePerOperation))
+r, err := enclave.NewSealer(enclave.WithProvider(p)) // ModeRootKey
+
+// v0.8
+s, err := enclave.NewSealer(enclave.WithKeyProtector(p))
+r, err := enclave.NewSealer(enclave.WithRootUnsealer(p))
+```
+
+A nil or typed-nil provider, or both options at once, returns
+`ErrInvalidProvider`. `WithMode(ModePerOperation)` with no provider used a
+software provider the sealer owned; pass one explicitly and destroy it
+yourself:
+
+```go
+p := enclave.NewSoftwareProvider()
+defer p.Destroy()
+s, err := enclave.NewSealer(enclave.WithKeyProtector(p))
+```
+
+**`WithProviderHealth` is replaced by the `HealthReporter` interface.** Move
+the callback onto the provider as a `Health() error` method; the sealer finds
+it by type assertion.
+
+```go
+// v0.7
+enclave.NewSealer(enclave.WithProvider(p), enclave.WithMode(enclave.ModePerOperation),
+	enclave.WithProviderHealth(p.health))
+
+// v0.8
+func (p *MyProvider) Health() error { return p.health() }
+enclave.NewSealer(enclave.WithKeyProtector(p))
+```
+
+**`(*SealedEnclave).Destroy` returns `error`**, like `MemoryEnclave.Destroy`
+and `Sealer.Destroy`. It is always `nil` today; a `defer s.Destroy()` still
+compiles, and a method value passed as `func()` (for example
+`t.Cleanup(s.Destroy)`) needs a wrapper.
 
 ## Migrating from v0.6
 
