@@ -61,6 +61,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
@@ -118,6 +119,10 @@ type syscallRule struct {
 	// identifies it.
 	Skip    uint64
 	skipped map[uintptr]struct{}
+	// Hold parks the matching call unanswered instead of refusing it, and
+	// lifts the rule; the test resumes it with release. While it is parked
+	// the supervisor keeps answering every other call.
+	Hold bool
 }
 
 // faultInjector is a running supervisor. Its rules are read on every
@@ -128,6 +133,7 @@ type faultInjector struct {
 	rules   map[int32]syscallRule
 	refused map[int32]*atomic.Int64
 	allowed map[int32]*atomic.Int64
+	held    chan uint64
 	fd      int
 }
 
@@ -237,6 +243,7 @@ func installFaultInjector(t *testing.T, munmapLen uint64) *faultInjector {
 		rules:   map[int32]syscallRule{},
 		refused: map[int32]*atomic.Int64{},
 		allowed: map[int32]*atomic.Int64{},
+		held:    make(chan uint64, 1),
 		fd:      int(fd),
 	}
 	for _, nr := range []int32{unix.SYS_MLOCK, unix.SYS_MUNLOCK, unix.SYS_MPROTECT, unix.SYS_MUNMAP} {
@@ -285,6 +292,41 @@ func (f *faultInjector) refuseAfter(nr int32, errno unix.Errno, skip uint64) {
 
 func (f *faultInjector) allow(nr int32) { f.set(nr, syscallRule{}) }
 
+// holdAfter lets the next skip calls of nr through, then parks the one after
+// (see syscallRule.Hold).
+func (f *faultInjector) holdAfter(nr int32, skip uint64) {
+	f.set(nr, syscallRule{Refuse: true, Hold: true, Skip: skip, skipped: map[uintptr]struct{}{}})
+}
+
+// awaitHeld waits for the call holdAfter parks and returns its notification ID.
+func (f *faultInjector) awaitHeld(t *testing.T) uint64 {
+	t.Helper()
+	select {
+	case id := <-f.held:
+		return id
+	case <-time.After(time.Minute):
+		t.Fatal("no call was parked: the operation never made the syscall the hold was set for")
+		return 0
+	}
+}
+
+// release lets a parked call through: the kernel performs it as if it had
+// never been routed.
+func (f *faultInjector) release(t *testing.T, id uint64) {
+	t.Helper()
+	resp := seccompNotifResp{ID: id, Flags: unix.SECCOMP_USER_NOTIF_FLAG_CONTINUE}
+	for {
+		_, _, errno := unix.Syscall(unix.SYS_IOCTL, uintptr(f.fd), uintptr(unix.SECCOMP_IOCTL_NOTIF_SEND), uintptr(unsafe.Pointer(&resp)))
+		if errno == unix.EINTR {
+			continue
+		}
+		if errno != 0 {
+			t.Fatalf("releasing the parked call: NOTIF_SEND: %v", errno)
+		}
+		return
+	}
+}
+
 func (f *faultInjector) refusals(nr int32) int64 { return f.refused[nr].Load() }
 
 // respond decides the answer to one notification, sends it, and only once
@@ -298,6 +340,11 @@ func (f *faultInjector) respond(n *seccompNotif) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	d := f.decideLocked(n)
+	if d.refuse && f.rules[n.Data.Nr].Hold {
+		f.rules[n.Data.Nr] = syscallRule{}
+		f.held <- n.ID
+		return nil
+	}
 	refuse := d.refuse
 	resp := seccompNotifResp{ID: n.ID, Flags: unix.SECCOMP_USER_NOTIF_FLAG_CONTINUE}
 	counter := f.allowed[n.Data.Nr]

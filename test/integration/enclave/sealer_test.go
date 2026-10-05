@@ -742,6 +742,193 @@ func TestSealerOverlappingASweepIsWiped(t *testing.T) {
 	})
 }
 
+// TestSealerKeyUseOverlappingASweepIsWiped parks the lock of a hierarchy
+// key being minted or materialized, runs a shutdown sweep while it is parked,
+// then lets it finish. The key it is about to use the root with is fresh, but
+// the root is gone, so the operation must report ErrSealerWiped rather than a
+// destroyed per-call key, and the sealer stays wiped. With every key release
+// refused, the refusals are reported alongside and the keys stay on the
+// ledger until the next sweep reclaims them.
+func TestSealerKeyUseOverlappingASweepIsWiped(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// prior is how many values to seal first; skip is how many locks the
+		// operation takes before the parked one.
+		prior       int
+		skip        uint64
+		refuseUnmap bool
+		op          func(ctx context.Context, s *enclave.Sealer, prior []*enclave.SealedEnclave) error
+	}{
+		// DEK, root destination, the provider's root, then the first KEK.
+		{"first KEK mint", 0, 3, false, func(ctx context.Context, s *enclave.Sealer, _ []*enclave.SealedEnclave) error {
+			_, err := s.Seal(ctx, heapBytes(needleLen))
+			return err
+		}},
+		// DEK, then the rotated KEK.
+		{"rotated KEK mint", 1, 1, false, func(ctx context.Context, s *enclave.Sealer, _ []*enclave.SealedEnclave) error {
+			_, err := s.Seal(ctx, heapBytes(needleLen))
+			return err
+		}},
+		{"first KEK mint, releases refused", 0, 3, true, func(ctx context.Context, s *enclave.Sealer, _ []*enclave.SealedEnclave) error {
+			_, err := s.Seal(ctx, heapBytes(needleLen))
+			return err
+		}},
+		{"rotated KEK mint, releases refused", 1, 1, true, func(ctx context.Context, s *enclave.Sealer, _ []*enclave.SealedEnclave) error {
+			_, err := s.Seal(ctx, heapBytes(needleLen))
+			return err
+		}},
+		// Destination, DEK, then the retired KEK for the unwrap.
+		{"retired KEK unwrap", 2, 2, false, func(ctx context.Context, _ *enclave.Sealer, prior []*enclave.SealedEnclave) error {
+			_, err := prior[0].Open(ctx)
+			return err
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			isolated(t, childOpts{}, func(t *testing.T) {
+				ctx := context.Background()
+				// Every hierarchy key and DEK has this one mapping length.
+				f := installFaultInjector(t, mappingLen(enclave.RootKeyBytes))
+				dev := newDevice()
+				s, err := enclave.NewSealer(enclave.WithProvider(dev), enclave.WithMode(enclave.ModeRootKey), enclave.WithKEKRotationLimit(1))
+				if err != nil {
+					t.Fatalf("NewSealer: %v", err)
+				}
+				var prior []*enclave.SealedEnclave
+				for range tc.prior {
+					v := sealNeedle(t, ctx, s, newNeedle(t))
+					defer v.Destroy()
+					prior = append(prior, v)
+				}
+
+				if tc.refuseUnmap {
+					f.refuse(unix.SYS_MUNMAP, unix.ENOMEM, 0)
+				}
+				f.holdAfter(unix.SYS_MLOCK, tc.skip)
+				result := make(chan error, 1)
+				go func() { result <- tc.op(ctx, s, prior) }()
+				id := f.awaitHeld(t)
+				held, err := enclave.WipeAll(ctx)
+				if err != nil || (held != 0) != tc.refuseUnmap {
+					t.Fatalf("WipeAll while the key's lock is parked = (%d, %v), want nil and held > 0 only if releases are refused", held, err)
+				}
+				f.release(t, id)
+
+				err = <-result
+				if !errors.Is(err, enclave.ErrSealerWiped) {
+					t.Fatalf("operation overlapping the sweep = %v, want ErrSealerWiped", err)
+				}
+				if got := errors.Is(err, enclave.ErrLockedMemoryUnavailable); got != tc.refuseUnmap {
+					t.Errorf("operation overlapping the sweep = %v: reports a refused release %t, want %t", err, got, tc.refuseUnmap)
+				}
+				if _, err := s.Seal(ctx, heapBytes(needleLen)); !errors.Is(err, enclave.ErrSealerWiped) {
+					t.Errorf("Seal after the overlap = %v, want ErrSealerWiped", err)
+				}
+				if got := dev.unsealAttempts.Load(); got != 1 {
+					t.Errorf("UnsealRoot attempts = %d, want 1: a wiped sealer must not ask its provider again", got)
+				}
+				if tc.refuseUnmap {
+					requireRefused(t, f, unix.SYS_MUNMAP)
+					f.allow(unix.SYS_MUNMAP)
+				}
+				if held, err := enclave.WipeAll(ctx); held != 0 || err != nil {
+					t.Fatalf("WipeAll afterwards = (%d, %v), want (0, nil): the parked key outlived the failure", held, err)
+				}
+			})
+		})
+	}
+}
+
+// TestSealerQueuedFirstSealUsesThePublishedRoot: a second first-use seal
+// that queued for the initialization slot while the first was unsealing finds
+// the published hierarchy once it gets the slot, and seals under it without
+// asking the provider again.
+func TestSealerQueuedFirstSealUsesThePublishedRoot(t *testing.T) {
+	isolated(t, childOpts{}, func(t *testing.T) {
+		ctx := context.Background()
+		g := &gatedUnsealer{soft: enclave.NewSoftwareProvider(), entered: make(chan struct{}), release: make(chan struct{})}
+		s, err := enclave.NewSealer(enclave.WithProvider(g), enclave.WithMode(enclave.ModeRootKey))
+		if err != nil {
+			t.Fatalf("NewSealer: %v", err)
+		}
+		type sealed struct {
+			v   *enclave.SealedEnclave
+			err error
+		}
+		seal := func(ctx context.Context, n needle, done chan<- sealed) {
+			buf := heapBytes(needleLen)
+			n.fill(buf)
+			v, err := s.Seal(ctx, buf)
+			done <- sealed{v, err}
+		}
+		first, second := newNeedle(t), newNeedle(t)
+		doneA, doneB := make(chan sealed, 1), make(chan sealed, 1)
+		go seal(ctx, first, doneA)
+		<-g.entered
+		ctxB, queuedB := waitObservingContext(ctx)
+		go seal(ctxB, second, doneB)
+		<-queuedB // B waits on the initialization slot A holds
+		close(g.release)
+
+		a, b := <-doneA, <-doneB
+		if a.err != nil || b.err != nil {
+			t.Fatalf("Seal: first = %v, queued = %v; want both to succeed", a.err, b.err)
+		}
+		vA, vB := a.v, b.v
+		defer vA.Destroy()
+		defer vB.Destroy()
+		requireOpensTo(t, ctx, vA, first)
+		requireOpensTo(t, ctx, vB, second)
+		if got := g.calls.Load(); got != 1 {
+			t.Errorf("UnsealRoot calls = %d, want 1: the queued seal must reuse the published root", got)
+		}
+	})
+}
+
+// cancelAfterUnseal unseals successfully and then ends the caller's context,
+// so the rest of the initialization runs for a caller that has given up.
+type cancelAfterUnseal struct {
+	*device
+	cancel context.CancelFunc
+}
+
+func (c cancelAfterUnseal) UnsealRoot(ctx context.Context, dst []byte) error {
+	defer c.cancel()
+	return c.device.UnsealRoot(ctx, dst)
+}
+
+// TestSealerAbandonedInitReportsBothCauses: the root unseals, the caller's
+// context ends, then the first KEK's lock is refused. The seal reports the
+// context and the refusal together, keeps the unsealed root, and the next
+// seal mints under it without unsealing again.
+func TestSealerAbandonedInitReportsBothCauses(t *testing.T) {
+	isolated(t, childOpts{}, func(t *testing.T) {
+		f := installFaultInjector(t, 0)
+		ctx, cancel := context.WithCancel(context.Background())
+		dev := newDevice()
+		s, err := enclave.NewSealer(enclave.WithProvider(cancelAfterUnseal{dev, cancel}), enclave.WithMode(enclave.ModeRootKey))
+		if err != nil {
+			t.Fatalf("NewSealer: %v", err)
+		}
+		// DEK, root destination, the provider's root, then the refused KEK.
+		f.refuseAfter(unix.SYS_MLOCK, unix.ENOMEM, 3)
+		_, err = s.Seal(ctx, heapBytes(needleLen))
+		f.allow(unix.SYS_MLOCK)
+		requireRefused(t, f, unix.SYS_MLOCK)
+		requireContextFailure(t, "Seal abandoned during a successful unseal", err, enclave.ErrSealFailed, context.Canceled)
+		if !errors.Is(err, enclave.ErrLockedMemoryUnavailable) {
+			t.Errorf("Seal = %v, want the refused KEK lock reported too", err)
+		}
+
+		n := newNeedle(t)
+		v := sealNeedle(t, context.Background(), s, n)
+		defer v.Destroy()
+		requireOpensTo(t, context.Background(), v, n)
+		if a, ok := dev.unsealAttempts.Load(), dev.unseals.Load(); a != 1 || ok != 1 {
+			t.Errorf("UnsealRoot: %d attempts, %d succeeded; want 1 and 1: the unsealed root is kept", a, ok)
+		}
+	})
+}
+
 // sealNeedle seals the material through s from a heap slice that Seal wipes.
 func sealNeedle(t *testing.T, ctx context.Context, s *enclave.Sealer, n needle) *enclave.SealedEnclave {
 	t.Helper()

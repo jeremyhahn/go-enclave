@@ -177,6 +177,16 @@ func TestDestroyedAndNilSealedValuesAnswerSafely(t *testing.T) {
 			t.Errorf("Openable of a nil *SealedEnclave = %v, want ErrEnclaveDestroyed", err)
 		}
 		nilSealed.Destroy()
+		a, err := enclave.NewAllocator(enclave.LockedSize(1))
+		if err != nil {
+			t.Fatalf("NewAllocator: %v", err)
+		}
+		if _, err := nilSealed.Open(ctx); !errors.Is(err, enclave.ErrEnclaveDestroyed) {
+			t.Errorf("Open of a nil *SealedEnclave = %v, want ErrEnclaveDestroyed", err)
+		}
+		if _, err := nilSealed.OpenWith(ctx, a); !errors.Is(err, enclave.ErrEnclaveDestroyed) {
+			t.Errorf("OpenWith of a nil *SealedEnclave = %v, want ErrEnclaveDestroyed", err)
+		}
 
 		v, err := enclave.NewSealed(ctx, []byte("a value to destroy"))
 		if err != nil {
@@ -195,10 +205,6 @@ func TestDestroyedAndNilSealedValuesAnswerSafely(t *testing.T) {
 		}
 		if _, err := v.Open(ctx); !errors.Is(err, enclave.ErrEnclaveDestroyed) {
 			t.Errorf("Open after Destroy = %v, want ErrEnclaveDestroyed", err)
-		}
-		a, err := enclave.NewAllocator(enclave.LockedSize(1))
-		if err != nil {
-			t.Fatalf("NewAllocator: %v", err)
 		}
 		if _, err := v.OpenWith(ctx, a); !errors.Is(err, enclave.ErrEnclaveDestroyed) {
 			t.Errorf("OpenWith after Destroy = %v, want ErrEnclaveDestroyed", err)

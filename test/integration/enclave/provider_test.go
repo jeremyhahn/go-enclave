@@ -203,6 +203,9 @@ func TestSoftwareProviderRefusesMisuse(t *testing.T) {
 			t.Errorf("UnsealRoot into a short destination = %v, want ErrInvalidSize", err)
 		}
 		key := make([]byte, enclave.RootKeyBytes)
+		if err := p.Unprotect(ctx, make([]byte, 64), key); !errors.Is(err, enclave.ErrSealedAuthentication) {
+			t.Errorf("Unprotect before any root exists = %v, want ErrSealedAuthentication", err)
+		}
 		blob, err := p.Protect(ctx, key)
 		if err != nil {
 			t.Fatalf("Protect: %v", err)

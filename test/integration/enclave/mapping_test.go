@@ -356,6 +356,9 @@ func TestRefusedUnmapKeepsTheEnclaveForARetry(t *testing.T) {
 		if !errors.Is(err, enclave.ErrLockedMemoryUnavailable) || errors.Is(err, enclave.ErrReleasedWithoutWipe) {
 			t.Fatalf("Destroy with munmap refused = %v, want ErrLockedMemoryUnavailable (pages still held)", err)
 		}
+		if msg := err.Error(); !strings.Contains(msg, unix.ENOMEM.Error()) {
+			t.Errorf("Destroy error %q does not name the refused munmap's errno", msg)
+		}
 		if c, err := enclave.WipeAll(context.Background()); c != 1 || err != nil {
 			t.Errorf("WipeAll with the unmap still refused = (%d, %v), want (1, nil)", c, err)
 		}
