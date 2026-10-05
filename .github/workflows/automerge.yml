@@ -1,8 +1,13 @@
-# automerge v6: a PR merges itself once CI is green; a `code-review` PR also
+# automerge v7: a PR merges itself once CI is green; a `code-review` PR also
 # needs one approval from the reviewer list, by someone other than its author.
-# PRs that are behind main land in batches through a merge train.
+# PRs that are behind main land together as one merge-train PR.
 #
-# Owner rulings (automatethethings#200, #203; go-enclave#118):
+# Owner rulings (automatethethings#200, #203; go-enclave#118, #122):
+#   2026-10-04 "keep merging its PRs by hand as agent-company and leave the
+#    block_on_outdated_branch turned on, we want to make sure we are requiring
+#    the latest from main in all branches before they get merged in" and
+#    "cant we have block_on_outdated_branch turned on for merging into main but
+#    have it off for the merge train?"
 #   2026-10-04 "yes lets batch the merges. make sure we are doing things
 #    efficiently!" and "use merge trains where possible if that helps!"
 #   2026-10-04 "instead of using review-bypass, lets use the existing
@@ -46,27 +51,24 @@
 # FAIL CLOSED: nothing merges unless the base branch REQUIRES at least one
 # status check and every required context is `success` on the PR head.
 #
-# MERGE TRAIN (sweeps: schedule and workflow_run). Ready PRs into main, in PR
-# number order:
+# MERGE TRAIN (sweeps: schedule and workflow_run). block_on_outdated_branch
+# stays on: what merges into main always contains main's tip. Ready PRs into
+# main, in PR number order:
 #   - a train in flight whose CI is pending -> wait (one train at a time);
-#   - main moved, or a train PR changed or is no longer ready -> delete the
-#     train and build a new one;
-#   - train CI green -> squash-merge its PRs in order, delete the train, and
-#     fail the run if main's tree is not the train's;
-#   - train CI red -> comment on its PRs, delete it, rebuild without the
-#     newest; a one-PR train that fails is left to its author until its head
-#     changes;
+#   - main moved, a train PR changed or is no longer ready, or the train's tree
+#     is not main plus its PRs -> close the train PR, delete the branch, rebuild;
+#   - train CI green -> squash-merge the train PR pinned to its head, then
+#     close each of its PRs with a comment naming the squash commit, and close
+#     the issues their bodies close;
+#   - train CI red -> comment on its PRs, close it, rebuild without the newest;
+#     a one-PR train that fails is left to its author until its head changes;
 #   - otherwise a ready PR already on main's tip merges directly, and the rest
 #     are merged (--no-ff, conflicts skipped with a comment) onto main as a new
 #     branch merge-train/<epoch>-<run id>, whose head commit records the base
-#     and every PR head. ci.yml runs on that push.
-# A train branch is pushed once and deleted, never force-updated. Its job
-# fetches refs and merges them; it runs no PR code.
-#
-# BEHIND MAIN, v5 FALLBACK. While main has block_on_outdated_branch on, or if
-# Gitea refuses a train merge as "behind the base branch", the PR gets Gitea's
-# update-branch call instead (style merge, never a rebase) and merges on its
-# own green CI.
+#     and every PR head, and opened as a PR into main. ci.yml runs on that PR.
+# A train branch is pushed once and deleted, never force-updated. A PR from a
+# merge-train/* branch is never a train candidate; only one this agent opened
+# is ever landed. Its job fetches refs and merges them; it runs no PR code.
 #
 # The merge is made as the repository's own agent (AGENT_TOKEN), one of the
 # principals on the merge whitelist (infra/gitea/scripts/setup-repo-guardrails.sh).
@@ -122,12 +124,16 @@ jobs:
           APPROVERS: '["claude","codex","opencode","jeremyhahn","agent-company","agent-software"]'
         run: |
           set -euo pipefail
+          # A read that fails inside $( ) fails the assignment, not just itself.
+          shopt -s inherit_errexit
 
           # A blank token would make Gitea answer as an anonymous caller, which
           # reads as a permissions bug; it must never fall back to another token.
           [ -n "${BOT:-}" ] || {
             echo "::error::AGENT_TOKEN is not set on this repository; the merge is made as the project agent."
             exit 1; }
+          me="agent-${REPOSITORY#*/}"
+          me_email="$me@$AGENT_DOMAIN"
           api() { # method path [body] -> http code; body in /tmp/api.json
             curl -sS -o /tmp/api.json -w '%{http_code}' -X "$1" \
               -H "Authorization: token $BOT" -H 'Content-Type: application/json' \
@@ -189,15 +195,12 @@ jobs:
                   elif any(. == "failure" or . == "error") then "failure"
                   else "pending" end' /tmp/latest.json
           }
-          protection() { # base -> /tmp/required.json, /tmp/push_required.json, $block
+          protection() { # base -> /tmp/required.json
             code=$(api GET "/branch_protections/$1")
             if [ "$code" != "200" ] || ! jq -e '.enable_status_check == true and ((.status_check_contexts // []) | length > 0)' /tmp/api.json >/dev/null; then
               die "$1 requires no status checks, so nothing would wait for CI. Not merging."
             fi
             jq -c '.status_check_contexts' /tmp/api.json > /tmp/required.json
-            # A train is a push, so its CI reports the push variant of each context.
-            jq -c '[ .status_check_contexts[] | sub(" \\(pull_request\\)$"; " (push)") ]' /tmp/api.json > /tmp/push_required.json
-            block=$(jq -r '.block_on_outdated_branch == true' /tmp/api.json)
           }
           tip() { # branch -> its head commit
             code=$(api GET "/branches/$1")
@@ -230,9 +233,27 @@ jobs:
             [ "$code" = "200" ] || die "cannot read the comments of PR $1 (HTTP $code)"
             jq -e --arg me "$me" --arg m "$2" 'any(.[]; .user.login == $me and (.body | contains($m)))' /tmp/api.json >/dev/null
           }
-          squash() { # pr head -> http code; the merge is pinned to head
+          close_pr() { # pr
+            code=$(api PATCH "/pulls/$1" '{"state":"closed"}')
+            case "$code" in 200|201) ;; *) die "cannot close PR $1 (HTTP $code): $(cat /tmp/api.json)" ;; esac
+          }
+          retire() { # pr.json -> "" or what failed: close a landed PR, delete its same-repo branch
+            local n ref code
+            n=$(jq -r '.number' "$1")
+            ref=$(jq -r '.head.ref' "$1")
+            if [ "$(jq -r '.state' "$1")" = "open" ]; then
+              code=$(api PATCH "/pulls/$n" '{"state":"closed"}')
+              case "$code" in 200|201) ;; *) echo " PR $n (close HTTP $code)"; return 0 ;; esac
+            fi
+            jq -e --arg base "$TRAIN_BASE" '.head.repo.full_name == .base.repo.full_name and .head.ref != $base
+                  and (.head.ref | startswith("merge-train/") | not)' "$1" >/dev/null || return 0
+            code=$(api DELETE "/branches/$ref")
+            case "$code" in 204|404) ;; *) echo " branch $ref (delete HTTP $code)" ;; esac
+          }
+          squash() { # pr head [title message] -> http code; the merge is pinned to head
             local body try=0
-            body=$(jq -nc --arg h "$2" '{Do: "squash", delete_branch_after_merge: true, head_commit_id: $h}')
+            body=$(jq -nc --arg h "$2" --arg t "${3:-}" --arg m "${4:-}" '{Do: "squash", delete_branch_after_merge: true, head_commit_id: $h}
+                  + (if $t == "" then {} else {MergeTitleField: $t, MergeMessageField: $m} end)')
             while :; do
               code=$(api POST "/pulls/$1/merge" "$body")
               { [ "$code" = "405" ] && grep -qi 'try again later' /tmp/api.json && [ "$try" -lt 10 ]; } || break
@@ -248,17 +269,39 @@ jobs:
             [ "$3" = "1" ] && note=" (a code-review PR needs its approval again on the new head)"
             echo "PR $1 was behind $2: merged $2 into it; CI re-runs on the new head and merges it when green$note."
           }
-          merge_or_update() { # pr head base held: v5
+          merge_or_update() { # pr head base held: a PR behind TRAIN_BASE waits for a train
             code=$(squash "$1" "$2")
             case "$code" in
               200|201|204) echo "merged PR $1 ($2) into $3; branch deleted" ;;
               *)
                 if [ "$code" = "405" ] && grep -q 'behind the base branch' /tmp/api.json; then
-                  update_branch "$1" "$3" "$4"
+                  if [ "$3" = "$TRAIN_BASE" ]; then
+                    echo "PR $1 fell behind $3; the next sweep puts it on a merge train"
+                  else
+                    update_branch "$1" "$3" "$4"
+                  fi
                 else
                   die "PR $1 is ready but did not merge (HTTP $code): $(cat /tmp/api.json)"
                 fi ;;
             esac
+          }
+          train_pr() { # branch -> the open PR this agent opened from it, if any
+            jq -r --arg b "$1" --arg me "$me" '[ .[] | select(.head.ref == $b and .user.login == $me) ][0].number // empty' /tmp/open.json
+          }
+          abandon() { # branch why -> close its PR, delete it
+            local n
+            echo "abandoning $1: $2"
+            n=$(train_pr "$1")
+            if [ -n "$n" ]; then
+              comment "$n" "Merge train abandoned: $2."
+              close_pr "$n"
+            fi
+            delete_branch "$1"
+          }
+          links() { # pr -> the issue numbers its body closes, one per line
+            jq -r --argjson self "$1" '[ (.body // "")
+                | scan("(?i)(?:^|[^A-Za-z0-9_])(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?):?\\s+#([0-9]+)")
+                | .[0] | tonumber | select(. != $self) ] | unique | .[]' "/tmp/pr-$1.json"
           }
 
           # Is one PR ready? Runs in a subshell: `exit 0` is "not now",
@@ -269,12 +312,16 @@ jobs:
             code=$(api GET "/pulls/$pr")
             [ "$code" = "200" ] || die "cannot read PR $pr (HTTP $code)"
             cp /tmp/api.json /tmp/pr.json
+            case $(jq -r '.head.ref' /tmp/pr.json) in
+              merge-train/*) echo "PR $pr is a merge train; it is never a train candidate"; exit 0 ;;
+            esac
             [ "$(jq -r '.state' /tmp/pr.json)" = "open" ] || { echo "PR $pr is not open"; exit 0; }
             [ "$(jq -r '.draft' /tmp/pr.json)" != "true" ] || { echo "PR $pr is a draft; not merging"; exit 0; }
             head=$(jq -r '.head.sha' /tmp/pr.json)
             base=$(jq -r '.base.ref' /tmp/pr.json)
             mbase=$(jq -r '.merge_base // ""' /tmp/pr.json)
             author=$(jq -r '.user.login | ascii_downcase' /tmp/pr.json)
+            cp /tmp/pr.json "/tmp/pr-$pr.json"
             protection "$base"
 
             # A merge armed by a legacy workflow (or a legacy copy still on an
@@ -308,16 +355,18 @@ jobs:
             echo "$pr $head $base $mbase $held" >> /tmp/ready
           }
 
-          # Merges the PRs in /tmp/cands ("pr head merge_base held") onto
-          # $base_tip as a new train branch. Fetches and merges refs only.
-          build_train() {
-            [ -s /tmp/cands ] || { echo "no PR is waiting for a train"; return 0; }
-            local repo=/tmp/train-repo auth name msg n h ref specs=("+refs/heads/$TRAIN_BASE:refs/train/base")
-            while read -r n _; do specs+=("+refs/pull/$n/head:refs/train/pr/$n"); done < /tmp/cands
+          # A fresh repository holding $TRAIN_BASE as refs/train/base, each PR
+          # in $1 ("pr head ...") as refs/train/pr/<n>, and any further
+          # refspecs. Fetches refs only; no hooks run.
+          fetch_train() {
+            local list=$1 n auth specs=("+refs/heads/$TRAIN_BASE:refs/train/base")
+            shift
+            while read -r n _; do specs+=("+refs/pull/$n/head:refs/train/pr/$n"); done < "$list"
+            repo=/tmp/train-repo
             rm -rf "$repo"
             git init -q "$repo"
-            # Config by environment keeps the token out of argv; no hooks run,
-            # and the train is unprotected, so its commits are unsigned.
+            # Config by environment keeps the token out of argv; the train is
+            # unprotected, so its commits are unsigned.
             auth=$(printf '%s:%s' "$me" "$BOT" | base64 -w0)
             export GIT_CONFIG_COUNT=3 \
               GIT_CONFIG_KEY_0=http.extraHeader GIT_CONFIG_VALUE_0="Authorization: Basic $auth" \
@@ -325,10 +374,42 @@ jobs:
               GIT_CONFIG_KEY_2=commit.gpgSign GIT_CONFIG_VALUE_2=false \
               GIT_AUTHOR_NAME="$me" GIT_AUTHOR_EMAIL="$me_email" \
               GIT_COMMITTER_NAME="$me" GIT_COMMITTER_EMAIL="$me_email"
-            git -C "$repo" fetch -q --no-tags "$GIT_URL" "${specs[@]}" || die "cannot fetch $TRAIN_BASE and the PR heads"
+            git -C "$repo" fetch -q --no-tags "$GIT_URL" "${specs[@]}" "$@" || die "cannot fetch $TRAIN_BASE and the PR heads"
+            git -C "$repo" checkout -q --detach refs/train/base
+          }
+
+          # Opens the PR for train branch $1 over the PRs in $2 ("pr head").
+          open_train_pr() {
+            local title body n h code
+            title="merge train: $(cut -d' ' -f1 "$2" | sed 's/^/#/' | paste -sd, | sed 's/,/, /g')"
+            body=$(printf 'Lands these PRs onto %s (%s) as one squash. Built and merged by automerge.yml; do not push to %s.\n\n' "$TRAIN_BASE" "$base_tip" "$1"
+                   while read -r n h; do printf -- '- #%s %s (%s)\n' "$n" "$(jq -r '.title' "/tmp/pr-$n.json")" "$h"; done < "$2"
+                   echo
+                   { while read -r n _; do echo "$n"; links "$n"; done < "$2"; } | sort -nu | sed 's/^/Closes #/')
+            body="$body"$'\n'
+            code=$(api POST "/pulls" "$(jq -nc --arg t "$title" --arg b "$body" --arg h "$1" --arg base "$TRAIN_BASE" '{title: $t, body: $b, head: $h, base: $base}')")
+            case "$code" in
+              201) echo "opened train PR #$(jq -r '.number' /tmp/api.json) for $1; CI runs on it" ;;
+              409)
+                # Another sweep may have opened it; anyone else's PR wedges the train.
+                paged "/pulls?state=open" /tmp/open.json
+                if [ -n "$(train_pr "$1")" ]; then
+                  echo "a train PR for $1 is already open"
+                else
+                  abandon "$1" "a PR this agent did not open holds its branch"
+                fi ;;
+              *)   die "cannot open a PR for $1 (HTTP $code): $(cat /tmp/api.json)" ;;
+            esac
+          }
+
+          # Merges the PRs in /tmp/cands ("pr head merge_base held") onto
+          # $base_tip as a new train branch and opens its PR.
+          build_train() {
+            [ -s /tmp/cands ] || { echo "no PR is waiting for a train"; return 0; }
+            local name msg n h ref
+            fetch_train /tmp/cands
             [ "$(git -C "$repo" rev-parse refs/train/base)" = "$base_tip" ] || {
               echo "$TRAIN_BASE moved while the train was being built; the next run builds it"; return 0; }
-            git -C "$repo" checkout -q --detach refs/train/base
             : > /tmp/train_in
             while read -r n h _; do
               ref=refs/train/pr/$n
@@ -349,25 +430,127 @@ jobs:
             git -C "$repo" commit -q --allow-empty -m "$msg"
             name="merge-train/$(date +%s)-$RUN_ID"
             git -C "$repo" push -q "$GIT_URL" "HEAD:refs/heads/$name" || die "cannot push $name"
-            echo "built $name with PRs $(cut -d' ' -f1 /tmp/train_in | tr '\n' ' ')onto $base_tip; CI runs on it"
+            echo "built $name with PRs $(cut -d' ' -f1 /tmp/train_in | tr '\n' ' ')onto $base_tip"
             # Two sweeps may race to build: the oldest train stays.
             trains
             first=$(jq -r '.[0].name' /tmp/trains.json)
-            [ "$first" = "$name" ] || { delete_branch "$name"; echo "$first is already in flight; withdrew $name"; }
+            [ "$first" = "$name" ] || { delete_branch "$name"; echo "$first is already in flight; withdrew $name"; return 0; }
+            open_train_pr "$name" /tmp/train_in
+          }
+
+          # 0 when train $1 at $2 has exactly the tree of $base_tip with the
+          # PRs in /tmp/train_prs merged in order, as build_train makes it.
+          train_tree_ok() {
+            local n h
+            fetch_train /tmp/train_prs "+refs/heads/$1:refs/train/tip"
+            [ "$(git -C "$repo" rev-parse refs/train/tip)" = "$2" ] || return 1
+            [ "$(git -C "$repo" rev-parse refs/train/base)" = "$base_tip" ] || return 1
+            while read -r n h; do
+              [ "$(git -C "$repo" rev-parse "refs/train/pr/$n")" = "$h" ] || return 1
+              git -C "$repo" merge -q --no-ff -m "merge-train: #$n $h" "refs/train/pr/$n" >/tmp/merge.log 2>&1 || return 1
+            done < /tmp/train_prs
+            [ "$(git -C "$repo" rev-parse 'HEAD^{tree}')" = "$(git -C "$repo" rev-parse 'refs/train/tip^{tree}')" ]
+          }
+
+          # Squash-merges train PR $3 (branch $1 at $2), then closes its PRs
+          # and their issues. Sets $landed on success.
+          land() {
+            local t_name=$1 t_sha=$2 t_pr=$3 title msg titles squash_sha n h i issues code bad=""
+            code=$(api GET "/pulls/$t_pr")
+            [ "$code" = "200" ] || die "cannot read train PR $t_pr (HTTP $code)"
+            jq -e --arg h "$t_sha" --arg b "$t_name" --arg me "$me" --arg base "$TRAIN_BASE" \
+              '.state == "open" and .head.sha == $h and .head.ref == $b and .base.ref == $base and .user.login == $me' /tmp/api.json >/dev/null ||
+              { abandon "$t_name" "PR #$t_pr is no longer this train at $t_sha"; return 0; }
+            [ "$(tip "$TRAIN_BASE")" = "$base_tip" ] || { abandon "$t_name" "$TRAIN_BASE moved since it was built"; return 0; }
+            train_tree_ok "$t_name" "$t_sha" || { abandon "$t_name" "its tree is not $TRAIN_BASE plus its PRs"; return 0; }
+
+            titles=$(while read -r n _; do jq -r '.title' "/tmp/pr-$n.json"; done < /tmp/train_prs | paste -sd';' | sed 's/;/; /g')
+            title="merge train: $titles"
+            [ "${#title}" -le 72 ] || title="${title:0:69}..."
+            title="$title (#$t_pr)"
+            msg=$(printf 'Merge train #%s: %s PR(s) onto %s %s.\n\n' "$t_pr" "$(wc -l < /tmp/train_prs)" "$TRAIN_BASE" "$base_tip"
+                  while read -r n h; do printf -- '- #%s %s (%s)\n' "$n" "$(jq -r '.title' "/tmp/pr-$n.json")" "$h"; done < /tmp/train_prs)
+            code=$(squash "$t_pr" "$t_sha" "$title" "$msg")
+            case "$code" in
+              200|201|204) ;;
+              405)
+                if grep -q 'behind the base branch' /tmp/api.json; then
+                  abandon "$t_name" "$TRAIN_BASE moved while it was merging"; return 0
+                fi
+                abandon "$t_name" "the merge was refused"
+                die "train PR $t_pr did not merge (HTTP $code): $(cat /tmp/api.json)" ;;
+              *)
+                abandon "$t_name" "the merge was refused"
+                die "train PR $t_pr did not merge (HTTP $code): $(cat /tmp/api.json)" ;;
+            esac
+            code=$(api GET "/pulls/$t_pr")
+            [ "$code" = "200" ] || die "train PR $t_pr merged but cannot be read back (HTTP $code); close its PRs by hand"
+            squash_sha=$(jq -r '.merge_commit_sha // ""' /tmp/api.json)
+            [ -n "$squash_sha" ] || die "train PR $t_pr merged but reports no merge commit; close its PRs by hand"
+            delete_branch "$t_name"
+            echo "landed $t_name as $squash_sha (train PR #$t_pr)"
+            awk 'NR == FNR { l[$1] = 1; next } !($1 in l)' /tmp/train_prs /tmp/cands > /tmp/cands.next; mv /tmp/cands.next /tmp/cands
+
+            # Each PR is closed only if its head is still the one that landed.
+            while read -r n h; do
+              comment "$n" "$(printf 'Landed in %s via merge train #%s (head %s).\n\n<!-- merge-train:landed %s -->' "$squash_sha" "$t_pr" "$h" "$h")"
+              code=$(api GET "/pulls/$n")
+              [ "$code" = "200" ] || { bad="$bad PR $n (read HTTP $code)"; continue; }
+              if [ "$(jq -r '.head.sha' /tmp/api.json)" != "$h" ]; then
+                # The train PR's `Closes #<pr>` may have closed it on merge.
+                if [ "$(jq -r '.state' /tmp/api.json)" != "open" ]; then
+                  code=$(api PATCH "/pulls/$n" '{"state":"open"}')
+                  case "$code" in 200|201) ;; *) bad="$bad PR $n (reopen HTTP $code)"; continue ;; esac
+                fi
+                comment "$n" "Commits pushed since $h are not on $TRAIN_BASE; this PR is left open for them."
+                continue
+              fi
+              cp /tmp/api.json "/tmp/pr-$n.json"
+              bad="$bad$(retire "/tmp/pr-$n.json")"
+            done < /tmp/train_prs
+            # Gitea closes these from the train PR body; issues only, never a PR.
+            issues=$(while read -r n _; do links "$n"; done < /tmp/train_prs | sort -nu)
+            for i in $issues; do
+              code=$(api GET "/issues/$i")
+              [ "$code" = "200" ] || { bad="$bad issue $i (read HTTP $code)"; continue; }
+              jq -e '.pull_request == null and .state == "open"' /tmp/api.json >/dev/null || continue
+              code=$(api PATCH "/issues/$i" '{"state":"closed"}')
+              case "$code" in 200|201) ;; *) bad="$bad issue $i (close HTTP $code)" ;; esac
+            done
+            [ -z "$bad" ] || die "train PR $t_pr landed, but these could not be closed:$bad"
+
+            code=$(api GET "/git/commits/$squash_sha"); [ "$code" = "200" ] || die "cannot read $squash_sha (HTTP $code)"
+            main_tree=$(jq -r '.commit.tree.sha' /tmp/api.json)
+            code=$(api GET "/git/commits/$t_sha"); [ "$code" = "200" ] || die "cannot read $t_sha (HTTP $code)"
+            [ "$main_tree" = "$(jq -r '.commit.tree.sha' /tmp/api.json)" ] ||
+              die "$TRAIN_BASE ($squash_sha) does not have the tree $t_name was tested on ($t_sha); $TRAIN_BASE's own CI is the backstop"
           }
 
           # The train step of a sweep, over the ready PRs in /tmp/cands.
           train() {
-            local t_name t_sha t_born t_list state n h why count newest landed=""
+            local t_name t_sha t_born t_pr t_list state n h why count newest extra extras stale current
             base_tip=$(tip "$TRAIN_BASE")
             trains
-            for extra in $(jq -r '.[1:][].name' /tmp/trains.json); do
-              echo "removing $extra: only one train runs at a time"; delete_branch "$extra"
+            # Lists are read into variables first: a failing read in a `for`
+            # list would not stop the run.
+            extras=$(jq -r '.[1:][].name' /tmp/trains.json)
+            for extra in $extras; do
+              abandon "$extra" "only one train runs at a time"
             done
-            if [ "$(jq 'length' /tmp/trains.json)" -gt 0 ]; then
-              t_name=$(jq -r '.[0].name' /tmp/trains.json)
+            current=$(jq -r '.[0].name // ""' /tmp/trains.json)
+            # A train PR whose branch is gone can never land.
+            stale=$(jq -r --arg me "$me" '.[] | select((.head.ref // "" | startswith("merge-train/")) and .user.login == $me) | "\(.number)=\(.head.ref)"' /tmp/open.json)
+            for n in $stale; do
+              jq -e --arg b "${n#*=}" 'any(.[]; .name == $b)' /tmp/trains.json >/dev/null && continue
+              echo "closing train PR #${n%%=*}: its branch ${n#*=} is gone"
+              comment "${n%%=*}" "Merge train abandoned: its branch is gone."
+              close_pr "${n%%=*}"
+            done
+            if [ -n "$current" ]; then
+              t_name=$current
               t_sha=$(jq -r '.[0].sha' /tmp/trains.json)
               t_born=$(jq -r '.[0].born' /tmp/trains.json)
+              t_pr=$(train_pr "$t_name")
               jq -r '.[0].message' /tmp/trains.json | sed -n 's/^pr \([0-9][0-9]*\) \([0-9a-f]\{40\}\)$/\1 \2/p' > /tmp/train_prs
               t_list=$(cut -d' ' -f1 /tmp/train_prs | paste -sd' ')
               why=""
@@ -377,54 +560,29 @@ jobs:
                 awk -v n="$n" -v h="$h" '$1 == n && $2 == h { f = 1 } END { exit !f }' /tmp/cands || why="PR $n changed or is no longer ready"
               done < /tmp/train_prs
               if [ -n "$why" ]; then
-                echo "abandoning $t_name: $why"; delete_branch "$t_name"
+                abandon "$t_name" "$why"
+              elif [ -z "$t_pr" ]; then
+                open_train_pr "$t_name" /tmp/train_prs
+                return 0
               else
-                state=$(ci_state "$t_sha" /tmp/push_required.json)
+                state=$(ci_state "$t_sha" /tmp/required.json)
                 if [ "$state" = "pending" ] && [ $(( $(date +%s) - t_born )) -gt $((TRAIN_TIMEOUT_MIN * 60)) ]; then
                   echo "::warning::$t_name has no CI result after $TRAIN_TIMEOUT_MIN minutes; rebuilding it"
-                  delete_branch "$t_name"
+                  abandon "$t_name" "no CI result after $TRAIN_TIMEOUT_MIN minutes"
                   state=abandoned
                 fi
                 case "$state" in
                   pending)
-                    echo "$t_name (PRs $t_list) is waiting for CI on $t_sha"
+                    echo "$t_name (PR #$t_pr: $t_list) is waiting for CI on $t_sha"
                     return 0 ;;
                   success)
-                    echo "$t_name is green on $t_sha; landing its PRs in order"
-                    cp /tmp/train_prs /tmp/landing
-                    while read -r n h; do
-                      code=$(squash "$n" "$h")
-                      case "$code" in
-                        200|201|204) echo "merged PR $n ($h) into $TRAIN_BASE; branch deleted"; landed="$landed $n" ;;
-                        *)
-                          if [ "$code" = "405" ] && grep -q 'behind the base branch' /tmp/api.json; then
-                            echo "::warning::$TRAIN_BASE still requires up-to-date branches; PR $n and the rest of $t_name fall back to update-branch"
-                            delete_branch "$t_name"
-                            awk -v n="$n" 'f || $1 == n { f = 1; print $1 }' /tmp/train_prs > /tmp/fallback
-                            while read -r n; do
-                              update_branch "$n" "$TRAIN_BASE" "$(awk -v n="$n" '$1 == n { print $4 }' /tmp/cands)"
-                            done < /tmp/fallback
-                            return 0
-                          fi
-                          delete_branch "$t_name"
-                          die "PR $n in $t_name did not merge (HTTP $code): $(cat /tmp/api.json); the train is abandoned" ;;
-                      esac
-                    done < /tmp/landing
-                    base_tip=$(tip "$TRAIN_BASE")
-                    code=$(api GET "/git/commits/$base_tip"); [ "$code" = "200" ] || die "cannot read $base_tip (HTTP $code)"
-                    main_tree=$(jq -r '.commit.tree.sha' /tmp/api.json)
-                    code=$(api GET "/git/commits/$t_sha"); [ "$code" = "200" ] || die "cannot read $t_sha (HTTP $code)"
-                    if [ "$main_tree" != "$(jq -r '.commit.tree.sha' /tmp/api.json)" ]; then
-                      delete_branch "$t_name"
-                      die "$TRAIN_BASE ($base_tip) does not have the tree $t_name was tested on ($t_sha); $TRAIN_BASE's own CI is the backstop"
-                    fi
-                    delete_branch "$t_name"
-                    echo "landed $t_name and deleted it"
-                    awk -v l="$landed " 'index(" " l, " " $1 " ") == 0' /tmp/cands > /tmp/cands.next; mv /tmp/cands.next /tmp/cands ;;
+                    echo "$t_name is green on $t_sha; landing PR #$t_pr"
+                    land "$t_name" "$t_sha" "$t_pr"
+                    base_tip=$(tip "$TRAIN_BASE") ;;
                   failure)
                     count=$(wc -l < /tmp/train_prs)
                     newest=$(tail -n 1 /tmp/train_prs | cut -d' ' -f1)
-                    delete_branch "$t_name"
+                    abandon "$t_name" "CI failed on $t_sha"
                     while read -r n h; do
                       if [ "$count" = "1" ]; then
                         comment "$n" "$(printf 'Merge train %s failed CI with this PR alone on %s (%s): see the CI run for %s. The train leaves this PR to its author until its head changes.\n\n<!-- merge-train:failed %s -->' "$t_name" "$TRAIN_BASE" "$base_tip" "$t_sha" "$h")"
@@ -479,9 +637,8 @@ jobs:
               # One PR: merge it now only when no train would be disturbed.
               one "$PR_FROM_EVENT"
               if read -r pr head base mbase held < /tmp/ready; then
-                protection "$base"
                 trains
-                if [ "$base" != "$TRAIN_BASE" ] || [ "$block" = "true" ]; then
+                if [ "$base" != "$TRAIN_BASE" ]; then
                   merge_or_update "$pr" "$head" "$base" "$held"
                 elif [ "$mbase" = "$(tip "$base")" ] && [ "$(jq 'length' /tmp/trains.json)" = "0" ]; then
                   merge_or_update "$pr" "$head" "$base" "$held"
@@ -491,35 +648,24 @@ jobs:
               fi ;;
             workflow_run|schedule)
               paged "/pulls?state=open" /tmp/open.json
-              for n in $(jq -r '.[].number' /tmp/open.json | sort -n); do one "$n"; done
+              prs=$(jq -r '.[] | select(.head.ref // "" | startswith("merge-train/") | not) | .number' /tmp/open.json | sort -n)
+              for n in $prs; do one "$n"; done
               protection "$TRAIN_BASE"
               : > /tmp/cands
               while read -r pr head base mbase held; do
-                if [ "$base" != "$TRAIN_BASE" ] || [ "$block" = "true" ]; then
+                if [ "$base" != "$TRAIN_BASE" ]; then
                   guard merge_or_update "$pr" "$head" "$base" "$held"
+                elif has_marker "$pr" "<!-- merge-train:landed $head -->"; then
+                  echo "PR $pr already landed at $head; closing it"
+                  failed_close=$(retire "/tmp/pr-$pr.json")
+                  [ -z "$failed_close" ] || die "PR $pr landed, but could not be closed:$failed_close"
+                elif has_marker "$pr" "<!-- merge-train:failed $head -->"; then
+                  echo "PR $pr failed a train on its own at $head; waiting for a new head"
                 else
                   echo "$pr $head $mbase $held" >> /tmp/cands
                 fi
               done < /tmp/ready
-              if [ "$block" = "true" ]; then
-                trains
-                for t in $(jq -r '.[].name' /tmp/trains.json); do
-                  echo "$TRAIN_BASE requires up-to-date branches; removing $t"; delete_branch "$t"
-                done
-              else
-                me="agent-${REPOSITORY#*/}"
-                me_email="$me@$AGENT_DOMAIN"
-                : > /tmp/cands.next
-                while read -r pr head mbase held; do
-                  if has_marker "$pr" "<!-- merge-train:failed $head -->"; then
-                    echo "PR $pr failed a train on its own at $head; waiting for a new head"
-                  else
-                    echo "$pr $head $mbase $held" >> /tmp/cands.next
-                  fi
-                done < /tmp/cands
-                mv /tmp/cands.next /tmp/cands
-                train
-              fi ;;
+              train ;;
             *) die "unexpected event $EVENT" ;;
           esac
           exit "$failed"

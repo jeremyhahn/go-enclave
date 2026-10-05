@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -250,28 +251,46 @@ func TestScriptsAutomerge_Decisions(t *testing.T) {
 }
 
 // trainGitea serves the merge-train endpoints from a real bare repository:
-// PR heads are refs/pull/N/head, branches are refs/heads/*, and a squash merge
-// writes a commit onto main. The workflow fetches and pushes that repository.
+// constituent PR heads are refs/pull/N/head, a train PR's head is its
+// merge-train/* branch, and a squash merge writes a commit onto main. The
+// workflow fetches and pushes that repository.
 type trainGitea struct {
-	t             *testing.T
-	mu            sync.Mutex
-	bare          string
-	open          map[int]bool
-	block         bool   // block_on_outdated_branch as branch protection reports it
-	enforceBehind bool   // the merge call refuses a PR that is behind main
-	trainCI       string // the push status on any merge-train/* tip; "" is none yet
-	checking      map[int]bool
-	racer         bool // main gains a commit right after the first merge
-	merged        []int
-	pins          []string
-	updated       []int
-	deleted       []string
-	comments      map[int][]string
+	t            *testing.T
+	mu           sync.Mutex
+	bare         string
+	prs          map[int]*fakePR
+	nextPR       int
+	issues       map[int]bool // issue number -> open
+	block        bool         // block_on_outdated_branch: a merge must contain main's tip
+	trainCI      string       // the PR status on any merge-train/* tip; "" is none yet
+	checking     map[int]bool
+	racer        bool   // main gains a commit just before the next merge is applied
+	racerPR      func() // runs once, right after the next merge is applied
+	keywordClose bool   // a merge closes what its PR body's "Closes #n" lines name, as Gitea does
+	merged       []int
+	pins         []string
+	messages     []string // each squash: title, blank line, message
+	updated      []int
+	deleted      []string
+	closed       []int
+	reopened     []int
+	closedIssues []int
+	comments     map[int][]string
+}
+
+type fakePR struct {
+	ref      string // the git ref holding its head
+	branch   string // head.ref as Gitea reports it
+	title    string
+	body     string
+	user     string
+	open     bool
+	mergeSHA string
 }
 
 const (
-	trainAgent  = "agent-r"
-	pushContext = "CI / CI Gate (push)"
+	trainAgent = "agent-r"
+	prContext  = "CI / CI Gate (pull_request)"
 )
 
 // gitIn runs git in dir with no user or system configuration.
@@ -292,7 +311,8 @@ func newTrainGitea(t *testing.T) *trainGitea {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Fatalf("the merge train needs git: %v", err)
 	}
-	f := &trainGitea{t: t, bare: t.TempDir(), open: map[int]bool{}, checking: map[int]bool{}, comments: map[int][]string{}}
+	f := &trainGitea{t: t, bare: t.TempDir(), prs: map[int]*fakePR{}, nextPR: 100, issues: map[int]bool{},
+		block: true, checking: map[int]bool{}, comments: map[int][]string{}}
 	gitIn(t, f.bare, "init", "-q", "--bare")
 	f.commitOn("main", "README", "line one\nline two\n")
 	return f
@@ -313,6 +333,12 @@ func (f *trainGitea) revOr(ref string) string {
 
 func (f *trainGitea) commitFrom(parent, ref, file, body string) string {
 	f.t.Helper()
+	return f.commitTree(parent, ref, file, body, "change "+file)
+}
+
+// commitTree commits parent's tree plus file=body as msg and points ref at it.
+func (f *trainGitea) commitTree(parent, ref, file, body, msg string) string {
+	f.t.Helper()
 	blob := strings.TrimSpace(f.gitStdin(body, "hash-object", "-w", "--stdin"))
 	idx := filepath.Join(f.t.TempDir(), "index")
 	env := []string{"GIT_INDEX_FILE=" + idx}
@@ -321,7 +347,7 @@ func (f *trainGitea) commitFrom(parent, ref, file, body string) string {
 	}
 	f.gitEnv(env, "update-index", "--add", "--cacheinfo", "100644,"+blob+","+file)
 	tree := f.gitEnv(env, "write-tree")
-	args := []string{"commit-tree", tree, "-m", "change " + file}
+	args := []string{"commit-tree", tree, "-m", msg}
 	if parent != "" {
 		args = append(args, "-p", parent)
 	}
@@ -353,15 +379,24 @@ func (f *trainGitea) gitStdin(in string, args ...string) string {
 	return string(out)
 }
 
-// openPR opens PR n with file=body committed onto from (a main commit).
+// openPR opens PR n, by claude from branch issue/<n>, with file=body
+// committed onto from (a main commit).
 func (f *trainGitea) openPR(n int, from, file, body string) string {
 	f.t.Helper()
-	f.open[n] = true
-	return f.commitFrom(from, fmt.Sprintf("refs/pull/%d/head", n), file, body)
+	ref := fmt.Sprintf("refs/pull/%d/head", n)
+	f.prs[n] = &fakePR{ref: ref, branch: fmt.Sprintf("issue/%d", n), title: fmt.Sprintf("feat: change %d", n), user: "claude", open: true}
+	sha := f.commitFrom(from, ref, file, body)
+	gitIn(f.t, f.bare, "update-ref", "refs/heads/"+f.prs[n].branch, sha)
+	return sha
 }
 
-func (f *trainGitea) head(n int) string { return f.revOr(fmt.Sprintf("refs/pull/%d/head", n)) }
-func (f *trainGitea) main() string      { return f.revOr("refs/heads/main") }
+func (f *trainGitea) head(n int) string {
+	if p := f.prs[n]; p != nil {
+		return f.revOr(p.ref)
+	}
+	return ""
+}
+func (f *trainGitea) main() string { return f.revOr("refs/heads/main") }
 
 // trainBranches lists merge-train/* branches as name -> tip.
 func (f *trainGitea) trainBranches() map[string]string {
@@ -387,6 +422,35 @@ func (f *trainGitea) onlyTrain() (string, string) {
 	return "", ""
 }
 
+// openTrainPRs returns the open PRs whose head is a merge-train/* branch.
+func (f *trainGitea) openTrainPRs() map[int]*fakePR {
+	out := map[int]*fakePR{}
+	for n, p := range f.prs {
+		if p.open && strings.HasPrefix(p.branch, "merge-train/") {
+			out[n] = p
+		}
+	}
+	return out
+}
+
+// onlyTrainPR returns the single open train PR, which must be the agent's and
+// be headed by the single train branch.
+func (f *trainGitea) onlyTrainPR() (int, *fakePR) {
+	f.t.Helper()
+	name, _ := f.onlyTrain()
+	prs := f.openTrainPRs()
+	if len(prs) != 1 {
+		f.t.Fatalf("want exactly one open train PR, have %d", len(prs))
+	}
+	for n, p := range prs {
+		if p.branch != name || p.user != trainAgent {
+			f.t.Fatalf("train PR #%d is %s by %s, want %s by %s", n, p.branch, p.user, name, trainAgent)
+		}
+		return n, p
+	}
+	return 0, nil
+}
+
 func (f *trainGitea) branchJSON(name string) map[string]any {
 	sha := f.revOr("refs/heads/" + name)
 	return map[string]any{"name": name, "commit": map[string]any{"id": sha,
@@ -394,7 +458,23 @@ func (f *trainGitea) branchJSON(name string) map[string]any {
 }
 
 func (f *trainGitea) mergeBase(n int) string {
-	return gitIn(f.t, f.bare, "merge-base", "refs/heads/main", f.head(n))
+	h := f.head(n)
+	if h == "" {
+		return ""
+	}
+	return gitIn(f.t, f.bare, "merge-base", "refs/heads/main", h)
+}
+
+func (f *trainGitea) prJSON(n int) map[string]any {
+	p := f.prs[n]
+	state := "closed"
+	if p.open {
+		state = "open"
+	}
+	return map[string]any{"number": n, "state": state, "draft": false, "title": p.title, "body": p.body,
+		"head":       map[string]any{"sha": f.head(n), "ref": p.branch, "repo": map[string]any{"full_name": "o/r"}},
+		"base":       map[string]any{"ref": "main", "repo": map[string]any{"full_name": "o/r"}},
+		"merge_base": f.mergeBase(n), "user": map[string]any{"login": p.user}, "merge_commit_sha": p.mergeSHA}
 }
 
 func (f *trainGitea) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -416,40 +496,89 @@ func (f *trainGitea) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var n int
 	pr := func(format string) bool {
 		_, err := fmt.Sscanf(path, format, &n)
-		return err == nil && fmt.Sprintf(format, n) == path
+		return err == nil && fmt.Sprintf(format, n) == path && f.prs[n] != nil
 	}
 	switch {
 	case r.Method == http.MethodGet && path == "/pulls":
 		list := []map[string]any{}
-		for num, open := range f.open {
-			if open {
-				list = append(list, map[string]any{"number": num, "head": map[string]any{"sha": f.head(num)}})
+		for num, p := range f.prs {
+			if p.open {
+				list = append(list, f.prJSON(num))
 			}
 		}
 		firstPage(list)
-	case r.Method == http.MethodGet && pr("/pulls/%d"):
-		state := "closed"
-		if f.open[n] {
-			state = "open"
+	case r.Method == http.MethodPost && path == "/pulls":
+		var body struct{ Title, Body, Head, Base string }
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		for _, p := range f.prs {
+			if p.open && p.branch == body.Head {
+				reply(409, map[string]string{"message": "pull request already exists"})
+				return
+			}
 		}
-		reply(200, map[string]any{"state": state, "draft": false, "head": map[string]any{"sha": f.head(n)},
-			"base": map[string]any{"ref": "main"}, "merge_base": f.mergeBase(n), "user": map[string]any{"login": "claude"}})
+		if body.Base != "main" || f.revOr("refs/heads/"+body.Head) == "" {
+			reply(422, map[string]string{"message": "bad head or base"})
+			return
+		}
+		f.nextPR++
+		f.prs[f.nextPR] = &fakePR{ref: "refs/heads/" + body.Head, branch: body.Head, title: body.Title, body: body.Body, user: trainAgent, open: true}
+		reply(201, f.prJSON(f.nextPR))
+	case r.Method == http.MethodGet && pr("/pulls/%d"):
+		reply(200, f.prJSON(n))
+	case r.Method == http.MethodPatch && pr("/pulls/%d"):
+		var body struct{ State string }
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		switch body.State {
+		case "closed":
+			f.prs[n].open = false
+			f.closed = append(f.closed, n)
+		case "open":
+			f.prs[n].open = true
+			f.reopened = append(f.reopened, n)
+		default:
+			reply(422, map[string]string{"message": "bad state"})
+			return
+		}
+		reply(201, f.prJSON(n))
+	case r.Method == http.MethodGet && strings.HasPrefix(path, "/issues/") && !strings.Contains(strings.TrimPrefix(path, "/issues/"), "/"):
+		num, _ := strconv.Atoi(strings.TrimPrefix(path, "/issues/"))
+		switch open, ok := f.issues[num]; {
+		case f.prs[num] != nil:
+			reply(200, map[string]any{"number": num, "state": "open", "pull_request": map[string]any{"merged": false}})
+		case ok:
+			state := "closed"
+			if open {
+				state = "open"
+			}
+			reply(200, map[string]any{"number": num, "state": state, "pull_request": nil})
+		default:
+			reply(404, map[string]string{"message": "no such issue"})
+		}
+	case r.Method == http.MethodPatch && strings.HasPrefix(path, "/issues/"):
+		num, _ := strconv.Atoi(strings.TrimPrefix(path, "/issues/"))
+		if _, ok := f.issues[num]; !ok {
+			reply(404, map[string]string{"message": "no such issue"})
+			return
+		}
+		f.issues[num] = false
+		f.closedIssues = append(f.closedIssues, num)
+		reply(201, map[string]any{"number": num, "state": "closed"})
 	case r.Method == http.MethodGet && path == "/branch_protections/main":
 		reply(200, map[string]any{"enable_status_check": true, "block_on_outdated_branch": f.block,
-			"status_check_contexts": []string{"CI / CI Gate (pull_request)"}})
+			"status_check_contexts": []string{prContext}})
 	case r.Method == http.MethodDelete && pr("/pulls/%d/merge"):
 		reply(404, map[string]string{})
 	case r.Method == http.MethodGet && strings.HasPrefix(path, "/commits/") && strings.HasSuffix(path, "/status"):
 		sha := strings.TrimSuffix(strings.TrimPrefix(path, "/commits/"), "/status")
 		statuses := []map[string]string{}
-		for num := range f.open {
-			if f.head(num) == sha {
-				statuses = append(statuses, map[string]string{"context": "CI / CI Gate (pull_request)", "status": "success"})
+		for num, p := range f.prs {
+			if p.open && !strings.HasPrefix(p.branch, "merge-train/") && f.head(num) == sha {
+				statuses = append(statuses, map[string]string{"context": prContext, "status": "success"})
 			}
 		}
 		for _, tip := range f.trainBranches() {
 			if tip == sha && f.trainCI != "" {
-				statuses = append(statuses, map[string]string{"context": pushContext, "status": f.trainCI})
+				statuses = append(statuses, map[string]string{"context": prContext, "status": f.trainCI})
 			}
 		}
 		if page != "1" {
@@ -492,31 +621,60 @@ func (f *trainGitea) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		reply(200, f.branchJSON(name))
 	case r.Method == http.MethodDelete && strings.HasPrefix(path, "/branches/"):
 		name := strings.TrimPrefix(path, "/branches/")
+		if f.revOr("refs/heads/"+name) == "" {
+			reply(404, map[string]string{})
+			return
+		}
 		f.deleted = append(f.deleted, name)
 		gitIn(f.t, f.bare, "update-ref", "-d", "refs/heads/"+name)
 		reply(204, nil)
 	case r.Method == http.MethodPost && pr("/pulls/%d/merge"):
 		var body map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&body)
-		head := f.head(n)
+		p, head := f.prs[n], f.head(n)
+		if f.racer {
+			f.racer = false
+			f.commitOn("main", "racer", "landed meanwhile\n")
+		}
 		switch {
-		case fmt.Sprint(body["head_commit_id"]) != head || body["Do"] != "squash":
+		case !p.open || fmt.Sprint(body["head_commit_id"]) != head || body["Do"] != "squash":
 			reply(409, map[string]string{"message": "head moved"})
 		case f.checking[n]:
 			delete(f.checking, n)
 			reply(405, map[string]string{"message": "Please try again later"})
-		case f.enforceBehind && f.mergeBase(n) != f.main():
+		case f.block && f.mergeBase(n) != f.main():
 			reply(405, map[string]string{"message": "head branch is behind the base branch"})
 		default:
+			msg := fmt.Sprintf("squash #%d", n)
+			if title, ok := body["MergeTitleField"].(string); ok && title != "" {
+				msg = title + "\n\n" + fmt.Sprint(body["MergeMessageField"])
+			}
 			tree := strings.Split(gitIn(f.t, f.bare, "merge-tree", "--write-tree", "refs/heads/main", head), "\n")[0]
-			sha := gitIn(f.t, f.bare, "commit-tree", tree, "-p", f.main(), "-m", fmt.Sprintf("squash #%d", n))
+			sha := gitIn(f.t, f.bare, "commit-tree", tree, "-p", f.main(), "-m", msg)
 			gitIn(f.t, f.bare, "update-ref", "refs/heads/main", sha)
-			f.open[n] = false
+			p.open, p.mergeSHA = false, sha
 			f.merged = append(f.merged, n)
 			f.pins = append(f.pins, head)
-			if f.racer {
-				f.racer = false
-				f.commitOn("main", "racer", "landed meanwhile\n")
+			f.messages = append(f.messages, msg)
+			if f.racerPR != nil {
+				f.racerPR()
+				f.racerPR = nil
+			}
+			if f.keywordClose {
+				for _, l := range strings.Split(p.body, "\n") {
+					var ref int
+					if _, err := fmt.Sscanf(l, "Closes #%d", &ref); err == nil {
+						if q := f.prs[ref]; q != nil {
+							q.open = false
+						} else if _, ok := f.issues[ref]; ok {
+							f.issues[ref] = false
+						}
+					}
+				}
+			}
+			if body["delete_branch_after_merge"] == true && strings.HasPrefix(p.ref, "refs/heads/") {
+				f.deleted = append(f.deleted, p.branch)
+				gitIn(f.t, f.bare, "update-ref", "-d", p.ref)
 			}
 			reply(200, map[string]any{})
 		}
@@ -534,21 +692,28 @@ func (f *trainGitea) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 var trainRuns int
 
-// sweep runs the merge step as a schedule sweep against f and fails the test
-// unless it exits as wantOK says.
-func (f *trainGitea) sweep(wantOK bool) string {
+// run runs the merge step for event against f and fails the test unless it
+// exits as wantOK says.
+func (f *trainGitea) run(event string, pr int, wantOK bool) string {
 	f.t.Helper()
 	trainRuns++
-	out, ok := runAutomergeWith(f.t, f, "schedule", map[string]string{
-		"GIT_URL": f.bare, "RUN_ID": fmt.Sprint(trainRuns), "RETRY_SLEEP": "0",
+	out, ok := runAutomergeWith(f.t, f, event, map[string]string{
+		"GIT_URL": f.bare, "RUN_ID": fmt.Sprint(trainRuns), "RETRY_SLEEP": "0", "PR_FROM_EVENT": fmt.Sprint(pr),
 		"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"})
 	if ok != wantOK {
-		f.t.Fatalf("sweep ok = %v, want %v:\n%s", ok, wantOK, out)
+		f.t.Fatalf("%s run ok = %v, want %v:\n%s", event, ok, wantOK, out)
 	}
 	return out
 }
 
-// twoBehind opens PRs 7 and 8 off a main that has since moved on.
+// sweep runs the merge step as a schedule sweep.
+func (f *trainGitea) sweep(wantOK bool) string {
+	f.t.Helper()
+	return f.run("schedule", 0, wantOK)
+}
+
+// twoBehind opens PRs 7 and 8 off a main that has since moved on. PR 7
+// closes issue 3; PR 8 fixes issue 4 and mentions PR 7.
 func twoBehind(t *testing.T) *trainGitea {
 	t.Helper()
 	f := newTrainGitea(t)
@@ -556,6 +721,9 @@ func twoBehind(t *testing.T) *trainGitea {
 	f.commitOn("main", "later", "main moved\n")
 	f.openPR(7, old, "seven", "7\n")
 	f.openPR(8, old, "eight", "8\n")
+	f.prs[7].body = "Closes #3\n\nSee the design notes."
+	f.prs[8].body = "Fixes #4. Resolves #7, and close #8 is ignored."
+	f.issues[3], f.issues[4] = true, true
 	return f
 }
 
@@ -570,12 +738,15 @@ func TestScriptsAutomergeTrain_UpToDatePRMergesDirectly(t *testing.T) {
 	f := newTrainGitea(t)
 	f.openPR(7, f.main(), "seven", "7\n")
 	out := f.sweep(true)
-	if fmt.Sprint(f.merged) != "[7]" || len(f.trainBranches()) != 0 {
+	if fmt.Sprint(f.merged) != "[7]" || len(f.trainBranches()) != 0 || len(f.openTrainPRs()) != 0 {
 		t.Fatalf("merged %v, trains %v; want PR 7 merged directly, no train:\n%s", f.merged, f.trainBranches(), out)
+	}
+	if f.pins[0] != f.head(7) {
+		t.Fatalf("merge pinned to %s, want PR 7's head %s", f.pins[0], f.head(7))
 	}
 }
 
-func TestScriptsAutomergeTrain_BuildsOneTrainAndWaitsForItsCI(t *testing.T) {
+func TestScriptsAutomergeTrain_OpensOneTrainPRAndWaitsForItsCI(t *testing.T) {
 	f := twoBehind(t)
 	base := f.main()
 	out := f.sweep(true)
@@ -586,40 +757,90 @@ func TestScriptsAutomergeTrain_BuildsOneTrainAndWaitsForItsCI(t *testing.T) {
 	for _, want := range []string{"README", "later", "seven", "eight"} {
 		mustContain(t, files, want)
 	}
-	if len(f.merged) != 0 || len(f.updated) != 0 {
-		t.Fatalf("merged %v, updated %v before the train's CI:\n%s", f.merged, f.updated, out)
+	trainPR, p := f.onlyTrainPR()
+	if p.title != "merge train: #7, #8" {
+		t.Fatalf("train PR title %q, want %q", p.title, "merge train: #7, #8")
+	}
+	for _, want := range []string{"#7 feat: change 7 (" + f.head(7) + ")", "#8 feat: change 8 (" + f.head(8) + ")",
+		"Closes #3\n", "Closes #4\n", "Closes #7\n", "Closes #8\n"} {
+		mustContain(t, p.body, want)
+	}
+	if strings.Count(p.body, "Closes #7\n") != 1 {
+		t.Fatalf("PR 7 is closed twice in the train body:\n%s", p.body)
+	}
+	if len(f.merged) != 0 || len(f.updated) != 0 || len(f.closed) != 0 {
+		t.Fatalf("merged %v, updated %v, closed %v before the train's CI:\n%s", f.merged, f.updated, f.closed, out)
 	}
 
 	out = f.sweep(true)
 	mustContain(t, out, "is waiting for CI")
-	if again, _ := f.onlyTrain(); again != name || len(f.merged) != 0 || len(f.deleted) != 0 {
-		t.Fatalf("a pending train was replaced (%s -> %s, deleted %v) or merged %v:\n%s", name, again, f.deleted, f.merged, out)
+	if again, _ := f.onlyTrainPR(); again != trainPR || len(f.merged) != 0 || len(f.deleted) != 0 {
+		t.Fatalf("a pending train was replaced (#%d -> #%d, deleted %v) or merged %v:\n%s", trainPR, again, f.deleted, f.merged, out)
 	}
 }
 
-func TestScriptsAutomergeTrain_GreenTrainLandsInOrderAndIsDeleted(t *testing.T) {
+func TestScriptsAutomergeTrain_GreenTrainSquashesTheTrainPRAndClosesItsPRs(t *testing.T) {
 	f := twoBehind(t)
 	f.sweep(true)
 	name, _ := f.onlyTrain()
+	trainPR, _ := f.onlyTrainPR()
+	trainTip := f.trainBranches()[name]
 	trainTree := gitIn(t, f.bare, "rev-parse", name+"^{tree}")
-	heads := []string{f.head(7), f.head(8)}
 	f.trainCI = "success"
-	f.checking[8] = true // Gitea re-tests PR 8 once PR 7 lands
+	f.checking[trainPR] = true // Gitea answers "try again later" once
 	out := f.sweep(true)
-	if fmt.Sprint(f.merged) != "[7 8]" || fmt.Sprint(f.pins) != fmt.Sprint(heads) {
-		t.Fatalf("merged %v pinned to %v, want [7 8] pinned to %v:\n%s", f.merged, f.pins, heads, out)
+
+	if fmt.Sprint(f.merged) != fmt.Sprint([]int{trainPR}) || fmt.Sprint(f.pins) != fmt.Sprint([]string{trainTip}) {
+		t.Fatalf("merged %v pinned to %v, want only train PR #%d pinned to %s:\n%s", f.merged, f.pins, trainPR, trainTip, out)
 	}
+	squash := f.prs[trainPR].mergeSHA
+	if got := gitIn(t, f.bare, "rev-parse", "main^{tree}"); got != trainTree || f.main() != squash {
+		t.Fatalf("main (%s, tree %s) is not the squash %s of the train tree %s:\n%s", f.main(), got, squash, trainTree, out)
+	}
+	title, body, _ := strings.Cut(f.messages[0], "\n\n")
+	if want := fmt.Sprintf("merge train: feat: change 7; feat: change 8 (#%d)", trainPR); title != want {
+		t.Fatalf("squash title %q, want %q", title, want)
+	}
+	mustContain(t, body, "- #7 feat: change 7")
+	mustContain(t, body, "- #8 feat: change 8")
 	if len(f.trainBranches()) != 0 || !strings.Contains(strings.Join(f.deleted, " "), name) {
 		t.Fatalf("train %s not deleted (deleted %v):\n%s", name, f.deleted, out)
 	}
-	if got := gitIn(t, f.bare, "rev-parse", "main^{tree}"); got != trainTree || strings.Contains(out, "does not have the tree") {
-		t.Fatalf("main's tree %s is not the train's %s:\n%s", got, trainTree, out)
+	for _, n := range []int{7, 8} {
+		if !strings.Contains(" "+strings.Join(f.deleted, " ")+" ", fmt.Sprintf(" issue/%d ", n)) {
+			t.Fatalf("PR %d's branch was not deleted (deleted %v):\n%s", n, f.deleted, out)
+		}
+		if f.prs[n].open || len(f.comments[n]) != 1 {
+			t.Fatalf("PR %d open=%v comments %q; want it closed with one comment:\n%s", n, f.prs[n].open, f.comments[n], out)
+		}
+		mustContain(t, f.comments[n][0], fmt.Sprintf("Landed in %s via merge train #%d", squash, trainPR))
 	}
+	if fmt.Sprint(f.closedIssues) != "[3 4]" {
+		t.Fatalf("closed issues %v, want [3 4] (PR 7 is not an issue):\n%s", f.closedIssues, out)
+	}
+	if strings.Contains(out, "does not have the tree") {
+		t.Fatalf("a clean landing reported a tree mismatch:\n%s", out)
+	}
+}
+
+func TestScriptsAutomergeTrain_APRThatMovedWhileLandingStaysOpen(t *testing.T) {
+	f := twoBehind(t)
+	f.sweep(true)
+	f.trainCI = "success"
+	landed := f.head(8)
+	f.racerPR = func() { f.commitFrom(landed, "refs/pull/8/head", "eight", "8 again\n") }
+	f.keywordClose = true
+	out := f.sweep(true)
+	if !f.prs[8].open || f.prs[7].open {
+		t.Fatalf("PR 7 open=%v, PR 8 open=%v; want only PR 8, which moved, left open:\n%s", f.prs[7].open, f.prs[8].open, out)
+	}
+	mustContain(t, strings.Join(f.comments[8], "\n"), "pushed since")
 }
 
 func TestScriptsAutomergeTrain_AnUntestedTreeOnMainFailsTheRun(t *testing.T) {
 	f := twoBehind(t)
 	f.sweep(true)
+	f.block = false // nothing stops Gitea squashing onto a main that moved
 	f.trainCI, f.racer = "success", true
 	out := f.sweep(false)
 	mustContain(t, out, "does not have the tree")
@@ -628,15 +849,52 @@ func TestScriptsAutomergeTrain_AnUntestedTreeOnMainFailsTheRun(t *testing.T) {
 	}
 }
 
+func TestScriptsAutomergeTrain_MainMovingDuringTheMergeAbandonsTheTrain(t *testing.T) {
+	f := twoBehind(t)
+	f.sweep(true)
+	old, _ := f.onlyTrainPR()
+	f.trainCI, f.racer = "success", true
+	out := f.sweep(true)
+	if len(f.merged) != 0 || f.prs[old].open {
+		t.Fatalf("merged %v, train PR #%d open=%v; want nothing merged and the train PR closed:\n%s", f.merged, old, f.prs[old].open, out)
+	}
+	if again, _ := f.onlyTrainPR(); again == old {
+		t.Fatalf("no new train after main moved:\n%s", out)
+	}
+}
+
+func TestScriptsAutomergeTrain_ATamperedTrainIsNeverLanded(t *testing.T) {
+	f := twoBehind(t)
+	f.sweep(true)
+	name, msg := f.onlyTrain()
+	trainPR, _ := f.onlyTrainPR()
+	tip := f.trainBranches()[name]
+	// Same recorded base and heads, one extra file: only the tree tells.
+	f.commitTree(tip+"^", "refs/heads/"+name, "evil", "x\n", msg)
+	f.trainCI = "success"
+	out := f.sweep(true)
+	mustContain(t, out, "abandoning "+name)
+	if len(f.merged) != 0 || f.prs[trainPR].open {
+		t.Fatalf("merged %v, train PR open=%v; a train whose tree is not main plus its PRs must not land:\n%s", f.merged, f.prs[trainPR].open, out)
+	}
+	if again, _ := f.onlyTrain(); strings.Contains(gitIn(t, f.bare, "ls-tree", "--name-only", again), "evil") {
+		t.Fatalf("the rebuilt train kept the tampered file:\n%s", out)
+	}
+}
+
 func TestScriptsAutomergeTrain_RedTrainDropsTheNewest(t *testing.T) {
 	f := twoBehind(t)
 	f.sweep(true)
 	old, _ := f.onlyTrain()
+	oldPR, _ := f.onlyTrainPR()
 	f.trainCI = "failure"
 	out := f.sweep(true)
 	name, msg := f.onlyTrain()
 	if name == old || !strings.Contains(msg, "pr 7 ") || strings.Contains(msg, "pr 8 ") {
 		t.Fatalf("want a new train with PR 7 only, have %s:\n%s\n%s", name, msg, out)
+	}
+	if f.prs[oldPR].open {
+		t.Fatalf("the red train PR #%d was left open:\n%s", oldPR, out)
 	}
 	if len(f.comments[7]) != 1 || len(f.comments[8]) != 1 || len(f.merged) != 0 {
 		t.Fatalf("comments %v, merged %v; want one comment on each train PR and no merge", f.comments, f.merged)
@@ -663,6 +921,18 @@ func TestScriptsAutomergeTrain_OnlyTheAgentsMarkersCount(t *testing.T) {
 	}
 }
 
+func TestScriptsAutomergeTrain_ALandedPRLeftOpenIsClosed(t *testing.T) {
+	f := twoBehind(t)
+	f.comments[8] = []string{"Landed in x via merge train #1.\n\n<!-- merge-train:landed " + f.head(8) + " -->"}
+	out := f.sweep(true)
+	if f.prs[8].open || !strings.Contains(strings.Join(f.deleted, " "), "issue/8") {
+		t.Fatalf("PR 8, already landed at its head, was left open or its branch kept (deleted %v):\n%s", f.deleted, out)
+	}
+	if _, msg := f.onlyTrain(); strings.Contains(msg, "pr 8 ") {
+		t.Fatalf("a landed PR boarded another train:\n%s\n%s", msg, out)
+	}
+}
+
 func TestScriptsAutomergeTrain_ConflictIsSkippedWithAComment(t *testing.T) {
 	f := newTrainGitea(t)
 	old := f.main()
@@ -680,39 +950,107 @@ func TestScriptsAutomergeTrain_ConflictIsSkippedWithAComment(t *testing.T) {
 	mustContain(t, f.comments[8][0], "does not merge cleanly")
 }
 
-func TestScriptsAutomergeTrain_MainMovedAbandonsAndRebuilds(t *testing.T) {
+func TestScriptsAutomergeTrain_MainMovedClosesTheTrainPRAndRebuilds(t *testing.T) {
+	for _, ci := range []string{"", "success"} {
+		t.Run("train CI "+ci, func(t *testing.T) { mainMovedRebuilds(t, ci) })
+	}
+}
+
+func mainMovedRebuilds(t *testing.T, ci string) {
 	f := twoBehind(t)
 	f.sweep(true)
 	old, _ := f.onlyTrain()
-	f.trainCI = "success"
+	oldPR, _ := f.onlyTrainPR()
+	f.trainCI = ci
 	moved := f.commitOn("main", "hotfix", "moved again\n")
 	out := f.sweep(true)
 	mustContain(t, out, "abandoning "+old)
 	name, msg := f.onlyTrain()
-	if name == old || !strings.Contains(msg, "base "+moved) || len(f.merged) != 0 {
-		t.Fatalf("want a new train on %s and nothing merged (merged %v), have %s:\n%s\n%s", moved, f.merged, name, msg, out)
+	newPR, _ := f.onlyTrainPR()
+	if name == old || newPR == oldPR || !strings.Contains(msg, "base "+moved) || len(f.merged) != 0 {
+		t.Fatalf("want a new train PR on %s and nothing merged (merged %v), have %s (#%d):\n%s\n%s", moved, f.merged, name, newPR, msg, out)
+	}
+	if f.prs[oldPR].open || !strings.Contains(strings.Join(f.deleted, " "), old) {
+		t.Fatalf("old train PR #%d open=%v, deleted %v; want it closed and %s deleted", oldPR, f.prs[oldPR].open, f.deleted, old)
 	}
 }
 
-func TestScriptsAutomergeTrain_OutdatedBranchRuleFallsBackToUpdateBranch(t *testing.T) {
-	t.Run("protection still blocks outdated branches", func(t *testing.T) {
-		f := twoBehind(t)
-		f.block, f.enforceBehind = true, true
-		out := f.sweep(true)
-		if fmt.Sprint(f.updated) != "[7 8]" || len(f.trainBranches()) != 0 || len(f.merged) != 0 {
-			t.Fatalf("updated %v, trains %v, merged %v; want v5 update-branch, no train:\n%s", f.updated, f.trainBranches(), f.merged, out)
-		}
-	})
-	t.Run("the merge call refuses a behind PR", func(t *testing.T) {
+func TestScriptsAutomergeTrain_ATrainBranchWithoutItsPRGetsOne(t *testing.T) {
+	f := twoBehind(t)
+	f.sweep(true)
+	trainPR, _ := f.onlyTrainPR()
+	f.prs[trainPR].open = false // as if the run died between push and PR
+	delete(f.prs, trainPR)
+	out := f.sweep(true)
+	if again, _ := f.onlyTrainPR(); again == trainPR || len(f.merged) != 0 {
+		t.Fatalf("want a new PR for the existing train and nothing merged:\n%s", out)
+	}
+}
+
+func TestScriptsAutomergeTrain_TrainPRsNeverBoardATrain(t *testing.T) {
+	t.Run("the agent's own train PR", func(t *testing.T) {
 		f := twoBehind(t)
 		f.sweep(true)
-		f.trainCI, f.enforceBehind = "success", true
-		out := f.sweep(true)
-		if fmt.Sprint(f.updated) != "[7 8]" || len(f.trainBranches()) != 0 || len(f.merged) != 0 {
-			t.Fatalf("updated %v, trains %v, merged %v; want update-branch for both and the train deleted:\n%s", f.updated, f.trainBranches(), f.merged, out)
+		trainPR, _ := f.onlyTrainPR()
+		out := f.run("pull_request_target", trainPR, true)
+		mustContain(t, out, "is a merge train")
+		out = f.sweep(true)
+		if strings.Contains(out, fmt.Sprintf("PR %d is ready", trainPR)) || len(f.merged) != 0 {
+			t.Fatalf("the sweep treated train PR #%d as a candidate:\n%s", trainPR, out)
 		}
-		mustContain(t, out, "fall back to update-branch")
 	})
+	t.Run("someone else's PR from the train's own branch", func(t *testing.T) {
+		f := twoBehind(t)
+		f.sweep(true)
+		name, _ := f.onlyTrain()
+		trainPR, _ := f.onlyTrainPR()
+		delete(f.prs, trainPR)
+		f.prs[50] = &fakePR{ref: "refs/heads/" + name, branch: name, title: "merge train: #7, #8", user: "mallory", open: true}
+		f.trainCI = "success"
+		out := f.sweep(true)
+		if len(f.merged) != 0 || len(f.closed) != 0 {
+			t.Fatalf("merged %v, closed %v; only a train PR the agent opened may land:\n%s", f.merged, f.closed, out)
+		}
+		if _, ok := f.trainBranches()[name]; ok {
+			t.Fatalf("a train held by someone else's PR was kept, so it can never land:\n%s", out)
+		}
+		f.sweep(true)
+		ours := 0
+		for _, p := range f.openTrainPRs() {
+			if p.user == trainAgent {
+				ours++
+			}
+		}
+		if ours != 1 || len(f.merged) != 0 {
+			t.Fatalf("want one new train PR by the agent after the rebuild, have %d (merged %v)", ours, f.merged)
+		}
+	})
+	t.Run("a merge-train branch PR by someone else", func(t *testing.T) {
+		f := newTrainGitea(t)
+		f.commitFrom(f.main(), "refs/heads/merge-train/1-1", "evil", "x\n")
+		f.prs[50] = &fakePR{ref: "refs/heads/merge-train/1-1", branch: "merge-train/1-1", title: "merge train: #1", user: "mallory", open: true}
+		f.trainCI = "success"
+		out := f.sweep(true)
+		if len(f.merged) != 0 {
+			t.Fatalf("merged %v; a merge-train PR not opened by the agent must never land:\n%s", f.merged, out)
+		}
+		out = f.run("pull_request_target", 50, true)
+		if len(f.merged) != 0 {
+			t.Fatalf("merged %v from its own event:\n%s", f.merged, out)
+		}
+	})
+}
+
+func TestScriptsAutomergeTrain_RunsWithTheOutdatedBranchRuleOn(t *testing.T) {
+	f := twoBehind(t)
+	if !f.block {
+		t.Fatal("train tests must run with block_on_outdated_branch on, as main has it")
+	}
+	f.sweep(true)
+	if len(f.updated) != 0 {
+		t.Fatalf("updated %v: with the flag on, behind PRs board a train instead of update-branch", f.updated)
+	}
+	f.onlyTrainPR()
 }
 
 func TestScriptsCI_StagesRunInParallelAndTrainsRunCI(t *testing.T) {
@@ -725,6 +1063,9 @@ func TestScriptsCI_StagesRunInParallelAndTrainsRunCI(t *testing.T) {
 			Push struct {
 				Branches []string `yaml:"branches"`
 			} `yaml:"push"`
+			PullRequest struct {
+				Branches []string `yaml:"branches"`
+			} `yaml:"pull_request"`
 		} `yaml:"on"`
 		Jobs map[string]struct {
 			Needs []string `yaml:"needs"`
@@ -736,8 +1077,12 @@ func TestScriptsCI_StagesRunInParallelAndTrainsRunCI(t *testing.T) {
 	if err := yaml.Unmarshal(raw, &wf); err != nil {
 		t.Fatalf("parse ci.yml: %v", err)
 	}
-	if !strings.Contains(strings.Join(wf.On.Push.Branches, " "), "merge-train/**") {
-		t.Errorf("ci.yml does not run on pushes to merge-train/**: %v", wf.On.Push.Branches)
+	// A train is a PR into main, so it runs CI through pull_request.
+	if fmt.Sprint(wf.On.PullRequest.Branches) != "[main]" {
+		t.Errorf("ci.yml pull_request branches = %v, want [main]", wf.On.PullRequest.Branches)
+	}
+	if fmt.Sprint(wf.On.Push.Branches) != "[main]" {
+		t.Errorf("ci.yml push branches = %v, want [main]", wf.On.Push.Branches)
 	}
 	gate, ok := wf.Jobs["ci-gate"]
 	if !ok {

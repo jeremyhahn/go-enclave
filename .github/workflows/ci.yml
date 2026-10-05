@@ -9,8 +9,8 @@
 #
 # Every job starts at once, so a run takes as long as its slowest job. CI Gate,
 # the one required check, needs every job and fails closed on any result but
-# success. Pushes to merge-train/** are automerge.yml's merge trains: one run
-# on the combined tree of several ready PRs.
+# success. automerge.yml's merge trains are PRs from merge-train/* and get
+# their CI from the pull_request trigger like any PR.
 #
 # Long-horizon checks — the FIPS-strict UNIT test run and `trivy fs` — live in
 # nightly.yml rather than on the push path (devops §8a: alpha phase), so a slow
@@ -50,7 +50,7 @@ name: CI
 
 on:
   push:
-    branches: [main, 'merge-train/**']  # GitHub Flow: main is the only long-lived branch
+    branches: [main]                    # GitHub Flow: main is the only long-lived branch
   pull_request:
     branches: [main]
   workflow_dispatch:                  # re-fire the workflow by hand; also
