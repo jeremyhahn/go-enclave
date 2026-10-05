@@ -482,3 +482,44 @@ func TestFaultInjectorSkipSurvivesRestartedSyscalls(t *testing.T) {
 		t.Fatalf("Skip left = %d, want 0: replays spent or failed to spend allowances", left)
 	}
 }
+
+// installErrnoFilter installs a plain seccomp filter, in an isolated child,
+// that fails syscall nr with errno whenever its argument arg equals value, and
+// allows everything else. No supervisor: the refusal is the kernel's own
+// SECCOMP_RET_ERRNO. Only the low 32 bits of the argument are compared.
+func installErrnoFilter(t *testing.T, nr int32, arg int, value uint32, errno unix.Errno) {
+	t.Helper()
+	if !isChild() {
+		t.Fatal("installErrnoFilter outside an isolated child: a seccomp filter cannot be removed")
+	}
+	arch, err := auditArch()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const (
+		ldW  = unix.BPF_LD | unix.BPF_W | unix.BPF_ABS
+		jeqK = unix.BPF_JMP | unix.BPF_JEQ | unix.BPF_K
+		retK = unix.BPF_RET | unix.BPF_K
+	)
+	// args[i] of a little-endian seccomp_data: low word at 16+8*i.
+	prog := []unix.SockFilter{
+		{Code: ldW, K: 4},
+		{Code: jeqK, Jt: 0, Jf: 5, K: arch},
+		{Code: ldW, K: 0},
+		{Code: jeqK, Jt: 0, Jf: 3, K: uint32(nr)},
+		{Code: ldW, K: uint32(16 + 8*arg)},
+		{Code: jeqK, Jt: 0, Jf: 1, K: value},
+		{Code: retK, K: unix.SECCOMP_RET_ERRNO | uint32(errno)},
+		{Code: retK, K: unix.SECCOMP_RET_ALLOW},
+	}
+	fprog := unix.SockFprog{Len: uint16(len(prog)), Filter: &prog[0]}
+	if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
+		t.Fatalf("prctl(PR_SET_NO_NEW_PRIVS): %v", err)
+	}
+	_, _, e := unix.Syscall(unix.SYS_SECCOMP, unix.SECCOMP_SET_MODE_FILTER,
+		unix.SECCOMP_FILTER_FLAG_TSYNC, uintptr(unsafe.Pointer(&fprog)))
+	runtime.KeepAlive(prog)
+	if e != 0 {
+		t.Fatalf("seccomp(SET_MODE_FILTER, TSYNC): %v", e)
+	}
+}

@@ -25,6 +25,7 @@ transport own those surfaces.
 | Release | `(*MemoryEnclave).Destroy() error` | N/A |
 | Cost of an enclave | `enclave.LockedSize(n) int64` | N/A |
 | Core-dump hardening status | `enclave.CoreDumpsDisabled() error` | N/A |
+| Opt-in process hardening | `enclave.HardenProcess() (ProcessHardening, error)` | N/A |
 | Zero a heap slice | `enclave.Wipe(b)` | N/A |
 
 Request and response schemas are the Go signatures in

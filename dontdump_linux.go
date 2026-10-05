@@ -10,7 +10,11 @@
 
 package enclave
 
-import "golang.org/x/sys/unix"
+import (
+	"os"
+
+	"golang.org/x/sys/unix"
+)
 
 // coreDumpMapFlags is empty on Linux: there is no mapping-time flag, and the
 // exclusion is the madvise below.
@@ -31,5 +35,5 @@ const coreDumpMapFlags = 0
 // too, so the caller is told rather than handed an enclave whose pages could be
 // written to disk in plaintext.
 func excludeFromCoreDump(b []byte) error {
-	return unix.Madvise(b, unix.MADV_DONTDUMP)
+	return os.NewSyscallError("madvise", unix.Madvise(b, unix.MADV_DONTDUMP))
 }

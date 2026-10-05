@@ -1077,3 +1077,125 @@ func TestMapping_RetryAfterARefusedUnmapDoesNotUnlockAgain(t *testing.T) {
 		t.Error("the mapping is still held after the retry released the pages")
 	}
 }
+
+// TestNewMapping_EveryConstructionStepRollsBack fails each step of newMapping
+// in turn, through the public constructor, and asserts the rollback: the
+// region is unlocked if it had been locked, unmapped once, reported as held
+// only when the unmap was refused, and a held region is adopted as an orphan
+// that a later WipeAll reclaims.
+func TestNewMapping_EveryConstructionStepRollsBack(t *testing.T) {
+	type seams struct {
+		lock, unlock, unmap func([]byte) error
+		protect             func([]byte, protection) error
+		core, fork, canary  func([]byte) error
+	}
+	saved := seams{lockMemory, unlockMemory, unmapMemory, protectMemory, excludeCoreDump, excludeFork, fillCanary}
+	restore := func() {
+		lockMemory, unlockMemory, unmapMemory, protectMemory = saved.lock, saved.unlock, saved.unmap, saved.protect
+		excludeCoreDump, excludeFork, fillCanary = saved.core, saved.fork, saved.canary
+	}
+	t.Cleanup(restore)
+
+	cause := errors.New("the step that failed")
+	fail := func([]byte) error { return cause }
+	// guardFailure fails the nth guard-page mprotect (1 = preguard).
+	guardFailure := func(nth int) func() {
+		return func() {
+			calls := 0
+			protectMemory = func(b []byte, p protection) error {
+				if p == protNoAccess {
+					calls++
+					if calls == nth {
+						return cause
+					}
+				}
+				return saved.protect(b, p)
+			}
+		}
+	}
+
+	steps := []struct {
+		name   string
+		inject func()
+		locked bool
+	}{
+		{"mlock", func() { lockMemory = fail }, false},
+		{"core-dump exclusion", func() { excludeCoreDump = fail }, true},
+		{"fork exclusion", func() { excludeFork = fail }, true},
+		{"canary fill", func() { fillCanary = fail }, true},
+		{"preguard mprotect", guardFailure(1), true},
+		{"postguard mprotect", guardFailure(2), true},
+	}
+	cleanups := []struct {
+		name                        string
+		unlockRefused, unmapRefused bool
+	}{
+		{"clean rollback", false, false},
+		{"munmap refused", false, true},
+		{"munlock and munmap refused", true, true},
+	}
+
+	for _, step := range steps {
+		for _, cl := range cleanups {
+			t.Run(step.name+"/"+cl.name, func(t *testing.T) {
+				requireCleanLedger(t)
+				t.Cleanup(restore)
+				step.inject()
+
+				unlocks, unmaps := 0, 0
+				unlockMemory = func(b []byte) error {
+					unlocks++
+					if cl.unlockRefused {
+						return errors.New("munlock refused")
+					}
+					return saved.unlock(b)
+				}
+				unmapMemory = func(b []byte) error {
+					unmaps++
+					if cl.unmapRefused {
+						return errors.New("munmap refused")
+					}
+					return saved.unmap(b)
+				}
+
+				e, err := NewMemoryEnclaveSized(64)
+				restore()
+
+				if e != nil {
+					t.Fatalf("NewMemoryEnclaveSized returned an enclave although %s failed", step.name)
+				}
+				if !errors.Is(err, cause) || !errors.Is(err, ErrLockedMemoryUnavailable) {
+					t.Errorf("err = %v, want the failed step as ErrLockedMemoryUnavailable", err)
+				}
+				wantUnlocks := 0
+				if step.locked {
+					wantUnlocks = 1
+				}
+				if unlocks != wantUnlocks {
+					t.Errorf("munlock called %d times, want %d", unlocks, wantUnlocks)
+				}
+				if unmaps != 1 {
+					t.Errorf("munmap called %d times, want 1", unmaps)
+				}
+				if got := pagesHeld(err); got != cl.unmapRefused {
+					t.Errorf("pagesHeld(%v) = %v, want %v", err, got, cl.unmapRefused)
+				}
+				wantLocked := step.locked && cl.unlockRefused && cl.unmapRefused
+				if got := lockedPagesHeld(err); got != wantLocked {
+					t.Errorf("lockedPagesHeld(%v) = %v, want %v", err, got, wantLocked)
+				}
+
+				wantOrphans := 0
+				if cl.unmapRefused {
+					wantOrphans = 1
+				}
+				if got := orphanCount(); got != wantOrphans {
+					t.Errorf("orphan ledger holds %d, want %d", got, wantOrphans)
+				}
+				if remaining := sweep(t); remaining != 0 {
+					t.Errorf("WipeAll left %d entries once the refusals lifted, want 0", remaining)
+				}
+			})
+		}
+	}
+}

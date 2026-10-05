@@ -10,7 +10,11 @@
 
 package enclave
 
-import "golang.org/x/sys/unix"
+import (
+	"os"
+
+	"golang.org/x/sys/unix"
+)
 
 // coreDumpMapFlags asks for the exclusion at mapping time as well, with
 // MAP_NOCORE, so the pages are never eligible for a core file even in the
@@ -28,5 +32,5 @@ const coreDumpMapFlags = unix.MAP_NOCORE
 // is surfaced and fails the allocation rather than handing back an enclave
 // whose pages could be written to disk in plaintext.
 func excludeFromCoreDump(b []byte) error {
-	return unix.Madvise(b, unix.MADV_NOCORE)
+	return os.NewSyscallError("madvise", unix.Madvise(b, unix.MADV_NOCORE))
 }

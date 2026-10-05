@@ -23,6 +23,9 @@ All in package `enclave` (import path `github.com/jeremyhahn/go-enclave`).
 | `(*MemoryEnclave).Destroy() error` | Wipe, verify, unlock, unmap; idempotent, nil-safe. See below. |
 | `LockedSize(n int) int64` | Locked bytes an `n`-byte enclave costs (page-rounded); `0` for an impossible size. |
 | `CoreDumpsDisabled() error` | Result of lowering `RLIMIT_CORE` (soft and hard) to zero at package init. |
+| `HardenProcess() (ProcessHardening, error)` | Opt-in, never called by the package. Linux: `prctl(PR_SET_DUMPABLE, 0)`, read back. Elsewhere `ErrProcessHardeningUnsupported`. |
+| `ProcessHardening{NotDumpable bool}` | What `HardenProcess` verified in effect. |
+| `ProcessHardeningError{Cause error}` | A refused or ineffective hardening step; `Unwrap` reaches the `prctl` error. |
 | `Wipe(b []byte)` | Best-effort zeroing of an ordinary heap slice. |
 | `LockedMemoryError{Cause any}` | Matches `ErrLockedMemoryUnavailable`; `Unwrap` reaches the syscall error. |
 | `UnwipedReleaseError{Cause error}` | Matches `ErrReleasedWithoutWipe`; `Unwrap` reaches the `mprotect` refusal. |
@@ -73,6 +76,8 @@ with `ErrEnclaveDestroyed`, `Destroy` returns `nil`.
 | `ErrReleasedWithoutWipe` (`*UnwipedReleaseError`) | `Destroy`; `NewMemoryEnclave`/`NewMemoryEnclaveCopy`/`NewMemoryEnclaveFromString` (joined into a freeze failure's rollback); `Allocator.New` likewise | `mprotect` denied, pages handed back with a bare `munmap` and **released**. They were locked for their whole life (never swapped) and the kernel zeroes anonymous pages before reuse, but the in-process wipe did not run. Not a panic. |
 | `ErrEnclaveCorrupted` | `Destroy` **panic value** | Canary or guard mismatch. See below. |
 | `ErrCoreDumpLimitUnsupported` | `CoreDumpsDisabled` | Windows: no process-wide core-dump limit exists. |
+| `ErrProcessHardeningUnsupported` | `HardenProcess` | Not Linux: nothing applied. |
+| `*ProcessHardeningError` | `HardenProcess` | `PR_SET_DUMPABLE` refused, or the read-back still shows the process dumpable. |
 
 ### `ErrReleasedWithoutWipe` and `ErrLockedMemoryUnavailable` are disjoint on release
 
@@ -117,15 +122,26 @@ it must not continue, and a returned error would be dropped by
 
 ## Platform contract
 
-| GOOS | Lock primitive | Per-mapping dump exclusion (verified) | `CoreDumpsDisabled()` | Notes |
-|---|---|---|---|---|
-| linux, android | `mlock` | `MADV_DONTDUMP` (refusal fails the allocation) | `setrlimit(RLIMIT_CORE, 0/0)` result | Only OS in CI. |
-| freebsd, dragonfly | `mlock` | `MAP_NOCORE` + `MADV_NOCORE` (madvise refusal fails the allocation) | setrlimit result | |
-| openbsd | `mlock` | `MAP_CONCEAL` on the `mmap` itself | setrlimit result | |
-| darwin, ios, netbsd | `mlock` | none exposed by x/sys | setrlimit result | `RLIMIT_CORE` is the only control. |
-| aix, solaris, illumos | `mlock` | none exposed by x/sys | setrlimit result | `mlock` needs a privilege an ordinary process lacks: unprivileged processes get `ErrLockedMemoryUnavailable` from every allocation. |
-| windows | `VirtualLock` | none (WER API deliberately unused) | `ErrCoreDumpLimitUnsupported` | Dump exposure must be governed by host policy (WER `LocalDumps`, who may open the process). |
-| anything else | — | — | — | Does not compile. |
+| GOOS | Lock primitive | Per-mapping dump exclusion (verified) | Fork exclusion (verified) | `CoreDumpsDisabled()` | Notes |
+|---|---|---|---|---|---|
+| linux, android | `mlock` | `MADV_DONTDUMP` (refusal fails the allocation) | `MADV_DONTFORK` on the whole mapping (refusal fails the allocation) | `setrlimit(RLIMIT_CORE, 0/0)` result | Only OS in CI. |
+| freebsd, dragonfly | `mlock` | `MAP_NOCORE` + `MADV_NOCORE` (madvise refusal fails the allocation) | none: x/sys exposes no `minherit` | setrlimit result | |
+| openbsd | `mlock` | `MAP_CONCEAL` on the `mmap` itself | none: x/sys exposes no `minherit`, and raw syscalls are refused | setrlimit result | |
+| darwin, ios, netbsd | `mlock` | none exposed by x/sys | none | setrlimit result | `RLIMIT_CORE` is the only control. |
+| aix, solaris, illumos | `mlock` | none exposed by x/sys | none | setrlimit result | `mlock` needs a privilege an ordinary process lacks: unprivileged processes get `ErrLockedMemoryUnavailable` from every allocation. |
+| windows | `VirtualLock` | none (WER API deliberately unused) | n/a (no fork) | `ErrCoreDumpLimitUnsupported` | Dump exposure must be governed by host policy (WER `LocalDumps`, who may open the process). |
+| anything else | — | — | — | — | Does not compile. |
+
+**Why `MADV_DONTFORK`, not `MADV_WIPEONFORK`.** Both keep the material out of a
+forked child. `WIPEONFORK` leaves the range mapped and zero-filled in the child,
+so code there that still holds the enclave reads an all-zero buffer it can
+mistake for a key; `DONTFORK` removes the range, so the same read faults. The
+fault is the fail-closed outcome. `DONTFORK` has existed since Linux 2.6.16, so
+a refusal is a denial and fails the allocation, with no "kernel too old"
+`EINVAL` to fall back from. Go's own `os/exec` on Linux spawns with
+`CLONE_VM|CLONE_VFORK` and never copies the address space, so this binds
+`fork(2)` from cgo or C libraries and the copying clone Go uses when a child
+gets a new user namespace.
 
 **`RLIMIT_CORE` vs piped `core_pattern`.** A zero `RLIMIT_CORE` stops the kernel
 writing core *files*. On Linux a `core_pattern` beginning with `|`
@@ -138,7 +154,15 @@ is what keeps enclave pages out. Heap copies (see
 
 None. No environment variables or options. Package initialization lowers
 `RLIMIT_CORE` to zero (soft and hard) once; constructors do not consult the
-result.
+result. Resource limits are inherited across `fork` and `execve`, so every child
+process the binary starts, go-enclave user or not, also starts with
+`RLIMIT_CORE` 0 and, the hard limit being 0 too, cannot raise it without
+privilege.
+
+`HardenProcess` is the one process-wide step that is the binary's choice and
+is never run at import: marking the process non-dumpable breaks same-uid
+debuggers, profilers and crash collectors, and makes `/proc/<pid>` files
+root-owned, which a library cannot decide for the program that imports it.
 
 ## Persistence
 
@@ -149,18 +173,31 @@ None. Enclaves live and die with the process.
 - **Unit tests** in the root package, run with `-race` across `-cpu=1,2,8`
   (`make test`, `make coverage` with a 90% floor).
 - **Fault injection** through package-private seams that production code never
-  reassigns: `lockMemory`, `unlockMemory`, `protectMemory`, `unmapMemory`
+  reassigns: `lockMemory`, `unlockMemory`, `protectMemory`, `unmapMemory`,
+  `excludeCoreDump`, `excludeFork`, `fillCanary`
   ([mapping.go](../../mapping.go)) model a refused `mlock`, `munlock`,
-  `mprotect` and `munmap`. Linux-only tests lower `RLIMIT_MEMLOCK` in a
+  `mprotect`, `munmap`, dump or fork `madvise`, and canary fill. Every step of
+  `newMapping` is failed in turn and its rollback asserted, including the
+  orphan ledger when the rollback's `munmap` is refused too. Linux-only tests lower `RLIMIT_MEMLOCK` in a
   subprocess, and FAIL — never skip — where the environment refuses the
   change; the suite states its requirement (soft limit at least 2 MiB, hard
   limit at least 2 MiB when `CAP_IPC_LOCK` exempts the soft one) and checks it
   once at startup.
-- **Core-dump exclusion refusal** is induced without a seam: `madvise` refuses
-  an unaligned address, so a test proves `excludeFromCoreDump` reports a
-  refusal. The branch in `newMapping` that acts on that report cannot be reached
-  by any test — `newMapping` always passes a page-aligned region, which cannot
-  be refused that way — and is guaranteed by construction instead.
+- **Dump and fork exclusion** are checked against the kernel: `madvise`
+  refuses an unaligned address, so tests prove `excludeFromCoreDump` and
+  `excludeFromFork` report a refusal as an `*os.SyscallError`, and a fresh
+  mapping's `/proc/self/smaps` `VmFlags` must show `dc` on every page and `dd`
+  on the data region. The integration suite checks `dc` on every enclave and
+  its guards, and refuses each `madvise` (and `HardenProcess`'s `prctl`) with a
+  seccomp `SECCOMP_RET_ERRNO` filter to prove construction fails closed.
+- **User namespaces**: a test re-executes the binary as root of a new user
+  namespace (the `unshare -Ur` case) and asserts `RLIMIT_MEMLOCK` is reported
+  enforced and `mlock` past it fails. It is the suite's one skip, taken only
+  when the host refuses unprivileged user namespaces or grants one without
+  capabilities.
+- **`HardenProcess`** runs in a subprocess, read back with `PR_GET_DUMPABLE`;
+  a parent-side test pins that importing the package leaves the process
+  dumpable.
 - **Cross-compilation** of the `CROSS_TARGETS` matrix in the Makefile
   (`make cross-build`; Android and iOS, which build through the linux and
   darwin files, are not in it);

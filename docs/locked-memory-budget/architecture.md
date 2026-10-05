@@ -39,7 +39,7 @@ flowchart LR
 - **The process allocator** splits responsibility the way `WipeAll` does: the
   binary sizes and installs it once; libraries only draw from it.
 - **Ceiling discovery** reads `RLIMIT_MEMLOCK` (and, on Linux, whether
-  `CAP_IPC_LOCK` makes it unenforced) at construction, when the lazy default
+  `CAP_IPC_LOCK` held in the initial user namespace makes it unenforced) at construction, when the lazy default
   process allocator is installed, on every `SetLimit` of an opted-in allocator
   (acted on only for a raise) and when `TransferTo` credits one — never on the
   admission path.

@@ -109,7 +109,8 @@ and consumers reach it only through the exported Go API of package `enclave`.
 
 **Protects against:** the material reaching swap (`mlock` for the enclave's
 life); reaching a core dump (per-mapping exclusion where the kernel offers one,
-plus `RLIMIT_CORE` lowered to zero at import); a linear overflow (post-guard
+plus `RLIMIT_CORE` lowered to zero at import); a `fork(2)` child inheriting the
+pages (Linux `MADV_DONTFORK`); a linear overflow (post-guard
 fault); an underflow into the slack (canary, reported at release); a stray
 write through a retained slice once frozen (fault); a failed allocation
 elsewhere in the process touching this enclave (no failure path reaches another
@@ -118,8 +119,8 @@ an exact page multiple has no canary, though an underflow past its first byte
 still faults on the pre-guard page.
 
 **Does not protect against:** anything that can read this process's live
-memory — `ptrace` or `/proc/<pid>/mem` at the same uid, a debugger, a cold-boot
-capture. While an enclave exists its plaintext is readable by such an adversary.
+memory — `ptrace` or `/proc/<pid>/mem` at the same uid (unless the binary opts
+in to `HardenProcess`), a debugger, a cold-boot capture. While an enclave exists its plaintext is readable by such an adversary.
 `mlock` keeps pages out of swap, not out of a hibernation (suspend-to-disk)
 image or a virtual-machine snapshot, which capture locked memory too.
 Nor does it cover copies the caller makes: the `[]byte` handed to

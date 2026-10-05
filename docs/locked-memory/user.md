@@ -106,6 +106,38 @@ dumps with host policy. On Linux hosts whose `core_pattern` pipes to a
 collector, `RLIMIT_CORE` is ignored; enclave pages are still excluded per
 mapping.
 
+Importing the package lowers `RLIMIT_CORE` to 0, soft and hard, at init. Child
+processes inherit that limit, so a tool your binary runs will not write core
+files either, and cannot raise the limit back without privilege.
+
+On Linux, enclave pages are also excluded from `fork(2)` children
+(`MADV_DONTFORK`): a forked child has no mapping there, so touching an enclave
+in the child faults rather than reading the material.
+
+## Harden the process (opt-in)
+
+`HardenProcess` marks the process non-dumpable on Linux. It is never called by
+the package; call it from `main` if your deployment accepts the trade-offs.
+
+```go
+func main() {
+	if report, err := enclave.HardenProcess(); err != nil {
+		log.Printf("process hardening: %v (applied: %+v)", err, report)
+	}
+	// ...
+}
+```
+
+What it buys: no core dump of any kind (piped collectors included), and no
+`ptrace` attach or `/proc/<pid>/mem` read by other processes of the same uid.
+
+What it costs: same-uid debuggers (`dlv attach`, `gdb -p`), profilers and crash
+collectors stop working, and `/proc/<pid>` entries become owned by root, so
+same-uid monitoring that reads `maps`, `fd` or `environ` loses access. The flag
+carries into `fork` children and is reset by `execve`.
+
+On other platforms it returns `ErrProcessHardeningUnsupported`.
+
 ## Troubleshooting
 
 | Symptom | Cause | Fix |

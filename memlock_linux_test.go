@@ -14,9 +14,11 @@ import (
 	"errors"
 	"math"
 	"os"
+	"os/exec"
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 
 	"golang.org/x/sys/unix"
@@ -660,4 +662,156 @@ func testMemlockHardLimit() (uint64, bool) {
 		return 0, false
 	}
 	return rl.Max, rl.Max == rlimInfinity || rl.Max >= testMemlockRequirement
+}
+
+func TestIsInitialUIDMap(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		m    string
+		want bool
+	}{
+		{"initial namespace", "         0          0 4294967295\n", true},
+		{"unshare -Ur", "         0       1000          1\n", false},
+		{"rootless container range", "0 1000 1\n1 100000 65536\n", false},
+		{"offset full range", "0 1 4294967295\n", false},
+		{"short range", "0 0 4294967294\n", false},
+		{"empty", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isInitialUIDMap([]byte(tc.m)); got != tc.want {
+				t.Errorf("isInitialUIDMap(%q) = %v, want %v", tc.m, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestMemlockRLimitEnforced_TrustsTheCapabilityOnlyInTheInitialNamespace
+// presents uid maps through the seam. Outside the initial namespace, or when
+// the map cannot be read, the limit is enforced whatever capget says; inside
+// it, the answer is the capability's.
+func TestMemlockRLimitEnforced_TrustsTheCapabilityOnlyInTheInitialNamespace(t *testing.T) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
+	prev := readUIDMap
+	t.Cleanup(func() { readUIDMap = prev })
+
+	readUIDMap = func() ([]byte, error) { return []byte("0 1000 1\n"), nil }
+	if !memlockRLimitEnforced() {
+		t.Error("memlockRLimitEnforced() = false in a child user namespace, want true")
+	}
+	readUIDMap = func() ([]byte, error) { return nil, os.ErrPermission }
+	if !memlockRLimitEnforced() {
+		t.Error("memlockRLimitEnforced() = false with an unreadable uid_map, want true")
+	}
+	readUIDMap = func() ([]byte, error) { return []byte("0 0 4294967295\n"), nil }
+	if got, want := memlockRLimitEnforced(), !testHoldsIPCLock(t); got != want {
+		t.Errorf("memlockRLimitEnforced() = %v in the initial namespace, want %v (the capability's answer)", got, want)
+	}
+}
+
+const (
+	userNamespaceMarker        = "GO_ENCLAVE_USERNS_CHILD"
+	userNamespaceNoCapability  = "userns child: no CAP_IPC_LOCK in the namespace"
+	userNamespaceLimitEnforced = "userns child: the limit was reported and found enforced"
+)
+
+// TestMemlockRLimit_EnforcedInsideAnUnprivilegedUserNamespace re-executes the
+// test binary as root of a new user namespace, the equivalent of unshare -Ur:
+// it holds CAP_IPC_LOCK there, and the kernel still applies RLIMIT_MEMLOCK
+// because the capability is checked in the initial namespace. The child
+// asserts both: this package reports the limit enforced, and mlock past it
+// really fails.
+//
+// It skips only when the host refuses unprivileged user namespaces, or grants
+// one without capabilities (an AppArmor userns restriction).
+func TestMemlockRLimit_EnforcedInsideAnUnprivilegedUserNamespace(t *testing.T) {
+	if os.Getenv(userNamespaceMarker) == "1" {
+		userNamespaceChild(t)
+		return
+	}
+
+	attr := &syscall.SysProcAttr{
+		Cloneflags:                 syscall.CLONE_NEWUSER,
+		UidMappings:                []syscall.SysProcIDMap{{ContainerID: 0, HostID: os.Getuid(), Size: 1}},
+		GidMappings:                []syscall.SysProcIDMap{{ContainerID: 0, HostID: os.Getgid(), Size: 1}},
+		GidMappingsEnableSetgroups: false,
+	}
+	probe := exec.Command(os.Args[0], "-test.run=^$")
+	probe.SysProcAttr = attr
+	if err := probe.Run(); err != nil {
+		for _, denied := range []error{unix.EPERM, unix.EACCES, unix.ENOSPC, unix.EINVAL, unix.ENOSYS} {
+			if errors.Is(err, denied) {
+				t.Skipf("unprivileged user namespaces are unavailable here: %v", err)
+			}
+		}
+		t.Fatalf("starting a child in a new user namespace: %v", err)
+	}
+
+	out, err := runTestChildWith(t, "TestMemlockRLimit_EnforcedInsideAnUnprivilegedUserNamespace",
+		userNamespaceMarker, "1", attr)
+	if strings.Contains(out, userNamespaceNoCapability) {
+		t.Skipf("the user namespace carries no capabilities here:\n%s", out)
+	}
+	if err != nil {
+		t.Fatalf("subprocess failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, userNamespaceLimitEnforced) {
+		t.Fatalf("subprocess did not confirm the enforced limit:\n%s", out)
+	}
+}
+
+func userNamespaceChild(t *testing.T) {
+	t.Helper()
+	runtime.LockOSThread()
+
+	raw, err := os.ReadFile("/proc/self/uid_map")
+	if err != nil {
+		t.Fatalf("read uid_map: %v", err)
+	}
+	if fields := strings.Fields(string(raw)); len(fields) == 3 && fields[1] == "0" && fields[2] == "4294967295" {
+		t.Fatalf("the child is in the initial user namespace (uid_map %q); nothing is under test", raw)
+	}
+	if !testHoldsIPCLock(t) {
+		t.Log(userNamespaceNoCapability)
+		return
+	}
+
+	var original unix.Rlimit
+	if err := unix.Getrlimit(unix.RLIMIT_MEMLOCK, &original); err != nil {
+		t.Fatalf("getrlimit: %v", err)
+	}
+	ceiling := uint64(4 * pageSize)
+	if original.Max != rlimInfinity && original.Max < ceiling {
+		ceiling = original.Max
+	}
+	// Past the ceiling by at least one whole page, whatever its size.
+	over := int((ceiling/uint64(pageSize) + 1) * uint64(pageSize))
+	if err := unix.Setrlimit(unix.RLIMIT_MEMLOCK, &unix.Rlimit{Cur: ceiling, Max: original.Max}); err != nil {
+		t.Fatalf("setrlimit: %v", err)
+	}
+
+	limit, err := DiscoverLockedMemoryLimit()
+	if err != nil {
+		t.Fatalf("DiscoverLockedMemoryLimit: %v", err)
+	}
+	if limit.Source != LimitRLimit || !limit.Bounded || limit.Bytes != int64(ceiling) {
+		t.Fatalf("DiscoverLockedMemoryLimit = %+v, want a bounded LimitRLimit of %d: CAP_IPC_LOCK in a "+
+			"child namespace does not lift the limit", limit, ceiling)
+	}
+	if _, err := NewAllocatorWithinRLimit(int64(over)); !errors.Is(err, ErrBudgetExceedsRLimit) {
+		t.Fatalf("NewAllocatorWithinRLimit over the ceiling = %v, want ErrBudgetExceedsRLimit", err)
+	}
+
+	// The kernel agrees: a region larger than the ceiling cannot be locked.
+	region, err := sysMap(over)
+	if err != nil {
+		t.Fatalf("mmap: %v", err)
+	}
+	defer func() { _ = sysUnmap(region) }()
+	if err := unix.Mlock(region); !errors.Is(err, unix.ENOMEM) && !errors.Is(err, unix.EPERM) {
+		t.Fatalf("mlock past the ceiling = %v, want ENOMEM: the kernel did not enforce the limit, so "+
+			"this host does not reproduce the case under test", err)
+	}
+	t.Log(userNamespaceLimitEnforced)
 }

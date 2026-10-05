@@ -102,7 +102,10 @@ defer func() {
 Any other GOOS (js, wasip1, plan9) fails to compile with
 `undefined: go_enclave_does_not_support_this_GOOS`. A zero `RLIMIT_CORE` stops
 core files only; a Linux `core_pattern` that pipes to a collector ignores it,
-and there the per-mapping exclusion is what protects enclave pages. Details:
+and there the per-mapping exclusion is what protects enclave pages. Child
+processes inherit the zero `RLIMIT_CORE`. On Linux enclave pages are also
+excluded from `fork` children (`MADV_DONTFORK`), and a binary can opt in to
+`HardenProcess()` (non-dumpable, no same-uid `ptrace`). Details:
 [docs/locked-memory](docs/locked-memory/engineering.md#platform-contract).
 
 ## Documentation

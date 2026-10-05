@@ -46,9 +46,10 @@ import (
 // enclave, and the enclave SealedEnclave.Open returns — and reads each one's
 // mapping back from /proc/self/smaps:
 //
-//   - VmFlags has "lo" (VM_LOCKED: mlock'd, never paged to swap) and "dd"
+//   - VmFlags has "lo" (VM_LOCKED: mlock'd, never paged to swap), "dd"
 //     (VM_DONTDUMP: MADV_DONTDUMP, skipped by the kernel's core writer, which
-//     a core_pattern pipe does not bypass);
+//     a core_pattern pipe does not bypass) and "dc" (VM_DONTCOPY:
+//     MADV_DONTFORK, absent from a forked child);
 //   - the mapping is exactly LockedSize(n) bytes, so VmLck is what the
 //     documentation says an enclave costs;
 //   - its permissions are r--p once the material is final and rw-p only for a
@@ -139,6 +140,9 @@ func TestEnclaveMappingsAreLockedUndumpableAndGuarded(t *testing.T) {
 			if !v.flags["dd"] {
 				t.Errorf("%s: mapping is not excluded from core dumps (no VM_DONTDUMP \"dd\"): %s", s.name, v)
 			}
+			if !v.flags["dc"] {
+				t.Errorf("%s: mapping is not excluded from fork (no VM_DONTCOPY \"dc\"): %s", s.name, v)
+			}
 			if want := enclave.LockedSize(s.size); v.size() != want {
 				t.Errorf("%s: mapping is %d bytes, want LockedSize(%d) = %d: %s", s.name, v.size(), s.size, want, v)
 			}
@@ -168,6 +172,9 @@ func TestEnclaveMappingsAreLockedUndumpableAndGuarded(t *testing.T) {
 				if !g.ok {
 					t.Errorf("%s: no mapping immediately %s the data (gap): %s", s.name, g.side, v)
 					continue
+				}
+				if !g.v.flags["dc"] {
+					t.Errorf("%s: the guard %s is not excluded from fork (no \"dc\"): %s", s.name, g.side, g.v)
 				}
 				if g.v.perms != "---p" {
 					t.Errorf("%s: the mapping immediately %s is %s, want an inaccessible ---p guard: %s", s.name, g.side, g.v.perms, g.v)
@@ -450,4 +457,36 @@ func TestRefusedGuardPageRollsBackALockedMapping(t *testing.T) {
 			t.Errorf("InUse = %d after reclaim, want 0", used)
 		}
 	})
+}
+
+// TestConstructionFailsClosedWhenAnExclusionIsRefused refuses, through a
+// seccomp filter, the madvise that excludes enclave pages from a fork or from
+// a core dump. Construction must fail with ErrLockedMemoryUnavailable carrying
+// the refusal, and leave nothing locked behind.
+func TestConstructionFailsClosedWhenAnExclusionIsRefused(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		advice uint32
+	}{
+		{"MADV_DONTFORK", unix.MADV_DONTFORK},
+		{"MADV_DONTDUMP", unix.MADV_DONTDUMP},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			isolated(t, childOpts{}, func(t *testing.T) {
+				installErrnoFilter(t, unix.SYS_MADVISE, 2, tc.advice, unix.EPERM)
+
+				e, err := enclave.NewMemoryEnclave([]byte("refused-exclusion"))
+				if e != nil || !errors.Is(err, enclave.ErrLockedMemoryUnavailable) || !errors.Is(err, unix.EPERM) {
+					t.Fatalf("NewMemoryEnclave with %s refused = %v, %v; want ErrLockedMemoryUnavailable wrapping EPERM", tc.name, e, err)
+				}
+				var se *os.SyscallError
+				if !errors.As(err, &se) || se.Syscall != "madvise" {
+					t.Errorf("err = %v, want the madvise *os.SyscallError reachable", err)
+				}
+				if locked := lockedVMAs(readSmaps(t)); len(locked) != 0 {
+					t.Errorf("the failed construction left %d locked mappings: %v", len(locked), locked)
+				}
+			})
+		})
+	}
 }

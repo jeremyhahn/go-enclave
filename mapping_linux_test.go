@@ -16,10 +16,13 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
 	"unsafe"
+
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -461,12 +464,10 @@ func destroyCorruptChild(t *testing.T) {
 // discarded the result; nothing issues it unchecked now.) A silent no-op here would leave enclave pages eligible for a core file
 // while the documentation said otherwise.
 //
-// Scope, stated precisely: this kills a mutant that makes excludeFromCoreDump
-// itself return nil. It does NOT reach a mutant that swallows the error at the
-// call site in newMapping, because newMapping always passes a page-aligned inner
-// region, which cannot be made to fail. That call-site branch remains
-// guaranteed by construction, as docs/locked-memory/engineering.md (Test
-// strategy) records.
+// It kills a mutant that makes excludeFromCoreDump itself return nil; a
+// mutant that swallows the error at the call site in newMapping is killed by
+// TestNewMapping_EveryConstructionStepRollsBack through the excludeCoreDump
+// seam.
 func TestExcludeFromCoreDump_ReportsRefusal(t *testing.T) {
 	region, err := sysMap(2 * int(pageSize))
 	if err != nil {
@@ -487,10 +488,105 @@ func TestExcludeFromCoreDump_ReportsRefusal(t *testing.T) {
 
 	// mmap guarantees a page-aligned base, so base+1 is guaranteed unaligned,
 	// and madvise on an unaligned address is EINVAL by definition.
-	if err := excludeFromCoreDump(region[1:]); err == nil {
-		t.Error("excludeFromCoreDump reported success on an unaligned region: " +
+	err = excludeFromCoreDump(region[1:])
+	if err == nil {
+		t.Fatal("excludeFromCoreDump reported success on an unaligned region: " +
 			"the kernel's refusal is being swallowed, and enclave pages could reach a core file")
 	}
+	requireMadviseError(t, err)
+}
+
+// requireMadviseError asserts err is the madvise EINVAL as an *os.SyscallError,
+// the form every other system call in this package reports.
+func requireMadviseError(t *testing.T, err error) {
+	t.Helper()
+	var se *os.SyscallError
+	if !errors.As(err, &se) || se.Syscall != "madvise" {
+		t.Errorf("err = %#v, want an *os.SyscallError for madvise", err)
+	}
+	if !errors.Is(err, unix.EINVAL) {
+		t.Errorf("err = %v, want EINVAL reachable", err)
+	}
+}
+
+// TestExcludeFromFork_ReportsRefusal is the fork-exclusion twin of
+// TestExcludeFromCoreDump_ReportsRefusal: an unaligned region is EINVAL.
+func TestExcludeFromFork_ReportsRefusal(t *testing.T) {
+	region, err := sysMap(2 * int(pageSize))
+	if err != nil {
+		t.Fatalf("could not allocate the probe region: %v", err)
+	}
+	defer func() {
+		if err := sysUnmap(region); err != nil {
+			t.Errorf("freeing the probe region: %v", err)
+		}
+	}()
+
+	if err := excludeFromFork(region); err != nil {
+		t.Fatalf("excludeFromFork on an aligned region: %v", err)
+	}
+	err = excludeFromFork(region[1:])
+	if err == nil {
+		t.Fatal("excludeFromFork reported success on an unaligned region")
+	}
+	requireMadviseError(t, err)
+}
+
+// TestNewMapping_KernelRecordsTheExclusions reads the kernel's own VMA flags
+// for a fresh mapping: every page, guards included, is "dc" (MADV_DONTFORK),
+// and the data region is "dd" (MADV_DONTDUMP).
+func TestNewMapping_KernelRecordsTheExclusions(t *testing.T) {
+	m, err := newMapping(64)
+	if err != nil {
+		t.Fatalf("newMapping: %v", err)
+	}
+	defer func() {
+		if err := m.release(); err != nil {
+			t.Errorf("release: %v", err)
+		}
+	}()
+
+	for _, region := range []struct {
+		name string
+		b    []byte
+		want []string
+	}{
+		{"preguard", m.preguard, []string{"dc"}},
+		{"inner", m.inner, []string{"dc", "dd"}},
+		{"postguard", m.postguard, []string{"dc"}},
+	} {
+		flags := vmFlagsAt(t, uintptr(unsafe.Pointer(&region.b[0])))
+		for _, f := range region.want {
+			if !slices.Contains(flags, f) {
+				t.Errorf("%s VmFlags = %v, want %q", region.name, flags, f)
+			}
+		}
+	}
+}
+
+// vmFlagsAt returns the VmFlags /proc/self/smaps reports for the mapping
+// containing addr.
+func vmFlagsAt(t *testing.T, addr uintptr) []string {
+	t.Helper()
+	raw, err := os.ReadFile("/proc/self/smaps")
+	if err != nil {
+		t.Fatalf("read /proc/self/smaps: %v", err)
+	}
+	in := false
+	for _, line := range strings.Split(string(raw), "\n") {
+		if f := strings.Fields(line); len(f) > 0 && strings.Contains(f[0], "-") && !strings.HasSuffix(f[0], ":") {
+			lo, hi, ok := strings.Cut(f[0], "-")
+			l, err1 := strconv.ParseUint(lo, 16, 64)
+			h, err2 := strconv.ParseUint(hi, 16, 64)
+			in = ok && err1 == nil && err2 == nil && uint64(addr) >= l && uint64(addr) < h
+			continue
+		}
+		if in && strings.HasPrefix(line, "VmFlags:") {
+			return strings.Fields(strings.TrimPrefix(line, "VmFlags:"))
+		}
+	}
+	t.Fatalf("no VmFlags found for %#x in /proc/self/smaps", addr)
+	return nil
 }
 
 // mappedAt reports whether addr still falls inside any mapping of this process.

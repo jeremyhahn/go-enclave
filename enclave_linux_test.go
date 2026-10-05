@@ -20,6 +20,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"unsafe"
 
@@ -40,8 +41,16 @@ import (
 // (#90: no test in this repository may skip).
 func runTestChild(t *testing.T, test, marker, value string) (string, error) {
 	t.Helper()
+	return runTestChildWith(t, test, marker, value, nil)
+}
+
+// runTestChildWith is runTestChild with attr applied to the child, so a test
+// can start it in new namespaces.
+func runTestChildWith(t *testing.T, test, marker, value string, attr *syscall.SysProcAttr) (string, error) {
+	t.Helper()
 	cmd := exec.Command(os.Args[0], "-test.run=^"+test+"$", "-test.v")
 	cmd.Env = append(os.Environ(), marker+"="+value)
+	cmd.SysProcAttr = attr
 	out, err := cmd.CombinedOutput()
 	if !strings.Contains(string(out), "=== RUN   "+test) {
 		t.Fatalf("the child process never ran %s (exit: %v), so it verified nothing:\n%s", test, err, out)

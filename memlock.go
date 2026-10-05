@@ -105,7 +105,9 @@ const (
 	LimitUnlimited
 
 	// LimitNotEnforced means a finite RLIMIT_MEMLOCK was read but CAP_IPC_LOCK
-	// is held, which lets mlock exceed it. The figure is reported in
+	// is held in the initial user namespace, which lets mlock exceed it. The
+	// capability held only inside a child user namespace (a rootless container)
+	// does not, and reports [LimitRLimit]. The figure is reported in
 	// [LockedMemoryLimit.Bytes] for diagnostics and is not treated as a ceiling:
 	// refusing a budget on a limit the kernel will not enforce would fail a
 	// correctly configured privileged service at startup over a number that

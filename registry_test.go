@@ -2109,7 +2109,9 @@ func requireCleanLedger(t *testing.T) {
 }
 
 // denyProtect refuses every mprotect made through the protectMemory seam until
-// the returned func lifts it; t.Cleanup lifts it as well. The mapping keeps its
+// the returned func lifts it; t.Cleanup lifts it as well. Construction's
+// guard-page mprotects (protNoAccess) pass, so a constructor gets as far as
+// its freeze. The mapping keeps its
 // real slices throughout, so nothing but the refusal differs from production.
 //
 // Failures are injected ONLY through the seams. An earlier helper handed the
@@ -2123,7 +2125,10 @@ func denyProtect(t *testing.T) (lift func()) {
 	prev := protectMemory
 	lift = func() { protectMemory = prev }
 	t.Cleanup(lift)
-	protectMemory = func([]byte, protection) error {
+	protectMemory = func(b []byte, p protection) error {
+		if p == protNoAccess {
+			return prev(b, p)
+		}
 		return errors.New("mprotect denied by policy")
 	}
 	return lift
@@ -2382,6 +2387,9 @@ func TestWipeAll_ReclaimsOrphansAddedConcurrently(t *testing.T) {
 	protectMemory = func(b []byte, p protection) error {
 		if p == protReadOnly {
 			return errors.New("mprotect denied by policy") // every freeze fails
+		}
+		if p == protNoAccess {
+			return prevProtect(b, p) // guard pages at construction
 		}
 		mu.Lock()
 		_, seen := refusedOnce[&b[0]]

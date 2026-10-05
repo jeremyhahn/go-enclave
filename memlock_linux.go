@@ -10,7 +10,12 @@
 
 package enclave
 
-import "golang.org/x/sys/unix"
+import (
+	"os"
+	"strings"
+
+	"golang.org/x/sys/unix"
+)
 
 // rlimInfinity is RLIM_INFINITY as it appears in a struct rlimit read back from
 // the Linux kernel: all bits set.
@@ -60,6 +65,11 @@ func discoverLockedMemoryLimit() (LockedMemoryLimit, error) {
 // capget happened to be filtered — a guard that reports fine and is not
 // looking.
 //
+// The capability only counts in the INITIAL user namespace: the kernel checks
+// CAP_IPC_LOCK against it, so a rootless container's root holds the capability
+// in its own namespace and is still bound by the limit. See
+// [inInitialUserNamespace].
+//
 // It answers for the CALLING THREAD, because that is the only question Linux
 // has an answer to: capabilities are per-thread and there is no process-wide
 // set to read. In practice the threads of a Go program agree — a thread
@@ -72,6 +82,10 @@ func discoverLockedMemoryLimit() (LockedMemoryLimit, error) {
 // alternative reading — refuse anyway — breaks a privileged service that is
 // configured correctly. See [LimitNotEnforced].
 func memlockRLimitEnforced() bool {
+	if !inInitialUserNamespace() {
+		return true
+	}
+
 	hdr := unix.CapUserHeader{Version: unix.LINUX_CAPABILITY_VERSION_3}
 	var data [2]unix.CapUserData
 	if err := unix.Capget(&hdr, &data[0]); err != nil {
@@ -88,4 +102,31 @@ func memlockRLimitEnforced() bool {
 	// The EFFECTIVE set is what the kernel checks at the moment of the mlock;
 	// permitted-but-not-effective does not bypass the limit.
 	return data[word].Effective&(1<<bit) == 0
+}
+
+// readUIDMap returns /proc/self/uid_map. A seam so tests can present any
+// namespace without creating one.
+var readUIDMap = func() ([]byte, error) { return os.ReadFile("/proc/self/uid_map") }
+
+// inInitialUserNamespace reports whether this process runs in the initial user
+// namespace, the only one whose CAP_IPC_LOCK lifts RLIMIT_MEMLOCK.
+//
+// The initial namespace's uid_map is the identity map of the whole uid range,
+// "0 0 4294967295". An unreadable map answers false, so the limit is treated as
+// enforced. A child namespace given that same full identity map, which only a
+// process privileged in the parent can create, is indistinguishable here and
+// is reported as initial.
+func inInitialUserNamespace() bool {
+	m, err := readUIDMap()
+	if err != nil {
+		return false
+	}
+	return isInitialUIDMap(m)
+}
+
+// isInitialUIDMap reports whether m is exactly one uid_map line mapping the
+// full uid range onto itself.
+func isInitialUIDMap(m []byte) bool {
+	f := strings.Fields(string(m))
+	return len(f) == 3 && f[0] == "0" && f[1] == "0" && f[2] == "4294967295"
 }

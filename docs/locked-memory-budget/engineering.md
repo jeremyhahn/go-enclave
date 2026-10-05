@@ -88,7 +88,7 @@
 
 | GOOS | Discovery | `CAP_IPC_LOCK` considered |
 |---|---|---|
-| linux | `getrlimit(RLIMIT_MEMLOCK)` soft limit, `RLIM_INFINITY` = all bits set | Yes — effective set of the **calling thread** (`LimitNotEnforced`) |
+| linux | `getrlimit(RLIMIT_MEMLOCK)` soft limit, `RLIM_INFINITY` = all bits set | Yes — effective set of the **calling thread** (`LimitNotEnforced`), and only in the initial user namespace (`/proc/self/uid_map` = `0 0 4294967295`; unreadable counts as enforced). Root of a rootless container gets `LimitRLimit`. |
 | darwin, freebsd, netbsd, openbsd, dragonfly | soft limit, `RLIM_INFINITY` = `MaxInt64` | No capability check exists; a finite limit is reported as enforced |
 | windows, aix, solaris, illumos | none — `LimitUnsupported`, nothing refused | — |
 

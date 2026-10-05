@@ -331,7 +331,12 @@ func TestAllocator_New_KeepsTheChargeForPagesACleanupCouldNotRelease(t *testing.
 				protectMemory, unmapMemory = prevProtect, prevUnmap
 				_, _ = WipeAll(context.Background())
 			})
-			protectMemory = func([]byte, protection) error { return denied }
+			protectMemory = func(b []byte, p protection) error {
+				if p == protNoAccess {
+					return prevProtect(b, p) // guard pages at construction
+				}
+				return denied
+			}
 			unmapMemory = func(b []byte) error {
 				if tc.bypassOK {
 					return prevUnmap(b)

@@ -74,10 +74,12 @@ var ErrCoreDumpLimitUnsupported = errors.New("enclave: this platform has no proc
 //
 // The mprotect seam is what #12 is about: without the unmap fallback in
 // release, the material stays resident for the process lifetime when it is
-// refused. It covers the mprotects on an EXISTING region -- the release
-// path's, and freeze's. The guard-page mprotects inside newMapping stay direct
-// calls: a test that denies this seam constructs its enclave first, and the
-// construction-time refusals are reached through lockMemory instead.
+// refused. It covers every mprotect this package makes: the release path's,
+// freeze's, and the guard pages' inside newMapping.
+//
+// excludeCoreDump, excludeFork and fillCanary are the remaining construction
+// steps, so a test can fail each step of newMapping in turn and assert its
+// rollback.
 //
 // There is ONE unmap seam because there is one unmap. Each primitive is a
 // single system call with no wipe or protection change of its own, so
@@ -87,11 +89,20 @@ var ErrCoreDumpLimitUnsupported = errors.New("enclave: this platform has no proc
 // Unexported and never assigned outside this package's own tests, so nothing
 // downstream can swap a syscall out from under a security primitive.
 var (
-	lockMemory    = sysLock
-	unlockMemory  = sysUnlock
-	protectMemory = sysProtect
-	unmapMemory   = sysUnmap
+	lockMemory      = sysLock
+	unlockMemory    = sysUnlock
+	protectMemory   = sysProtect
+	unmapMemory     = sysUnmap
+	excludeCoreDump = excludeFromCoreDump
+	excludeFork     = excludeFromFork
+	fillCanary      = randomCanary
 )
+
+// randomCanary fills b from crypto/rand.
+func randomCanary(b []byte) error {
+	_, err := rand.Read(b)
+	return err
+}
 
 // CoreDumpsDisabled reports whether this package succeeded in disabling core
 // dumps process-wide at import, returning the failure if it did not.
@@ -359,14 +370,20 @@ func newMapping(size int) (*mapping, error) {
 	// one an enclave's pages actually rest on — a failure fails the allocation
 	// rather than handing back memory that could be written to disk in
 	// plaintext.
-	if err := excludeFromCoreDump(m.inner); err != nil {
+	if err := excludeCoreDump(m.inner); err != nil {
+		return nil, m.abandon(err, locked)
+	}
+
+	// Keep the whole mapping out of any forked child, checked like the dump
+	// exclusion. See excludeFromFork for the choice of advice.
+	if err := excludeFork(m.memory); err != nil {
 		return nil, m.abandon(err, locked)
 	}
 
 	// The canary is random so that an overflow cannot reproduce it by writing a
 	// predictable pattern. It is empty when size is an exact page multiple,
 	// which is a known gap documented on the type.
-	if _, err := rand.Read(m.canary); err != nil {
+	if err := fillCanary(m.canary); err != nil {
 		return nil, m.abandon(err, locked)
 	}
 
@@ -375,10 +392,10 @@ func newMapping(size int) (*mapping, error) {
 	copyConstantTime(m.preguard, m.canary)
 	copyConstantTime(m.postguard, m.canary)
 
-	if err := sysProtect(m.preguard, protNoAccess); err != nil {
+	if err := protectMemory(m.preguard, protNoAccess); err != nil {
 		return nil, m.abandon(err, locked)
 	}
-	if err := sysProtect(m.postguard, protNoAccess); err != nil {
+	if err := protectMemory(m.postguard, protNoAccess); err != nil {
 		return nil, m.abandon(err, locked)
 	}
 
