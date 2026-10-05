@@ -1,11 +1,14 @@
-### Changed
+### Changed — BREAKING: `providertest` fails closed when its residue sweep cannot measure
 
-- **BREAKING: `providertest` fails closed when its residue sweep cannot
+- **`providertest` fails closed when its residue sweep cannot
   measure** (#111). Off Linux, without locked memory, or with a blind control,
   `TestProvider` now returns an error matching the new `ErrNotMeasured`
   (`*NotMeasuredError`) instead of logging and returning `nil`. Set
   `Config.SkipResidueSweep` with a reason to accept the gap.
-- **BREAKING: every `providertest` error message starts with `providertest:`**
+
+### Changed — BREAKING: every `providertest` error message starts with `providertest:`
+
+- **every `providertest` error message starts with `providertest:`**
   (#111), including `PropertyError`.
 
 ### Fixed
