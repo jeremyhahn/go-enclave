@@ -86,7 +86,12 @@ const RootKeyBytes = 32
 // inside it, which is what lets a provider evolve its format without an
 // upstream change here. Protect must not retain key or any copy of it; the
 // slice aliases locked pages that are wiped and unmapped when the caller is
-// done.
+// done. The [Sealer] copies the returned blob before using it, so the
+// provider keeps ownership of that slice and may reuse it once Protect has
+// returned; the Sealer never writes to it.
+//
+// Unprotect must not retain or modify blob: it is the Sealer's copy, wiped
+// when the sealed value is destroyed.
 //
 // Unprotect recovers the protected key INTO key, a caller-supplied buffer of
 // exactly the length Protect received — a length mismatch is an

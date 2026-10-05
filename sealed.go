@@ -13,6 +13,7 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"errors"
+	"math"
 	"sync"
 )
 
@@ -83,10 +84,10 @@ var (
 	// takes a caller's slice and panics on a legal length has made an input
 	// mistake into a process-level fault.
 	//
-	// It is close to unreachable in practice and deliberately checked anyway:
-	// nothing on a 32-bit platform can hold a slice this long, and on 64-bit
-	// it takes a deliberate 64 GiB allocation. Unreachable-in-practice is the
-	// property that changes when someone streams a file into this constructor.
+	// It also reports material whose sealed form — plaintext plus the 28
+	// bytes of nonce and tag — would not fit in an int, which on a 32-bit
+	// platform is the bound reached first (about 2 GiB), and which
+	// crypto/cipher would otherwise meet with a panic as well.
 	ErrMaterialTooLarge = errors.New("enclave: material is too large to seal")
 )
 
@@ -115,7 +116,13 @@ const maxSealedPlaintext uint64 = (1<<32 - 2) * 16
 // converting a signed length up is the kind of widening a security linter is
 // right to question. Callers pass a len, which cannot be negative.
 func sealableLength(n uint64) error {
-	if n > maxSealedPlaintext {
+	return sealableWithin(n, math.MaxInt)
+}
+
+// sealableWithin is sealableLength for a platform whose largest int is
+// maxInt, so the 32-bit bound is testable on a 64-bit host.
+func sealableWithin(n, maxInt uint64) error {
+	if n > maxSealedPlaintext || n > maxInt-sealedOverhead {
 		return ErrMaterialTooLarge
 	}
 	return nil
@@ -162,12 +169,15 @@ const sealedOverhead = 12 + 16
 //
 // What this means per key CLASS, because they differ in what a recovered copy
 // is worth: a DEK opens exactly one value and its Block becomes garbage
-// within one call; a KEK opens every DEK of its generation; a [ModeRootKey]
+// within one call; a KEK opens every DEK of its generation, and its schedule
+// transits the heap on EVERY seal and open in [ModeRootKey]; a ModeRootKey
 // sealer's WRAPPING KEY (derived from the provider's root) opens everything
 // that sealer sealed, and its schedule transits the heap on every KEK mint
-// and retired-generation unwrap. [ModePerOperation] exists precisely so the key
-// that opens everything never enters the process and never reaches this
-// function at all.
+// and retired-generation unwrap. So in ModeRootKey a dump or swap artifact
+// can hold a schedule that opens a whole KEK generation, not just one value.
+// With a hardware provider in [ModePerOperation] the key that opens
+// everything never enters the process and never reaches this function, but
+// each operation's DEK schedule still does.
 //
 // # FOR HOW LONG
 //
@@ -215,9 +225,10 @@ const sealedOverhead = 12 + 16
 // resolved: where a validated implementation's INTERNALS collide with a
 // memory-hygiene rule, the validated implementation wins and the hygiene rule
 // yields at that boundary — with the boundary written down, as above, rather
-// than coded around. Closing it for real needs a key that never enters the
-// process at all, which is exactly what a hardware [KeyProtector] in
-// [ModePerOperation] provides.
+// than coded around. A build with GOEXPERIMENT=runtimesecret erases these
+// schedules at the next collection ([KeyScheduleErasure]); without it, only a
+// hardware [KeyProtector] in [ModePerOperation] keeps the long-lived key out
+// of the process, and per-value DEK schedules still reach the heap.
 func withAEAD(key *MemoryEnclave, fn func(cipher.AEAD) error) error {
 	// Every AES construction and use in this package runs here, inside
 	// secretDo (#98): in a build with GOEXPERIMENT=runtimesecret on
@@ -320,44 +331,43 @@ func sealWithKey(ke *MemoryEnclave, plaintext, aad []byte) ([]byte, error) {
 // checks below stay as the guard against being wrong about that.
 func openWithKeyInto(ke *MemoryEnclave, sealed, aad, dst []byte) error {
 	return withAEAD(ke, func(gcm cipher.AEAD) error {
-		if len(sealed) <= sealedOverhead || len(sealed)-sealedOverhead != len(dst) {
-			return ErrSealedAuthentication
-		}
-
-		// dst[:0:len(dst)] pins the capacity even if the caller's slice has
-		// slack, so the AEAD's append writes in place and cannot reallocate.
-		// nil nonce: the AEAD reads the one it prepended at seal time.
-		got, oerr := gcm.Open(dst[:0:len(dst)], nil, sealed, aad)
-		if oerr != nil {
-			// crypto/cipher zeroes its output before reporting a failed tag,
-			// so nothing partial is left in the destination.
-			//
-			// Deleting this branch changes no behavior — a failed Open
-			// returns a nil slice, so the length check below refuses the same
-			// values with the same error, and the mutation is invisible. It
-			// stays because that is an implementation detail of another
-			// package and this is the contract: an AEAD that reported failure
-			// is not to be trusted for anything, whatever shape its output
-			// happens to take.
-			return ErrSealedAuthentication
-		}
-		// ESCAPE FIRST, LENGTH SECOND. The other order has a hole: a result
-		// that both escaped and came back the wrong length would return on
-		// the length check and leave the heap copy unwiped, which is the
-		// failure this whole ordering exists to avoid. Checking residency
-		// first means every path that can see heap plaintext wipes it.
-		if len(got) > 0 && &got[0] != &dst[0] {
-			// Unreachable while the capacity is exact and the length check
-			// above holds; see [ErrPlaintextEscaped] for why it is checked
-			// rather than assumed, and why this fails instead of copying.
-			wipe(got)
-			return ErrPlaintextEscaped
-		}
-		if len(got) != len(dst) {
-			return ErrSealedAuthentication
-		}
-		return nil
+		return openInto(gcm, sealed, aad, dst)
 	})
+}
+
+// openInto is openWithKeyInto's body for an AEAD already built, separate so
+// its guards can be exercised with an AEAD that misbehaves.
+func openInto(gcm cipher.AEAD, sealed, aad, dst []byte) error {
+	if len(sealed) <= sealedOverhead || len(sealed)-sealedOverhead != len(dst) {
+		return ErrSealedAuthentication
+	}
+
+	// dst[:0:len(dst)] pins the capacity even if the caller's slice has
+	// slack, so the AEAD's append writes in place and cannot reallocate.
+	// nil nonce: the AEAD reads the one it prepended at seal time.
+	got, oerr := gcm.Open(dst[:0:len(dst)], nil, sealed, aad)
+	if oerr != nil {
+		// crypto/cipher zeroes its output before reporting a failed tag,
+		// so nothing partial is left in the destination. An AEAD that
+		// reported failure is trusted for nothing, whatever its output.
+		return ErrSealedAuthentication
+	}
+	// ESCAPE FIRST, LENGTH SECOND. The other order has a hole: a result
+	// that both escaped and came back the wrong length would return on
+	// the length check and leave the heap copy unwiped, which is the
+	// failure this whole ordering exists to avoid. Checking residency
+	// first means every path that can see heap plaintext wipes it.
+	if len(got) > 0 && &got[0] != &dst[0] {
+		// Unreachable while the capacity is exact and the length check
+		// above holds; see [ErrPlaintextEscaped] for why it is checked
+		// rather than assumed, and why this fails instead of copying.
+		wipe(got)
+		return ErrPlaintextEscaped
+	}
+	if len(got) != len(dst) {
+		return ErrSealedAuthentication
+	}
+	return nil
 }
 
 // newKeyEnclave returns a [MemoryEnclave] holding n bytes drawn from the
@@ -427,12 +437,13 @@ func newKeyEnclave(n int) (*MemoryEnclave, error) {
 // statement of what each buys lives there.
 //
 // One caveat belongs in the same breath as "the plaintext never reaches the
-// heap": the per-value DEK transits it, transiently, on every operation —
-// building the AEAD expands the key into a heap allocation (the full audit is
-// on [withAEAD]). The correct claim is narrower and still worth having: the
-// long-lived key that opens every value never enters the process in
-// [ModePerOperation]; only per-value keys do, and only for the duration of
-// one operation.
+// heap": keys do. Every operation expands the per-value DEK into a heap key
+// schedule, and in [ModeRootKey] the KEK that wraps it as well; Go does not
+// wipe them, so they persist until the memory is reused — in swap or a core
+// dump too — unless the build erases them ([KeyScheduleErasure]; the full
+// audit is on [withAEAD]). The correct claim is narrower and still worth
+// having: with a hardware provider in [ModePerOperation] the long-lived key
+// that opens every value never enters the process; only per-value keys do.
 //
 // # Foreign sealed bytes are out of contract
 //
@@ -538,8 +549,10 @@ type SealedEnclave struct {
 // It returns ErrEmptyEnclave when data is empty, ErrMaterialTooLarge above
 // AES-GCM's per-message ceiling, ErrSealFailed when the AEAD, the CSPRNG or
 // the provider fails, ErrLockedMemoryUnavailable when the kernel refuses to
-// lock the pages the seal transiently needs, and ErrSealerWiped after a
-// shutdown sweep has destroyed the process Sealer's keys.
+// lock the pages the seal transiently needs, ErrSealerWiped after a
+// shutdown sweep has destroyed the process Sealer's keys, and
+// ErrSealerDestroyed after [Sealer.Destroy] on the process Sealer, which is
+// not replaced.
 //
 // A context that has ended — before the call, while it waits for another
 // caller's first-time root unseal, or during a provider call — fails the seal
@@ -604,8 +617,8 @@ func NewSealed(ctx context.Context, data []byte) (*SealedEnclave, error) {
 // if the envelope does not authenticate, ErrLockedMemoryUnavailable when the
 // kernel refuses to lock the destination — the sealed value SURVIVES that
 // intact, so a transient ceiling is retryable rather than a lost credential —
-// and ErrSealerWiped when a shutdown sweep has destroyed the sealing Sealer's
-// keys. In [ModePerOperation] a provider's own infrastructure failures (a
+// ErrSealerWiped when a shutdown sweep has destroyed the sealing Sealer's
+// keys, and ErrSealerDestroyed after [Sealer.Destroy]. In [ModePerOperation] a provider's own infrastructure failures (a
 // device unreachable, say) surface joined under ErrOpenFailed with the
 // provider's error reachable, per the [KeyProtector] contract.
 //
@@ -785,11 +798,12 @@ func (s *SealedEnclave) IsAlive() bool {
 // material, without recovering it: nil if nothing known prevents it,
 // [ErrEnclaveDestroyed] if this value was destroyed (or is nil),
 // [ErrSealerWiped] if a shutdown [WipeAll] destroyed the in-process keys the
-// sealer needs, and [ErrOpenabilityUnknown] if a sweep has run since this
+// sealer needs, [ErrSealerDestroyed] after [Sealer.Destroy], and
+// [ErrOpenabilityUnknown] if a sweep has run since this
 // value was sealed and the provider can report nothing about its own sealing
 // state.
 //
-// # The four answers are four different facts
+// # Each answer is a different fact
 //
 // nil and ErrOpenabilityUnknown are NOT variations of each other. nil is a
 // positive claim that nothing known prevents an open; the sentinel says this
@@ -927,4 +941,9 @@ func (s *SealedEnclave) String() string {
 		return "SealedEnclave(destroyed)"
 	}
 	return "SealedEnclave(sealed)"
+}
+
+// GoString masks the contents under %#v, exactly as String does under %v.
+func (s *SealedEnclave) GoString() string {
+	return s.String()
 }

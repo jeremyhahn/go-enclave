@@ -1,6 +1,6 @@
 # Sealing and the provider seam — API
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-01
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-04
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Transports
@@ -19,6 +19,8 @@ transport itself, behind the `KeyProtector`/`RootUnsealer` interfaces.
 | Open (unbudgeted / budgeted) | `(*SealedEnclave).Open(ctx)`, `(*SealedEnclave).OpenWith(ctx, a)` | N/A |
 | Probe openability | `(*SealedEnclave).Openable()` | N/A |
 | Release ciphertext | `(*SealedEnclave).Destroy()` | N/A |
+| Release a sealer's keys | `(*Sealer).Destroy() error` | N/A |
+| Release the software provider's root | `(*SoftwareProvider).Destroy() error` | N/A |
 | Implement a provider | `KeyProtector`, `RootUnsealer`, `RootKeyBytes` | N/A |
 | Software provider | `enclave.NewSoftwareProvider()` | N/A |
 | Check key-schedule erasure | `enclave.KeyScheduleErasure()` | N/A |

@@ -9,12 +9,14 @@
 package enclave
 
 import (
+	"bytes"
 	"context"
 	"crypto/hkdf"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
+	"hash"
 	"reflect"
 	"strconv"
 	"sync"
@@ -131,6 +133,18 @@ var (
 	// step, and installing one would turn every subsequent seal into a
 	// panic.
 	ErrNilSealer = errors.New("enclave: sealer is nil")
+
+	// ErrSealerDestroyed is returned by every Seal and Open, and by
+	// [SealedEnclave.Openable], once [Sealer.Destroy] has run; by a
+	// [SoftwareProvider] once its own Destroy has run. Like [ErrSealerWiped]
+	// the sealer fails closed and never re-keys, but the cause is the caller's
+	// own Destroy rather than a shutdown sweep, so it is a distinct error.
+	ErrSealerDestroyed = errors.New("enclave: sealer was destroyed; sealed values are unrecoverable and sealing requires constructing a new Sealer")
+
+	// ErrSealerNotConstructed is returned by Seal and Open on a Sealer that
+	// was not built by [NewSealer] — the zero value, for instance. The
+	// caller's material is wiped as on every other failure.
+	ErrSealerNotConstructed = errors.New("enclave: sealer was not constructed with NewSealer")
 
 	// errHierarchyUninitialized is the internal marker for a ModeRootKey
 	// hierarchy that has not been built yet — distinct from wiped, because
@@ -271,7 +285,7 @@ func deriveWrappingKey(root, salt []byte) error {
 	var err error
 	secretDo(func() {
 		var k []byte
-		if k, err = hkdf.Key(sha256.New, root, salt, wrappingKeyInfo, len(root)); err == nil {
+		if k, err = hkdfKey(sha256.New, root, salt, wrappingKeyInfo, len(root)); err == nil {
 			copy(root, k)
 			wipe(k)
 		}
@@ -340,10 +354,17 @@ func parseBlobHeader(blob []byte) (kind byte, gen uint32, body []byte, err error
 	return blob[1], binary.BigEndian.Uint32(blob[2:blobHeaderLen]), blob[blobHeaderLen:], nil
 }
 
+// Test seams for failures the standard library does not produce on demand.
+// Production never reassigns them.
+var (
+	randRead = rand.Read
+	hkdfKey  = hkdf.Key[hash.Hash]
+)
+
 // fillRandom fills b from the CSPRNG; it is the WithBytes body every key
-// generation in this package uses.
+// generation in this package uses, and the source of every wrapping salt.
 func fillRandom(b []byte) error {
-	_, err := rand.Read(b)
+	_, err := randRead(b)
 	return err
 }
 
@@ -352,11 +373,9 @@ func fillRandom(b []byte) error {
 // the package-level [NewSealed]/[SetSealer] for the one-per-process shape
 // most consumers want.
 //
-// A Sealer is safe for concurrent use. It has no Destroy: its keys are
-// registered [MemoryEnclave]s reclaimed by the process's shutdown [WipeAll],
-// and a sealer is a process-lifetime object — the provider is selected once
-// per process, not per value. After a sweep it fails closed; see
-// [ErrSealerWiped].
+// A Sealer is safe for concurrent use. [Sealer.Destroy] releases its keys;
+// a shutdown [WipeAll] also reclaims them. After either it fails closed; see
+// [ErrSealerDestroyed] and [ErrSealerWiped].
 //
 // # No mutex of a Sealer's is ever held across its provider
 //
@@ -420,10 +439,14 @@ type Sealer struct {
 	// Fixed at construction.
 	kekLimit uint64
 	kekBlobs map[uint32][]byte
-	// wrapSalt is the HKDF salt root was derived under (deriveWrappingKey).
-	// Not secret; kept so the derivation can be checked against the
-	// provider's root.
-	wrapSalt []byte
+	// destroyed is set by Destroy and never cleared; every path checks it
+	// before the hierarchy state above. Guarded by mu.
+	destroyed bool
+
+	// owned is the provider NewSealer created by default, which Destroy
+	// releases with the sealer. nil for an injected provider: its lifetime
+	// belongs to whoever injected it. Set once at construction.
+	owned *SoftwareProvider
 
 	// initSlot is the init lock: a one-slot semaphore, held by sending into
 	// it and released by receiving. Holding it is the right to run
@@ -622,8 +645,10 @@ func NewSealer(opts ...SealerOption) (*Sealer, error) {
 	if !ok {
 		return nil, ErrInvalidMode
 	}
+	var owned *SoftwareProvider
 	if !cfg.providerSet {
-		cfg.provider = NewSoftwareProvider()
+		owned = NewSoftwareProvider()
+		cfg.provider = owned
 	} else if isNilInterface(cfg.provider) {
 		// Refused HERE, not defaulted and not deferred: see [WithProvider].
 		// The typed-nil half is the treacherous one — it satisfies the
@@ -639,7 +664,7 @@ func NewSealer(opts ...SealerOption) (*Sealer, error) {
 		kekLimit = cfg.kekLimit
 	}
 
-	s := &Sealer{mode: cfg.mode, health: cfg.health, initSlot: make(chan struct{}, 1), kekLimit: kekLimit}
+	s := &Sealer{mode: cfg.mode, health: cfg.health, initSlot: make(chan struct{}, 1), kekLimit: kekLimit, owned: owned}
 	if err := bind(s, cfg.provider); err != nil {
 		return nil, err
 	}
@@ -705,6 +730,101 @@ func (s *Sealer) Mode() Mode {
 	return s.mode
 }
 
+// usable reports [ErrSealerNotConstructed] for a Sealer NewSealer did not
+// build and [ErrSealerDestroyed] after Destroy, and nil otherwise.
+func (s *Sealer) usable() error {
+	if s.protect == nil || s.unprotect == nil {
+		return ErrSealerNotConstructed
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.destroyed {
+		return ErrSealerDestroyed
+	}
+	return nil
+}
+
+// whileUsable runs fn, which must be in-process work, under the read lock
+// unless the sealer is destroyed, so a concurrent Destroy orders entirely
+// before or after it. The caller has already passed usable.
+func (s *Sealer) whileUsable(fn func() error) error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.destroyed {
+		return ErrSealerDestroyed
+	}
+	return fn()
+}
+
+// Destroy releases every key this sealer holds — the wrapping key, the
+// current KEK, the retained KEK blobs, and any root or KEK an unfinished
+// initialization left pending — and, if [NewSealer] created the provider by
+// default, that [SoftwareProvider] too. An injected provider is never
+// destroyed: its owner decides its lifetime.
+//
+// From then on every Seal, Open and [SealedEnclave.Openable] through this
+// sealer reports [ErrSealerDestroyed]; values it sealed are unrecoverable.
+// Destroy waits for in-process seals and opens using the hierarchy, but not
+// for a provider call: a seal or open whose provider call straddles Destroy
+// fails with ErrSealerDestroyed when the provider returns, and an
+// initialization blocked in [RootUnsealer.UnsealRoot] releases what it
+// produced. A release the kernel
+// refuses is reported and stays on the [WipeAll] ledger; calling Destroy
+// again retries it. Destroy is idempotent and safe on a nil Sealer.
+func (s *Sealer) Destroy() error {
+	if s == nil {
+		return nil
+	}
+
+	s.mu.Lock()
+	s.destroyed = true
+	var errs []error
+	for _, k := range []*MemoryEnclave{s.kek, s.root} {
+		if err := k.Destroy(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	for _, b := range s.kekBlobs {
+		wipe(b)
+	}
+	s.kekBlobs = nil
+	// Non-blocking: a holder of the slot may be inside a provider call. It
+	// releases the pending state itself, under mu, after seeing destroyed
+	// (see initHierarchy), so either branch here leaves nothing behind.
+	select {
+	case s.initSlot <- struct{}{}:
+		if err := s.releasePending(); err != nil {
+			errs = append(errs, err)
+		}
+		<-s.initSlot
+	default:
+	}
+	s.mu.Unlock()
+
+	if err := s.owned.Destroy(); err != nil {
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
+}
+
+// releasePending destroys pendingKEK and pendingRoot, keeping a reference to
+// any whose release the kernel refused so a later call retries it. The caller
+// holds initSlot.
+func (s *Sealer) releasePending() error {
+	var errs []error
+	if err := s.pendingKEK.Destroy(); err != nil {
+		errs = append(errs, err)
+	} else {
+		s.pendingKEK = nil
+	}
+	if err := s.pendingRoot.Destroy(); err != nil {
+		errs = append(errs, err)
+	} else {
+		s.pendingRoot = nil
+	}
+	return errors.Join(errs...)
+}
+
 // Seal encrypts data and returns the sealed enclave holding it. It is
 // [NewSealed] for an explicitly constructed Sealer; the ownership contract,
 // the envelope, the context contract and the failure surface are documented
@@ -740,6 +860,9 @@ func (s *Sealer) Seal(ctx context.Context, data []byte) (*SealedEnclave, error) 
 	if err := contextFailure(ctx, ErrSealFailed, nil); err != nil {
 		return nil, err
 	}
+	if err := s.usable(); err != nil {
+		return nil, err
+	}
 
 	// Taken BEFORE any key is touched, and deliberately not after. A sweep
 	// that runs to completion during this call would leave the after-reading
@@ -759,11 +882,16 @@ func (s *Sealer) Seal(ctx context.Context, data []byte) (*SealedEnclave, error) 
 	if err != nil {
 		return nil, err
 	}
-
 	// The blob is the AAD: this is the binding [SealedEnclave] documents as
 	// load-bearing, and the one a substituted or re-paired envelope fails on.
-	sealed, err := sealWithKey(dek, data, blob)
-	if err != nil {
+	// Under whileUsable, because Destroy does not wait for the provider call
+	// above: a seal that straddles it fails instead of completing after it.
+	var sealed []byte
+	if err := s.whileUsable(func() error {
+		var serr error
+		sealed, serr = sealWithKey(dek, data, blob)
+		return serr
+	}); err != nil {
 		return nil, err
 	}
 
@@ -799,6 +927,9 @@ func (s *Sealer) open(ctx context.Context, a *Allocator, blob, sealed []byte, si
 	if err := contextFailure(ctx, ErrOpenFailed, nil); err != nil {
 		return nil, err
 	}
+	if err := s.usable(); err != nil {
+		return nil, err
+	}
 
 	// The gate. allocSized admits it against a, or allocates it unadmitted
 	// when a is nil, which is how [SealedEnclave.Open] keeps its contract.
@@ -825,12 +956,16 @@ func (s *Sealer) open(ctx context.Context, a *Allocator, blob, sealed []byte, si
 		destroyTransient(out)
 		return nil, err
 	}
-
-	if err := out.WithBytes(func(pt []byte) error {
-		// The blob is verified as AAD here even though the DEK unwrap already
-		// authenticated it: this is what refuses an envelope whose two halves
-		// are individually authentic but were never sealed together.
-		return openWithKeyInto(dek, sealed, blob, pt)
+	// Under whileUsable for the same reason as in Seal: an open that
+	// straddles Destroy recovers nothing.
+	if err := s.whileUsable(func() error {
+		return out.WithBytes(func(pt []byte) error {
+			// The blob is verified as AAD here even though the DEK unwrap
+			// already authenticated it: this is what refuses an envelope whose
+			// two halves are individually authentic but were never sealed
+			// together.
+			return openWithKeyInto(dek, sealed, blob, pt)
+		})
 	}); err != nil {
 		destroyTransient(out)
 		return nil, err
@@ -965,6 +1100,10 @@ func (s *Sealer) hierarchyOpenable() error {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
+	if s.destroyed {
+		return ErrSealerDestroyed
+	}
+
 	// root is set once and never cleared, precisely so that a dead root is a
 	// detectable state rather than an absent one; see the field comment.
 	if s.root != nil && (!s.root.IsAlive() || !s.kek.IsAlive()) {
@@ -998,7 +1137,9 @@ func (s *Sealer) protectPerOperation(ctx context.Context, dek *MemoryEnclave) ([
 			// value at its first Open with a misleading authentication error.
 			return errors.Join(ErrSealFailed, errProviderEmptyBlob)
 		}
-		blob = b
+		// Copied: the provider keeps its slice (see [KeyProtector]), and
+		// SealedEnclave.Destroy wipes this one.
+		blob = bytes.Clone(b)
 		return nil
 	}); err != nil {
 		return nil, providerSealFailure(err)
@@ -1080,7 +1221,7 @@ func contextFailure(ctx context.Context, op, cause error) error {
 // sentinel too — and passes through here in that joined form.
 func providerSealFailure(err error) error {
 	return shapeProviderFailure(ErrSealFailed, err,
-		ErrSealerWiped, ErrSealFailed, ErrLockedMemoryUnavailable, ErrProviderMessageLimit, ErrEnclaveDestroyed)
+		ErrSealerWiped, ErrSealerDestroyed, ErrSealFailed, ErrLockedMemoryUnavailable, ErrProviderMessageLimit, ErrEnclaveDestroyed)
 }
 
 // providerOpenFailure is providerSealFailure's mirror on the open path. The
@@ -1095,7 +1236,7 @@ func providerSealFailure(err error) error {
 // the cancellation by contextFailure, and is passed through in that form.
 func providerOpenFailure(err error) error {
 	return shapeProviderFailure(ErrOpenFailed, err,
-		ErrSealedAuthentication, ErrSealerWiped, ErrOpenFailed, ErrLockedMemoryUnavailable, ErrEnclaveDestroyed)
+		ErrSealedAuthentication, ErrSealerWiped, ErrSealerDestroyed, ErrOpenFailed, ErrLockedMemoryUnavailable, ErrEnclaveDestroyed)
 }
 
 // shapeProviderFailure returns err untouched if it is nil or matches one of
@@ -1164,6 +1305,10 @@ func (s *Sealer) protectRootKeyInner(ctx context.Context, dek *MemoryEnclave) ([
 
 		s.mu.RLock()
 
+		if s.destroyed {
+			s.mu.RUnlock()
+			return nil, ErrSealerDestroyed
+		}
 		if s.root == nil {
 			s.mu.RUnlock()
 			if err := s.initHierarchy(ctx); err != nil {
@@ -1268,6 +1413,9 @@ func (s *Sealer) unprotectRootKeyRLocked(_ context.Context, blob []byte, dek *Me
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
+	if s.destroyed {
+		return ErrSealerDestroyed
+	}
 	if s.root == nil {
 		// This sealer has sealed nothing, so no blob can be its own. Reported
 		// as authentication rather than as a state error because that is what
@@ -1395,13 +1543,22 @@ func (s *Sealer) hierarchyLocked() []*MemoryEnclave {
 // which every later attempt reads as wiped: this sealer then reports
 // [ErrSealerWiped] exactly as one whose published hierarchy was swept does,
 // and never asks the provider again.
-func (s *Sealer) initHierarchy(ctx context.Context) error {
+func (s *Sealer) initHierarchy(ctx context.Context) (err error) {
 	select {
 	case s.initSlot <- struct{}{}:
 	case <-ctx.Done():
 		return contextFailure(ctx, ErrSealFailed, nil)
 	}
-	defer func() { <-s.initSlot }()
+	// The slot is released under mu, so a Destroy that found it taken is
+	// guaranteed to be seen here and its pending keys released.
+	defer func() {
+		s.mu.Lock()
+		if s.destroyed {
+			err = errors.Join(ErrSealerDestroyed, s.releasePending())
+		}
+		<-s.initSlot
+		s.mu.Unlock()
+	}()
 
 	// select chooses at random among ready cases, so a context that had
 	// already ended can still win the slot; it is refused here, before the
@@ -1452,7 +1609,7 @@ func (s *Sealer) initHierarchyHeld(ctx context.Context) error {
 		// succeeded — and may not be called again — nothing can fail for
 		// want of it.
 		salt := make([]byte, wrappingSaltBytes)
-		if _, err := rand.Read(salt); err != nil {
+		if err := fillRandom(salt); err != nil {
 			return errors.Join(ErrSealFailed, err)
 		}
 		var err error
@@ -1505,7 +1662,6 @@ func (s *Sealer) initHierarchyHeld(ctx context.Context) error {
 		// context — by initFailure if the mint fails, by protectRootKey's next
 		// pass if it succeeds.
 		s.pendingRoot, s.pendingGen = root, gen
-		s.wrapSalt = salt
 	}
 
 	// A retained root a sweep destroyed between attempts, or one a sweep
@@ -1544,6 +1700,9 @@ func (s *Sealer) initHierarchyHeld(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if s.destroyed {
+		return ErrSealerDestroyed // initHierarchy releases the pending keys
+	}
 	if err := s.discardIfSwept(); err != nil {
 		return err
 	}
@@ -1607,6 +1766,9 @@ func (s *Sealer) publishedHierarchy() (done bool, err error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
+	if s.destroyed {
+		return true, ErrSealerDestroyed
+	}
 	if s.root == nil {
 		return false, nil
 	}
@@ -1643,6 +1805,9 @@ func (s *Sealer) rotateKEK() error {
 	// under the surviving root.
 	gen := sweepGeneration()
 
+	if s.destroyed {
+		return ErrSealerDestroyed
+	}
 	if s.root == nil {
 		// Unreachable: rotation is only requested by a seal that found the
 		// hierarchy initialized, and nothing un-initializes one. Guarded so a

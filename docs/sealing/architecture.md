@@ -1,6 +1,6 @@
 # Sealing and the provider seam — architecture
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-01
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-04
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Problem
@@ -162,9 +162,11 @@ TPM, HSM and KMS providers live in higher layers and are injected through
   authenticity, must not retain the key it is handed or the plaintext it
   recovers, and must honor its context.
 - **Process memory.** Plaintext material is decrypted only into locked pages;
-  per-value keys transit the Go heap inside AES key schedules (see
-  [engineering.md](engineering.md#key-schedule-heap-exposure)), erased at
-  the next GC only in a `runtime/secret` build.
+  keys transit the Go heap inside AES key schedules — per-value DEKs in every
+  mode, and in `ModeRootKey` the current KEK on every seal and open (see
+  [engineering.md](engineering.md#key-schedule-heap-exposure)) — erased at
+  the next GC only in a `runtime/secret` build. Swap and core-dump hardening
+  covers the locked pages, not those schedules.
 - **Sealing narrows a window; it does not close one.** No protection against a
   reader while an `Open` is in flight, or against anyone who can drive `Open`
   through the caller's own surface.

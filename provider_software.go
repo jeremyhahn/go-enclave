@@ -56,16 +56,21 @@ const softwareProtectLimit = 1 << 31
 //
 // The root is generated in this process and lives in a locked, undumpable
 // enclave here — so unlike a hardware provider, an adversary who can read
-// this process's live memory (or swap, for the heap transits documented on
-// [withAEAD]) obtains the key that opens everything. What sealing under this
-// provider DOES buy: the material is unreadable in a core dump or a swap
-// artifact between opens, and a shutdown [WipeAll] destroys the root and with
-// it every sealed value at once. Callers whose threat model includes a
-// live-memory adversary need a hardware provider; that is the entire reason
-// the seam exists.
+// this process's live memory obtains the key that opens everything. Nor are
+// swap and core dumps fully closed: each seal and open leaves AES key
+// schedules on the ordinary heap — the value's DEK, and the KEK (in
+// [ModeRootKey]) or this root (in [ModePerOperation]) that wraps it — unwiped
+// unless the build erases them (see [KeyScheduleErasure] and [withAEAD]).
+// What sealing under this provider DOES buy: plaintext is never on the heap,
+// the root itself is never in a dump or swap, and [SoftwareProvider.Destroy]
+// or a shutdown [WipeAll] destroys the root and with it every sealed value at
+// once. Callers whose threat model includes a live-memory adversary need a
+// hardware provider; that is the entire reason the seam exists.
 //
 // After a shutdown sweep destroys the root, every method fails closed with
-// [ErrSealerWiped] — never a silent fresh root; see that error for why.
+// [ErrSealerWiped], and after [SoftwareProvider.Destroy] with
+// [ErrSealerDestroyed] — never a silent fresh root; see [ErrSealerWiped] for
+// why.
 //
 // Every method honors its context the way the seam requires (see
 // [RootUnsealer]): one that has ended at entry is refused with ctx.Err()
@@ -89,6 +94,8 @@ type SoftwareProvider struct {
 	// in. UnsealRoot and Unprotect are not counted: the bound is on
 	// encryptions.
 	protects uint64
+	// destroyed is set by Destroy and never cleared.
+	destroyed bool
 }
 
 // SoftwareProvider is the default provider for both modes — [NewSealer] uses it
@@ -112,6 +119,9 @@ func NewSoftwareProvider() *SoftwareProvider {
 // rootLocked returns the root enclave, generating it on first use. The
 // caller holds p.mu.
 func (p *SoftwareProvider) rootLocked() (*MemoryEnclave, error) {
+	if p.destroyed {
+		return nil, ErrSealerDestroyed
+	}
 	if p.root != nil {
 		if !p.root.IsAlive() {
 			return nil, ErrSealerWiped
@@ -126,8 +136,9 @@ func (p *SoftwareProvider) rootLocked() (*MemoryEnclave, error) {
 	return root, nil
 }
 
-// openable implements sealHealth: it reports [ErrSealerWiped] once a shutdown
-// sweep has destroyed this provider's root, and nil otherwise.
+// openable implements sealHealth: it reports [ErrSealerDestroyed] after
+// Destroy, [ErrSealerWiped] once a shutdown sweep has destroyed this
+// provider's root, and nil otherwise.
 //
 // It uses rootLocked's dead-root predicate but NOT rootLocked itself, because
 // asking whether a value can be opened must not generate a root that did not
@@ -138,6 +149,9 @@ func (p *SoftwareProvider) openable() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
+	if p.destroyed {
+		return ErrSealerDestroyed
+	}
 	if p.root != nil && !p.root.IsAlive() {
 		return ErrSealerWiped
 	}
@@ -204,6 +218,9 @@ func (p *SoftwareProvider) Unprotect(ctx context.Context, blob, key []byte) erro
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
+	if p.destroyed {
+		return ErrSealerDestroyed
+	}
 	if p.root == nil {
 		// This provider has protected nothing, so no blob can be its own.
 		return ErrSealedAuthentication
@@ -250,4 +267,21 @@ func (p *SoftwareProvider) UnsealRoot(ctx context.Context, dst []byte) error {
 		copyConstantTime(dst, b)
 		return nil
 	}))
+}
+
+// Destroy releases the provider's root. Every later call fails closed with
+// [ErrSealerDestroyed], so everything it protected — and every [Sealer] that
+// uses it — is unrecoverable. It waits for an operation in progress, which is
+// in-process and short. A release the kernel refuses is reported and stays
+// on the [WipeAll] ledger; calling Destroy again retries it. Destroy is
+// idempotent and safe on a nil provider.
+func (p *SoftwareProvider) Destroy() error {
+	if p == nil {
+		return nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	p.destroyed = true
+	return p.root.Destroy()
 }

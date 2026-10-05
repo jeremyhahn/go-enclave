@@ -1,6 +1,6 @@
 # Sealing and the provider seam — user guide
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-01
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-04
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Choose the type by access pattern
@@ -11,9 +11,12 @@
 | Used intermittently (a credential per request; a root key a few times an hour) | `SealedEnclave` | Plaintext exists only in the enclave an `Open` returns, until you destroy it. At rest it is heap ciphertext; each `Open` takes a fresh locked page. |
 
 Know what sealing does not do. This package never writes recovered plaintext
-to the heap, but it does write keys there: every seal and open leaves that value's AES key schedule in heap
-memory that is not wiped, so a reader of this process's memory (live, or via
-swap or a core dump) can recover recently used values in any mode. (Built
+to the heap, but it does write keys there: every seal and open leaves AES key
+schedules in heap memory that is not wiped — the value's DEK in every mode,
+and in `ModeRootKey` also the KEK that opens every value of its generation —
+so a reader of this process's memory (live, or via swap or a core dump) can
+recover recently used values in any mode, and in `ModeRootKey` whole KEK
+generations. (Built
 with `GOEXPERIMENT=runtimesecret` on linux/amd64 or linux/arm64 (not Android), those
 schedules are erased at the next garbage collection instead;
 `enclave.KeyScheduleErasure()` reports which build you have. See
@@ -103,6 +106,27 @@ case errors.Is(err, enclave.ErrOpenFailed):
 The full order, including the resource refusals, is in
 [engineering.md](engineering.md#classifying-an-open-failure).
 
+## Release a sealer you no longer need
+
+A `Sealer` you constructed holds locked memory (its wrapping key and current
+KEK) until you release it. Destroy it when its values are no longer needed;
+retired sealers otherwise accumulate locked pages until `RLIMIT_MEMLOCK` runs
+out:
+
+```go
+s, err := enclave.NewSealer()
+if err != nil {
+	return err
+}
+defer s.Destroy() // values it sealed are unrecoverable afterwards
+```
+
+Afterwards every seal, open and `Openable` through it reports
+`ErrSealerDestroyed`. `Destroy` also releases the `SoftwareProvider` that
+`NewSealer` created by default, but never a provider you injected; release
+that with its own lifecycle (`(*SoftwareProvider).Destroy` for the software
+one).
+
 ## Install a hardware provider
 
 Install once in `main`, before anything seals (the first `NewSealed` otherwise
@@ -139,6 +163,7 @@ value keeps reporting `IsAlive() == true` (its ciphertext is still there); ask
 |---|---|
 | `nil` | Nothing known prevents an open. |
 | `ErrSealerWiped` | A sweep destroyed in-process keys this sealer needs (in `ModeRootKey`, its root or current KEK), or the provider's health callback reports it; the value can never be opened. |
+| `ErrSealerDestroyed` | `(*Sealer).Destroy` ran; the value can never be opened. |
 | `ErrEnclaveDestroyed` | The value itself was destroyed. |
 | `ErrOpenabilityUnknown` | A sweep ran and the provider reports no health; open it to find out. |
 
@@ -153,6 +178,8 @@ A wiped sealer never re-keys. Construct a new `Sealer` and re-seal from source.
 | `ErrProviderMode` from `NewSealer` | Provider lacks the mode's interface, or is nil/typed nil | Pick the mode the provider implements; check the provider variable is set. |
 | `ErrOpenFailed` intermittently | Deadline too short, or device/KMS unavailable | If the error matches none of `ErrSealedAuthentication`, `ErrSealerWiped` or `ErrEnclaveDestroyed`, the value is intact. Classify any provider cause first (`errors.As` on its types): never retry a permanent one, even if a cancellation is joined with it; retry a transient one; retry a bare cancellation with a live context. |
 | `ErrSealerWiped` | A shutdown `WipeAll` destroyed this sealer's own keys (its root or current KEK in `ModeRootKey`), or the provider returned it. A sweep that destroys only one call's working key gives `ErrEnclaveDestroyed` instead | Check `Openable()` on a value: `ErrSealerWiped` there means the sealer is dead (expected at exit; mid-run, something called `WipeAll` too early). |
+| `ErrSealerDestroyed` | Something called `Destroy` on this sealer (or on the `SoftwareProvider` it uses) | Destroy a sealer only after its last use; construct a new one and re-seal from source. |
+| `ErrSealerNotConstructed` | A `Sealer` not built by `NewSealer` (for example a zero value) | Construct it with `NewSealer`. |
 | `ErrProviderMessageLimit` | `SoftwareProvider` used in `ModePerOperation` past 2^31 seals | Use `ModeRootKey` (rotates KEKs) or a hardware provider. |
 | Locked memory grows with traffic | Each `Open` takes a locked page | Destroy opened enclaves promptly; use `OpenWith` so the budget sees it. |
 

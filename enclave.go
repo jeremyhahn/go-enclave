@@ -1157,6 +1157,11 @@ func (e *MemoryEnclave) String() string {
 	return "MemoryEnclave(redacted)"
 }
 
+// GoString masks the contents under %#v, exactly as String does under %v.
+func (e *MemoryEnclave) GoString() string {
+	return e.String()
+}
+
 // Wipe overwrites b with zeroes. It is for callers that must hand plain bytes
 // to an API outside this package and want the transient copy cleared as soon
 // as that API returns.

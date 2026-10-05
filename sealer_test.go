@@ -588,6 +588,7 @@ func TestSealer_ConcurrentSealsAcrossRotation(t *testing.T) {
 // unwrap with its generation frame rewritten, which pins the KEK blob's AAD
 // binding at the same time.
 func TestSealer_ProviderRootReachesTheHierarchy(t *testing.T) {
+	salts := recordWrapSalts(t)
 	s, err := NewSealer(WithProvider(&fixedRootUnsealer{fill: 0x5A}), WithMode(ModeRootKey))
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
@@ -633,9 +634,10 @@ func TestSealer_ProviderRootReachesTheHierarchy(t *testing.T) {
 	// The wrapping key derived from the provider's known root under the
 	// sealer's salt unwraps the sealer's KEK blob: the hierarchy is keyed by
 	// what UnsealRoot supplied, not by anything self-minted.
-	s.mu.RLock()
-	salt := append([]byte(nil), s.wrapSalt...)
-	s.mu.RUnlock()
+	if len(*salts) != 1 {
+		t.Fatalf("%d wrapping-key derivations, want 1", len(*salts))
+	}
+	salt := (*salts)[0]
 	providerRoot := buildRoot(0x5A)
 	defer providerRoot.Destroy()
 	if err := unwrapInto(providerRoot, kekBlob[:blobHeaderLen]); !errors.Is(err, ErrSealedAuthentication) {
@@ -2000,6 +2002,7 @@ func TestSealer_ConcurrentSealsRotateWithoutLosingAValue(t *testing.T) {
 func TestSealer_SealersSharingARootWrapUnderDistinctKeys(t *testing.T) {
 	ctx := t.Context()
 	p := &fixedRootUnsealer{fill: 0x5A}
+	salts := recordWrapSalts(t)
 	var sealers [2]*Sealer
 	for i := range sealers {
 		s, err := NewSealer(WithProvider(p), WithMode(ModeRootKey))
@@ -2014,7 +2017,7 @@ func TestSealer_SealersSharingARootWrapUnderDistinctKeys(t *testing.T) {
 		sealers[i] = s
 	}
 	a, b := sealers[0], sealers[1]
-	if bytes.Equal(a.wrapSalt, b.wrapSalt) {
+	if len(*salts) != 2 || bytes.Equal((*salts)[0], (*salts)[1]) {
 		t.Fatal("two sealers drew the same wrapping salt")
 	}
 	if ok, err := a.root.EqualToErr(mustBytes(t, b.root)); ok || err != nil {

@@ -65,10 +65,12 @@
 // [context.Context], and no mutex of a Sealer's is held across a provider call.
 // Plaintext is decrypted only into locked pages, but keys are not: with the
 // software default a reader of this process's memory can recover the sealing
-// keys, and in every mode each seal and open leaves that value's AES key
-// schedule on the heap, unwiped. Read [Mode] before choosing. Sealing uses
-// only a FIPS 140-3
-// approved algorithm (AES-256-GCM), and its tests pass in strict mode
+// keys, and each seal and open leaves AES key schedules on the ordinary heap —
+// the value's DEK in every mode, and in [ModeRootKey] the KEK that opens its
+// whole generation — unwiped, and so reachable through swap or a core dump,
+// unless the build erases them ([KeyScheduleErasure]). Read [Mode] before
+// choosing. [Sealer.Destroy] releases a sealer's keys. Sealing uses only a
+// FIPS 140-3 approved algorithm (AES-256-GCM), and its tests pass in strict mode
 // (GODEBUG=fips140=only, a best-effort testing aid). That is compatibility
 // evidence, not validation: a validated deployment builds with GOFIPS140 set
 // to a certified module snapshot and runs as that module's security policy
