@@ -3,7 +3,7 @@
 #
 # Usage: scripts/release-version-check.sh <vX.Y.Z[-pre]>   (from the repository root)
 #
-# `make release-alpha` runs this before it writes anything. release-versioning
+# The release targets (scripts/release.sh) run this before they write anything. release-versioning
 # §3: a VERSION file is never lowered and a published tag is never superseded
 # by a lower one — a backward version silently loses whatever the intervening
 # releases fixed, and Go's MVS will happily keep selecting the higher one. So
@@ -22,17 +22,8 @@
 # A `v*` tag that is not SemVer cannot be ordered, so it is refused rather than
 # skipped: skipping it is exactly how a release could be cut below it.
 set -eu
-export LC_ALL=C
-
-die() { echo "release-version-check: $*" >&2; exit 1; }
-
-NL='
-'
-# The WHOLE value matches: `grep` alone is line-oriented.
-matches() {
-  case $1 in *"$NL"*) return 1 ;; esac
-  printf '%s\n' "$1" | grep -Eq "$2"
-}
+# shellcheck source=lib.sh
+. "${0%/*}/lib.sh"
 
 # SemVer 2.0.0's grammar: no leading zeros in numeric parts or numeric
 # pre-release identifiers, non-empty dot-separated identifiers.
@@ -95,8 +86,8 @@ NF == 2 && cmp(ENVIRON["NEW"], $2) <= 0 { print $1 " (" $2 ")" }
 ')
 
 if [ -n "$offenders" ]; then
-  echo "release-version-check: $new is not greater than:" >&2
+  echo "$prog: $new is not greater than:" >&2
   printf '%s\n' "$offenders" | sed 's/^/  /' >&2
   die "a release never lowers VERSION or goes below an existing tag (release-versioning §3); choose a higher version"
 fi
-echo "release-version-check: $new is greater than VERSION ($current) and every existing v* tag"
+echo "$prog: $new is greater than VERSION ($current) and every existing v* tag"

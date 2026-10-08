@@ -256,8 +256,11 @@ None. Enclaves live and die with the process.
   passes under `GOFIPS140=latest GODEBUG=fips140=only`. That is not a
   validation claim; see [sealing](../sealing/engineering.md#fips-140-3).
 - **Integration**: `make integration-test-enclave` runs `test/integration/enclave`
-  in the project devcontainer and fails, rather than passes, when either is
-  absent. The import-time `RLIMIT_CORE` test is meaningful there because the
+  in the project devcontainer's `integration` stage and fails, rather than
+  passes, when either is absent. That stage shares its `base` stage (Go,
+  gcc/musl-dev, module and build caches) with the `toolchain` stage
+  (`build/docker/devcontainer/Dockerfile`), the image every other gate passes
+  in (`make docker-run CMD='make coverage'`), and ships none of its tools. The import-time `RLIMIT_CORE` test is meaningful there because the
   devcontainer starts with a non-zero core limit and the test's parent (`go`)
   does not import go-enclave.
 - **Borrow benchmarks** (`BenchmarkBorrow*`, `BenchmarkIsAliveParallel`) are

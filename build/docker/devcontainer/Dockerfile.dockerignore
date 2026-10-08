@@ -1,19 +1,29 @@
 # ALLOWLIST for the devcontainer build context (BuildKit reads
 # <Dockerfile>.dockerignore in preference to a root .dockerignore).
 #
-# Everything is excluded, then exactly what the integration suite compiles is
-# re-admitted: the module files, the root package's and providertest's
-# non-test sources, and the integration suite itself. The image therefore
-# cannot carry .git, local.mk, a stray credentials file, the repository-local
-# tool cache (bin/) or a coverage profile — whatever lands in the checkout
-# tomorrow, it is excluded until someone admits it here on purpose.
+# Everything is excluded, then exactly what the stages read is re-admitted:
+# the toolchain's inputs (both modules' go.mod/go.sum and the tool installer
+# with its pins), and for the integration stage the root package's and
+# providertest's non-test sources, the integration suite and the two scripts
+# it runs. Each stage COPYs its own part by name, so the integration image
+# does not carry the toolchain's. Neither image can carry .git, local.mk, a
+# stray credentials file, the repository-local tool cache (bin/) or a coverage
+# profile — whatever lands in the checkout tomorrow, it is excluded until
+# someone admits it here on purpose.
 *
 !go.mod
 !go.sum
+!test/buildgates/go.mod
+!test/buildgates/go.sum
+!scripts/lib.sh
+!scripts/tool.sh
+!scripts/tool-pins.sh
+!scripts/install-tools.sh
 !*.go
 !providertest/*.go
 !test/integration/**/*.go
 !build/docker/devcontainer/run-integration-tests.sh
+!scripts/coverage-gate.sh
 # The root package's and providertest's own unit tests are not part of this
 # suite and are not compiled by it.
 *_test.go

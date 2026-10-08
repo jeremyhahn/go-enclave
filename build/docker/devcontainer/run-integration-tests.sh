@@ -63,36 +63,11 @@ fi
 # from it was never exercised, which is 0%, not "not applicable".
 status=0
 old_ifs=$IFS; IFS=,
-for want in $coverpkg; do
-  IFS=$old_ifs
-  # Blocks are keyed by file:range and counted once (the larger count wins,
-  # should a block appear twice); a block's package is its file's directory.
-  counts=$(awk -v p="$want" '
-    NR == 1 && /^mode:/ { next }
-    {
-      split($1, loc, ":"); file = loc[1]
-      pkg = file; sub("/[^/]*$", "", pkg)
-      if (pkg != p) next
-      if (!($1 in n)) { n[$1] = $2; c[$1] = $3 } else if ($3 > c[$1]) c[$1] = $3
-    }
-    END {
-      for (k in n) { total += n[k]; if (c[k] > 0) covered += n[k] }
-      printf "%d %d\n", covered, total
-    }' "$profile")
-  covered=${counts% *}; total=${counts#* }
-  if [ "$total" -eq 0 ]; then
-    echo "FAIL: $want has no integration coverage at all" >&2
-    status=1
-    continue
-  fi
-  pct=$(awk -v c="$covered" -v t="$total" 'BEGIN { printf "%.2f", 100 * c / t }')
-  printf '\t%s\t\tcoverage: %s%% of statements (%d of %d)\n' "$want" "$pct" "$covered" "$total"
-  if ! awk -v c="$covered" -v t="$total" -v f="$floor" 'BEGIN { exit !(100 * c >= f * t) }'; then
-    echo "FAIL: $want integration coverage $pct% ($covered of $total statements) is below the $floor% floor" >&2
-    status=1
-  fi
-done
+# $coverpkg is a comma-separated list by design.
+# shellcheck disable=SC2086
+set -- $coverpkg
 IFS=$old_ifs
+sh "$(dirname -- "$0")/../../../scripts/coverage-gate.sh" "$floor" "$profile" "$@" || status=$?
 if [ "$status" -ne 0 ]; then
   # Say WHERE the suite falls short, not only by how much: the least-covered
   # functions of the instrumented packages, from the same profile.

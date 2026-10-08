@@ -20,7 +20,6 @@ dist/
 *.test
 *.out
 coverage/
-coverage.txt
 coverage.out
 *.prof
 
@@ -29,7 +28,7 @@ coverage.out
 go.work
 go.work.sum
 gosec.sarif
-gosec-results.json
+trivy-results.sarif
 
 # OS / editor
 .DS_Store

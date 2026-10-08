@@ -1,11 +1,13 @@
-# go-enclave: locked-memory library. No binaries, no image, no protobuf, so no
-# docker-build/docker-run/proto targets.
+# go-enclave: locked-memory library. The Makefile is the contract (handbook
+# project-scaffold §4): CI calls these targets and carries no commands or flags
+# of its own, so a red CI reproduces with the same `make` line locally. It stays
+# thin: the logic lives in scripts/, which share scripts/lib.sh.
 #
-# The Makefile is the contract: CI calls these targets and carries no commands
-# or flags of its own, so a red CI reproduces with the same `make` line locally.
+# There is no binary and no protobuf: `proto` is a no-op, and docker-build /
+# docker-run build the devcontainer and run a gate in its toolchain stage.
 
 # Release tooling (maintainer-only). AGENT_GIT is the commit/signing wrapper; it
-# has no default on purpose and release-alpha fails closed without it. Set it in
+# has no default on purpose and release fails closed without it. Set it in
 # the environment or a gitignored local.mk.
 #
 # REPO_NAME must be the LITERAL repo name, never $(notdir $(CURDIR)): it selects
@@ -31,50 +33,16 @@ COVERAGE_HTML    := coverage/coverage.html
 # shell or make source. See EXTERNAL_VARS.
 raw_bind = $(foreach v,$(1),$(eval override $(v) := $$(value $(v)))$(eval export $(v)))
 
-# sq TEXT: TEXT as one single-quoted shell word, for $(shell ...), which does
-# not see exported variables in GNU Make 4.3.
-sq = '$(subst ','\'',$(1))'
+# $(,): a comma inside a $(call) argument.
+, := ,
 
 # Paths may hold spaces or quotes: bind raw, read as "$$VAR".
 $(call raw_bind,GOCMD AGENT_GIT REPO_NAME COVERAGE_PROFILE COVERAGE_HTML)
 
 # ---------------------------------------------------------------------------
-# PINNED TOOLS
-#
-# Pins match the CI runner image, which runs with TOOL_INSTALL=0 and rejects
-# any other version: raise a pin in the image first, then here. Never @latest.
-#
-# Raise with the runner image: `go list -m github.com/golangci/golangci-lint/v2@latest`.
-# v2.13.2 is the floor for linting Go 1.27.
-GOLANGCI_VERSION    := v2.13.2
-# Raise with the runner image: `go list -m honnef.co/go/tools@latest` (v0.8.1 is release 2026.2.1).
-STATICCHECK_VERSION := v0.8.1
-# Raise with the runner image: `go list -m github.com/securego/gosec/v2@latest`.
-GOSEC_VERSION       := v2.29.0
-# Raise with the runner image: `go list -m golang.org/x/vuln@latest`.
-GOVULNCHECK_VERSION := v1.7.0
-# Raise with the runner image: `go list -m github.com/rhysd/actionlint@latest`.
-ACTIONLINT_VERSION  := v1.7.7
-#
-# trivy and shellcheck are release archives pinned by four SHA-256s each: the
-# archive per Linux arch and the binary inside it (see scripts/tool.sh).
-# Raise a version and all four of its hashes together, or not at all.
-#
-# trivy is not in the runner image. Held at v0.74.0 so a scanner release ages
-# before it runs here; re-evaluate v0.75.0 from 2026-10-08.
-TRIVY_VERSION                  := v0.74.0
-TRIVY_SHA256_LINUX_AMD64       := 2ae6fe3ee734b7fdf11335663e18c75ea12dccc76062f09f164a3b0f8be4371a
-TRIVY_SHA256_LINUX_ARM64       := b94ce1976bbf3c15b514b605ee88be7c6d94a29be2302847ff01cb794d47aad5
-TRIVY_BIN_SHA256_LINUX_AMD64   := d89bcc6510a267f11b773398cbf1be5520ce39f9e8b6633178c4487f05b7d791
-TRIVY_BIN_SHA256_LINUX_ARM64   := fed2c9ca7d27191ada34524b5eaf5216a845c6d6f3246143c3b475552ffe5358
-# shellcheck (actionlint and lint-scripts): the runner image's Ubuntu 24.04
-# package version; raise with the image's base. Upstream publishes no
-# checksums; these match the koalaman/shellcheck:v0.9.0 image's binaries.
-SHELLCHECK_VERSION             := v0.9.0
-SHELLCHECK_SHA256_LINUX_AMD64  := 700324c6dd0ebea0117591c6cc9d7350d9c7c5c287acbad7630fa17b1d4d9e2f
-SHELLCHECK_SHA256_LINUX_ARM64  := 179c579ef3481317d130adebede74a34dbbc2df961a70916dd4039ebf0735fae
-SHELLCHECK_BIN_SHA256_LINUX_AMD64 := 7087178d54de6652b404c306233264463cb9e7a9afeb259bb663cc4dbfd64149
-SHELLCHECK_BIN_SHA256_LINUX_ARM64 := ef4c0f06039f2034dfba012251ddfeb1edba88e049fc5edfbc289fef179daaa0
+# PINNED TOOLS: versions and SHA-256s live only in scripts/tool-pins.sh, which the
+# devcontainer's toolchain stage installs from too.
+include scripts/tool-pins.sh
 
 # TOOL_INSTALL=1 installs missing pins into TOOLS_DIR (inside the repo, keyed by
 # version and toolchain). TOOL_INSTALL=0 (CI) installs nothing: a missing or
@@ -84,19 +52,18 @@ TOOLS_DIR    := $(CURDIR)/bin/tools
 # TOOLS_DIR derives from the checkout path, so it is raw-bound.
 $(call raw_bind,TOOLS_DIR)
 
-# This module's toolchain, passed to every tool install so `go install` builds
-# the tools with it rather than with the tool's own go.mod floor.
-TOOLCHAIN := $(shell $(call sq,$(GOCMD)) env GOVERSION)
-
-# `bin=$$($(TOOL) <name> <version>)` prints the pinned binary's path or fails
-# closed. Its inputs are exported, never spliced into recipe source.
-export TOOLCHAIN
+# tool NAME,PREFIX: the pinned binary's path (NAME at $(PREFIX)_VERSION), or a
+# failed closed lookup. scripts/tool.sh reads the pins below from the
+# environment, and resolves the module's toolchain itself when it builds a tool.
+#   bin=$(call tool,trivy,TRIVY) && "$$bin" ...
 export GO := $(GOCMD)
+export TRIVY_VERSION
 export TRIVY_SHA256_LINUX_AMD64 TRIVY_SHA256_LINUX_ARM64 TRIVY_BIN_SHA256_LINUX_AMD64 TRIVY_BIN_SHA256_LINUX_ARM64
 export SHELLCHECK_SHA256_LINUX_AMD64 SHELLCHECK_SHA256_LINUX_ARM64 SHELLCHECK_BIN_SHA256_LINUX_AMD64 SHELLCHECK_BIN_SHA256_LINUX_ARM64
-TOOL = sh scripts/tool.sh
+tool = $$(sh scripts/tool.sh $(1) $($(2)_VERSION))
 
-# gosec flags live only here; CI runs `make gosec`.
+# gosec flags live only here; CI runs `make gosec`. golangci-lint runs gosec
+# too (lint-go), but cannot write the SARIF code scanning reads.
 #   -concurrency=4: gosec sizes workers from host cores, ignoring cgroup limits.
 #   -exclude-dir=test: test/ is never shipped; shipped packages are always scanned.
 #   SARIF for code scanning, plus text on stdout for Gitea logs.
@@ -104,9 +71,16 @@ TOOL = sh scripts/tool.sh
 GOSEC_FLAGS := -concurrency=4 -severity=medium -confidence=medium -exclude-dir=test \
 	-fmt=sarif -out=gosec.sarif -stdout -verbose=text
 
+# golangci-lint flags. --allow-serial-runners waits for golangci-lint's
+# host-wide lock instead of failing.
+GOLANGCI_FLAGS := run --allow-serial-runners --timeout=5m
+
 # trivy fs flags for every target and workflow. bin/ is the third-party tool
 # cache; the pin decides the version, so the version check is skipped.
 TRIVY_FS_FLAGS := --skip-dirs bin --ignorefile .trivyignore --skip-version-check
+
+# trivy_fs SCAN-FLAGS: `trivy fs` of the tree with the shared flags.
+trivy_fs = bin=$(call tool,trivy,TRIVY) && "$$bin" fs $(1) $(TRIVY_FS_FLAGS) .
 
 # Coverage floor. `:=` so the environment cannot lower it; only the command line can.
 COVERAGE_THRESHOLD := 90
@@ -140,7 +114,21 @@ PACKAGES          := enclave providertest
 PKGDIR_enclave      := .
 PKGDIR_providertest := ./providertest
 
+# FEATURE MAPPING (local-software-factory §7). A feature is a directory
+# docs/<feature>/; scripts/features.sh <base> <tip> prints the ones a change
+# touches, which the factory reads as FEATURES_CMD. Each feature runs as
+# test-<feature> and integration-test-<feature>, which are its package's
+# test-<pkg> and integration-test-<pkg>. A new docs/<feature>/ is mapped here;
+# test/buildgates fails until it is.
+FEATURES := locked-memory locked-memory-budget provider-conformance sealing shutdown-sweep
+FEATURE_PKG_locked-memory        := enclave
+FEATURE_PKG_locked-memory-budget := enclave
+FEATURE_PKG_provider-conformance := providertest
+FEATURE_PKG_sealing              := enclave
+FEATURE_PKG_shutdown-sweep       := enclave
+
 .PHONY: all
+## all: Same as ci
 all: ci
 
 .PHONY: help
@@ -149,21 +137,24 @@ help:
 	@test -f "$$HELP_MAKEFILE" || { echo "help: cannot locate this Makefile (make splits a -f path containing spaces); run make from the checkout"; exit 1; }
 	@grep -E '^## ' "$$HELP_MAKEFILE" | sed 's/## //'
 
+## proto: No-op, this library has no .proto
+.PHONY: proto
+proto:
+	@echo "proto: nothing to generate (go-enclave has no .proto)"
+
 ## fmt: Format the tree (gofmt)
 .PHONY: fmt
 fmt:
-	@gofmt -w .
+	@sh scripts/fmt.sh write
 
 ## fmt-check: Fail if anything is unformatted
 .PHONY: fmt-check
 fmt-check:
-	@UNFORMATTED=$$(gofmt -l .); \
-	if [ -n "$$UNFORMATTED" ]; then echo "Not formatted:"; echo "$$UNFORMATTED"; exit 1; fi
+	@sh scripts/fmt.sh check
 
-## vet: go vet
+## vet: go vet (golangci-lint's govet, the one implementation, lint-go)
 .PHONY: vet
-vet:
-	"$$GOCMD" vet $(PKG)
+vet: lint-go
 
 ## tidy: go mod tidy
 .PHONY: tidy
@@ -177,61 +168,48 @@ tidy-check:
 	@"$$GOCMD" mod tidy -diff || { echo "go.mod/go.sum are not tidy: run 'make tidy'"; exit 1; }
 	@cd test/buildgates && "$$GOCMD" mod tidy -diff || { echo "test/buildgates/go.mod is not tidy: run 'go mod tidy' there"; exit 1; }
 
-## lint: gofmt, go vet, golangci-lint, actionlint, shellcheck (devops §4)
+## lint: gofmt, golangci-lint (vet, staticcheck, gosec), actionlint, shellcheck (devops §4)
 .PHONY: lint
-lint: fmt-check vet lint-go lint-actions lint-scripts
+lint: fmt-check lint-go lint-actions lint-scripts
 
-## lint-go: golangci-lint (pinned) over .golangci.yml
+## lint-go: golangci-lint (pinned) over .golangci.yml: vet, staticcheck, gosec and the rest
 # .golangci.yml must enable staticcheck, errcheck, unused, ineffassign,
-# misspell and gocritic. --allow-serial-runners waits for golangci-lint's
-# host-wide lock instead of failing. test/buildgates is a separate module, so
-# lint-go, staticcheck and govulncheck also run there.
+# misspell and gocritic. test/buildgates is a separate module, so it is
+# linted there too.
 .PHONY: lint-go
 lint-go:
-	@bin=$$($(TOOL) golangci-lint $(GOLANGCI_VERSION)) && "$$bin" run --allow-serial-runners --timeout=5m $(PKG) && \
-	cd test/buildgates && "$$bin" run --allow-serial-runners --timeout=5m $(PKG)
+	@bin=$(call tool,golangci-lint,GOLANGCI) && "$$bin" $(GOLANGCI_FLAGS) $(PKG) && \
+	cd test/buildgates && "$$bin" $(GOLANGCI_FLAGS) $(PKG)
 
 ## lint-actions: actionlint (pinned) over .github/workflows, with the pinned shellcheck on every run: block
 # The pinned shellcheck is passed explicitly: actionlint silently skips shell
 # checks when it finds none on PATH.
 .PHONY: lint-actions
 lint-actions:
-	@sc=$$($(TOOL) shellcheck $(SHELLCHECK_VERSION)) && \
-	bin=$$($(TOOL) actionlint $(ACTIONLINT_VERSION)) && "$$bin" -shellcheck "$$sc"
+	@sc=$(call tool,shellcheck,SHELLCHECK) && \
+	bin=$(call tool,actionlint,ACTIONLINT) && "$$bin" -shellcheck "$$sc"
 
 ## lint-scripts: shellcheck (pinned) over scripts/*.sh
-# The scripts are POSIX sh, and release.yml runs them with a write token.
+# The scripts are POSIX sh, and release.yml runs them with a write token. -x
+# follows the `. lib.sh` every script sources.
 .PHONY: lint-scripts
 lint-scripts:
-	@sc=$$($(TOOL) shellcheck $(SHELLCHECK_VERSION)) && \
-	echo "shellcheck $(SHELLCHECK_VERSION) --shell=sh scripts/*.sh build/docker/devcontainer/*.sh" && "$$sc" --shell=sh scripts/*.sh build/docker/devcontainer/*.sh
+	@sc=$(call tool,shellcheck,SHELLCHECK) && \
+	echo "shellcheck $(SHELLCHECK_VERSION) -x --shell=sh scripts/*.sh build/docker/devcontainer/*.sh" && "$$sc" -x --source-path=SCRIPTDIR --shell=sh scripts/*.sh build/docker/devcontainer/*.sh
 
-## staticcheck: honnef.co staticcheck (pinned)
+## staticcheck: staticcheck (golangci-lint's, the one implementation, lint-go)
 .PHONY: staticcheck
-staticcheck:
-	@bin=$$($(TOOL) staticcheck $(STATICCHECK_VERSION)) && "$$bin" $(PKG) && \
-	cd test/buildgates && "$$bin" $(PKG)
+staticcheck: lint-go
 
-## gosec: security static analysis (pinned; writes gosec.sarif)
-# Exit >128 means killed by a signal (e.g. OOM), not findings; say which.
+## gosec: gosec (pinned; writes gosec.sarif for code scanning; lint-go runs the same rules)
 .PHONY: gosec
 gosec:
-	@bin=$$($(TOOL) gosec $(GOSEC_VERSION)) || exit 1; \
-	rc=0; "$$bin" $(GOSEC_FLAGS) $(PKG) || rc=$$?; \
-	if [ $$rc -gt 128 ]; then \
-	  echo "gosec was KILLED by signal $$((rc - 128)) - this is NOT a security finding. Memory pressure; re-run when the host is quieter."; \
-	fi; exit $$rc
+	@bin=$(call tool,gosec,GOSEC) && sh scripts/scan.sh gosec "a security finding" "$$bin" $(GOSEC_FLAGS) $(PKG)
 
 ## govulncheck: known-vuln scan (pinned; also the toolchain-currency forcing function)
-# Same signal-exit triage as gosec.
 .PHONY: govulncheck
 govulncheck:
-	@bin=$$($(TOOL) govulncheck $(GOVULNCHECK_VERSION)) || exit 1; \
-	rc=0; "$$bin" $(PKG) || rc=$$?; \
-	if [ $$rc -eq 0 ]; then (cd test/buildgates && "$$bin" $(PKG)) || rc=$$?; fi; \
-	if [ $$rc -gt 128 ]; then \
-	  echo "govulncheck was KILLED by signal $$((rc - 128)) - this is NOT a vulnerability finding. Memory pressure, not a CVE; confirm with an uncapped run."; \
-	fi; exit $$rc
+	@bin=$(call tool,govulncheck,GOVULNCHECK) && SCAN_MODULES=". test/buildgates" sh scripts/scan.sh govulncheck "a vulnerability (a CVE)" "$$bin" $(PKG)
 
 ## vuln: alias for govulncheck
 .PHONY: vuln
@@ -246,72 +224,73 @@ modverify:
 # TRIVY_FS_FLAGS carries --ignorefile, so suppressions apply to every scan.
 .PHONY: trivy
 trivy:
-	@bin=$$($(TOOL) trivy $(TRIVY_VERSION)) && \
-	"$$bin" fs --scanners vuln,secret --severity CRITICAL,HIGH --exit-code 1 --format table $(TRIVY_FS_FLAGS) .
+	@$(call trivy_fs,--scanners vuln$(,)secret --severity CRITICAL$(,)HIGH --exit-code 1 --format table)
 
 ## trivy-misconfig: misconfiguration scan, ADVISORY (reports, never fails on findings)
 # Advisory until the misconfiguration baseline is clean.
 .PHONY: trivy-misconfig
 trivy-misconfig:
-	@bin=$$($(TOOL) trivy $(TRIVY_VERSION)) && \
-	"$$bin" fs --scanners misconfig --exit-code 0 --format table $(TRIVY_FS_FLAGS) .
+	@$(call trivy_fs,--scanners misconfig --exit-code 0 --format table)
 
 ## trivy-sarif: vulnerability + secret scan as SARIF (trivy-results.sarif), for code scanning
 .PHONY: trivy-sarif
 trivy-sarif:
-	@bin=$$($(TOOL) trivy $(TRIVY_VERSION)) && \
-	"$$bin" fs --scanners vuln,secret --exit-code 0 --format sarif --output trivy-results.sarif $(TRIVY_FS_FLAGS) .
+	@$(call trivy_fs,--scanners vuln$(,)secret --exit-code 0 --format sarif --output trivy-results.sarif)
 
-## security: full local security suite — gosec, govulncheck, modverify, trivy
-# No image to scan. CI runs the first three per push and trivy nightly; release.yml runs all four.
+## security: full local security suite — golangci-lint's gosec, govulncheck, modverify, trivy
+# No image to scan. CI runs gosec (SARIF), govulncheck and modverify per push
+# and trivy nightly; release.yml runs all four.
 .PHONY: security
-security: gosec govulncheck modverify trivy
+security: lint-go govulncheck modverify trivy
 	@echo "Security suite passed"
 
 # CI's test flags, defined once so local and CI runs cannot drift; `:=` so an
-# exported TESTFLAGS cannot drop them. Neither flag is optional:
+# exported TESTFLAGS cannot drop them. None is optional:
 #   -race is the only detector for publication-ordering bugs in the shutdown registry.
 #   -cpu=1,2,8: the reserve retune-vs-admission race is caught only by
 #   contention, so core count is part of the oracle (one core never sees it).
-TESTFLAGS := -race -count=1 -cpu=1,2,8
+TEST_TIMEOUT := -timeout=900s
+TESTFLAGS    := -race -count=1 -cpu=1,2,8 $(TEST_TIMEOUT)
+
+# Per-package targets; the aggregates below only depend on them.
+TEST_TARGETS     := $(addprefix test-,$(PACKAGES))
+COVERAGE_TARGETS := $(addprefix coverage-,$(PACKAGES))
+PROFILE_TARGETS  := $(addprefix coverage-profile-,$(PACKAGES))
+BENCH_TARGETS    := $(addprefix bench-,$(PACKAGES))
 
 ## test: unit tests with the race detector, across the CPU matrix
 .PHONY: test
-test:
-	"$$GOCMD" test $(TESTFLAGS) -timeout=900s $(PKG)
+test: $(TEST_TARGETS)
 
-# Profile for coverage and coverage-report, measured with the full TESTFLAGS.
-.PHONY: coverage-profile
-coverage-profile:
-	"$$GOCMD" test $(TESTFLAGS) -covermode=atomic -timeout=900s -coverprofile="$$COVERAGE_PROFILE" $(PKG)
-
-## coverage: unit tests with coverage; FAILS below COVERAGE_THRESHOLD, in total AND per package
-# The floor binds the total AND every package (a statement-weighted total can
-# hide a small package below it). Exact comparison, no rounding.
-.PHONY: coverage
-coverage: coverage-threshold coverage-profile
-	@TOTAL=$$("$$GOCMD" tool cover -func="$$COVERAGE_PROFILE" | awk '/^total:/ {sub("%","",$$3); print $$3}'); \
-	test -n "$$TOTAL" || { echo "FAIL: no total in $$COVERAGE_PROFILE"; exit 1; }; \
-	echo "Total coverage: $$TOTAL% (floor $$COVERAGE_THRESHOLD%)"; \
-	awk -v t="$$TOTAL" -v f="$$COVERAGE_THRESHOLD" 'BEGIN { exit !(t+0 >= f+0) }' || { echo "FAIL: coverage $$TOTAL% is below the $$COVERAGE_THRESHOLD% floor"; exit 1; }
-	@awk -v f="$$COVERAGE_THRESHOLD" ' \
-	  NR > 1 && NF == 3 { file = $$1; sub(/:[^:]*$$/, "", file); pkg = file; sub(/\/[^\/]*$$/, "", pkg); \
-	    if (!(pkg in stmts)) pkgs++; stmts[pkg] += $$2; if ($$3 > 0) hit[pkg] += $$2 } \
-	  END { if (pkgs == 0) { print "FAIL: no package in " FILENAME; exit 1 } \
-	    bad = 0; \
-	    for (p in stmts) { pct = 100 * hit[p] / stmts[p]; \
-	      printf "%s coverage: %.1f%% (floor %s%%)\n", p, pct, f | "sort"; \
-	      if (100 * hit[p] < (f + 0) * stmts[p]) { below[p] = pct; bad = 1 } } \
-	    close("sort"); \
-	    for (p in below) printf "FAIL: %s coverage %.1f%% is below the %s%% floor\n", p, below[p], f; \
-	    exit bad }' "$$COVERAGE_PROFILE"
+## test-<pkg>, coverage-<pkg>, bench-<pkg>: one package (enclave, providertest); coverage-<pkg> FAILS below COVERAGE_THRESHOLD
+.PHONY: $(TEST_TARGETS) $(COVERAGE_TARGETS) $(PROFILE_TARGETS) $(BENCH_TARGETS)
+$(TEST_TARGETS): test-%:
+	"$$GOCMD" test $(TESTFLAGS) $(PKGDIR_$*)
 
 # The floor is checked to be a number BEFORE the suite spends minutes running.
+$(PROFILE_TARGETS): coverage-profile-%: coverage-threshold
+	"$$GOCMD" test $(TESTFLAGS) -covermode=atomic -coverprofile=coverage-$*.out $(PKGDIR_$*)
+
+# The floor binds every package, in total and exactly (no rounding), which also
+# bounds the total: a statement-weighted total cannot hide a small package.
+$(COVERAGE_TARGETS): coverage-%: coverage-profile-%
+	@sh scripts/coverage-gate.sh "$$COVERAGE_THRESHOLD" coverage-$*.out
+
+$(BENCH_TARGETS): bench-%:
+	"$$GOCMD" test -run '^$$' -bench . -benchmem $(PKGDIR_$*)
+
+## coverage: unit tests with coverage; FAILS below COVERAGE_THRESHOLD, in total AND per package
+.PHONY: coverage
+coverage: $(COVERAGE_TARGETS)
+
 .PHONY: coverage-threshold
 coverage-threshold:
-	@case "$$COVERAGE_THRESHOLD" in \
-	  ''|*[!0-9.]*|*.*.*|.*|*.) echo "ERROR: COVERAGE_THRESHOLD must be a number (got a value that is not)"; exit 1 ;; \
-	esac
+	@sh scripts/coverage-gate.sh "$$COVERAGE_THRESHOLD"
+
+# One profile ($(COVERAGE_PROFILE)) for coverage-report, from the per-package ones.
+.PHONY: coverage-profile
+coverage-profile: $(PROFILE_TARGETS)
+	@sh scripts/coverage-gate.sh merge "$$COVERAGE_PROFILE" $(foreach p,$(PACKAGES),coverage-$(p).out)
 
 ## coverage-report: HTML coverage report at coverage/coverage.html (no threshold)
 # Separate from coverage so the report is produced even when the floor is missed.
@@ -319,7 +298,7 @@ coverage-threshold:
 coverage-report: coverage-profile
 	@mkdir -p -- "$$(dirname -- "$$COVERAGE_HTML")"
 	"$$GOCMD" tool cover -html="$$COVERAGE_PROFILE" -o "$$COVERAGE_HTML"
-	@"$$GOCMD" tool cover -func="$$COVERAGE_PROFILE" | awk '/^total:/ {print "Total coverage: " $$3}'
+	@"$$GOCMD" tool cover -func="$$COVERAGE_PROFILE" | tail -n 1
 	@echo "Wrote $$COVERAGE_HTML"
 
 ## test-fips: build + unit tests under Go native FIPS 140-3 strict mode
@@ -329,54 +308,30 @@ coverage-report: coverage-profile
 .PHONY: test-fips
 test-fips:
 	GOFIPS140=latest GODEBUG=fips140=only "$$GOCMD" build $(PKG)
-	GOFIPS140=latest GODEBUG=fips140=only "$$GOCMD" test -count=1 -timeout=900s $(PKG)
+	GOFIPS140=latest GODEBUG=fips140=only "$$GOCMD" test -count=1 $(TEST_TIMEOUT) $(PKG)
 
 ## test-runtimesecret: unit tests built with GOEXPERIMENT=runtimesecret (key-schedule erasure, #98)
-# Checks per-platform erasure file selection, then runs the suite with
-# GOEXPERIMENT=runtimesecret on the module's own toolchain (resolved with the
-# experiment unset; an older go cannot parse it). The erasure proof runs
-# without -race, whose allocator would blind its control.
-ERASURE_PROOF := ^TestWithAEAD_ErasesTheKeyScheduleUnderRuntimeSecret$$
+# See scripts/test-runtimesecret.sh.
 .PHONY: test-runtimesecret
 test-runtimesecret:
-	@gobin=$$(GOEXPERIMENT= "$$GOCMD" env GOROOT)/bin/go || exit 1; \
-	for t in linux/amd64=secret_erase.go linux/arm64=secret_erase.go linux/386=secret_noerase.go \
-	  android/amd64=secret_noerase.go android/arm64=secret_noerase.go darwin/arm64=secret_noerase.go; do \
-	  target=$${t%=*}; want=$${t#*=}; \
-	  files=$$(GOEXPERIMENT=runtimesecret GOOS=$${target%/*} GOARCH=$${target#*/} CGO_ENABLED=0 "$$gobin" list -f '{{join .GoFiles " "}}' .) || exit 1; \
-	  case " $$files " in *" $$want "*) echo "erasure selection $$target: $$want";; \
-	    *) echo "ERROR: GOEXPERIMENT=runtimesecret on $$target does not build $$want (KeyScheduleErasure would lie)"; exit 1;; esac; \
-	done; \
-	echo "GOEXPERIMENT=runtimesecret $$gobin test $(TESTFLAGS) -skip '$(ERASURE_PROOF)' -timeout=900s $(PKG)"; \
-	GOEXPERIMENT=runtimesecret "$$gobin" test $(TESTFLAGS) -skip '$(ERASURE_PROOF)' -timeout=900s $(PKG) || exit 1; \
-	echo "GOEXPERIMENT=runtimesecret $$gobin test -count=5 -cpu=1,2,8 -run '$(ERASURE_PROOF)' ."; \
-	GOEXPERIMENT=runtimesecret "$$gobin" test -count=5 -cpu=1,2,8 -run '$(ERASURE_PROOF)' .
+	@sh scripts/test-runtimesecret.sh $(TESTFLAGS)
 
 ## bench: every benchmark, with allocation counts (no unit tests)
 .PHONY: bench
-bench:
-	"$$GOCMD" test -run '^$$' -bench . -benchmem $(PKG)
+bench: $(BENCH_TARGETS)
 
-## test-<pkg>, coverage-<pkg>, bench-<pkg>: one package (enclave, providertest)
-.PHONY: $(addprefix test-,$(PACKAGES)) $(addprefix coverage-,$(PACKAGES)) $(addprefix bench-,$(PACKAGES))
-$(addprefix test-,$(PACKAGES)): test-%:
-	"$$GOCMD" test $(TESTFLAGS) -timeout=900s $(PKGDIR_$*)
-$(addprefix coverage-,$(PACKAGES)): coverage-%:
-	"$$GOCMD" test $(TESTFLAGS) -covermode=atomic -timeout=900s -coverprofile=coverage-$*.out $(PKGDIR_$*)
-	@"$$GOCMD" tool cover -func=coverage-$*.out | awk '/^total:/ {print "$* coverage: " $$3}'
-$(addprefix bench-,$(PACKAGES)): bench-%:
-	"$$GOCMD" test -run '^$$' -bench . -benchmem $(PKGDIR_$*)
+## test-<feature>, integration-test-<feature>: one feature's package suites (see FEATURES)
+.PHONY: $(addprefix test-,$(FEATURES)) $(addprefix integration-test-,$(FEATURES))
+$(foreach f,$(FEATURES),$(eval test-$(f): test-$(FEATURE_PKG_$(f))))
+$(foreach f,$(FEATURES),$(eval integration-test-$(f): integration-test-$(FEATURE_PKG_$(f))))
 
 # INTEGRATION SUITE. Each package's suite (test/integration/<pkg>/) runs in the
-# devcontainer, never on the host. The image bakes the source because on CI
-# runners compose talks to the host daemon, where bind-mount paths do not exist.
-# Each run uses a unique compose project, torn down on every exit. The package
-# is named exactly (no /...) so a wrong build tag errors instead of passing
-# vacuously. Every precondition fails rather than skips.
+# devcontainer, never on the host: scripts/integration-test.sh.
 INTEGRATION_PACKAGES  := enclave providertest
 DEVCONTAINER_COMPOSE  := build/docker/devcontainer/compose.yaml
-DEVCONTAINER_SERVICE  := devcontainer
+DEVCONTAINER_SERVICE  := integration
 INTEGRATION_TESTFLAGS := -tags=integration -race -count=1 -v -timeout=1800s
+export INTEGRATION_TESTFLAGS
 
 # GO_ENCLAVE_IT_PROFILE_OUT: where to write the merged integration profile
 # ("-" prints it). Caller-supplied, so raw-bound.
@@ -391,70 +346,60 @@ INTEGRATION_COVERPKG_providertest := github.com/jeremyhahn/go-enclave/providerte
 INTEGRATION_FIPS_ENV  := -e GOFIPS140=latest -e GODEBUG=fips140=only -e GO_ENCLAVE_IT_FIPS_MODE=only
 $(call raw_bind,DEVCONTAINER_COMPOSE DEVCONTAINER_SERVICE)
 
-# run_integration PKG, EXTRA_RUN_FLAGS: the one recipe both variants share.
-define run_integration
-	@test -n "$(INTEGRATION_COVERPKG_$(1))" || { echo "ERROR: no INTEGRATION_COVERPKG_$(1): every integration suite names the package its coverage floor applies to"; exit 1; }
-	@test -d test/integration/$(1) || { echo "ERROR: test/integration/$(1) does not exist. Refusing to report a suite that did not run as passed."; exit 1; }
-	@ls test/integration/$(1)/*_test.go >/dev/null 2>&1 || { echo "ERROR: test/integration/$(1) holds no _test.go files; refusing to pass with nothing to run."; exit 1; }
-	@test -f "$$DEVCONTAINER_COMPOSE" || { echo "ERROR: $$DEVCONTAINER_COMPOSE not found. Integration tests run in the project devcontainer, never on the host (integration-testing §4)."; exit 1; }
-	@command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1 || { echo "ERROR: 'docker compose' (Compose v2) is required to run the integration suite in the devcontainer."; exit 1; }
-	@docker version --format '{{.Server.Version}}' >/dev/null 2>&1 || { echo "ERROR: the Docker daemon is not reachable (docker version cannot read the server). The integration suite runs in the devcontainer and cannot run without it."; exit 1; }
-	@trivy=$$($(TOOL) trivy $(TRIVY_VERSION)) || exit 1; \
-	project="go-enclave-it-$(1)-$$(date +%s)-$$$$-$$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n')"; \
-	echo "compose project: $$project"; \
-	cleanup() { \
-	  rc=$$?; \
-	  if ! docker compose -f "$$DEVCONTAINER_COMPOSE" -p "$$project" down --volumes --remove-orphans --rmi local >/dev/null 2>&1; then \
-	    echo "ERROR: teardown of compose project $$project failed; remove it with: docker compose -f '$$DEVCONTAINER_COMPOSE' -p '$$project' down --volumes --remove-orphans --rmi local" >&2; \
-	    [ "$$rc" -ne 0 ] || rc=1; \
-	  fi; \
-	  exit $$rc; \
-	}; \
-	trap cleanup EXIT; trap 'exit 130' INT; trap 'exit 143' TERM; \
-	docker compose -f "$$DEVCONTAINER_COMPOSE" -p "$$project" build "$$DEVCONTAINER_SERVICE" || exit 1; \
-	echo "trivy image $$project-$$DEVCONTAINER_SERVICE (CRITICAL,HIGH, fixable only — devops §8)"; \
-	"$$trivy" image --scanners vuln --severity CRITICAL,HIGH --ignore-unfixed --exit-code 1 \
-	  --ignorefile .trivyignore --skip-version-check --format table "$$project-$$DEVCONTAINER_SERVICE" || exit 1; \
-	docker compose -f "$$DEVCONTAINER_COMPOSE" -p "$$project" run --rm \
-	  -e GO_ENCLAVE_IT_TESTFLAGS="$(INTEGRATION_TESTFLAGS)" \
-	  -e GO_ENCLAVE_IT_COVERAGE_FLOOR="$$COVERAGE_THRESHOLD" \
-	  -e GO_ENCLAVE_IT_COVERPKG="$(INTEGRATION_COVERPKG_$(1))" \
-	  -e GO_ENCLAVE_IT_PROFILE_OUT="$$GO_ENCLAVE_IT_PROFILE_OUT" \
-	  $(2) "$$DEVCONTAINER_SERVICE" sh build/docker/devcontainer/run-integration-tests.sh $(1)
-endef
+IT_TARGETS      := $(addprefix integration-test-,$(INTEGRATION_PACKAGES))
+IT_FIPS_TARGETS := $(addprefix integration-test-fips-,$(INTEGRATION_PACKAGES))
 
 ## integration-test: every integration suite, in the devcontainer
 .PHONY: integration-test
-integration-test: $(addprefix integration-test-,$(INTEGRATION_PACKAGES))
+integration-test: $(IT_TARGETS)
 
-## integration-test-<pkg>: one package's integration suite, in the devcontainer (enclave)
-.PHONY: $(addprefix integration-test-,$(INTEGRATION_PACKAGES))
-$(addprefix integration-test-,$(INTEGRATION_PACKAGES)): integration-test-%:
-	$(call run_integration,$*,)
+## integration-test-<pkg>: one package's integration suite, in the devcontainer (enclave, providertest)
+.PHONY: $(IT_TARGETS)
+$(IT_TARGETS): integration-test-%:
+	@sh scripts/integration-test.sh $* "$(INTEGRATION_COVERPKG_$*)"
 
 ## integration-test-fips: every integration suite under FIPS 140-3 strict mode, in the devcontainer
 .PHONY: integration-test-fips
-integration-test-fips: $(addprefix integration-test-fips-,$(INTEGRATION_PACKAGES))
+integration-test-fips: $(IT_FIPS_TARGETS)
 
-## integration-test-fips-<pkg>: one package's integration suite under FIPS 140-3 strict mode (enclave)
-.PHONY: $(addprefix integration-test-fips-,$(INTEGRATION_PACKAGES))
-$(addprefix integration-test-fips-,$(INTEGRATION_PACKAGES)): integration-test-fips-%:
-	$(call run_integration,$*,$(INTEGRATION_FIPS_ENV))
+## integration-test-fips-<pkg>: one package's integration suite under FIPS 140-3 strict mode (enclave, providertest)
+.PHONY: $(IT_FIPS_TARGETS)
+$(IT_FIPS_TARGETS): integration-test-fips-%:
+	@sh scripts/integration-test.sh $* "$(INTEGRATION_COVERPKG_$*)" $(INTEGRATION_FIPS_ENV)
 
-## lint-integration: vet, golangci-lint and staticcheck over the integration suite, WITH its build tag
+## lint-integration: golangci-lint over the integration suite, WITH its build tag
 # `make lint` runs without the integration tag and never sees the suite. This
 # first proves the tag selects the test files and nothing builds without it.
 .PHONY: lint-integration
 lint-integration:
-	@for p in $(INTEGRATION_PACKAGES); do \
-	  with=$$("$$GOCMD" list -tags=integration -f '{{len .TestGoFiles}}{{len .XTestGoFiles}}' ./test/integration/$$p) || exit 1; \
-	  without=$$("$$GOCMD" list -e -f '{{len .TestGoFiles}}{{len .XTestGoFiles}}' ./test/integration/$$p 2>/dev/null); \
-	  case "$$with" in 00|'') echo "ERROR: -tags=integration selects no test files in test/integration/$$p"; exit 1;; esac; \
-	  case "$$without" in 00|'') ;; *) echo "ERROR: test/integration/$$p has test files that build WITHOUT the integration tag ($$without)"; exit 1;; esac; \
-	done
-	"$$GOCMD" vet -tags=integration ./test/integration/...
-	@bin=$$($(TOOL) golangci-lint $(GOLANGCI_VERSION)) && "$$bin" run --allow-serial-runners --timeout=5m --build-tags=integration ./test/integration/...
-	@bin=$$($(TOOL) staticcheck $(STATICCHECK_VERSION)) && "$$bin" -tags=integration ./test/integration/...
+	@sh scripts/lint-integration.sh $(INTEGRATION_PACKAGES)
+	@bin=$(call tool,golangci-lint,GOLANGCI) && "$$bin" $(GOLANGCI_FLAGS) --build-tags=integration ./test/integration/...
+
+# THE DEVCONTAINER (build/docker/devcontainer/): one Dockerfile, two stages.
+# `toolchain` is Go plus every pin in scripts/tool-pins.sh, and runs every gate
+# with the checkout mounted; `integration`, from the same base stage and
+# without the tools, has the source baked in and runs only the integration suite. scripts/devcontainer.sh does the work.
+#
+# CMD: the command docker-run runs, one string for bash -c. It is the caller's
+# command by design, so it is raw-bound (never parsed as make source) and
+# handed to the script as one argument.
+CMD ?=
+$(call raw_bind,CMD)
+
+## docker-build: Build both devcontainer stages: go-enclave-toolchain:<content tag> and :latest, and the integration image
+.PHONY: docker-build
+docker-build:
+	@sh scripts/devcontainer.sh build
+
+## docker-run: Run CMD in the toolchain image, checkout mounted, offline, as you: make docker-run CMD='make lint'
+.PHONY: docker-run
+docker-run: docker-build
+	@sh scripts/devcontainer.sh run "$$CMD"
+
+## toolchain-image: Print the toolchain image's content-addressed tag (lane-verify's VERIFY_IMAGE)
+.PHONY: toolchain-image
+toolchain-image:
+	@sh scripts/devcontainer.sh tag
 
 ## build: compile all packages
 .PHONY: build
@@ -464,46 +409,45 @@ build:
 ## cross-build: compile (and vet) every package for every supported GOOS/GOARCH
 .PHONY: cross-build
 cross-build:
-	@set -e; for t in $(CROSS_TARGETS); do \
-	  echo "cross-build $$t"; \
-	  GOOS=$${t%/*} GOARCH=$${t#*/} "$$GOCMD" build $(PKG); \
-	  GOOS=$${t%/*} GOARCH=$${t#*/} "$$GOCMD" vet $(PKG); \
-	done
+	@sh scripts/cross-build.sh $(CROSS_TARGETS) -- $(PKG)
 
 # BUILD GATES: their own module under test/buildgates (it needs a YAML parser
 # the root module must not depend on). check-action-pins runs every test the
 # other gates do not claim.
 BUILDGATES_OTHER := ^(TestReleasability|TestChangelogAssemble|TestScripts)
+# gates TEST-FLAGS: vet the gates module, then run its tests.
+gates = cd test/buildgates && "$$GOCMD" vet $(PKG) && "$$GOCMD" test -count=1 $(1) $(PKG)
 
 ## check-action-pins: every `uses:` in a workflow names a 40-hex commit
 .PHONY: check-action-pins
 check-action-pins:
-	@cd test/buildgates && "$$GOCMD" vet $(PKG) && "$$GOCMD" test -count=1 -skip '$(BUILDGATES_OTHER)' $(PKG)
+	@$(call gates,-skip '$(BUILDGATES_OTHER)')
 
 ## check-releasability: no tracked file names the lab fleet or is agent-only
 # Every tracked file is published, so the scrub happens here. Rules and
 # waivers: test/buildgates/releasability_test.go.
 .PHONY: check-releasability
 check-releasability:
-	@cd test/buildgates && "$$GOCMD" vet $(PKG) && "$$GOCMD" test -count=1 -run '^TestReleasability' $(PKG)
+	@$(call gates,-run '^TestReleasability')
 
 ## check-changelog-assembly: the release step folds every fragment in exactly once
-# Tests scripts/changelog-assemble.sh, which release-alpha runs, on scratch trees.
+# Tests scripts/changelog-assemble.sh, which release runs, on scratch trees.
 .PHONY: check-changelog-assembly
 check-changelog-assembly:
-	@cd test/buildgates && "$$GOCMD" vet $(PKG) && "$$GOCMD" test -count=1 -run '^TestChangelogAssemble' $(PKG)
+	@$(call gates,-run '^TestChangelogAssemble')
 
 ## check-scripts: the release and tooling scripts, driven on scratch inputs
 # Drives the release and tooling scripts offline on scratch trees, a fake forge
 # API and a local module proxy, since most run for real only on a tag push.
 .PHONY: check-scripts
 check-scripts:
-	@cd test/buildgates && "$$GOCMD" vet $(PKG) && "$$GOCMD" test -count=1 -run '^TestScripts' $(PKG)
+	@$(call gates,-run '^TestScripts')
 
 ## ci-fast: everything `ci` runs that does not need Docker (devops §4)
-# lint-integration needs no container, so it runs here.
+# Each target runs once per invocation, however many others depend on it:
+# lint-go carries vet, staticcheck and gosec for lint and security alike.
 .PHONY: ci-fast
-ci-fast: tidy-check lint lint-integration check-action-pins check-releasability check-changelog-assembly check-scripts staticcheck security coverage test-runtimesecret build cross-build
+ci-fast: tidy-check lint lint-integration check-action-pins check-releasability check-changelog-assembly check-scripts security coverage test-runtimesecret build cross-build
 	@echo "ci-fast completed successfully"
 
 ## ci: the full local gate — what a PR must pass, security included (devops §4)
@@ -515,68 +459,34 @@ ci: ci-fast integration-test integration-test-fips
 ## deps-latest: bump internal dependencies to their latest tags (none today)
 .PHONY: deps-latest
 deps-latest:
-	@GOWORK=off sh -c ' \
-	SELF=$$(go list -m); \
-	for m in $$(go list -m -f "{{if not .Indirect}}{{.Path}}{{end}}" all 2>/dev/null | grep "^github.com/jeremyhahn/" | grep -vx "$$SELF"); do \
-	  V=$$(go list -m -versions "$$m" 2>/dev/null | tr " " "\n" | tail -1); \
-	  if [ -n "$$V" ] && [ "$$V" != "$$m" ]; then go get "$$m@$$V" || exit 1; fi; \
-	done; go mod tidy'
+	@sh scripts/deps-latest.sh
 
-## release-alpha: cut a signed release — make release-alpha VERSION=vX.Y.Z-alpha
-# The version is explicit, never derived. Before anything is written: VERSION
-# must move forward (release-version-check.sh), the tag must be free locally
-# and on dev (ls-remote exit 2 is the only "free"; anything else fails closed),
-# and the assembled tree must pass release-check-tag.sh. VERSION is written
-# unprefixed, and changelog.d/ fragments fold into CHANGELOG.md in the same
-# commit. Pushing the tag hands off to release.yml.
+## release: Tag and push a production release (VERSION=vX.Y.Z; refuses -alpha and -rc.N)
+# The version is explicit, never derived. The three release targets run the one
+# scripts/release.sh with their kind: every check runs before anything is
+# written, and pushing the tag hands off to release.yml.
+.PHONY: release
+release:
+	@sh scripts/release.sh release
+
+## release-candidate: Tag and push a release candidate (VERSION=vX.Y.Z-rc.N; refuses the other kinds)
+.PHONY: release-candidate
+release-candidate:
+	@sh scripts/release.sh candidate
+
+## release-alpha: Tag and push an alpha release (VERSION=vX.Y.Z-alpha; refuses the other kinds)
 .PHONY: release-alpha
 release-alpha:
-	@case "$$VERSION" in \
-	  '') echo "ERROR: state the version explicitly: make release-alpha VERSION=vX.Y.Z-alpha (release-versioning.md decides patch/minor/major — the recipe refuses to guess)"; exit 1 ;; \
-	  *[!0-9A-Za-z.-]*) echo "ERROR: VERSION holds characters no vX.Y.Z-alpha version does; refusing it"; exit 1 ;; \
-	esac; \
-	printf '%s\n' "$$VERSION" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+-alpha$$' || { echo "ERROR: '$$VERSION' is not vX.Y.Z-alpha"; exit 1; }
-	@test -n "$$AGENT_GIT" || { echo 'ERROR: AGENT_GIT is unset - point it at your commit-signing/release wrapper (maintainer tooling; not needed to build or test)'; exit 1; }
-	@test "$$(git rev-parse --abbrev-ref HEAD)" = main || { echo "ERROR: releases are cut from main; you are on $$(git rev-parse --abbrev-ref HEAD). 'push dev HEAD' would publish this branch to dev."; exit 1; }
-	@test -n "$$REPO_NAME" || { echo "ERROR: REPO_NAME is empty — set it to the literal repo name in the Makefile, never \$$(notdir \$$(CURDIR))"; exit 1; }
-	@! git rev-parse -q --verify "refs/tags/$$VERSION" >/dev/null || { echo "ERROR: tag $$VERSION already exists locally"; exit 1; }
-	@git remote get-url dev >/dev/null 2>&1 || { echo "ERROR: no 'dev' remote. The Gitea remote is named dev (version-control.md §2): git remote rename origin dev"; exit 1; }
-	@rc=0; git ls-remote --exit-code --tags dev "refs/tags/$$VERSION" >/dev/null 2>&1 || rc=$$?; \
-	case $$rc in \
-	  0) echo "ERROR: tag $$VERSION already exists on dev (a local check alone would miss this and fail the push AFTER committing VERSION)"; exit 1 ;; \
-	  2) ;; \
-	  *) echo "ERROR: could not query dev for tag $$VERSION (git ls-remote exit $$rc) — refusing to release on an unanswered check"; exit 1 ;; \
-	esac
-	@test -z "$$(git status --porcelain)" || { echo "ERROR: working tree not clean"; exit 1; }
-	@sh scripts/release-version-check.sh "$$VERSION"
-	sh scripts/changelog-assemble.sh "$$VERSION" "$$(date -u +%Y-%m-%d)"
-	@printf '%s\n' "$${VERSION#v}" > VERSION
-	@sh scripts/release-check-tag.sh "$$VERSION" || { echo "ERROR: the assembled tree would be refused by release.yml; nothing was committed (git checkout -- VERSION CHANGELOG.md changelog.d to start over)"; exit 1; }
-	"$$AGENT_GIT" "$$REPO_NAME" add -A -- VERSION CHANGELOG.md changelog.d
-	"$$AGENT_GIT" "$$REPO_NAME" commit -m "chore(release): $$VERSION"
-	"$$AGENT_GIT" "$$REPO_NAME" tag -a "$$VERSION" -m "$$VERSION"
-	"$$AGENT_GIT" "$$REPO_NAME" push dev HEAD "refs/tags/$$VERSION"
-	@echo "Released $$VERSION (signed, annotated, single tag pushed); release.yml gates it and publishes the Gitea release"
+	@sh scripts/release.sh alpha
 
 # RELEASE TARGETS: release.yml calls these, never the scripts directly. Each
 # takes TAG=vX.Y.Z[-pre].
 
 ## release-verify: TAG=vX.Y.Z[-pre] [MAIN_REF=<ref>] — the tag agrees with VERSION and CHANGELOG.md (and is on MAIN_REF)
-# See scripts/release-check-tag.sh. With MAIN_REF, HEAD must be an ancestor of it.
+# See scripts/release-verify.sh. With MAIN_REF, HEAD must be an ancestor of it.
 .PHONY: release-verify
 release-verify:
-	@test -n "$$TAG" || { echo "ERROR: TAG=vX.Y.Z[-pre] is required"; exit 1; }
-	@if [ -n "$$MAIN_REF" ]; then \
-	  case "$$MAIN_REF" in \
-	    -*|*[!A-Za-z0-9._/-]*) echo "ERROR: MAIN_REF is not a plain ref name; refusing it"; exit 1 ;; \
-	  esac; \
-	fi
-	sh scripts/release-check-tag.sh "$$TAG"
-	@if [ -n "$$MAIN_REF" ]; then \
-	  main=$$(git rev-parse --verify --quiet --end-of-options "$$MAIN_REF^{commit}") || { echo "ERROR: MAIN_REF '$$MAIN_REF' does not name a commit"; exit 1; }; \
-	  git merge-base --is-ancestor HEAD "$$main" || { echo "ERROR: HEAD $$(git rev-parse HEAD) is not on $$MAIN_REF"; exit 1; }; \
-	  echo "release-verify: HEAD is on $$MAIN_REF"; \
-	fi
+	@sh scripts/release-verify.sh "$$TAG" "$$MAIN_REF"
 
 ## consumer-check: TAG=vX.Y.Z[-pre] — build and run a throwaway consumer of this module at TAG (GOWORK=off)
 # Module resolution comes from the environment (GOPRIVATE, insteadOf, proxy).
@@ -597,23 +507,10 @@ release-publish:
 # Removes files, and the report directory only if empty (never rm -rf).
 .PHONY: clean
 clean:
-	@rm -f -- "$$COVERAGE_PROFILE" "$$COVERAGE_HTML" coverage-*.out gosec.sarif trivy-results.sarif || exit $$?; \
-	d=$$(dirname -- "$$COVERAGE_HTML"); \
-	if [ "$$d" != . ]; then rmdir -- "$$d" 2>/dev/null || true; fi
+	@rm -f -- "$$COVERAGE_PROFILE" "$$COVERAGE_HTML" coverage-*.out gosec.sarif trivy-results.sarif
+	@rmdir -- "$$(dirname -- "$$COVERAGE_HTML")" 2>/dev/null || true
 
 ## clean-tools: remove the repository-local pinned-tool cache (bin/tools)
-# Refuses a relative TOOLS_DIR, or one resolving to /, the checkout or $HOME.
 .PHONY: clean-tools
 clean-tools:
-	@case "$$TOOLS_DIR" in \
-	  /*) ;; \
-	  *) echo "ERROR: TOOLS_DIR must be an absolute path; refusing to delete it"; exit 1 ;; \
-	esac; \
-	if [ -d "$$TOOLS_DIR" ]; then \
-	  real=$$(cd -P -- "$$TOOLS_DIR" && pwd) || exit 1; \
-	  repo=$$(pwd -P); \
-	  case "$$real" in \
-	    /|"$$repo"|"$${HOME:-/}") echo "ERROR: TOOLS_DIR resolves to $$real; refusing to delete it"; exit 1 ;; \
-	  esac; \
-	fi; \
-	rm -rf -- "$$TOOLS_DIR"
+	@sh scripts/clean-tools.sh

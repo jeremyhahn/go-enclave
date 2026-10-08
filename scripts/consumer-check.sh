@@ -28,26 +28,15 @@
 # The fresh module cache is the point, not a cost: a cache already holding the
 # module would answer from local bytes and prove nothing about the forge.
 set -eu
-export LC_ALL=C
-
-die() { echo "consumer-check: $*" >&2; exit 1; }
-
-NL='
-'
-# matches VALUE ERE: the WHOLE value matches. `grep` alone is line-oriented,
-# so a value with an embedded newline would pass on any one matching line.
-matches() {
-  case $1 in *"$NL"*) return 1 ;; esac
-  printf '%s\n' "$1" | grep -Eq "$2"
-}
+# shellcheck source=lib.sh
+. "${0%/*}/lib.sh"
 
 [ $# -eq 2 ] || die "usage: $0 <module> <vX.Y.Z[-pre]>"
 module=$1
 version=$2
 matches "$module" '^[a-z0-9.-]+\.[a-z]{2,}(/[A-Za-z0-9._~-]+)+$' || die "'$module' is not a module path"
-matches "$version" '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$' || die "'$version' is not vX.Y.Z[-pre]"
+matches "$version" "$VERSION_RE" || die "'$version' is not vX.Y.Z[-pre]"
 
-here=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 program=$here/testdata/consumer/main.go
 [ -f "$program" ] || die "consumer program $program not found"
 command -v go >/dev/null 2>&1 || die "go is not on PATH"
@@ -68,7 +57,7 @@ export GOWORK GOMODCACHE
 
 mkdir "$work/consumer"
 cd "$work/consumer"
-echo "consumer-check: resolving $module@$version in a scratch module (GOWORK=off, fresh module cache)"
+echo "$prog: resolving $module@$version in a scratch module (GOWORK=off, fresh module cache)"
 go mod init example.com/go-enclave-consumer-check >/dev/null 2>&1 || die "go mod init failed"
 go get "$module@$version" || die "go get $module@$version failed"
 

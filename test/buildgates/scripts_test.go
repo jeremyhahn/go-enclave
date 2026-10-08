@@ -201,6 +201,18 @@ const checkTagChangelog = `# Changelog
 
 ## [Unreleased]
 
+## [v1.4.0-rc.12] - 2026-02-03
+
+### Added
+
+- a twelfth candidate
+
+## [v1.4.0-rc.1] - 2026-02-02
+
+### Added
+
+- a first candidate
+
 ## [v1.4.0-alpha] - 2026-02-01
 
 ### Added
@@ -230,6 +242,8 @@ func checkTagTree(t *testing.T, version, changelog string, extra map[string]stri
 func TestScriptsReleaseCheckTag_AcceptsAConsistentTree(t *testing.T) {
 	for _, tc := range []struct{ tag, version string }{
 		{"v1.4.0-alpha", "1.4.0-alpha\n"},
+		{"v1.4.0-rc.1", "1.4.0-rc.1\n"},
+		{"v1.4.0-rc.12", "1.4.0-rc.12\n"},
 		{"v1.3.0", "1.3.0\n"},
 		{"v1.3.0", "1.3.0"}, // no trailing newline is still one line
 	} {
@@ -250,10 +264,16 @@ func TestScriptsReleaseCheckTag_RefusesEveryDisagreement(t *testing.T) {
 		{"VERSION carries the prefix", "v1.4.0-alpha", "v1.4.0-alpha\n", checkTagChangelog, nil, "unprefixed"},
 		{"VERSION has a second line", "v1.4.0-alpha", "1.4.0-alpha\n1.4.0-alpha\n", checkTagChangelog, nil, "2 lines"},
 		{"VERSION has a stray space", "v1.4.0-alpha", "1.4.0-alpha \n", checkTagChangelog, nil, "VERSION reads"},
-		{"unsanctioned pre-release", "v1.4.0-beta", "1.4.0-beta\n", strings.ReplaceAll(checkTagChangelog, "-alpha", "-beta"), nil, "not vX.Y.Z or vX.Y.Z-alpha"},
+		{"unsanctioned pre-release", "v1.4.0-beta", "1.4.0-beta\n", strings.ReplaceAll(checkTagChangelog, "-alpha", "-beta"), nil, "not vX.Y.Z, vX.Y.Z-alpha or vX.Y.Z-rc.N"},
+		{"candidate number zero", "v1.4.0-rc.0", "1.4.0-rc.0\n", strings.ReplaceAll(checkTagChangelog, "-alpha", "-rc.0"), nil, "not vX.Y.Z, vX.Y.Z-alpha or vX.Y.Z-rc.N"},
+		{"candidate number with a leading zero", "v1.4.0-rc.01", "1.4.0-rc.01\n", strings.ReplaceAll(checkTagChangelog, "-alpha", "-rc.01"), nil, "not vX.Y.Z, vX.Y.Z-alpha or vX.Y.Z-rc.N"},
+		{"candidate without a number", "v1.4.0-rc", "1.4.0-rc\n", strings.ReplaceAll(checkTagChangelog, "-alpha", "-rc"), nil, "not vX.Y.Z, vX.Y.Z-alpha or vX.Y.Z-rc.N"},
+		{"candidate and alpha at once", "v1.4.0-rc.1-alpha", "1.4.0-rc.1-alpha\n", strings.ReplaceAll(checkTagChangelog, "-alpha", "-rc.1-alpha"), nil, "not vX.Y.Z, vX.Y.Z-alpha or vX.Y.Z-rc.N"},
+		{"leading zero in the core", "v01.4.0", "01.4.0\n", strings.ReplaceAll(checkTagChangelog, "v1.4.0-alpha", "v01.4.0"), nil, "not vX.Y.Z, vX.Y.Z-alpha or vX.Y.Z-rc.N"},
+		{"VERSION on the wrong candidate", "v1.4.0-rc.12", "1.4.0-rc.1\n", checkTagChangelog, nil, "VERSION reads '1.4.0-rc.1'"},
 		{"no CHANGELOG section", "v1.5.0-alpha", "1.5.0-alpha\n", checkTagChangelog, nil, "no usable section"},
 		{"fragment never folded", "v1.4.0-alpha", "1.4.0-alpha\n", checkTagChangelog, map[string]string{"changelog.d/77-thing.md": "### Fixed\n\n- x\n"}, "77-thing.md was never folded"},
-		{"multi-line tag", "v1.3.0\nv1.4.0-alpha", "1.4.0-alpha\n", checkTagChangelog, nil, "is not vX.Y.Z or vX.Y.Z-alpha"},
+		{"multi-line tag", "v1.3.0\nv1.4.0-alpha", "1.4.0-alpha\n", checkTagChangelog, nil, "is not vX.Y.Z, vX.Y.Z-alpha or vX.Y.Z-rc.N"},
 		{"entry left in Unreleased", "v1.4.0-alpha", "1.4.0-alpha\n", strings.Replace(checkTagChangelog, "## [Unreleased]\n", "## [Unreleased]\n\n### Fixed\n\n- stranded\n", 1), nil, "stranded"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -392,6 +412,8 @@ func TestScriptsReleasePublish_CreatesTheReleaseFromTheChangelog(t *testing.T) {
 		prerelease bool
 	}{
 		{"v1.4.0-alpha", true},
+		{"v1.4.0-rc.1", true},
+		{"v1.4.0-rc.12", true},
 		{"v1.3.0", false},
 	} {
 		t.Run(tc.tag, func(t *testing.T) {
@@ -888,7 +910,7 @@ func toolEnv(t *testing.T, bin string, over map[string]string) map[string]string
 		"PATH":         bin + ":" + isolatedPath(t),
 		"TOOL_INSTALL": "0",
 		"TOOLS_DIR":    "",
-		"TOOLCHAIN":    "go1.27.0",
+		"TOOLCHAIN":    "go1.27.1",
 		"GO":           "/nonexistent/go", // any install attempt fails loudly
 	}
 	for _, k := range []string{"TRIVY", "SHELLCHECK"} {
@@ -909,15 +931,15 @@ func toolEnv(t *testing.T, bin string, over map[string]string) map[string]string
 var toolOutputs = []struct {
 	tool, version, output string
 }{
-	{"golangci-lint", "v2.13.2", "golangci-lint has version 2.13.2 built with go1.26.7 from (unknown, modified: ?, mod sum: \"h1:x\") on (unknown)"},
-	{"golangci-lint", "v2.13.2", "golangci-lint has version v2.13.2 built with go1.27.0 from 1234abcd on 2026-09-01T00:00:00Z"},
+	{"golangci-lint", "v2.14.0", "golangci-lint has version 2.14.0 built with go1.26.7 from (unknown, modified: ?, mod sum: \"h1:x\") on (unknown)"},
+	{"golangci-lint", "v2.14.0", "golangci-lint has version v2.14.0 built with go1.27.1 from 1234abcd on 2026-09-01T00:00:00Z"},
 	{"staticcheck", "v0.8.1", "staticcheck 2026.2.1 (0.8.1)"},
 	{"gosec", "v2.29.0", "Version: v2.29.0\nGit tag: \nBuild date: "},
-	{"govulncheck", "v1.7.0", "Scanner: govulncheck@v1.7.0\nGo: go1.27.0\nDB: https://vuln.go.dev"},
-	{"govulncheck", "v1.7.0", "Go: go1.27.0\nScanner: govulncheck@v1.7.0\nDB: https://vuln.go.dev"},
-	{"actionlint", "v1.7.7", "v1.7.7\ninstalled by building from source\nbuilt with go1.26.7 compiler for linux/amd64"},
-	{"trivy", "v0.74.0", "Version: 0.74.0\nVulnerability DB:\n  Version: 2"},
-	{"shellcheck", "v0.9.0", "ShellCheck - shell script analysis tool\nversion: 0.9.0\nlicense: GNU General Public License, version 3\nwebsite: https://www.shellcheck.net"},
+	{"govulncheck", "v1.8.0", "Scanner: govulncheck@v1.8.0\nGo: go1.27.1\nDB: https://vuln.go.dev"},
+	{"govulncheck", "v1.8.0", "Go: go1.27.1\nScanner: govulncheck@v1.8.0\nDB: https://vuln.go.dev"},
+	{"actionlint", "v1.7.12", "v1.7.12\ninstalled by building from source\nbuilt with go1.26.7 compiler for linux/amd64"},
+	{"trivy", "v0.75.0", "Version: 0.75.0\nVulnerability DB:\n  Version: 2"},
+	{"shellcheck", "v0.11.0", "ShellCheck - shell script analysis tool\nversion: 0.11.0\nlicense: GNU General Public License, version 3\nwebsite: https://www.shellcheck.net"},
 }
 
 func TestScriptsToolResolve_AcceptsThePinnedVersionInEveryOutputShape(t *testing.T) {
@@ -942,14 +964,14 @@ func TestScriptsToolResolve_FailsClosedOnAnythingElse(t *testing.T) {
 		env                                  map[string]string
 		absent                               bool
 	}{
-		{name: "another version", tool: "golangci-lint", version: "v2.14.0", output: toolOutputs[0].output, wantMsg: "is v2.13.2, but the Makefile pins v2.14.0"},
-		{name: "the Go version is not the tool's", tool: "golangci-lint", version: "v1.26.7", output: toolOutputs[0].output, wantMsg: "is v2.13.2"},
+		{name: "another version", tool: "golangci-lint", version: "v2.15.0", output: toolOutputs[0].output, wantMsg: "is v2.14.0, but the Makefile pins v2.15.0"},
+		{name: "the Go version is not the tool's", tool: "golangci-lint", version: "v1.26.7", output: toolOutputs[0].output, wantMsg: "is v2.14.0"},
 		{name: "unversioned gosec", tool: "gosec", version: "v2.29.0", output: "Version: dev\nGit tag: ", wantMsg: "does not report a version"},
-		{name: "unversioned trivy", tool: "trivy", version: "v0.74.0", output: "Version: dev", wantMsg: "does not report a version"},
+		{name: "unversioned trivy", tool: "trivy", version: "v0.75.0", output: "Version: dev", wantMsg: "does not report a version"},
 		{name: "unparseable", tool: "staticcheck", version: "v0.8.1", output: "staticcheck (devel)", wantMsg: "does not report a version"},
-		{name: "shellcheck from another distro", tool: "shellcheck", version: "v0.9.0", output: "ShellCheck - shell script analysis tool\nversion: 0.10.0", wantMsg: "is v0.10.0, but the Makefile pins v0.9.0"},
-		{name: "absent", tool: "govulncheck", version: "v1.7.0", absent: true, wantMsg: "not on PATH and TOOL_INSTALL=0 forbids installing it"},
-		{name: "absent shellcheck", tool: "shellcheck", version: "v0.9.0", absent: true, wantMsg: "not on PATH and TOOL_INSTALL=0 forbids installing it"},
+		{name: "shellcheck from another distro", tool: "shellcheck", version: "v0.11.0", output: "ShellCheck - shell script analysis tool\nversion: 0.10.0", wantMsg: "is v0.10.0, but the Makefile pins v0.11.0"},
+		{name: "absent", tool: "govulncheck", version: "v1.8.0", absent: true, wantMsg: "not on PATH and TOOL_INSTALL=0 forbids installing it"},
+		{name: "absent shellcheck", tool: "shellcheck", version: "v0.11.0", absent: true, wantMsg: "not on PATH and TOOL_INSTALL=0 forbids installing it"},
 		{name: "TOOL_INSTALL unset", tool: "gosec", version: "v2.29.0", output: "Version: v2.29.0", env: map[string]string{"TOOL_INSTALL": ""}, wantMsg: "TOOL_INSTALL must be 0"},
 		{name: "TOOL_INSTALL yes", tool: "gosec", version: "v2.29.0", output: "Version: v2.29.0", env: map[string]string{"TOOL_INSTALL": "yes"}, wantMsg: "TOOL_INSTALL must be 0"},
 		{name: "unknown tool", tool: "sh", version: "v1.0.0", output: "", wantMsg: "unknown tool"},
@@ -1101,7 +1123,7 @@ func TestScriptsToolResolve_GoToolCacheIsKeyedByToolchain(t *testing.T) {
 	for name, over := range map[string]map[string]string{
 		"relative TOOLS_DIR":     {"TOOLS_DIR": "bin/tools"},
 		"no TOOLCHAIN":           {"TOOLCHAIN": ""},
-		"multi-line TOOLCHAIN":   {"TOOLCHAIN": "../../x\ngo1.27.0"},
+		"multi-line TOOLCHAIN":   {"TOOLCHAIN": "../../x\ngo1.27.1"},
 		"TOOLCHAIN not a Go one": {"TOOLCHAIN": "local"},
 	} {
 		env := toolEnv(t, t.TempDir(), mergeEnv(map[string]string{"TOOL_INSTALL": "1", "TOOLS_DIR": tools}, over))
@@ -1148,8 +1170,8 @@ func sha256Hex(t *testing.T, p string) string {
 func TestScriptsToolResolve_ArchiveToolsAreTrustedOnlyThroughPinnedHashes(t *testing.T) {
 	requireLinuxInstallPath(t)
 	for _, tc := range []struct{ tool, version, output, prefix string }{
-		{"trivy", "v0.74.0", "Version: 0.74.0", "TRIVY"},
-		{"shellcheck", "v0.9.0", "ShellCheck - shell script analysis tool\nversion: 0.9.0", "SHELLCHECK"},
+		{"trivy", "v0.75.0", "Version: 0.75.0", "TRIVY"},
+		{"shellcheck", "v0.11.0", "ShellCheck - shell script analysis tool\nversion: 0.11.0", "SHELLCHECK"},
 	} {
 		t.Run(tc.tool, func(t *testing.T) {
 			log := filepath.Join(t.TempDir(), "curl.log")
@@ -1197,6 +1219,70 @@ func TestScriptsToolResolve_ArchiveToolsAreTrustedOnlyThroughPinnedHashes(t *tes
 	}
 }
 
+// TestScriptsToolResolve_UsesAVerifiedCopyOnPath pins that TOOL_INSTALL=1 uses
+// a tool already on PATH (the devcontainer bakes every pin into
+// /usr/local/bin) when it proves what a cached install must, and installs
+// rather than trust one that does not.
+func TestScriptsToolResolve_UsesAVerifiedCopyOnPath(t *testing.T) {
+	requireLinuxInstallPath(t)
+
+	t.Run("go tool", func(t *testing.T) {
+		built, toolchain := buildFakeGoTool(t, "Version: v2.29.0")
+		bin := t.TempDir()
+		onPath := filepath.Join(bin, "gosec")
+		copyExec(t, built, onPath)
+		tools := t.TempDir()
+		log := filepath.Join(t.TempDir(), "go.log")
+		run := func(tc string) (string, bool, string) {
+			t.Helper()
+			_ = os.Remove(log)
+			env := toolEnv(t, bin, map[string]string{
+				"TOOL_INSTALL": "1", "TOOLS_DIR": tools, "TOOLCHAIN": tc, "GO": fakeGo(t, log),
+			})
+			out, ok := runScript(t, t.TempDir(), env, "tool.sh", "gosec", "v2.29.0")
+			calls, _ := os.ReadFile(log)
+			return out, ok, string(calls)
+		}
+
+		if out, ok, calls := run(toolchain); !ok || strings.TrimSpace(out) != onPath || calls != "" {
+			t.Fatalf("did not use the verified copy on PATH (ok=%v, go calls %q):\n%s", ok, calls, out)
+		}
+		// Built by another toolchain: not the pinned build, so an install.
+		if out, ok, calls := run("go1.26.7"); ok || !strings.Contains(calls, " install") || !strings.Contains(out, "is not the pinned build") {
+			t.Fatalf("trusted a copy on PATH built by another toolchain (ok=%v, go calls %q):\n%s", ok, calls, out)
+		}
+		// The right toolchain but another version.
+		wrong, _ := buildFakeGoTool(t, "Version: v2.28.0")
+		copyExec(t, wrong, onPath)
+		if out, ok, calls := run(toolchain); ok || !strings.Contains(calls, " install") {
+			t.Fatalf("trusted a copy on PATH reporting another version (ok=%v, go calls %q):\n%s", ok, calls, out)
+		}
+	})
+
+	t.Run("archive tool", func(t *testing.T) {
+		log := filepath.Join(t.TempDir(), "curl.log")
+		bin := fakeCurlDir(t, "not the release", log)
+		onPath := fakeTool(t, bin, "trivy", "Version: 0.75.0")
+		tools := t.TempDir()
+		env := toolEnv(t, bin, map[string]string{"TOOL_INSTALL": "1", "TOOLS_DIR": tools})
+		pinned := mergeEnv(env, map[string]string{
+			"TRIVY_BIN_SHA256_LINUX_AMD64": sha256Hex(t, onPath),
+			"TRIVY_BIN_SHA256_LINUX_ARM64": sha256Hex(t, onPath),
+		})
+
+		out, ok := runScript(t, t.TempDir(), pinned, "tool.sh", "trivy", "v0.75.0")
+		if _, err := os.Stat(log); !ok || strings.TrimSpace(out) != onPath || !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("did not use the copy on PATH matching the pinned hash (ok=%v, curl log stat %v):\n%s", ok, err, out)
+		}
+		// The same self-reported version with other bytes is downloaded
+		// instead, and the tampered download refused.
+		out, ok = runScript(t, t.TempDir(), env, "tool.sh", "trivy", "v0.75.0")
+		if _, err := os.Stat(log); ok || err != nil || !strings.Contains(out, "CHECKSUM MISMATCH") {
+			t.Fatalf("trusted a copy on PATH on its self-reported version (ok=%v, curl log stat %v):\n%s", ok, err, out)
+		}
+	})
+}
+
 // ---------------------------------------------------------------------------
 // release-version-check.sh
 
@@ -1237,6 +1323,11 @@ func TestScriptsReleaseVersionCheck_RequiresStrictlyGreaterThanVersionAndEveryTa
 	}{
 		{"next alpha patch", "0.2.0", []string{"v0.1.0-alpha", "v0.2.0-alpha", "v0.2.0"}, "v0.2.1-alpha", true, ""},
 		{"next minor", "0.2.0", []string{"v0.2.0"}, "v0.3.0-alpha", true, ""},
+		{"candidate above the alpha", "0.3.0-alpha", []string{"v0.3.0-alpha"}, "v0.3.0-rc.1", true, ""},
+		{"candidate numbers numerically", "0.3.0-rc.2", []string{"v0.3.0-rc.2"}, "v0.3.0-rc.10", true, ""},
+		{"lower candidate", "0.3.0-rc.10", []string{"v0.3.0-rc.10"}, "v0.3.0-rc.2", false, "VERSION (v0.3.0-rc.10)"},
+		{"alpha below the candidate", "0.3.0-rc.1", []string{"v0.3.0-rc.1"}, "v0.3.0-alpha", false, "VERSION (v0.3.0-rc.1)"},
+		{"release above its candidates", "0.3.0-rc.12", []string{"v0.3.0-rc.12"}, "v0.3.0", true, ""},
 		{"no tags yet", "0.1.0-alpha", nil, "v0.1.0", true, ""},
 		{"equal to VERSION and the tag", "0.2.0", []string{"v0.2.0"}, "v0.2.0", false, "VERSION (v0.2.0)"},
 		{"pre-release of the current release", "0.2.0", []string{"v0.2.0"}, "v0.2.0-alpha", false, "v0.2.0 (v0.2.0)"},
@@ -1283,32 +1374,318 @@ func TestScriptsReleaseVersionCheck_RequiresStrictlyGreaterThanVersionAndEveryTa
 	}
 }
 
-// TestScriptsReleaseAlpha_ChecksTheVersionBeforeWritingAnything reads the
-// recipe `make release-alpha` would run and requires the monotonicity check
-// to come before the first command that writes the tree.
-func TestScriptsReleaseAlpha_ChecksTheVersionBeforeWritingAnything(t *testing.T) {
+// TestScriptsRelease_ChecksTheVersionBeforeWritingAnything reads the recipes
+// the three release targets would run, each the one scripts/release.sh with
+// its kind, and requires the
+// monotonicity check to come before the first command that writes the tree.
+func TestScriptsRelease_ChecksTheVersionBeforeWritingAnything(t *testing.T) {
 	root := repoRoot(t)
-	cmd := exec.Command("make", "-n", "--no-print-directory", "release-alpha", "VERSION=v9.9.9-alpha", "AGENT_GIT=/bin/false")
-	cmd.Dir = root
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("make -n release-alpha: %v\n%s", err, out)
+	for _, tc := range []struct{ target, version, want string }{
+		{"release", "v9.9.9", "scripts/release.sh release"},
+		{"release-candidate", "v9.9.9-rc.1", "scripts/release.sh candidate"},
+		{"release-alpha", "v9.9.9-alpha", "scripts/release.sh alpha"},
+	} {
+		cmd := exec.Command("make", "-n", "--no-print-directory", tc.target, "VERSION="+tc.version, "AGENT_GIT=/bin/false")
+		cmd.Dir = root
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("make -n %s: %v\n%s", tc.target, err, out)
+		}
+		if !strings.Contains(string(out), tc.want) {
+			t.Fatalf("%s does not run %q:\n%s", tc.target, tc.want, out)
+		}
 	}
-	recipe := string(out)
-	check := strings.Index(recipe, "scripts/release-version-check.sh")
+	body, err := os.ReadFile(filepath.Join(root, "scripts", "release.sh"))
+	if err != nil {
+		t.Fatalf("read release.sh: %v", err)
+	}
+	script := string(body)
+	check := strings.Index(script, `"$here/release-version-check.sh"`)
 	if check < 0 {
-		t.Fatalf("release-alpha does not run scripts/release-version-check.sh:\n%s", recipe)
+		t.Fatalf("release.sh does not run release-version-check.sh:\n%s", script)
 	}
 	// Every git write goes through the AGENT_GIT wrapper, read as a quoted
 	// variable.
-	for _, write := range []string{"sh scripts/changelog-assemble.sh", "> VERSION", `"$AGENT_GIT" "$REPO_NAME" add `, `"$AGENT_GIT" "$REPO_NAME" commit `, `"$AGENT_GIT" "$REPO_NAME" tag -a `, `"$AGENT_GIT" "$REPO_NAME" push `} {
-		at := strings.Index(recipe, write)
+	for _, write := range []string{`"$here/changelog-assemble.sh"`, "> VERSION", `"$agent_git" "$repo_name" add `, `"$agent_git" "$repo_name" commit `, `"$agent_git" "$repo_name" tag -a `, `"$agent_git" "$repo_name" push `} {
+		at := strings.Index(script, write)
 		if at < 0 {
-			t.Fatalf("release-alpha no longer contains %q; update this test with the recipe:\n%s", write, recipe)
+			t.Fatalf("release.sh no longer contains %q; update this test with the script:\n%s", write, script)
 		}
 		if at < check {
-			t.Fatalf("release-alpha runs %q before the version check:\n%s", write, recipe)
+			t.Fatalf("release.sh runs %q before the version check:\n%s", write, script)
 		}
+	}
+}
+
+// releaseRepo is a scratch repository on main for scripts/release.sh: a dev
+// remote (a bare repository), one fragment to fold, and a wrapper standing in
+// for AGENT_GIT that signs nothing and logs the repo name it was given. It is
+// isolated from the user's and system git configuration.
+type releaseRepo struct {
+	t         *testing.T
+	dir, bare string
+	env       map[string]string
+}
+
+func newReleaseRepo(t *testing.T) *releaseRepo {
+	t.Helper()
+	dir := writeTree(t, map[string]string{
+		"VERSION":              "1.4.0-alpha\n",
+		"CHANGELOG.md":         "# Changelog\n\n## [Unreleased]\n\n## [v1.4.0-alpha] - 2026-02-01\n\n### Added\n\n- a thing\n",
+		"changelog.d/.gitkeep": "",
+		"changelog.d/134-x.md": "### Added\n\n- a candidate\n",
+	})
+	wrapper := filepath.Join(t.TempDir(), "agent-git")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$1\" >> \"$0.log\"\nshift\nexec git -c commit.gpgsign=false -c tag.gpgsign=false \"$@\"\n"
+	if err := os.WriteFile(wrapper, []byte(script), 0o755); err != nil {
+		t.Fatalf("write wrapper: %v", err)
+	}
+	r := &releaseRepo{t: t, dir: dir, bare: t.TempDir(), env: map[string]string{
+		"GIT_CONFIG_GLOBAL": os.DevNull, "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_COUNT": "0",
+		"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com",
+		"GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.com",
+		"AGENT_GIT": wrapper, "REPO_NAME": "go-enclave-test", "VERSION": "",
+	}}
+	r.git(r.bare, "init", "-q", "--bare")
+	r.git(dir, "init", "-q", "-b", "main")
+	r.git(dir, "remote", "add", "dev", r.bare)
+	r.git(dir, "add", "-A")
+	r.git(dir, "commit", "-q", "-m", "root")
+	return r
+}
+
+func (r *releaseRepo) git(dir string, args ...string) string {
+	r.t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	cmd.Env = layerEnv(os.Environ(), r.env)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		r.t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// state is everything a refused release must leave alone.
+func (r *releaseRepo) state() string {
+	return strings.Join([]string{
+		r.git(r.dir, "rev-parse", "HEAD"),
+		r.git(r.dir, "tag", "-l"),
+		r.git(r.bare, "tag", "-l"),
+		readFile(r.t, filepath.Join(r.dir, "VERSION")),
+		readFile(r.t, filepath.Join(r.dir, "CHANGELOG.md")),
+	}, "\x00")
+}
+
+func (r *releaseRepo) run(kind, version string) (string, bool) {
+	r.t.Helper()
+	return runScript(r.t, r.dir, mergeEnv(r.env, map[string]string{"VERSION": version}), "release.sh", kind)
+}
+
+func TestScriptsRelease_RefusesWhatItMustNotPublish(t *testing.T) {
+	const forms = "not vX.Y.Z, vX.Y.Z-alpha or vX.Y.Z-rc.N"
+	for _, tc := range []struct {
+		name, kind, version string
+		setup               func(r *releaseRepo)
+		wantMsg             string
+	}{
+		{"no version, production", "release", "", nil, "state the version explicitly"},
+		{"no version, candidate", "candidate", "", nil, "state the version explicitly"},
+		{"no version, alpha", "alpha", "", nil, "state the version explicitly"},
+		{"candidate number zero", "candidate", "v1.5.0-rc.0", nil, forms},
+		{"candidate number with a leading zero", "candidate", "v1.5.0-rc.01", nil, forms},
+		{"candidate without a number", "candidate", "v1.5.0-rc", nil, forms},
+		{"unsanctioned pre-release", "candidate", "v1.5.0-beta", nil, forms},
+		{"unsanctioned pre-release, production", "release", "v1.5.0-beta", nil, forms},
+		{"candidate and alpha at once", "candidate", "v1.5.0-rc.1-alpha", nil, forms},
+		{"unprefixed", "candidate", "1.5.0-rc.1", nil, forms},
+		{"two components", "release", "v1.5", nil, forms},
+		{"leading zero in the core", "release", "v1.05.0", nil, forms},
+		{"build metadata", "candidate", "v1.5.0+build", nil, "characters no release version does"},
+		{"multi-line", "candidate", "v1.5.0-rc.1\nv1.5.0-rc.2", nil, "characters no release version does"},
+		{"no signing wrapper", "candidate", "v1.5.0-rc.1", func(r *releaseRepo) { r.env["AGENT_GIT"] = "" }, "AGENT_GIT is unset"},
+		{"another branch", "candidate", "v1.5.0-rc.1", func(r *releaseRepo) { r.git(r.dir, "checkout", "-q", "-b", "topic") }, "releases are cut from main; you are on topic"},
+		{"tag exists locally", "candidate", "v1.5.0-rc.1", func(r *releaseRepo) { r.git(r.dir, "tag", "v1.5.0-rc.1") }, "already exists locally"},
+		{"tag exists on the remote", "candidate", "v1.5.0-rc.1", func(r *releaseRepo) {
+			r.git(r.dir, "tag", "v1.5.0-rc.1")
+			r.git(r.dir, "push", "-q", "dev", "refs/tags/v1.5.0-rc.1")
+			r.git(r.dir, "tag", "-d", "v1.5.0-rc.1")
+		}, "already exists on dev"},
+		{"remote unreachable", "candidate", "v1.5.0-rc.1", func(r *releaseRepo) {
+			r.git(r.dir, "remote", "set-url", "dev", filepath.Join(r.bare, "missing"))
+		}, "could not query dev"},
+		{"no dev remote", "candidate", "v1.5.0-rc.1", func(r *releaseRepo) { r.git(r.dir, "remote", "remove", "dev") }, "no 'dev' remote"},
+		{"dirty tree", "candidate", "v1.5.0-rc.1", func(r *releaseRepo) {
+			if err := os.WriteFile(filepath.Join(r.dir, "stray.txt"), []byte("x"), 0o600); err != nil {
+				t.Fatalf("write stray: %v", err)
+			}
+		}, "working tree not clean"},
+		{"version does not move forward", "alpha", "v1.4.0-alpha", nil, "is not greater than"},
+		{"below an existing candidate tag", "alpha", "v1.4.0-alpha", func(r *releaseRepo) {
+			r.git(r.dir, "tag", "v1.4.0-rc.1")
+		}, "v1.4.0-rc.1 (v1.4.0-rc.1)"},
+		{"nothing to release", "candidate", "v1.5.0-rc.1", func(r *releaseRepo) {
+			r.git(r.dir, "rm", "-q", "changelog.d/134-x.md")
+			r.git(r.dir, "commit", "-q", "-m", "drop the fragment")
+		}, "nothing to release"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newReleaseRepo(t)
+			if tc.setup != nil {
+				tc.setup(r)
+			}
+			before := r.state()
+			out, ok := r.run(tc.kind, tc.version)
+			if ok {
+				t.Fatalf("accepted %q, want a refusal:\n%s", tc.version, out)
+			}
+			if !strings.Contains(out, tc.wantMsg) {
+				t.Fatalf("refusal does not say %q:\n%s", tc.wantMsg, out)
+			}
+			if after := r.state(); after != before {
+				t.Fatalf("a refused release changed the repository:\nbefore %q\nafter  %q", before, after)
+			}
+		})
+	}
+}
+
+// releaseKinds pairs each release target's kind with a version of that kind.
+var releaseKinds = []struct{ kind, target, forms, version string }{
+	{"release", "make release", "vX.Y.Z;", "v1.5.0"},
+	{"candidate", "make release-candidate", "vX.Y.Z-rc.N;", "v1.5.0-rc.1"},
+	{"alpha", "make release-alpha", "vX.Y.Z-alpha;", "v1.5.0-alpha"},
+}
+
+// TestScriptsRelease_EachTargetRefusesTheOtherKinds drives every kind with
+// every version of the other two kinds: each is refused before anything is
+// written.
+func TestScriptsRelease_EachTargetRefusesTheOtherKinds(t *testing.T) {
+	for _, k := range releaseKinds {
+		for _, other := range releaseKinds {
+			if other.kind == k.kind {
+				continue
+			}
+			t.Run(k.kind+" given "+other.version, func(t *testing.T) {
+				r := newReleaseRepo(t)
+				before := r.state()
+				out, ok := r.run(k.kind, other.version)
+				if ok {
+					t.Fatalf("%s accepted %s:\n%s", k.target, other.version, out)
+				}
+				if want := "is not " + k.forms; !strings.Contains(out, want) {
+					t.Fatalf("refusal does not say %q:\n%s", want, out)
+				}
+				if after := r.state(); after != before {
+					t.Fatalf("a refused release changed the repository:\nbefore %q\nafter  %q", before, after)
+				}
+			})
+		}
+	}
+}
+
+func TestScriptsRelease_RefusesAnUnknownKind(t *testing.T) {
+	r := newReleaseRepo(t)
+	for _, kind := range []string{"", "any", "rc", "Release"} {
+		if out, ok := r.run(kind, "v1.5.0"); ok || !strings.Contains(out, "usage") {
+			t.Fatalf("kind %q was not refused with a usage line (ok=%v):\n%s", kind, ok, out)
+		}
+	}
+	out, ok := runScript(t, r.dir, mergeEnv(r.env, map[string]string{"VERSION": "v1.5.0"}), "release.sh")
+	if ok || !strings.Contains(out, "usage") {
+		t.Fatalf("no kind was not refused with a usage line (ok=%v):\n%s", ok, out)
+	}
+}
+
+// TestScriptsRelease_MakeTargetsRefuseTheOtherKinds drives each real target
+// with a version of each of the other two kinds. The refusal comes before
+// anything else is looked at, so nothing in this checkout is touched; a
+// target's own kind is covered above, on a scratch repository.
+func TestScriptsRelease_MakeTargetsRefuseTheOtherKinds(t *testing.T) {
+	for _, k := range releaseKinds {
+		for _, other := range releaseKinds {
+			if other.kind == k.kind {
+				continue
+			}
+			t.Run(strings.TrimPrefix(k.target, "make ")+" given "+other.version, func(t *testing.T) {
+				out, ok := runMake(t, map[string]string{"VERSION": "", "AGENT_GIT": "/bin/false"}, strings.TrimPrefix(k.target, "make "), "VERSION="+other.version)
+				if ok {
+					t.Fatalf("%s accepted VERSION=%s:\n%s", k.target, other.version, out)
+				}
+				if want := "is not " + k.forms; !strings.Contains(out, want) {
+					t.Fatalf("refusal does not say %q:\n%s", want, out)
+				}
+			})
+		}
+	}
+}
+
+func TestScriptsRelease_TagsAndPushesEveryKind(t *testing.T) {
+	for _, tc := range []struct{ kind, version string }{
+		{"candidate", "v1.5.0-rc.1"},
+		{"candidate", "v1.5.0-rc.12"},
+		{"alpha", "v1.5.0-alpha"},
+		{"release", "v1.5.0"},
+	} {
+		t.Run(tc.kind+" "+tc.version, func(t *testing.T) {
+			r := newReleaseRepo(t)
+			out, ok := r.run(tc.kind, tc.version)
+			if !ok {
+				t.Fatalf("refused:\n%s", out)
+			}
+			if got, want := readFile(t, filepath.Join(r.dir, "VERSION")), strings.TrimPrefix(tc.version, "v")+"\n"; got != want {
+				t.Fatalf("VERSION = %q, want %q", got, want)
+			}
+			if changelog := readFile(t, filepath.Join(r.dir, "CHANGELOG.md")); !strings.Contains(changelog, "\n## ["+tc.version+"] - ") || !strings.Contains(changelog, "- a candidate") {
+				t.Fatalf("CHANGELOG.md has no assembled section for %s:\n%s", tc.version, changelog)
+			}
+			if _, err := os.Stat(filepath.Join(r.dir, "changelog.d", "134-x.md")); !os.IsNotExist(err) {
+				t.Fatalf("the fragment was not folded in (stat err %v)", err)
+			}
+			if got := r.git(r.dir, "cat-file", "-t", "refs/tags/"+tc.version); got != "tag" {
+				t.Fatalf("%s is a %q object, want an annotated tag", tc.version, got)
+			}
+			if got, want := r.git(r.bare, "rev-parse", tc.version+"^{commit}"), r.git(r.dir, "rev-parse", "HEAD"); got != want {
+				t.Fatalf("dev's %s names %s, want HEAD %s", tc.version, got, want)
+			}
+			if got := r.git(r.bare, "tag", "-l"); got != tc.version {
+				t.Fatalf("dev holds tags %q, want only %s", got, tc.version)
+			}
+			if got := r.git(r.dir, "log", "-1", "--format=%s"); got != "chore(release): "+tc.version {
+				t.Fatalf("release commit = %q", got)
+			}
+			if got := r.git(r.dir, "status", "--porcelain"); got != "" {
+				t.Fatalf("the release left the tree dirty:\n%s", got)
+			}
+			if log := readFile(t, r.env["AGENT_GIT"]+".log"); strings.Trim(strings.ReplaceAll(log, "go-enclave-test\n", ""), "\n") != "" {
+				t.Fatalf("a git write ran under another repo name:\n%s", log)
+			}
+		})
+	}
+}
+
+// TestScriptsRelease_CandidatesFollowOneAnother cuts rc.1, then refuses the
+// same candidate again and an alpha below it, and then cuts rc.2.
+func TestScriptsRelease_CandidatesFollowOneAnother(t *testing.T) {
+	r := newReleaseRepo(t)
+	if out, ok := r.run("candidate", "v1.5.0-rc.1"); !ok {
+		t.Fatalf("rc.1 refused:\n%s", out)
+	}
+	if out, ok := r.run("candidate", "v1.5.0-rc.1"); ok || !strings.Contains(out, "already exists locally") {
+		t.Fatalf("a second rc.1 was not refused as an existing tag (ok=%v):\n%s", ok, out)
+	}
+	if out, ok := r.run("alpha", "v1.5.0-alpha"); ok || !strings.Contains(out, "is not greater than") {
+		t.Fatalf("an alpha below rc.1 was not refused (ok=%v):\n%s", ok, out)
+	}
+	if err := os.WriteFile(filepath.Join(r.dir, "changelog.d", "134-y.md"), []byte("### Fixed\n\n- a second candidate\n"), 0o600); err != nil {
+		t.Fatalf("write fragment: %v", err)
+	}
+	r.git(r.dir, "add", "-A")
+	r.git(r.dir, "commit", "-q", "-m", "fix")
+	if out, ok := r.run("candidate", "v1.5.0-rc.2"); !ok {
+		t.Fatalf("rc.2 refused:\n%s", out)
+	}
+	if got := r.git(r.bare, "tag", "-l"); got != "v1.5.0-rc.1\nv1.5.0-rc.2" {
+		t.Fatalf("dev holds tags %q", got)
 	}
 }
 
@@ -1328,7 +1705,7 @@ func TestScriptsMakefile_AnalysersCoverTheBuildGatesModule(t *testing.T) {
 		return string(out)
 	}
 	for _, target := range []string{"lint-go", "staticcheck", "govulncheck", "vuln"} {
-		if recipe := dryRun(target); !strings.Contains(recipe, "cd test/buildgates") {
+		if recipe := dryRun(target); !strings.Contains(recipe, "test/buildgates") {
 			t.Errorf("make %s does not analyze the test/buildgates module:\n%s", target, recipe)
 		}
 	}
@@ -1435,6 +1812,8 @@ func TestScriptsMakeEntryPoints_TreatHostileValuesAsData(t *testing.T) {
 		{"consumer-check TAG", "consumer-check", "TAG", nil, false, ""},
 		{"release-publish TAG", "release-publish", "TAG", map[string]string{"SHA": okSHA}, false, ""},
 		{"release-publish SHA", "release-publish", "SHA", map[string]string{"TAG": "v0.0.1"}, false, ""},
+		{"release VERSION", "release", "VERSION", map[string]string{"AGENT_GIT": "/bin/false"}, false, ""},
+		{"release-candidate VERSION", "release-candidate", "VERSION", map[string]string{"AGENT_GIT": "/bin/false"}, false, ""},
 		{"release-alpha VERSION", "release-alpha", "VERSION", map[string]string{"AGENT_GIT": "/bin/false"}, false, ""},
 		{"lint-scripts TOOL_INSTALL", "lint-scripts", "TOOL_INSTALL", nil, false, ""},
 		// `coverage` checks the floor before the suite runs, so a refused value
@@ -1605,7 +1984,7 @@ func TestScriptsMakefile_AHostileCheckoutPathIsOneLiteralOperand(t *testing.T) {
 	operandLogger(t, fakes, "shellcheck", log, "")
 	// A go command at a hostile path, too: GOCMD is a path like any other.
 	fakeGoDir := filepath.Join(checkout, "my go $(touch pwned-gocmd) `touch pwned-gotick`")
-	operandLogger(t, fakeGoDir, "go", log, "[ \"$1 $2\" = 'env GOVERSION' ] && echo go1.27.0\nexit 0\n")
+	operandLogger(t, fakeGoDir, "go", log, "[ \"$1 $2\" = 'env GOVERSION' ] && echo go1.27.1\nexit 0\n")
 	fakeGo := filepath.Join(fakeGoDir, "go")
 
 	makeIn := func(env map[string]string, args ...string) (string, bool) {
@@ -1639,16 +2018,16 @@ func TestScriptsMakefile_AHostileCheckoutPathIsOneLiteralOperand(t *testing.T) {
 	}
 
 	// lint-scripts resolves shellcheck on PATH; its operands are literal.
-	operandLogger(t, fakes, "shellcheck", log, "[ \"$1\" = --version ] && printf 'version: 0.9.0\\n'\nexit 0\n")
+	operandLogger(t, fakes, "shellcheck", log, "[ \"$1\" = --version ] && printf 'version: 0.11.0\\n'\nexit 0\n")
 	out, ok = makeIn(withFakes, "lint-scripts")
 	if logged := readLog(t, log); !ok || !strings.Contains(logged, "<--shell=sh>\n<scripts/changelog-assemble.sh>\n") || !strings.Contains(logged, "<scripts/tool.sh>\n") {
 		t.Fatalf("lint-scripts (ok=%v) passed shellcheck:\n%s\noutput:\n%s", ok, logged, out)
 	}
 
-	// GOCMD at a hostile path: one word, in $(shell …) and in recipes.
-	out, ok = makeIn(nil, "vet", "GOCMD="+fakeGo)
-	if logged := readLog(t, log); !ok || !strings.Contains(logged, "--- go\n<env>\n<GOVERSION>\n") || !strings.Contains(logged, "--- go\n<vet>\n<./...>\n") {
-		t.Fatalf("make vet GOCMD=<hostile path> (ok=%v) logged:\n%s\noutput:\n%s", ok, logged, out)
+	// GOCMD at a hostile path: one word in recipes (TOOLCHAIN is lazy, so no $(shell) runs it).
+	out, ok = makeIn(nil, "build", "GOCMD="+fakeGo)
+	if logged := readLog(t, log); !ok || !strings.Contains(logged, "--- go\n<build>\n<./...>\n") {
+		t.Fatalf("make build GOCMD=<hostile path> (ok=%v) logged:\n%s\noutput:\n%s", ok, logged, out)
 	}
 
 	// help reads the Makefile at the hostile path.

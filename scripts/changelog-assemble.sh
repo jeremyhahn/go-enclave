@@ -13,7 +13,7 @@
 # (scripts/release-check-tag.sh), and publishes that section verbatim as the
 # release body (scripts/release-notes.sh). So a fragment this script does not
 # fold in never reaches a release; it stops the release instead. `make
-# release-alpha` runs this script and commits the result with VERSION.
+# release` runs this script and commits the result with VERSION.
 #
 # What it does, run from the repository root:
 #   - the body of `## [Unreleased]` (entries written before fragments were
@@ -32,23 +32,13 @@
 # waiting and [Unreleased] is empty it is a no-op, so a section written by
 # hand still releases.
 set -eu
-export LC_ALL=C
-
-die() { echo "changelog-assemble: $*" >&2; exit 1; }
-
-NL='
-'
-# matches VALUE ERE: the WHOLE value matches. `grep` alone is line-oriented,
-# so a value with an embedded newline would pass on any one matching line.
-matches() {
-  case $1 in *"$NL"*) return 1 ;; esac
-  printf '%s\n' "$1" | grep -Eq "$2"
-}
+# shellcheck source=lib.sh
+. "${0%/*}/lib.sh"
 
 [ $# -eq 2 ] || die "usage: $0 <vX.Y.Z[-pre]> <YYYY-MM-DD>"
 version=$1
 date=$2
-matches "$version" '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$' || die "'$version' is not vX.Y.Z[-pre]"
+matches "$version" "$VERSION_RE" || die "'$version' is not vX.Y.Z[-pre]"
 matches "$date" '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' || die "'$date' is not YYYY-MM-DD"
 
 changelog=CHANGELOG.md
@@ -63,21 +53,11 @@ if [ -d "$fragdir" ]; then
   done
 fi
 
-# The version heading, bracketed or not — the same anchor the release recipe
-# checks for.
-esc=$(printf '%s' "$version" | sed 's/[.]/\\./g')
-if grep -Eq "^## +\[?$esc\]?( |\$)" "$changelog"; then
+if grep -Eq "$(version_anchor "$version")" "$changelog"; then
   [ $# -eq 0 ] || die "$changelog already has a section for $version but $# fragment(s) are still in $fragdir/ — they would be left out of the release: $*"
   # The same hazard from the other side: entries still under [Unreleased]
-  # would be tagged OUTSIDE the release they were written for. A bare
-  # `### ` heading is not an entry — the fold drops empty subsections too —
-  # but any other non-blank line is, stray text included.
-  pending=$(awk '
-    /^## +\[Unreleased\][ \t]*$/ { inside = 1; next }
-    inside && /^## / { exit }
-    inside && /^### / { next }
-    inside && !/^[ \t]*$/ { print; exit }
-  ' "$changelog")
+  # would be tagged OUTSIDE the release they were written for.
+  pending=$(unreleased_pending "$changelog")
   [ -z "$pending" ] || die "$changelog already has a section for $version but [Unreleased] still holds entries — they would be left out of the release: $pending"
   echo "changelog-assemble: $changelog already has a section for $version, no fragment is waiting and [Unreleased] is empty; nothing to do"
   exit 0

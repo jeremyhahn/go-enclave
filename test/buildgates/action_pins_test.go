@@ -15,7 +15,7 @@ import (
 // Every `uses:` in every workflow must name a 40-hex commit, with the human
 // tag in a trailing comment:
 //
-//	uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+//	uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 //
 // A tag can be moved by its owner and a branch is re-resolved on every run,
 // and these jobs hold write-scoped tokens. A one-line ref change inside a large
@@ -527,7 +527,7 @@ func TestProseContainingUsesIsNotARef(t *testing.T) {
     with:
       prompt: |
         Check that every ` + "`uses:`" + ` line is pinned, e.g. uses: foo/bar@v1
-  - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+  - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 `
 	refs, err := extractRefs("fixture.yml", []byte(src))
 	if err != nil {

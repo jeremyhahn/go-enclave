@@ -10,7 +10,8 @@
 #
 # Environment:
 #   TOOL_INSTALL  1 (the Makefile's default) installs the pinned version into
-#                 TOOLS_DIR, unless a verified copy is already there. 0
+#                 TOOLS_DIR, unless a verified copy is already on PATH or
+#                 there (verified as below). 0
 #                 installs NOTHING: the tool must already be on PATH at
 #                 exactly the pinned version, and anything else — absent,
 #                 another version, a build that cannot say which version it is
@@ -20,18 +21,19 @@
 #                 exists to prevent. Any other value is refused rather than
 #                 read as either.
 #   TOOLS_DIR     where TOOL_INSTALL=1 installs (absolute path).
-#   TOOLCHAIN     the Go toolchain to build Go tools with, e.g. go1.27.0 — this
-#                 module's own, resolved by the Makefile inside the module
-#                 (#83): `go install tool@version` runs outside the module, and
+#   TOOLCHAIN     the Go toolchain to build Go tools with, e.g. go1.27.1 — this
+#                 module's own, resolved inside the module when unset (#83):
+#                 `go install tool@version` runs outside the module, and
 #                 under GOTOOLCHAIN=auto it would build with the TOOL's go
 #                 floor, producing an analyser too old to load this module.
 #   GO            the go command (default: go).
 #   <TOOL>_SHA256_LINUX_{AMD64,ARM64}, <TOOL>_BIN_SHA256_LINUX_{AMD64,ARM64}
 #                 for the two tools installed from release archives (TRIVY,
 #                 SHELLCHECK): the archive's SHA-256 and the extracted
-#                 binary's, pinned in the Makefile beside the version.
+#                 binary's, pinned in scripts/tool-pins.sh beside the version.
 #
-# What a cached install must prove before it is reused (TOOL_INSTALL=1):
+# What a cached install, or a copy on PATH, must prove before it is used
+# (TOOL_INSTALL=1):
 #   - a Go tool lives at TOOLS_DIR/<tool>-<version>-<toolchain>/, and its
 #     embedded build metadata (`go version <binary>`) must name TOOLCHAIN and
 #     its reported version must be the pin. The path alone is not trusted:
@@ -47,18 +49,10 @@
 # side effect of `make lint` overwrote whatever version the developer had
 # there — a target mutating the machine outside the repository (devops §4).
 set -eu
-export LC_ALL=C
-
-die() { echo "tool.sh: $*" >&2; exit 1; }
-
-NL='
-'
-# matches VALUE ERE: the WHOLE value matches. `grep` alone is line-oriented,
-# so a value with an embedded newline would pass on any one matching line.
-matches() {
-  case $1 in *"$NL"*) return 1 ;; esac
-  printf '%s\n' "$1" | grep -Eq "$2"
-}
+# shellcheck source=lib.sh
+. "${0%/*}/lib.sh"
+# shellcheck disable=SC2034  # die() in lib.sh prefixes with it
+prog=tool.sh
 
 [ $# -eq 2 ] || die "usage: $0 <tool> <vX.Y.Z>"
 tool=$1
@@ -189,13 +183,13 @@ install_archive() {
   chmod 0755 "$tmp/$tool"
 }
 
-# cached_ok reports whether the binary at $bin may be reused without installing.
-cached_ok() {
-  [ -x "$bin" ] || return 1
+# verified reports whether the binary at $1 may be used without installing.
+verified() {
+  [ -x "$1" ] || return 1
   if [ "$kind" = archive ]; then
-    [ "$(sha256_of "$bin")" = "$binsum" ]
+    [ "$(sha256_of "$1")" = "$binsum" ]
   else
-    [ "$(built_with "$bin")" = "$TOOLCHAIN" ] && [ "$(version_of "$bin")" = "$want" ]
+    [ "$(built_with "$1")" = "$TOOLCHAIN" ] && [ "$(version_of "$1")" = "$want" ]
   fi
 }
 
@@ -211,6 +205,9 @@ case ${TOOL_INSTALL-} in
     case $TOOLS_DIR in /*) ;; *) die "TOOLS_DIR '$TOOLS_DIR' is not an absolute path" ;; esac
     case $TOOLS_DIR in *"$NL"*) die "TOOLS_DIR contains a newline" ;; esac
     if [ "$kind" = go ]; then
+      # Resolved here, from the module in the working directory, only when a Go
+      # tool is being installed: the Makefile does not pay for it per target.
+      TOOLCHAIN=${TOOLCHAIN:-$("$go" env GOVERSION)}
       matches "${TOOLCHAIN-}" '^go[0-9]+\.[0-9]+(\.[0-9]+)?$' ||
         die "TOOLCHAIN '${TOOLCHAIN-}' is not a Go toolchain name; the Makefile resolves it inside the module (#83)"
       dir=$TOOLS_DIR/$tool-$want-$TOOLCHAIN
@@ -219,7 +216,19 @@ case ${TOOL_INSTALL-} in
       dir=$TOOLS_DIR/$tool-$want
     fi
     bin=$dir/$tool
-    if ! cached_ok; then
+    # A copy already on PATH that proves what a cached install must is used
+    # as it is: the devcontainer bakes every pin into /usr/local/bin, so a
+    # gate there runs offline and writes nothing into the checkout.
+    if onpath=$(command -v "$tool" 2>/dev/null) && [ "$onpath" != "$bin" ]; then
+      case $onpath in
+        /*) if verified "$onpath"; then
+              bin=$onpath
+            else
+              echo "tool.sh: $tool at $onpath is not the pinned build (version, build toolchain or checksum); not using it" >&2
+            fi ;;
+      esac
+    fi
+    if ! verified "$bin"; then
       if [ "$kind" = go ]; then
         echo "tool.sh: installing $tool $want with $TOOLCHAIN into $dir" >&2
       else
@@ -244,7 +253,7 @@ case ${TOOL_INSTALL-} in
       mv -f "$tmp/$tool" "$bin"
       rm -rf "$tmp"
       trap - EXIT
-      cached_ok || die "$tool: the fresh install at $bin does not verify (version, build toolchain or checksum)"
+      verified "$bin" || die "$tool: the fresh install at $bin does not verify (version, build toolchain or checksum)"
     fi
     require_version "$bin" "The install did not produce the pinned version."
     ;;

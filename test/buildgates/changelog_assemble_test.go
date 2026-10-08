@@ -10,7 +10,7 @@ import (
 	"testing"
 )
 
-// Tests for scripts/changelog-assemble.sh, the step `make release-alpha` runs
+// Tests for scripts/changelog-assemble.sh, the step `make release` runs
 // before tagging. The release must fold every fragment into the version's
 // section exactly once and delete it: a fragment left behind is a missing
 // entry, and one folded twice is a duplicate. The tests drive the real script
@@ -274,7 +274,7 @@ const gateVersion = "v999.0.0-gate"
 // fragments) is in a releasable state. Two states are valid:
 //
 //   - the queue is empty: no fragment is waiting and [Unreleased] holds no
-//     entry, as straight after `make release-alpha`. The script must report
+//     entry, as straight after `make release`. The script must report
 //     "nothing to release" and change nothing.
 //   - entries are waiting: assembly must succeed, every entry line must
 //     appear as many times as before plus once per fragment carrying it, and
@@ -350,7 +350,7 @@ func TestChangelogAssemble_RealTree(t *testing.T) {
 
 // TestChangelogAssemble_RealTreeAfterRelease runs the release assembly on a
 // copy of this repository's tree and then applies the same gate to what it
-// produced, proving the gate stays green on the commit `make release-alpha`
+// produced, proving the gate stays green on the commit `make release`
 // creates (an emptied [Unreleased] and no fragments).
 func TestChangelogAssemble_RealTreeAfterRelease(t *testing.T) {
 	root := repoRoot(t)

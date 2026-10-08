@@ -6,7 +6,7 @@
 # Prints the body of the `## [<version>] - <date>` section — everything after
 # the heading up to the next `#`/`##` heading — with leading and trailing blank
 # lines removed. The heading anchor is the one scripts/changelog-assemble.sh
-# writes and `make release-alpha` checks, bracketed or not, so a version is
+# writes and the release targets check, bracketed or not, so a version is
 # never matched by a longer one that starts with it (v0.6.2 is not v0.6.20,
 # v0.6.2-alpha is not v0.6.2-alpha.1).
 #
@@ -19,28 +19,17 @@
 # section is empty — a release whose notes say nothing is a release whose
 # CHANGELOG step was skipped.
 set -eu
-export LC_ALL=C
-
-die() { echo "release-notes: $*" >&2; exit 1; }
-
-NL='
-'
-# matches VALUE ERE: the WHOLE value matches. `grep` alone is line-oriented,
-# so a value with an embedded newline would pass on any one matching line.
-matches() {
-  case $1 in *"$NL"*) return 1 ;; esac
-  printf '%s\n' "$1" | grep -Eq "$2"
-}
+# shellcheck source=lib.sh
+. "${0%/*}/lib.sh"
 
 case $# in 1|2) ;; *) die "usage: $0 <vX.Y.Z[-pre]> [CHANGELOG.md]" ;; esac
 version=$1
 changelog=${2:-CHANGELOG.md}
-matches "$version" '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$' ||
+matches "$version" "$VERSION_RE" ||
   die "'$version' is not vX.Y.Z[-pre]"
 [ -f "$changelog" ] || die "$changelog not found"
 
-esc=$(printf '%s' "$version" | sed 's/[.]/\\./g')
-anchor="^## +\\[?$esc\\]?( |\$)"
+anchor=$(version_anchor "$version")
 
 count=$(grep -Ec "$anchor" "$changelog" || true)
 [ "$count" -ne 0 ] || die "$changelog has no section heading for $version"

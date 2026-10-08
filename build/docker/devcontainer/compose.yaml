@@ -1,16 +1,26 @@
-# go-enclave devcontainer. `make integration-test` (and -fips) is the entry
-# point; it runs this file under a UNIQUE project name per run and tears it
-# down with `down --volumes --rmi local` on every exit.
+# go-enclave devcontainer: one service per shipped stage of the Dockerfile.
 #
-# Per-run isolation (handbook integration-testing §7): no container_name, no
-# image: tag (compose names the image <project>-devcontainer, so it is unique
-# per run), no published ports, and the only volume is per-project. Two runs on
-# one host — two agents, a push and a re-run — cannot claim each other's
-# containers, images or caches.
+#   integration  `make integration-test` (and -fips) is the entry point; it
+#                runs this file under a UNIQUE project name per run and tears
+#                it down with `down --volumes --rmi local` on every exit.
+#   toolchain    `make docker-run CMD='make lint'`: a command in the toolchain
+#                image, as the invoking user, with the checkout bind-mounted.
+#                For a workstation; on a CI runner a bind mount resolves on the
+#                host daemon, where the checkout does not exist (Dockerfile).
 #
-# SECURITY POSTURE, every setting justified. The suite exercises locked memory,
-# core-dump exclusion and process-memory residue; NONE of that needs a
-# privilege, and holding one would make the suite measure the wrong thing.
+# Per-run isolation of the integration service (handbook integration-testing
+# §7): no container_name, no image: tag (compose names the image
+# <project>-integration, so it is unique per run), no published ports, and the
+# only volume is per-project. Two runs on one host — two agents, a push and a
+# re-run — cannot claim each other's containers, images or caches. The
+# toolchain service names its image, go-enclave-toolchain:<tag>, because `make
+# docker-build` builds and tags it; `--rmi local` never removes it, and
+# pull_policy: never means that name is never looked up in a registry.
+#
+# SECURITY POSTURE (x-posture, both services), every setting justified. The
+# suite exercises locked memory, core-dump exclusion and process-memory
+# residue; NONE of that needs a privilege, and holding one would make the
+# suite measure the wrong thing.
 #
 #   cap_drop: [ALL], and NO cap_add. Each capability the suite might seem to
 #     want, and why it is absent:
@@ -34,13 +44,15 @@
 #   Docker's default seccomp and AppArmor profiles stay ON (nothing here says
 #     unconfined): mmap, mlock, madvise, mprotect, setrlimit and /proc reads
 #     are all permitted by the default profile.
-#   user 10001: the image's unprivileged user. Not root, so a test that
-#     "passes" only because root bypasses a check cannot exist here.
+#   user: not root, so a test that "passes" only because root bypasses a check
+#     cannot exist here. integration runs as the image's user 10001; toolchain
+#     as the invoking user (`make docker-run` passes `id -u`/`id -g`), so what
+#     it writes into the checkout is theirs.
 #   read_only: the root filesystem, the baked source and the baked module
 #     cache cannot be written. The only writable paths are /tmp (tmpfs, where
-#     `go test` links and executes the test binary, hence `exec`) and the
-#     per-run build-cache volume.
-#   network_mode: none: the run needs no network. Modules are baked into the
+#     `go test` links and executes the test binary, hence `exec`), the
+#     build-cache volume and, for toolchain, the mounted checkout.
+#   network_mode: none: a run needs no network. Modules are baked into the
 #     image and verified against go.sum at build time, and GOPROXY=off makes
 #     any attempt to fetch one fail instead of reaching out.
 #   init: true: a real PID 1 (docker-init) reaps the suite's re-exec'd child
@@ -69,38 +81,42 @@
 #     library) is this non-zero figure, and its own is 0/0.
 #   nofile: explicit rather than inherited from whatever the daemon defaults.
 
+x-posture: &posture
+  init: true
+  read_only: true
+  network_mode: none
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  pids_limit: 1024
+  mem_limit: 4g
+  memswap_limit: 4g
+  cpus: 4
+  ulimits:
+    memlock:
+      soft: 16777216
+      hard: 16777216
+    core:
+      soft: 1048576
+      hard: 1048576
+    nofile:
+      soft: 4096
+      hard: 4096
+  working_dir: /src
+
 services:
-  devcontainer:
+  integration:
+    <<: *posture
     build:
       context: ../../..
       dockerfile: build/docker/devcontainer/Dockerfile
+      target: integration
     user: "10001:10001"
-    working_dir: /src
-    init: true
-    read_only: true
-    network_mode: none
-    cap_drop:
-      - ALL
-    security_opt:
-      - no-new-privileges:true
-    pids_limit: 1024
-    mem_limit: 4g
-    memswap_limit: 4g
-    cpus: 4
-    ulimits:
-      memlock:
-        soft: 16777216
-        hard: 16777216
-      core:
-        soft: 1048576
-        hard: 1048576
-      nofile:
-        soft: 4096
-        hard: 4096
     tmpfs:
       - /tmp:rw,exec,nosuid,nodev,size=1g,mode=1777
     volumes:
-      - gocache:/home/dev/.cache/go-build
+      - gocache:/gocache
     environment:
       GOTOOLCHAIN: local
       GOFLAGS: -mod=readonly
@@ -119,5 +135,24 @@ services:
       GO_ENCLAVE_IT_MEMLOCK_BYTES: "16777216"
       GO_ENCLAVE_IT_CORE_BYTES: "1048576"
 
+  toolchain:
+    <<: *posture
+    image: go-enclave-toolchain:${GO_ENCLAVE_TOOLCHAIN_TAG:-latest}
+    pull_policy: never
+    user: "${GO_ENCLAVE_UID:-10001}:${GO_ENCLAVE_GID:-10001}"
+    # Lint and the race-instrumented tests keep their build artifacts and
+    # golangci-lint's cache (HOME=/tmp) here: more room than one suite needs.
+    tmpfs:
+      - /tmp:rw,exec,nosuid,nodev,size=2g,mode=1777
+    volumes:
+      - ../../..:/src
+      - toolchain-gocache:/gocache
+    environment:
+      GOTOOLCHAIN: local
+      GOFLAGS: -mod=readonly
+      GOPROXY: "off"
+      HOME: /tmp
+
 volumes:
   gocache:
+  toolchain-gocache:

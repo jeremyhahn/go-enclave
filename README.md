@@ -21,7 +21,7 @@ exhausting the process's locked-memory ceiling.
 go get github.com/jeremyhahn/go-enclave
 ```
 
-Requires Go 1.27.0 or later. The only dependency is `golang.org/x/sys`.
+Requires Go 1.27.1 or later. The only dependency is `golang.org/x/sys`.
 
 ## Quick start
 
@@ -138,10 +138,13 @@ reference is on [pkg.go.dev](https://pkg.go.dev/github.com/jeremyhahn/go-enclave
 | `make ci-fast` | The full gate except anything that needs Docker |
 | `make ci` | The full local gate a change must pass |
 | `make integration-test` | Integration suites under `test/integration/`, run in the project devcontainer (needs Docker); fails rather than passes when there is nothing to run |
+| `make docker-build` / `make docker-run CMD='make lint'` / `make toolchain-image` | Build the devcontainer (`build/docker/devcontainer/`) / run a command in its `toolchain` image with the checkout mounted, offline, as you / print that image's content-addressed tag |
 | `make help` | Every target |
 
-Analysis tools are pinned and checksum-verified; `make` installs them into
-`bin/tools/`. Per-package variants exist (`test-providertest`,
+Analysis tools are pinned and checksum-verified in `scripts/tool-pins.sh`; `make`
+uses a verified copy on `PATH`, or installs them into `bin/tools/`. The
+devcontainer's `toolchain` image carries Go and every pinned tool, and every
+gate passes in it offline. Per-package variants exist (`test-providertest`,
 `coverage-enclave`, ...). The unit suite has no skip guards: it needs a soft
 `RLIMIT_MEMLOCK` of at least 2 MiB (or unlimited; with `CAP_IPC_LOCK`, a hard
 limit of at least 2 MiB), a readable `/proc`, and permission to lower its own
@@ -149,9 +152,15 @@ limits — and it FAILS, with one message at startup, where that is missing.
 
 **Changelog and releases.** A change adds a fragment,
 `changelog.d/<issue>-<slug>.md`, instead of editing `CHANGELOG.md`.
-`make release-alpha VERSION=vX.Y.Z-alpha` refuses a version that does not move
-forward, folds the fragments into `CHANGELOG.md`, checks the result, and commits,
-tags and pushes. The tag triggers the release workflow, which runs
+Three targets cut a release from `main`, each of exactly one kind:
+`make release VERSION=vX.Y.Z` (production), `make release-candidate
+VERSION=vX.Y.Z-rc.N` and `make release-alpha VERSION=vX.Y.Z-alpha`; each
+refuses the other two kinds. All three run `scripts/release.sh`, which refuses a
+missing or malformed version, any other branch, a tag that exists locally or on
+the remote (or a remote it cannot reach), a dirty tree and a version that does
+not move forward; then it folds the fragments into `CHANGELOG.md`, checks the
+result, and commits, tags and pushes. An `-alpha` or `-rc.N` release is
+published as a pre-release. The tag triggers the release workflow, which runs
 `make release-verify`, the full gate (FIPS and trivy included),
 `make consumer-check` (a throwaway module that `go get`s the tag) and, on the
 project's Gitea forge only, `make release-publish`. The publish job is skipped

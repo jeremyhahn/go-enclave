@@ -1233,6 +1233,12 @@ func TestWipeAll_TerminatesAgainstALiveConstructorUnderBackground(t *testing.T) 
 				b[0] = 0x5A
 				return nil
 			})
+			// Only the acknowledged enclave is left for the sweep to find;
+			// every other one is returned at once, so the loop holds a
+			// constant number of locked pages however long it spins.
+			if ack == nil {
+				_ = e.Destroy()
+			}
 			once.Do(func() { close(started) })
 		}
 	}()

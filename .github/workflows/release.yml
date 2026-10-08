@@ -1,7 +1,8 @@
 # Release for go-enclave, on every pushed `v*` tag (#89, release-versioning §5).
 #
-# `make release-alpha` assembles the CHANGELOG, writes VERSION, commits, tags
-# and pushes the tag. Everything after that is here, and nothing is created by
+# `make release`, `make release-candidate` or `make release-alpha` assembles the CHANGELOG, writes
+# VERSION, commits, tags and pushes the tag; the tag is vX.Y.Z, vX.Y.Z-alpha or
+# vX.Y.Z-rc.N. Everything after that is here, and nothing is created by
 # hand on the forge:
 #
 #   1. Verify   — the tag agrees with its own tree (VERSION, the CHANGELOG
@@ -19,7 +20,7 @@
 #                 (release-versioning §2: in-repo builds resolve through the
 #                 working tree and never exercise what a consumer gets).
 #   4. Publish  — the forge release, with the version's CHANGELOG section as
-#                 its body, a prerelease when the tag is `-alpha`. Gitea only.
+#                 its body, a prerelease when the tag is `-alpha` or `-rc.N`. Gitea only.
 #
 # Every check is a make target (release-verify, the gate targets,
 # consumer-check, release-publish), so each stage reproduces from a shell with
@@ -54,7 +55,7 @@ permissions:
   contents: read
 
 env:
-  GO_VERSION: "1.27.0"   # MUST equal ci.yml's GO_VERSION
+  GO_VERSION: "1.27.1"   # MUST equal ci.yml's GO_VERSION
   # As in ci.yml: 0 on our runners (baked tools, pinned, never installed),
   # 1 on github.com.
   TOOL_INSTALL: ${{ github.server_url == 'https://github.com' && '1' || '0' }}
@@ -68,7 +69,7 @@ jobs:
       tag: ${{ steps.tag.outputs.tag }}
       sha: ${{ steps.tag.outputs.sha }}
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0      # main's history, for the ancestry check below
 
@@ -97,9 +98,9 @@ jobs:
 
       # VERSION equals the tag unprefixed, CHANGELOG.md has exactly one
       # non-empty section for it, no fragment is waiting in changelog.d/,
-      # [Unreleased] is empty — the check `make release-alpha` runs before it
-      # commits — and the tagged commit is on main: both release kinds are
-      # tags on main (release-versioning §1a), and a tag on a branch commit
+      # [Unreleased] is empty — the check the release targets run before they
+      # commit — and the tagged commit is on main: every release kind is a
+      # tag on main (release-versioning §1a), and a tag on a branch commit
       # would release code main never received.
       #
       # Values reach make ONLY through the environment, never as make
@@ -120,9 +121,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version: ${{ env.GO_VERSION }}
 
@@ -143,9 +144,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version: ${{ env.GO_VERSION }}
 
@@ -162,9 +163,9 @@ jobs:
       GOMEMLIMIT: 10GiB
       GOMAXPROCS: 8
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version: ${{ env.GO_VERSION }}
 
@@ -185,9 +186,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version: ${{ env.GO_VERSION }}
 
@@ -214,9 +215,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version: ${{ env.GO_VERSION }}
 
@@ -242,9 +243,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version: ${{ env.GO_VERSION }}
 
@@ -317,7 +318,7 @@ jobs:
           fi
           exit $BAD
 
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Publish the release with its CHANGELOG section
         env:

@@ -3,6 +3,6 @@
 // requirements up to ../../go.mod.
 module github.com/jeremyhahn/go-enclave/test/buildgates
 
-go 1.27.0
+go 1.27.1
 
 require github.com/goccy/go-yaml v1.19.2

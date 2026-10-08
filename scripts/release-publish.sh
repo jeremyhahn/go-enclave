@@ -24,7 +24,7 @@
 #
 # The body is the tag's CHANGELOG section (scripts/release-notes.sh). The
 # release is a prerelease when the tag carries a SemVer 2.0.0 pre-release
-# suffix (`-alpha`, release-versioning §1/§5), and a full release otherwise.
+# suffix (`-alpha` or `-rc.N`, release-versioning §1/§1a/§5), and a full release otherwise.
 #
 # NOT FOR GITHUB. Publishing a release on the public mirror is a publication
 # that needs the owner's explicit, per-instance approval (release-versioning
@@ -34,23 +34,13 @@
 # The token never reaches a command line or the log: curl reads its
 # Authorization header from a configuration on stdin.
 set -eu
-export LC_ALL=C
-
-die() { echo "release-publish: $*" >&2; exit 1; }
-
-NL='
-'
-# matches VALUE ERE: the WHOLE value matches. `grep` alone is line-oriented,
-# so a value with an embedded newline would pass on any one matching line.
-matches() {
-  case $1 in *"$NL"*) return 1 ;; esac
-  printf '%s\n' "$1" | grep -Eq "$2"
-}
+# shellcheck source=lib.sh
+. "${0%/*}/lib.sh"
 
 [ $# -eq 2 ] || die "usage: $0 <tag> <commit-sha>"
 tag=$1
 sha=$2
-matches "$tag" '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$' || die "'$tag' is not vX.Y.Z[-pre]"
+matches "$tag" "$VERSION_RE" || die "'$tag' is not vX.Y.Z[-pre]"
 matches "$sha" '^[0-9a-f]{40}$' || die "'$sha' is not a 40-hex commit sha"
 
 api=${FORGE_API_URL-}
@@ -107,7 +97,6 @@ for t in curl jq; do
   command -v "$t" >/dev/null 2>&1 || die "$t is required and was not found"
 done
 
-here=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 notes=$(sh "$here/release-notes.sh" "$tag" CHANGELOG.md) || die "no release notes for $tag"
 case $tag in
   *-*) prerelease=true ;;
@@ -160,7 +149,7 @@ case $status in
   404)
     status=$(call POST "/repos/$repo/releases" "$work/payload")
     case $status in
-      201) echo "release-publish: created the $tag release" ;;
+      201) echo "$prog: created the $tag release" ;;
       *) show; die "creating the $tag release failed (HTTP $status)" ;;
     esac
     ;;
@@ -169,7 +158,7 @@ case $status in
     matches "$id" '^[0-9]+$' || die "the existing $tag release has no usable id"
     status=$(call PATCH "/repos/$repo/releases/$id" "$work/payload")
     case $status in
-      200) echo "release-publish: updated the existing $tag release (id $id)" ;;
+      200) echo "$prog: updated the existing $tag release (id $id)" ;;
       *) show; die "updating the $tag release failed (HTTP $status)" ;;
     esac
     ;;
@@ -182,4 +171,4 @@ status=$(call GET "/repos/$repo/releases/tags/$tag")
 jq -e --arg body "$notes" --argjson pre "$prerelease" \
   '.body == $body and .prerelease == $pre and .draft == false' "$work/response" >/dev/null ||
   die "the stored $tag release does not match what was sent (body, prerelease or draft differs)"
-echo "release-publish: $tag published (prerelease=$prerelease) with its CHANGELOG section as the body"
+echo "$prog: $tag published (prerelease=$prerelease) with its CHANGELOG section as the body"
