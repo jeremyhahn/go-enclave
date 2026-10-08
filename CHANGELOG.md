@@ -6,6 +6,307 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [v0.8.0-alpha] - 2026-10-08
+
+### Security
+
+- **Auto-merge decides only from the base branch's workflow definition**
+  (#106). `automerge.yml` now triggers on `pull_request_target`,
+  `workflow_run` and a schedule, so a PR can no longer rewrite the workflow
+  that holds the merge token. A `code-review` PR's approval must come from
+  someone other than its author, and the label and reviews are read after CI
+  is green, immediately before the merge call (owner ruling 2026-10-04).
+- **`.gitea/CODEOWNERS`** names the owner for `.github/`, the Makefile and
+  `scripts/` (#106).
+
+- **Corrected docs that overstated dump and swap protection** (#107): in
+  `ModeRootKey` the KEK's AES key schedule reaches the ordinary heap on every
+  seal and open, and the per-value DEK's in every mode, unless built with
+  `GOEXPERIMENT=runtimesecret`.
+
+### Fixed
+
+- **`scripts/release-version-check.sh` orders pre-release identifiers as
+  strings** (#106). AWK coerced identifiers such as `1e10` and numerics past
+  2^53 to floating point, which could accept a lower version or refuse a
+  higher one.
+- **`release.yml` runs `make test-runtimesecret` before publishing** (#106), so
+  a regression confined to the erasing build cannot ship.
+
+- **A zero-value `Sealer` no longer panics or blocks** (#107): `Seal` and
+  `Open` return the new `ErrSealerNotConstructed` and still wipe the input.
+- **The blob a `KeyProtector.Protect` returns is copied** (#107), so a
+  provider that reuses its buffer no longer corrupts sealed values, and
+  destroying a value no longer zeroes the provider's slice.
+- **Material whose sealed length would overflow `int` is refused** (#107) with
+  `ErrMaterialTooLarge` instead of panicking in AES-GCM, which on 32-bit
+  platforms was reachable at about 2 GiB.
+
+- **`RLIMIT_MEMLOCK` is reported enforced inside user namespaces** (#109).
+  `CAP_IPC_LOCK` only lifts the limit in the initial user namespace, so root of
+  a rootless container used to get `LimitNotEnforced` and then a late `mlock`
+  `ENOMEM` instead of `ErrBudgetExceedsRLimit`. An unreadable
+  `/proc/self/uid_map` now counts as enforced.
+- **`madvise` failures are `*os.SyscallError`s** (#109), naming the call like
+  every other system call the package makes.
+
+- **The residue sweep sees keys kept outside anonymous memory** (#111). It now
+  reads memfd, `/dev/shm`, SysV, `/dev/zero`, unlinked and every writable
+  file-backed mapping; only read-only views of on-disk files are skipped.
+- **The sweep no longer panics on a 32-bit target with a mapping wider than
+  `math.MaxInt32`** (#111); the read length is bounded before it is converted.
+- **The ended-context `UnsealRoot` check wipes its destinations** (#111) once
+  the call returns, or from the abandoned call's goroutine once the provider
+  returns, so root material a misbehaving provider wrote there does not linger
+  on the heap.
+
+### Added
+
+- **`make vuln`** runs govulncheck (#106). `lint-go`, `staticcheck` and
+  `govulncheck` now also analyze the `test/buildgates` module.
+
+- **`(*Sealer).Destroy() error` and `(*SoftwareProvider).Destroy() error`**
+  (#107) release a sealer's keys (wrapping key, current KEK, retained KEK
+  blobs, any pending root) and the default provider `NewSealer` created,
+  never an injected one. Afterwards every seal, open and `Openable` reports the
+  new `ErrSealerDestroyed`, so retired sealers no longer hold locked memory
+  until `RLIMIT_MEMLOCK` runs out.
+- **`GoString` on `SealedEnclave` and `MemoryEnclave`** (#107): `%#v` prints
+  the same redacted form as `%v` instead of the ciphertext and wrapped key.
+
+- **Enclave pages are excluded from forked children on Linux** (#109). Every
+  mapping is marked `MADV_DONTFORK`, so a `fork(2)` child has no mapping there
+  and touching an enclave faults instead of reading the material. A refused
+  `madvise` fails the allocation with `ErrLockedMemoryUnavailable`, like the
+  core-dump exclusion; other platforms apply nothing (x/sys exposes no
+  `minherit`).
+- **`HardenProcess()`, opt-in process hardening for binaries** (#109). On Linux
+  it sets `PR_SET_DUMPABLE` to 0 and reports what it verified in
+  `ProcessHardening`. That blocks core dumps and same-uid `ptrace`, and breaks
+  same-uid debuggers; elsewhere it returns `ErrProcessHardeningUnsupported`.
+  The package never calls it.
+
+- **`make toolchain-image`** (#129) prints the toolchain image's content-addressed tag, a hash of the files that build it, for running gates in it (`VERIFY_IMAGE`).
+
+- **Root `CLAUDE.md` and `AGENTS.md`** (#129): the layout, the Make contract, the
+  devcontainer, Serena and typed-error rules, and where the feature docs live.
+
+- **`proto`, `docker-build` and `docker-run` targets** (#129). `proto` is a documented no-op, since the library has no `.proto`; the other two build and run the devcontainer image.
+- **Feature targets** (#129). `scripts/features.sh <base> <tip>` prints the `docs/<feature>/` directories a change touches, and the Makefile maps each feature to `test-<feature>` and `integration-test-<feature>`.
+
+- **`make release-candidate VERSION=vX.Y.Z-rc.N` and `make release VERSION=vX.Y.Z`** (#134). Three release targets now exist, each cutting exactly one kind from `main` and refusing the other two: `make release-alpha` (`vX.Y.Z-alpha`, as before), `make release-candidate` (`vX.Y.Z-rc.N`) and `make release` (production only; `-alpha` and `-rc.N` are refused). They run the one `scripts/release.sh`, which replaces `scripts/release-alpha.sh` and takes the kind as its argument. The version is explicit (a missing one is an error, never a guess) and checked against `^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-alpha|-rc\.[1-9][0-9]*)?$`; a tag that exists locally or on the remote, an unreachable remote, another branch and a dirty tree are refused. `release-verify`, `release-check-tag`, `release-notes` and `release-publish` (and so `release.yml`) accept `-rc.N` wherever they accept `-alpha`, and publish it as a pre-release.
+
+### Changed — BREAKING: `WithKeyProtector(KeyProtector)` and `WithRootUnsealer(RootUnsealer)` replace `WithProvider(any)` and `WithMode`
+
+- **`WithKeyProtector(KeyProtector)` and `WithRootUnsealer(RootUnsealer)`
+  replace `WithProvider(any)` and `WithMode`** (#108). The option selects the
+  mode, so a provider that cannot serve it no longer compiles; `ErrProviderMode`
+  and `ErrInvalidMode` are removed. A nil or typed-nil provider, or both
+  options at once, returns the new `ErrInvalidProvider`.
+
+### Changed — BREAKING: `WithProviderHealth` is replaced by the `HealthReporter` interface
+
+- **`WithProviderHealth` is replaced by the `HealthReporter`
+  interface** (#108). A `KeyProtector` that implements `Health() error` is
+  found by type assertion and believed by `SealedEnclave.Openable`;
+  `SoftwareProvider` implements it.
+
+### Changed — BREAKING: `(*SealedEnclave).Destroy` returns `error`
+
+- **`(*SealedEnclave).Destroy` returns `error`** (#108), matching
+  `MemoryEnclave.Destroy` and `Sealer.Destroy`. It is always `nil` today.
+
+### Changed
+
+- **`(*MemoryEnclave).Open`, `(*MemoryEnclave).OpenString` and
+  `NewMemoryEnclaveFromString` are deprecated** (#110). Their
+  `// Deprecated:` notices let staticcheck (SA1019) report their callers.
+  They keep working; use `WithBytes` and `NewMemoryEnclave`.
+
+- **Package documentation states contracts, not history** (#112). Godoc comments now give each identifier's behaviour, errors, concurrency and platform caveats; design rationale lives in `docs/*/engineering.md`, and links to unexported identifiers no longer render broken on pkg.go.dev.
+- **The module no longer ships a repository-walking test** (#112). The root package's `doc_test.go`, which read the source tree and queried the issue tracker, is gone, so `go test all` in a consuming module no longer runs it. An offline gate in `test/buildgates` keeps issue citations out of shipped source.
+
+- **Auto-merge lands ready PRs in batches through a merge train** (#118).
+  `automerge.yml` v6 merges every ready PR that is behind main onto a new
+  `merge-train/*` branch, runs CI once on that combined tree, then
+  squash-merges the PRs in order and deletes the branch. A red train drops its
+  newest PR and retries; a PR that conflicts is left out with a comment. While
+  main still requires up-to-date branches, PRs are updated one at a time as
+  before.
+- **CI runs every stage at once** (#118). Security, Test and Integration no
+  longer wait for Lint and Build; CI Gate still needs every job and fails
+  closed on any result but success. `ci.yml` also runs on pushes to
+  `merge-train/**`.
+
+- **A merge train lands as one up-to-date PR** (#122). `automerge.yml` v7
+  opens each `merge-train/*` branch as a PR into main and squash-merges that PR
+  once its CI is green, so main keeps `block_on_outdated_branch` on. Its PRs
+  are then closed with a comment naming the squash commit, and the issues they
+  close are closed.
+- **CI no longer runs on pushes to `merge-train/**`** (#122). A train is a PR,
+  so it gets CI from the `pull_request` trigger like any other.
+
+- **`ci.yml` and `release.yml` call the same make aggregates** (#129). `make ci-lint`, `ci-build`, `ci-security`, `ci-test` and `ci-integration` replace the duplicated step lists; `make ci-fast` and `make ci` compose them. Jobs run on the bare runner with `actions/setup-go` and `go-version-file: go.mod`, tools install only on github.com (`TOOL_INSTALL`), and the integration jobs keep the hardened `integration` image. Every action remains pinned by SHA.
+- **The workflows' inline shell moved to `build/ci/`** (#129). The merge workflow's script is `build/ci/automerge.sh`, which keeps its scratch files in a `mktemp` directory and is shellchecked by `make lint-scripts`; the tag, forge-resolution and publish steps are scripts beside it, and one summary script serves every gate job. The merge job checks out the default branch, without credentials, to read it.
+- **`test/buildgates` is now `build/ci/buildgates`** (#129), with the Makefile, gosec exclude and path references updated.
+- **`make check-action-pins` is `make check-buildgates`** (#129), with help text that says what it checks. The old name remains as an alias for one release.
+- **The releasability gate reports `CLAUDE.md`, `AGENTS.md` and `.claude/` as strip-at-publish** (#129) instead of refusing them. `.gitignore` no longer ignores them, except `.claude/settings.local.json`.
+- **CODEOWNERS covers `build/`** (#129).
+
+- **The devcontainer is the one toolchain for every build and test** (#129). `build/docker/devcontainer/Dockerfile` ships two stages from a shared `base` (Go, gcc/musl-dev, the `dev` user, the module and build caches at `/gomodcache` and `/gocache`): `toolchain`, which adds every pinned tool, bash, make, git, jq and the GNU userland and is usable as any non-root uid with `HOME=/tmp` and `GOPROXY=off`; and `integration`, which adds the source with today's hardening unchanged and ships none of the tools. Modules are fetched only at build time, through the `GO_BUILD_PROXY` build argument. The compose service that runs the integration suite is now `integration`, beside a new `toolchain` service.
+- **Tool pins live only in `scripts/tool-pins.sh`** (#129). The Makefile includes it and the image's tools stage installs from it through `scripts/tool.sh`, which now uses a verified copy already on `PATH` (pinned version and build toolchain, or pinned SHA-256) instead of building or downloading one.
+- **Every pin tracks upstream latest** (#129): golangci-lint v2.14.0, govulncheck v1.8.0, actionlint v1.7.12, trivy v0.75.0 and shellcheck v0.11.0, Go 1.27.1 on `golang:1.27.1-alpine3.24` (by digest), and checkout v7, setup-go v7 and codeql-action v4 (by commit SHA). A pin exists only so a build is reproducible, a version plus a SHA-256 or digest, and is never below the latest release.
+- **`docker-build` and `docker-run` target the toolchain** (#129). `make docker-build` builds both stages and tags `go-enclave-toolchain:<content tag>` and `:latest`; `make docker-run CMD='make lint'` runs a command in the toolchain image with the checkout mounted, offline, as the invoking user.
+
+- **Migration guidance lives once, in `docs/README.md` "Upgrading"** (#129), now
+  with a v0.8.0-alpha section covering the breaking changes since v0.7. The
+  "Migrating from" sections of each `user.md` and the version history of each
+  `api.md` link to it instead of repeating it.
+- **The README links to the platform contract and the documentation index**
+  (#129) instead of copying their tables, and no longer says Android is missing
+  from `cross-build`. `docs/locked-memory/engineering.md` says Linux is the only
+  OS the tests run on, not the only OS in CI (CI cross-builds every target).
+
+- **The Makefile is a thin contract over `scripts/`** (#129). The inline shell of `integration-test-<pkg>`, `release-alpha`, `release-verify`, `test-runtimesecret`, `lint-integration`, `cross-build`, `clean-tools` and the scanners moved into scripts that share `scripts/lib.sh`. One test-flags variable and one tool-lookup macro replace the repeated copies, `coverage-<pkg>` now enforces `COVERAGE_THRESHOLD`, and the unit and integration suites share `scripts/coverage-gate.sh`.
+- **`vet`, `staticcheck` and `gosec` no longer run twice in `make ci-fast`** (#129). golangci-lint runs them once; `make vet` and `make staticcheck` are aliases for `make lint-go`. `make gosec` remains the SARIF-writing scan CI uploads, and `make security` takes gosec's rules from `lint-go`.
+
+- **One naming scheme for the OS-specific files** (#129). Each concern has one
+  implementation per GOOS, named `<concern>_linux.go`, `_bsd.go`, `_windows.go`
+  or `_unix.go` (code the platforms share), with `_unsupported.go` as the only
+  catch-all; `_other` and `_nocore` are retired. `dontdump` and `dontfork` are
+  one `madvise` concern around a single helper, Linux and the BSDs share one
+  `getrlimit` path, and one table translates page protections. No exported API
+  changes. `TestPlatformLayer_EveryGOOSHasExactlyOneImplementation` now covers
+  every concern, not only the memory primitives.
+
+### Changed — BREAKING: `(*MemoryEnclave).EqualTo` returns `(bool, error)`, and `EqualToErr` is removed
+
+- **`(*MemoryEnclave).EqualTo` returns `(bool, error)`, and
+  `EqualToErr` is removed** (#110). A destroyed or nil enclave returns
+  `ErrEnclaveDestroyed` instead of a bare `false`, so a mismatch can no longer
+  be confused with a missing enclave. The comparison time does not depend on
+  the contents, but it does reveal whether the lengths differ.
+
+### Changed — BREAKING: `Destroy` returns `ErrEnclaveCorrupted` instead of panicking
+
+- **`Destroy` returns `ErrEnclaveCorrupted` instead of panicking**
+  (#110). The material is still wiped and the pages released first. Every
+  corruption `Destroy` detects is also reported by the next `WipeAll` in its
+  `SweepError`, so a `defer e.Destroy()` that discards the error does not lose
+  it. Nothing in the package panics now.
+
+### Changed — BREAKING: `LimitError` is renamed `BudgetInUseError`
+
+- **`LimitError` is renamed `BudgetInUseError`** (#110), matching
+  the `ErrBudgetInUse` sentinel it reports. Fields and behavior are unchanged.
+
+### Changed — BREAKING: a nil `*Allocator` returns `ErrNilAllocator`
+
+- **a nil `*Allocator` returns `ErrNilAllocator`** (#110) from
+  `New`, `NewSized`, `SetLimit`, `ForceLimit` and `TransferTo` instead of
+  panicking; `New` still wipes the data it was handed. `InUse`, `Limit` and
+  `Available` report 0.
+
+### Changed — BREAKING: `providertest` fails closed when its residue sweep cannot measure
+
+- **`providertest` fails closed when its residue sweep cannot
+  measure** (#111). Off Linux, without locked memory, or with a blind control,
+  `TestProvider` now returns an error matching the new `ErrNotMeasured`
+  (`*NotMeasuredError`) instead of logging and returning `nil`. Set
+  `Config.SkipResidueSweep` with a reason to accept the gap.
+
+### Changed — BREAKING: every `providertest` error message starts with `providertest:`
+
+- **every `providertest` error message starts with `providertest:`**
+  (#111), including `PropertyError`.
+
+### Changed — BREAKING: the deprecated `MemoryEnclave` accessors are removed
+
+- **`MemoryEnclave.Open`, `MemoryEnclave.OpenString` and
+  `NewMemoryEnclaveFromString` are removed** (#129). Read through `WithBytes`,
+  and bring string material in as `NewMemoryEnclave([]byte(s))`. `Open`'s slice
+  outlived the lock, so a concurrent `Destroy` or `WipeAll` unmapped it under
+  its reader; every read is now a borrow.
+- The enclave and allocator core is restructured with no other behavior change
+  (#129): every constructor ends in one publish step, `Allocator.New` and
+  `NewSized` share one admission step and refund, and `Destroy` and `WipeAll`
+  book every release, orphans included, through one step. `admission.go` and
+  `process_allocator.go` become `allocator.go`, `Wipe` and the constant-time
+  helpers move to `constanttime.go`, and the process allocator lives in a
+  generic install-once slot (`singleton.go`).
+
+### Changed — BREAKING: one typed-error layer; `errors.Join` composites become typed errors
+
+- **Seal and open failures are `*SealError` and `*OpenError`** (#129), not
+  `errors.Join` composites. They match `ErrSealFailed` / `ErrOpenFailed` and
+  unwrap to the cause, so every `errors.Is` match on the sentinels,
+  `ctx.Err()`, `context.Cause` and the provider's error still holds. A sweep
+  that meets a failure reports the new `*SealerWipedError`, matching
+  `ErrSealerWiped`. Code that walked `Unwrap() []error` must use
+  `errors.Is`/`errors.As`. A failure together with an independent cleanup
+  failure is still joined, so it matches both.
+- **`LockedMemoryError.Cause` is an `error`** (#129), was `any`.
+- **`ProcessHardeningError` matches the new `ErrProcessHardeningFailed`**
+  (#129).
+- **Cause-carrying error types share one shape** (#129):
+  `LockedMemoryError`, `UnwipedReleaseError`, `LimitDiscoveryError`,
+  `ProcessHardeningError` and the new sealing types are aliases of one
+  generic type with a `Cause error` field, rendering as the sentinel's text,
+  `": "` and the cause. Struct literals and `errors.As` targets are unchanged.
+- **`BudgetError` and `BudgetInUseError` messages read `<N> bytes
+  requested`** (#129), was `<N> requested`.
+- **`providertest.AbortedError` renders as `ErrAborted`'s text followed by the
+  context's error** (#129); its `Err` field and matches are unchanged.
+- Every root sentinel and error type is declared in `errors.go`, and every
+  `providertest` one in `providertest/errors.go` (#129).
+
+### Changed — one process singleton, no transitional helpers
+
+- **`SetSealer` and the process sealer use the same install-once singleton as
+  the process allocator** (#129), replacing the sealer's hand-written mutex,
+  instance and lazy default. Behaviour is unchanged: `SetSealer` is still
+  one-shot, and a lazily built default still counts as installed.
+- The transitional helpers `destroyTransient`, `allocSized` and the lowercase
+  `wipe` are gone; their call sites use `Destroy`, `NewSized` and `Wipe`
+  directly. An allocation now rounds its size to whole pages once, where the
+  allocator did it twice. No exported identifier, error or behaviour changes.
+
+### Changed — one process-memory sweep; one integration suite
+
+- **The `/proc/self/mem` residue sweep has one implementation**, the internal
+  package `internal/memscan` (#129). The root package's Linux tests and
+  `providertest` both call it, so the unit tests now sweep every mapping that
+  can hold a runtime copy (writable, memfd, `/dev/shm`, SysV and unlinked
+  mappings), not only anonymous ones. It refuses offsets that do not fit
+  `ReadAt`. `memscan.AllZero` replaces the per-package copies. No exported
+  identifier, error or behaviour changes.
+- **The `providertest` integration suite is folded into the enclave suite**
+  (#129). It was a copy of `providertest`'s unit tests; its one devcontainer
+  case, `TestProvider` with `RLIMIT_MEMLOCK` at zero reporting
+  `ErrNotMeasured`, now runs in an isolated child in
+  `test/integration/enclave/provider_test.go`. `make integration-test-providertest`
+  and its `-fips-` variant are gone; `integration-test-provider-conformance`
+  runs the enclave suite. Every integration suite stays gated at
+  `COVERAGE_THRESHOLD`, and the harness at the same floor by
+  `coverage-providertest`.
+- The integration image now carries `internal/`, which the suite and
+  `providertest` import (#129).
+- `test/integration/COVERAGE.md` maps each documented feature to the
+  integration tests that exercise it (#129).
+
+### Changed — sealing code split by concern
+
+- **The sealing implementation is split into cohesive files** (#129):
+  `sealer.go` keeps the `Sealer` type and its direct API; the `ModeRootKey`
+  hierarchy moves to `hierarchy.go`, blob framing and the one key wrap shared
+  by the hierarchy and `SoftwareProvider` to `keywrap.go`, and the AEAD
+  primitives to `aead.go`; `sealed.go` keeps only `SealedEnclave`. Tests
+  follow the same file names. No exported identifier, error or behaviour
+  changes.
+- Each hierarchy state check, key wrap, key-set destroy and
+  destroy-on-failure step now has one implementation, and the provider error
+  shaping is one table-driven `providerFailure` (#129).
+
 ## [v0.7.0-alpha] - 2026-10-02
 
 ### Fixed
