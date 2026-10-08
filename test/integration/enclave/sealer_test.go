@@ -36,7 +36,7 @@ import (
 
 var sealerModes = []enclave.Mode{enclave.ModeRootKey, enclave.ModePerOperation}
 
-// TestSealerRoundTripsManyValuesInBothModes seals many distinct values from
+// TestSealing_SealerRoundTripsManyValuesInBothModes seals many distinct values from
 // concurrent goroutines and opens every one of them, in both modes, through a
 // consumer-injected provider backed by the SoftwareProvider. It checks the
 // ownership contract (each caller slice is wiped by Seal), that every value
@@ -45,7 +45,7 @@ var sealerModes = []enclave.Mode{enclave.ModeRootKey, enclave.ModePerOperation}
 // per-value calls; ModePerOperation: one Protect per seal and one Unprotect per
 // open), that two opens are independent enclaves, and the lifecycle answers
 // of IsAlive/Openable/Open after Destroy and after a shutdown sweep.
-func TestSealerRoundTripsManyValuesInBothModes(t *testing.T) {
+func TestSealing_SealerRoundTripsManyValuesInBothModes(t *testing.T) {
 	for _, mode := range sealerModes {
 		t.Run(mode.String(), func(t *testing.T) {
 			isolated(t, childOpts{}, func(t *testing.T) {
@@ -180,7 +180,7 @@ func TestSealerRoundTripsManyValuesInBothModes(t *testing.T) {
 	}
 }
 
-// TestSealerContextReachesTheProvider exercises the context contract with a
+// TestSealing_SealerContextReachesTheProvider exercises the context contract with a
 // provider that blocks until told otherwise (ModePerOperation, where every
 // seal and open calls the provider):
 //
@@ -195,7 +195,7 @@ func TestSealerRoundTripsManyValuesInBothModes(t *testing.T) {
 //     while one seal and one open are stalled inside the provider, a second
 //     seal and open on the SAME sealer complete, and Destroy of the value
 //     being opened returns without waiting for that open.
-func TestSealerContextReachesTheProvider(t *testing.T) {
+func TestSealing_SealerContextReachesTheProvider(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		live := context.Background()
 		dev := newDevice()
@@ -297,14 +297,14 @@ func TestSealerContextReachesTheProvider(t *testing.T) {
 	})
 }
 
-// TestSealerRootUnsealIsSerializedAndAbandonable is the ModeRootKey first-use
+// TestSealing_SealerRootUnsealIsSerializedAndAbandonable is the ModeRootKey first-use
 // path. The first seal unseals the root through the provider; a second caller
 // arriving meanwhile QUEUES behind it rather than unsealing a second time, and
 // leaves the queue as soon as ITS OWN context ends — while the first is still
 // stuck in the provider. When the first caller gives up too, nothing was
 // unsealed, so the next caller unseals the root (once) and every later seal
 // reuses it.
-func TestSealerRootUnsealIsSerializedAndAbandonable(t *testing.T) {
+func TestSealing_SealerRootUnsealIsSerializedAndAbandonable(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		live := context.Background()
 		dev := newDevice()
@@ -351,9 +351,9 @@ func TestSealerRootUnsealIsSerializedAndAbandonable(t *testing.T) {
 	})
 }
 
-// TestProcessSealerIsInstalledOnce covers NewSealed and SetSealer, the
+// TestSealing_ProcessSealerIsInstalledOnce covers NewSealed and SetSealer, the
 // process-wide pair, in the two orders a program can use them.
-func TestProcessSealerIsInstalledOnce(t *testing.T) {
+func TestSealing_ProcessSealerIsInstalledOnce(t *testing.T) {
 	// The binary installs its sealer first; NewSealed then uses it. A seal
 	// refused for an ended context before that must NOT have installed the
 	// software default in the meantime.
@@ -425,7 +425,7 @@ func TestProcessSealerIsInstalledOnce(t *testing.T) {
 	})
 }
 
-// TestSealerRotatesKEKGenerationsUnderRealLockedMemory drives ModeRootKey KEK
+// TestSealing_SealerRotatesKEKGenerationsUnderRealLockedMemory drives ModeRootKey KEK
 // rotation through the public crypto-period option against real locked
 // memory: concurrent seals at a three-wrap crypto-period cross many
 // generations; every value — sealed under the current generation or a retired
@@ -433,7 +433,7 @@ func TestProcessSealerIsInstalledOnce(t *testing.T) {
 // (one root unseal for the sealer's life); and a retired generation costs no
 // locked memory, so the locked footprint after many rotations is the same as
 // after one.
-func TestSealerRotatesKEKGenerationsUnderRealLockedMemory(t *testing.T) {
+func TestSealing_SealerRotatesKEKGenerationsUnderRealLockedMemory(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		ctx := context.Background()
 		dev := newDevice()
@@ -497,11 +497,11 @@ func TestSealerRotatesKEKGenerationsUnderRealLockedMemory(t *testing.T) {
 	})
 }
 
-// TestSealerIsWipedForGoodAfterASweep: a ModeRootKey sealer whose keys a
+// TestShutdownSweep_SealerIsWipedForGoodAfterASweep: a ModeRootKey sealer whose keys a
 // shutdown sweep destroyed refuses every later seal and open with
 // ErrSealerWiped — including a seal that would have rotated — reports it from
 // Openable, and never goes back to its provider for a new root.
-func TestSealerIsWipedForGoodAfterASweep(t *testing.T) {
+func TestShutdownSweep_SealerIsWipedForGoodAfterASweep(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		ctx := context.Background()
 		dev := newDevice()
@@ -537,14 +537,14 @@ func TestSealerIsWipedForGoodAfterASweep(t *testing.T) {
 	})
 }
 
-// TestSealerFailsCleanlyWhenLockedMemoryRunsOutMidHierarchy refuses the
+// TestSealing_SealerFailsCleanlyWhenLockedMemoryRunsOutMidHierarchy refuses the
 // kernel lock at each step of building and using a ModeRootKey hierarchy —
 // the root destination, the provider's own root, the first KEK, a rotated KEK, a retired KEK materialized for an
 // open, and an open's own DEK — and requires every one to fail with
 // ErrLockedMemoryUnavailable, keep what already succeeded (a root unsealed is
 // never unsealed again), leave every existing value openable, and succeed on
 // the next attempt once memory is available again.
-func TestSealerFailsCleanlyWhenLockedMemoryRunsOutMidHierarchy(t *testing.T) {
+func TestSealing_SealerFailsCleanlyWhenLockedMemoryRunsOutMidHierarchy(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		ctx := context.Background()
 		f := installFaultInjector(t, 0)
@@ -628,12 +628,12 @@ func TestSealerFailsCleanlyWhenLockedMemoryRunsOutMidHierarchy(t *testing.T) {
 	})
 }
 
-// TestOpenFailsClosedWhenTheFreezeIsRefused: the plaintext an open returns
+// TestSealing_OpenFailsClosedWhenTheFreezeIsRefused: the plaintext an open returns
 // is frozen before it is handed back, so a kernel that refuses that mprotect
 // fails the open — no enclave, the destination wiped and released, OpenWith's
 // reservation returned — rather than returning writable plaintext; the value
 // opens normally once the refusal lifts.
-func TestOpenFailsClosedWhenTheFreezeIsRefused(t *testing.T) {
+func TestSealing_OpenFailsClosedWhenTheFreezeIsRefused(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		ctx := context.Background()
 		s, err := enclave.NewSealer()
@@ -684,7 +684,7 @@ func (g *gatedUnsealer) UnsealRoot(ctx context.Context, dst []byte) error {
 	return g.soft.UnsealRoot(ctx, dst)
 }
 
-// TestSealerOverlappingASweepIsWiped runs a shutdown sweep while a
+// TestSealing_SealerOverlappingASweepIsWiped runs a shutdown sweep while a
 // ModeRootKey sealer is unsealing its root. The sweep cannot reclaim the
 // root's destination — the unseal is writing into it — and a successful
 // unseal may never be repeated, so the only fail-closed outcome is the one
@@ -692,7 +692,7 @@ func (g *gatedUnsealer) UnsealRoot(ctx context.Context, dst []byte) error {
 // destroyed rather than published, and every later seal is refused without
 // asking the provider again. A sealer that published that root would hand
 // back working keys after a WipeAll.
-func TestSealerOverlappingASweepIsWiped(t *testing.T) {
+func TestSealing_SealerOverlappingASweepIsWiped(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		ctx := context.Background()
 		g := &gatedUnsealer{soft: enclave.NewSoftwareProvider(), entered: make(chan struct{}), release: make(chan struct{})}
@@ -733,14 +733,14 @@ func TestSealerOverlappingASweepIsWiped(t *testing.T) {
 	})
 }
 
-// TestSealerKeyUseOverlappingASweepIsWiped parks the lock of a hierarchy
+// TestSealing_SealerKeyUseOverlappingASweepIsWiped parks the lock of a hierarchy
 // key being minted or materialized, runs a shutdown sweep while it is parked,
 // then lets it finish. The key it is about to use the root with is fresh, but
 // the root is gone, so the operation must report ErrSealerWiped rather than a
 // destroyed per-call key, and the sealer stays wiped. With every key release
 // refused, the refusals are reported alongside and the keys stay on the
 // ledger until the next sweep reclaims them.
-func TestSealerKeyUseOverlappingASweepIsWiped(t *testing.T) {
+func TestSealing_SealerKeyUseOverlappingASweepIsWiped(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		// prior is how many values to seal first; skip is how many locks the
@@ -829,11 +829,11 @@ func TestSealerKeyUseOverlappingASweepIsWiped(t *testing.T) {
 	}
 }
 
-// TestSealerQueuedFirstSealUsesThePublishedRoot: a second first-use seal
+// TestSealing_SealerQueuedFirstSealUsesThePublishedRoot: a second first-use seal
 // that queued for the initialization slot while the first was unsealing finds
 // the published hierarchy once it gets the slot, and seals under it without
 // asking the provider again.
-func TestSealerQueuedFirstSealUsesThePublishedRoot(t *testing.T) {
+func TestSealing_SealerQueuedFirstSealUsesThePublishedRoot(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		ctx := context.Background()
 		g := &gatedUnsealer{soft: enclave.NewSoftwareProvider(), entered: make(chan struct{}), release: make(chan struct{})}
@@ -887,11 +887,11 @@ func (c cancelAfterUnseal) UnsealRoot(ctx context.Context, dst []byte) error {
 	return c.device.UnsealRoot(ctx, dst)
 }
 
-// TestSealerAbandonedInitReportsBothCauses: the root unseals, the caller's
+// TestSealing_SealerAbandonedInitReportsBothCauses: the root unseals, the caller's
 // context ends, then the first KEK's lock is refused. The seal reports the
 // context and the refusal together, keeps the unsealed root, and the next
 // seal mints under it without unsealing again.
-func TestSealerAbandonedInitReportsBothCauses(t *testing.T) {
+func TestSealing_SealerAbandonedInitReportsBothCauses(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		f := installFaultInjector(t, 0)
 		ctx, cancel := context.WithCancel(context.Background())
@@ -1040,10 +1040,10 @@ func (d *reportingDevice) Health() error {
 	return enclave.ErrSealerWiped
 }
 
-// TestSealerReportsItsConfiguration covers what a sealer and a sealed value
+// TestSealing_SealerReportsItsConfiguration covers what a sealer and a sealed value
 // tell an operator: the mode it was built in, a provider health report it
 // believes, and a String that never prints the envelope.
-func TestSealerReportsItsConfiguration(t *testing.T) {
+func TestSealing_SealerReportsItsConfiguration(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		ctx := context.Background()
 		dev := &reportingDevice{device: newDevice(), healthy: true}
@@ -1085,11 +1085,11 @@ func TestSealerReportsItsConfiguration(t *testing.T) {
 	})
 }
 
-// TestSealerRefusesInvalidArgumentsBeforeAnyLockedMemory drives every
+// TestSealing_SealerRefusesInvalidArgumentsBeforeAnyLockedMemory drives every
 // argument check a consumer of the sealing API can trip, against real locked
 // memory: each is refused with its documented sentinel, wipes the caller's
 // slice where the contract says so, and locks nothing.
-func TestSealerRefusesInvalidArgumentsBeforeAnyLockedMemory(t *testing.T) {
+func TestSealing_SealerRefusesInvalidArgumentsBeforeAnyLockedMemory(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		ctx := context.Background()
 		before := vmLck(t)
@@ -1149,9 +1149,9 @@ func TestSealerRefusesInvalidArgumentsBeforeAnyLockedMemory(t *testing.T) {
 	})
 }
 
-// TestNewSealerRefusesMisconfiguration: the provider option fixes the mode,
+// TestSealing_NewSealerRefusesMisconfiguration: the provider option fixes the mode,
 // and two providers are refused at CONSTRUCTION rather than resolved by order.
-func TestNewSealerRefusesMisconfiguration(t *testing.T) {
+func TestSealing_NewSealerRefusesMisconfiguration(t *testing.T) {
 	ro := rootOnly{soft: enclave.NewSoftwareProvider()}
 	if s, err := enclave.NewSealer(enclave.WithRootUnsealer(ro)); err != nil || s.Mode() != enclave.ModeRootKey {
 		t.Errorf("NewSealer(WithRootUnsealer) = (%v, %v), want a ModeRootKey sealer", s, err)

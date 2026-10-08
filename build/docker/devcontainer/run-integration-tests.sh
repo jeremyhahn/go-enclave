@@ -44,6 +44,7 @@ GOCOVERDIR=$covdir go test $flags -cover -coverpkg="$coverpkg" "./$dir" -args -t
 # is compared on exact covered/total statements. (`covdata percent` rounds to
 # one decimal first, which would pass 89.96% as 90.0%.)
 profile=$(mktemp /tmp/profile.XXXXXX)
+trap 'rm -rf "$covdir" "$profile"' EXIT
 go tool covdata textfmt -i="$covdir" -pkg="$coverpkg" -o "$profile"
 
 # For whoever is raising coverage: GO_ENCLAVE_IT_PROFILE_OUT names a path to

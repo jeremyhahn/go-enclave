@@ -18,7 +18,9 @@
 #      a version pointing at whatever main happens to be;
 #   2. creates the release, or, if one exists for the tag (a re-run), updates
 #      it in place — name, body, prerelease — so re-running converges instead
-#      of failing or duplicating. Nothing is ever deleted;
+#      of failing or duplicating. Every write names <commit-sha> as the
+#      release's target_commitish, so the release points at the gated commit
+#      whatever the forge's default branch holds. Nothing is ever deleted;
 #   3. reads the release back and requires the stored body and prerelease
 #      flag to be exactly what was sent.
 #
@@ -140,8 +142,8 @@ esac
 tagsha=$(jq -r '.commit.sha // empty' "$work/response")
 [ "$tagsha" = "$sha" ] || die "tag $tag names commit '${tagsha:-<none>}' on the forge, but the gate ran on $sha; refusing to publish"
 
-jq -n --arg tag "$tag" --arg body "$notes" --argjson pre "$prerelease" \
-  '{tag_name: $tag, name: $tag, body: $body, draft: false, prerelease: $pre}' > "$work/payload"
+jq -n --arg tag "$tag" --arg body "$notes" --argjson pre "$prerelease" --arg sha "$sha" \
+  '{tag_name: $tag, target_commitish: $sha, name: $tag, body: $body, draft: false, prerelease: $pre}' > "$work/payload"
 
 # 2. Create, or converge an existing release.
 status=$(call GET "/repos/$repo/releases/tags/$tag")

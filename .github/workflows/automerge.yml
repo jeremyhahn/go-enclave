@@ -93,6 +93,13 @@ on:
   schedule:
     - cron: '*/10 * * * *'
 
+# Least privilege: the job's one checkout reads the base branch with the
+# workflow token. Every forge write (merge, comment, train branch, close) is
+# made with AGENT_TOKEN, a separate credential, so the workflow token is
+# granted nothing else.
+permissions:
+  contents: read
+
 # Runs queue rather than cancel, so a train is never cut off mid-landing where
 # concurrency is honoured. Gitea may not honour it: see train() for the races.
 concurrency:

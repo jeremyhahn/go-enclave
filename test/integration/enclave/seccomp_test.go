@@ -398,10 +398,10 @@ func (f *faultInjector) supervise(started chan<- struct{}) {
 	}
 }
 
-// TestFaultInjectorRefusesAndLifts proves the instrument: a refused mlock
+// TestLockedMemory_FaultInjectorRefusesAndLifts proves the instrument: a refused mlock
 // fails with the chosen errno, succeeds once lifted, and both answers are
 // counted, so a filter that routed nothing cannot make the fault tests pass.
-func TestFaultInjectorRefusesAndLifts(t *testing.T) {
+func TestLockedMemory_FaultInjectorRefusesAndLifts(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		f := installFaultInjector(t, 0)
 		page := unix.Getpagesize()
@@ -446,12 +446,12 @@ func requireRefused(t *testing.T, f *faultInjector, nr int32) {
 	}
 }
 
-// TestFaultInjectorSkipSurvivesRestartedSyscalls replays the notifications of a
+// TestLockedMemory_FaultInjectorSkipSurvivesRestartedSyscalls replays the notifications of a
 // syscall the kernel restarts after an accepted answer, driving decide and
 // commit directly so it is deterministic. A replayed allowance is not spent
 // twice, a replayed refusal is refused again, and the targeted call is still
 // the one refused.
-func TestFaultInjectorSkipSurvivesRestartedSyscalls(t *testing.T) {
+func TestLockedMemory_FaultInjectorSkipSurvivesRestartedSyscalls(t *testing.T) {
 	f := &faultInjector{rules: map[int32]syscallRule{}}
 	f.rules[unix.SYS_MLOCK] = syscallRule{Refuse: true, Errno: unix.ENOMEM, Skip: 2, skipped: map[uintptr]struct{}{}}
 	notif := func(addr uintptr) *seccompNotif {

@@ -80,12 +80,12 @@ func requireBudgetError(t *testing.T, what string, err error, requested, inUse, 
 	}
 }
 
-// TestAdmissionUnderRealMemlockCeiling drives one allocator through the whole
+// TestLockedMemoryBudget_AdmissionUnderRealMemlockCeiling drives one allocator through the whole
 // admission lifecycle against a 32-page kernel ceiling: construction checks,
 // filling to the ceiling (VmLck agreeing) with the next refused by budget, an
 // unadmitted allocation refused by the kernel, release and re-admission,
 // SetLimit/ForceLimit/TransferTo at the ceiling, and nothing held at the end.
-func TestAdmissionUnderRealMemlockCeiling(t *testing.T) {
+func TestLockedMemoryBudget_AdmissionUnderRealMemlockCeiling(t *testing.T) {
 	page := enclave.LockedSize(1)
 	ceiling := admissionPages * page
 	isolated(t, childOpts{memlock: ceiling}, func(t *testing.T) {
@@ -246,11 +246,11 @@ func TestAdmissionUnderRealMemlockCeiling(t *testing.T) {
 	})
 }
 
-// TestAdmissionHoldsTheKernelCeilingUnderContention admits and releases from
+// TestLockedMemoryBudget_AdmissionHoldsTheKernelCeilingUnderContention admits and releases from
 // many goroutines while another retunes a budget whose maximum is exactly the
 // kernel ceiling, so any over-admission becomes a real mlock failure. Refusals
 // and sampled figures stay in range, and everything is returned at the end.
-func TestAdmissionHoldsTheKernelCeilingUnderContention(t *testing.T) {
+func TestLockedMemoryBudget_AdmissionHoldsTheKernelCeilingUnderContention(t *testing.T) {
 	page := enclave.LockedSize(1)
 	ceiling := admissionPages * page
 	isolated(t, childOpts{memlock: ceiling}, func(t *testing.T) {
@@ -364,10 +364,10 @@ func TestAdmissionHoldsTheKernelCeilingUnderContention(t *testing.T) {
 	})
 }
 
-// TestProcessAllocatorDefaultsToTheKernelCeiling is the library path: the lazy
+// TestLockedMemoryBudget_ProcessAllocatorDefaultsToTheKernelCeiling is the library path: the lazy
 // default's budget is the discovered ceiling, kept for life, and installation
 // is one-shot.
-func TestProcessAllocatorDefaultsToTheKernelCeiling(t *testing.T) {
+func TestLockedMemoryBudget_ProcessAllocatorDefaultsToTheKernelCeiling(t *testing.T) {
 	page := enclave.LockedSize(1)
 	const pages = 8
 	ceiling := pages * page
@@ -417,10 +417,10 @@ func TestProcessAllocatorDefaultsToTheKernelCeiling(t *testing.T) {
 	})
 }
 
-// TestSetAllocatorIsTheBinarysOneShotDecision is the binary path: the budget
+// TestLockedMemoryBudget_SetAllocatorIsTheBinarysOneShotDecision is the binary path: the budget
 // installed once is what every ProcessAllocator caller admits against; nil and a
 // second installation are refused.
-func TestSetAllocatorIsTheBinarysOneShotDecision(t *testing.T) {
+func TestLockedMemoryBudget_SetAllocatorIsTheBinarysOneShotDecision(t *testing.T) {
 	page := enclave.LockedSize(1)
 	ceiling := admissionPages * page
 	isolated(t, childOpts{memlock: ceiling}, func(t *testing.T) {
@@ -463,10 +463,10 @@ func TestSetAllocatorIsTheBinarysOneShotDecision(t *testing.T) {
 	})
 }
 
-// TestZeroMemlockCeilingFailsClosedEverywhere pins that under a zero
+// TestLockedMemoryBudget_ZeroMemlockCeilingFailsClosedEverywhere pins that under a zero
 // RLIMIT_MEMLOCK every route to locked memory refuses with a typed error: the
 // default allocator by budget, direct construction and sealing by the kernel.
-func TestZeroMemlockCeilingFailsClosedEverywhere(t *testing.T) {
+func TestLockedMemoryBudget_ZeroMemlockCeilingFailsClosedEverywhere(t *testing.T) {
 	isolated(t, childOpts{memlockZero: true}, func(t *testing.T) {
 		lim, err := enclave.DiscoverLockedMemoryLimit()
 		if err != nil {
@@ -509,9 +509,9 @@ func TestZeroMemlockCeilingFailsClosedEverywhere(t *testing.T) {
 	})
 }
 
-// TestForceLimitReportsTheExcessItCreates pins ForceLimit's excess on raise,
+// TestLockedMemoryBudget_ForceLimitReportsTheExcessItCreates pins ForceLimit's excess on raise,
 // no-op and lowering, and that the excess refuses admission until repaid.
-func TestForceLimitReportsTheExcessItCreates(t *testing.T) {
+func TestLockedMemoryBudget_ForceLimitReportsTheExcessItCreates(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		page := enclave.LockedSize(1)
 		a, err := enclave.NewAllocator(2 * page)
@@ -543,11 +543,11 @@ func TestForceLimitReportsTheExcessItCreates(t *testing.T) {
 	})
 }
 
-// TestAdmissionErrorsDescribeThemselves drives each admission and rlimit
+// TestLockedMemoryBudget_AdmissionErrorsDescribeThemselves drives each admission and rlimit
 // error from a real refusal and checks what an operator reads: the message
 // names the condition, errors.As reaches the figures, and the sentinel still
 // matches; LimitDiscoveryError renders and unwraps its cause.
-func TestAdmissionErrorsDescribeThemselves(t *testing.T) {
+func TestLockedMemoryBudget_AdmissionErrorsDescribeThemselves(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		page := enclave.LockedSize(1)
 
@@ -621,10 +621,10 @@ func TestAdmissionErrorsDescribeThemselves(t *testing.T) {
 	})
 }
 
-// TestAllocatorRefusesInvalidArguments drives every argument check of the
+// TestLockedMemoryBudget_AllocatorRefusesInvalidArguments drives every argument check of the
 // budget API against real locked memory: each is refused with its documented
 // sentinel and leaves no locked memory or charge behind.
-func TestAllocatorRefusesInvalidArguments(t *testing.T) {
+func TestLockedMemoryBudget_AllocatorRefusesInvalidArguments(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		before := vmLck(t)
 		a, err := enclave.NewAllocator(4 * enclave.LockedSize(1))
@@ -663,10 +663,10 @@ func TestAllocatorRefusesInvalidArguments(t *testing.T) {
 	})
 }
 
-// TestNilAllocatorRefusesEverywhere: a nil *Allocator is a lost configuration
+// TestLockedMemoryBudget_NilAllocatorRefusesEverywhere: a nil *Allocator is a lost configuration
 // step, so every method that can fail refuses with ErrNilAllocator, New still
 // wipes the data it took, nothing is locked, and the observers report zero.
-func TestNilAllocatorRefusesEverywhere(t *testing.T) {
+func TestLockedMemoryBudget_NilAllocatorRefusesEverywhere(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		before := vmLck(t)
 		var a *enclave.Allocator

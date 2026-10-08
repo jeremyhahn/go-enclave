@@ -9,6 +9,21 @@ cannot have: the real kernel's `RLIMIT_MEMLOCK`, VmLck and VmFlags, a full
 `/proc/self/mem` sweep, a seccomp fault injector, or a process-wide limit set
 in a fresh child process. Everything else is a unit test in the package itself.
 
+Every test is named for the one feature it belongs to, with the prefix
+[scripts/features.map](../../scripts/features.map) gives that feature
+(`TestLockedMemory_`, `TestLockedMemoryBudget_`, `TestSealing_`,
+`TestShutdownSweep_`, `TestProviderConformance_`). `make
+integration-test-<feature>` runs the tests with that prefix and nothing else,
+and `build/ci/buildgates` fails on a test with no feature's prefix. A test that
+serves two features (the table below lists some) carries the prefix of the one
+it is mostly about.
+
+The root package's user-namespace test is not in this suite: it needs
+`package enclave` internals and a seccomp profile that permits `CLONE_NEWUSER`.
+`make integration-test-userns` runs it in its own compose service, as part of
+every `integration-test-enclave` and of
+`integration-test-locked-memory-budget`.
+
 `providertest` has no suite of its own: its devcontainer cases are in the
 enclave suite (provider-conformance below), and its harness is gated at
 `COVERAGE_THRESHOLD` by the unit `make coverage-providertest`.

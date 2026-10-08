@@ -23,7 +23,7 @@
 # GOPRIVATE and the git insteadOf rewrite carrying a read token, so the module
 # is fetched from Gitea; on GitHub and for public consumers there is no
 # rewrite and it comes from the public proxy. This script sets neither, never
-# prints either, and sets no GOFLAGS, GONOSUMDB or GOINSECURE.
+# prints either, and clears GOFLAGS and sets no GONOSUMDB or GOINSECURE.
 #
 # The fresh module cache is the point, not a cost: a cache already holding the
 # module would answer from local bytes and prove nothing about the forge.
@@ -53,7 +53,9 @@ trap 'exit 130' INT TERM
 
 GOWORK=off
 GOMODCACHE=$work/modcache
-export GOWORK GOMODCACHE
+# The runner's GOFLAGS (-mod=vendor, -modfile, -tags) must not shape the consumer.
+GOFLAGS=
+export GOWORK GOMODCACHE GOFLAGS
 
 mkdir "$work/consumer"
 cd "$work/consumer"

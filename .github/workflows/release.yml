@@ -42,9 +42,11 @@
 # per-instance approval (release-versioning §5, devops §3) — the publish
 # script also refuses api.github.com on its own.
 #
-# Every job checks out the tag ref, so every job runs on the tagged commit;
-# Publish additionally confirms the forge's tag still names the commit Verify
-# saw before attaching anything to it.
+# Verify resolves the tag to a commit once; every other job checks out that
+# SHA (needs.verify.outputs.sha), never the tag ref again, so a tag moved after
+# Verify cannot change what the gates run on. Publish additionally confirms the
+# forge's tag still names that commit and sends it as the release's
+# target_commitish, before attaching anything to it.
 #
 # NEVER add `GOPROXY: direct` or `GOSUMDB: off` here either (see ci.yml). The
 # consumer resolves exactly as dependency-resolution §1/§6 says: on our runners
@@ -108,6 +110,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.verify.outputs.sha }}   # the commit Verify saw, never the tag again
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
@@ -122,6 +126,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.verify.outputs.sha }}   # the commit Verify saw, never the tag again
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
@@ -141,6 +147,8 @@ jobs:
       GOMAXPROCS: 8
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.verify.outputs.sha }}   # the commit Verify saw, never the tag again
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
@@ -156,6 +164,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.verify.outputs.sha }}   # the commit Verify saw, never the tag again
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
@@ -168,22 +178,28 @@ jobs:
   # Integration job runs, so a tag is held to at least the PR gate. Docker is a
   # hard requirement: the targets fail, never skip, without docker, Compose v2
   # or a reachable daemon. No event value reaches these targets; they take
-  # none. Each run trivy-scans the image it builds, and trivy is not on the
-  # runner host, so it is installed from the pinned release tarball, verified
-  # against scripts/tool-pins.sh's SHA-256 (TOOL_INSTALL=1).
+  # none. The image is trivy-scanned once, and trivy is not on the runner
+  # host, so it is copied out of the toolchain image, which carries it at the
+  # pin in scripts/tool-pins.sh; nothing is downloaded.
   integration:
     name: Integration
     needs: [verify, lint, build]
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    env:
-      TOOL_INSTALL: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.verify.outputs.sha }}   # the commit Verify saw, never the tag again
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: go.mod
+
+      - name: Pinned trivy from the toolchain image
+        run: |
+          set -eu
+          sh build/ci/toolchain-trivy.sh "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
 
       - run: make ci-integration
 
@@ -194,6 +210,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.verify.outputs.sha }}   # the commit Verify saw, never the tag again
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
@@ -220,21 +238,32 @@ jobs:
     permissions:
       contents: write   # create/update the release; nothing else
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-
-      # Gitea combines a skipped job as success and does not implement
-      # join(needs.*.result) (devops §1), so every stage is checked by name and
-      # anything but success refuses to publish.
+      # Nothing from the repository runs, and no checkout happens, until every
+      # stage has passed: with always() this job also starts after a failed
+      # Verify, when the SHA may name unverified tag code or be empty (checkout
+      # then defaults to the event ref). Gitea combines a skipped job as success
+      # and does not implement join(needs.*.result) (devops §1), so every stage
+      # is checked by name, inline, and anything but success refuses to publish.
       - name: Every stage passed
         run: |
-          sh build/ci/summary.sh "not publishing: a release stage did not pass" \
-            verify="${{ needs.verify.result }}" \
-            lint="${{ needs.lint.result }}" \
-            build="${{ needs.build.result }}" \
-            security="${{ needs.security.result }}" \
-            test="${{ needs.test.result }}" \
-            integration="${{ needs.integration.result }}" \
-            consumer="${{ needs.consumer.result }}"
+          bad=0
+          for r in \
+            verify=${{ needs.verify.result }} \
+            lint=${{ needs.lint.result }} \
+            build=${{ needs.build.result }} \
+            security=${{ needs.security.result }} \
+            test=${{ needs.test.result }} \
+            integration=${{ needs.integration.result }} \
+            consumer=${{ needs.consumer.result }}
+          do
+            case $r in *=success) ;; *) echo "::error::not publishing: ${r%%=*} is ${r#*=}"; bad=1 ;; esac
+          done
+          [ "$bad" -eq 0 ] || exit 1
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.verify.outputs.sha }}   # the commit Verify saw, never the tag again
+          persist-credentials: false             # publishing uses the step-scoped FORGE_TOKEN
 
       - name: Publish the release with its CHANGELOG section
         env:

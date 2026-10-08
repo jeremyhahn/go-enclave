@@ -15,7 +15,9 @@
 #                 installs NOTHING: the tool must already be on PATH at
 #                 exactly the pinned version, and anything else — absent,
 #                 another version, a build that cannot say which version it is
-#                 — fails closed. CI on our runners sets 0, because the runner
+#                 — fails closed. An archive tool (trivy, shellcheck) must also
+#                 hash to its pinned binary SHA-256, checked before it is run:
+#                 the version a binary reports about itself proves nothing. CI on our runners sets 0, because the runner
 #                 image bakes the tools at its own pinned versions and a
 #                 network install over them is the substitution that image
 #                 exists to prevent. Any other value is refused rather than
@@ -130,8 +132,8 @@ sha256_of() { sha256sum "$1" | cut -d' ' -f1; }
 # The pinned hashes for a downloaded tool on this platform, and its archive.
 # Sets: artifact, member (path of the binary inside the archive), sum, binsum.
 archive_pins() {
-  for t in curl tar sha256sum uname; do
-    command -v "$t" >/dev/null 2>&1 || die "$tool: $t is required to install it and was not found"
+  for t in sha256sum uname; do
+    command -v "$t" >/dev/null 2>&1 || die "$tool: $t is required to verify it and was not found"
   done
   case $(uname -s):$(uname -m) in
     Linux:x86_64)              arch=AMD64 ;;
@@ -154,7 +156,6 @@ archive_pins() {
                 sum=$(printenv "SHELLCHECK_SHA256_LINUX_$arch" || true)
                 binsum=$(printenv "SHELLCHECK_BIN_SHA256_LINUX_$arch" || true) ;;
   esac
-  matches "$sum" '^[0-9a-f]{64}$' || die "$tool: the pinned archive SHA-256 for $artifact is missing or malformed"
   matches "$binsum" '^[0-9a-f]{64}$' || die "$tool: the pinned binary SHA-256 for $artifact is missing or malformed"
 }
 
@@ -171,6 +172,10 @@ archive_pins() {
 # downloaded is ever executed as a script — this replaces nightly.yml's
 # `curl …/contrib/install.sh from main | sh`.
 install_archive() {
+  for t in curl tar; do
+    command -v "$t" >/dev/null 2>&1 || die "$tool: $t is required to install it and was not found"
+  done
+  matches "$sum" '^[0-9a-f]{64}$' || die "$tool: the pinned archive SHA-256 for $artifact is missing or malformed"
   case $artifact in *.xz) command -v xz >/dev/null 2>&1 || die "$tool: xz is required to unpack $artifact" ;; esac
   curl -sSfL --proto '=https' --tlsv1.2 --retry 3 -o "$tmp/$artifact" "$url" ||
     die "$tool: downloading $artifact failed"
@@ -198,7 +203,24 @@ case ${TOOL_INSTALL-} in
     bin=$(command -v "$tool" 2>/dev/null) ||
       die "$tool is not on PATH and TOOL_INSTALL=0 forbids installing it. CI expects it baked into the runner image at $want; locally, run without TOOL_INSTALL=0 to install the pinned version into the repository."
     case $bin in /*) ;; *) die "$tool resolved to '$bin', which is not an absolute path" ;; esac
+    if [ "$kind" = archive ]; then
+      # Checked before the binary is run for its version: a planted binary can
+      # print any version, and must not be executed to find out.
+      archive_pins
+      [ "$(sha256_of "$bin")" = "$binsum" ] ||
+        die "$tool at $bin does not hash to the pinned binary SHA-256 $binsum. A binary that reports $want is not the release that was reviewed; treat this as a supply-chain event."
+    fi
     require_version "$bin" "Raise the Makefile pin and the runner image's version together, or the two drift apart; a network install is not the fix."
+    if [ "$kind" = go ]; then
+      # The version alone does not say which compiler built the tool: one built
+      # by an older Go cannot load this module.
+      TOOLCHAIN=${TOOLCHAIN:-$("$go" env GOVERSION)}
+      matches "${TOOLCHAIN-}" '^go[0-9]+\.[0-9]+(\.[0-9]+)?$' ||
+        die "TOOLCHAIN '${TOOLCHAIN-}' is not a Go toolchain name; the Makefile resolves it inside the module (#83)"
+      built=$(built_with "$bin")
+      [ "$built" = "$TOOLCHAIN" ] ||
+        die "$tool at $bin was built with '${built:-an unknown Go}', but this module's toolchain is $TOOLCHAIN; rebuild the runner image's tool with $TOOLCHAIN"
+    fi
     ;;
   1)
     [ -n "${TOOLS_DIR-}" ] || die "TOOLS_DIR is unset"

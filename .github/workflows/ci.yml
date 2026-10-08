@@ -130,6 +130,8 @@ jobs:
       security-events: write  # the gosec SARIF upload on github.com; unused on Gitea
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
@@ -229,21 +231,25 @@ jobs:
   # Both FIPS configurations run (`make ci-integration`), one after the other:
   # the default, and FIPS 140-3 strict (GOFIPS140=latest, GODEBUG=fips140=only),
   # which the suite verifies actually took effect (crypto/fips140.Enabled/
-  # Enforced). Each run trivy-scans the image it builds; trivy is not on the
-  # runner host, so it is installed from the pinned release tarball, verified
-  # against scripts/tool-pins.sh's SHA-256 (TOOL_INSTALL=1).
+  # Enforced). The image is trivy-scanned once (both runs use the same image).
+  # trivy is not on the runner host, so it is copied out of the toolchain image,
+  # which carries it at the pin in scripts/tool-pins.sh; nothing is downloaded.
   integration:
     name: Integration
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    env:
-      TOOL_INSTALL: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: go.mod
+
+      - name: Pinned trivy from the toolchain image
+        run: |
+          set -eu
+          sh build/ci/toolchain-trivy.sh "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
 
       - run: make ci-integration
 

@@ -10,6 +10,7 @@
 #   prog                    the script's name without .sh, the prefix of die()
 #   NL                      one newline
 #   die MSG...              print "<prog>: MSG" to stderr and exit 1
+#   require_scanned_image   die unless the integration image is the one that was scanned
 #   matches VALUE ERE       the WHOLE value matches
 #   VERSION_RE              vX.Y.Z[-pre]
 #   RELEASE_TAG_RE          vX.Y.Z, vX.Y.Z-alpha or vX.Y.Z-rc.N
@@ -26,6 +27,18 @@ NL='
 '
 
 die() { echo "$prog: $*" >&2; exit 1; }
+
+# require_scanned_image: fail unless GO_ENCLAVE_IT_IMAGE, set by
+# scripts/integration-image.sh, still has the ID that script scanned
+# (GO_ENCLAVE_IT_IMAGE_ID). A suite runs only on the image that was scanned.
+require_scanned_image() {
+  [ -n "${GO_ENCLAVE_IT_IMAGE-}" ] && [ -n "${GO_ENCLAVE_IT_IMAGE_ID-}" ] ||
+    die "GO_ENCLAVE_IT_IMAGE and GO_ENCLAVE_IT_IMAGE_ID are required: the suite runs on the image scripts/integration-image.sh scanned"
+  _got=$(docker image inspect --format '{{.Id}}' "$GO_ENCLAVE_IT_IMAGE" 2>/dev/null) ||
+    die "the integration image $GO_ENCLAVE_IT_IMAGE does not exist"
+  [ "$_got" = "$GO_ENCLAVE_IT_IMAGE_ID" ] ||
+    die "the integration image $GO_ENCLAVE_IT_IMAGE is $_got, not the $GO_ENCLAVE_IT_IMAGE_ID that was scanned"
+}
 
 # `grep` alone is line-oriented, so a value with an embedded newline would pass
 # on any one matching line.

@@ -1,0 +1,25 @@
+# features.map — the feature mapping, read by scripts/features.sh, the Makefile
+# and build/ci/buildgates (local-software-factory §7).
+#
+# One line per feature (a directory docs/<feature>/), whitespace-separated:
+#
+#   <feature> <unit-package> <suite> <test-prefix> <source-glob>...
+#
+#   unit-package  the Makefile package whose test-<pkg> the feature runs
+#   suite         the directory under test/integration/ holding its integration
+#                 tests
+#   test-prefix   every integration test of the feature is named
+#                 <test-prefix>..., so `-run ^<test-prefix>` selects it and
+#                 `make integration-test-<feature>` runs nothing else. It ends
+#                 in an underscore, so no prefix is the start of another.
+#   source-glob   the non-test .go files of the feature, from the repository
+#                 root; a shell pattern, where `*` also crosses `/`
+#
+# build/ci/buildgates fails when a docs/<feature>/ directory has no line, when
+# a source file matches no glob or two features' globs, when a glob matches
+# nothing, and when an integration test does not carry a feature's prefix.
+locked-memory         enclave      enclave TestLockedMemory_         constanttime.go doc.go enclave.go errors.go harden*.go madvise*.go mapping.go osmem*.go secret_erase.go secret_noerase.go internal/memscan/*.go
+locked-memory-budget  enclave      enclave TestLockedMemoryBudget_   allocator.go memlock.go memlock_*.go singleton.go
+sealing               enclave      enclave TestSealing_              aead.go hierarchy.go keywrap.go provider.go sealed.go sealer.go
+shutdown-sweep        enclave      enclave TestShutdownSweep_        registry.go
+provider-conformance  providertest enclave TestProviderConformance_  provider_software.go providertest/*.go

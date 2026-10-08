@@ -45,12 +45,25 @@ changelog=CHANGELOG.md
 fragdir=changelog.d
 [ -f "$changelog" ] || die "$changelog not found (run from the repository root)"
 
-# Fragments in a stable order. The glob is sorted under LC_ALL=C.
+# Fragments in a stable order: numerically by issue (the leading digits of the
+# file name, so 9x folds before 10x), then by file name under LC_ALL=C.
 set --
 if [ -d "$fragdir" ]; then
+  tab=$(printf '\t')
+  keyed=
   for f in "$fragdir"/*.md; do
-    [ -f "$f" ] && set -- "$@" "$f"
+    [ -f "$f" ] || continue
+    b=${f##*/}
+    keyed=$keyed$(printf '%s\t%s' "$(printf '%s' "${b%%[!0-9]*}" | sed 's/^0*//;s/^$/0/')" "$f")$NL
   done
+  if [ -n "$keyed" ]; then
+    sorted=$(printf '%s' "$keyed" | LC_ALL=C sort -t "$tab" -k1,1n -k2,2)
+    old_ifs=$IFS; IFS=$NL
+    for line in $sorted; do
+      set -- "$@" "${line#*"$tab"}"
+    done
+    IFS=$old_ifs
+  fi
 fi
 
 if grep -Eq "$(version_anchor "$version")" "$changelog"; then

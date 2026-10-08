@@ -2,20 +2,26 @@
 #
 #   integration  `make integration-test` (and -fips) is the entry point; it
 #                runs this file under a UNIQUE project name per run and tears
-#                it down with `down --volumes --rmi local` on every exit.
+#                it down with `down --volumes` on every exit. The image is not
+#                the project's: scripts/integration-image.sh builds, scans and
+#                removes it (below).
+#   userns       `make integration-test-userns`: the integration service under a
+#                seccomp profile that also permits CLONE_NEWUSER (see below).
 #   toolchain    `make docker-run CMD='make lint'`: a command in the toolchain
 #                image, as the invoking user, with the checkout bind-mounted.
 #                For a workstation; on a CI runner a bind mount resolves on the
 #                host daemon, where the checkout does not exist (Dockerfile).
 #
 # Per-run isolation of the integration service (handbook integration-testing
-# §7): no container_name, no image: tag (compose names the image
-# <project>-integration, so it is unique per run), no published ports, and the
-# only volume is per-project. Two runs on one host — two agents, a push and a
-# re-run — cannot claim each other's containers, images or caches. The
-# toolchain service names its image, go-enclave-toolchain:<tag>, because `make
-# docker-build` builds and tags it; `--rmi local` never removes it, and
-# pull_policy: never means that name is never looked up in a registry.
+# §7): no container_name, no published ports, and the only volume is
+# per-project. The integration image's tag is unique per run
+# (go-enclave-it:<time>-<pid>-<random>, GO_ENCLAVE_IT_IMAGE), set by
+# scripts/integration-image.sh, which builds it once, scans it, runs the suites
+# on it and removes it. Two runs on one host — two agents, a push and a re-run —
+# cannot claim each other's containers, images or caches. The toolchain service
+# names its image, go-enclave-toolchain:<tag>, because `make docker-build`
+# builds and tags it; pull_policy: never means that name is never looked up in
+# a registry.
 #
 # SECURITY POSTURE (x-posture, both services), every setting justified. The
 # suite exercises locked memory, core-dump exclusion and process-memory
@@ -105,35 +111,59 @@ x-posture: &posture
       hard: 4096
   working_dir: /src
 
+x-integration: &integration_service
+  <<: *posture
+  # One image per `make ci-integration`: scripts/integration-image.sh builds it
+  # under a tag unique to the run (GO_ENCLAVE_IT_IMAGE), scans that exact image
+  # ID, and the userns, default and FIPS suites run on it with `run --pull never`.
+  # The default is for a hand-run `docker compose`, never for the make targets.
+  image: ${GO_ENCLAVE_IT_IMAGE:-go-enclave-it:local}
+  build:
+    context: ../../..
+    dockerfile: build/docker/devcontainer/Dockerfile
+    target: integration
+  user: "10001:10001"
+  tmpfs:
+    - /tmp:rw,exec,nosuid,nodev,size=1g,mode=1777
+  volumes:
+    - gocache:/gocache
+  environment:
+    GOTOOLCHAIN: local
+    GOFLAGS: -mod=readonly
+    GOPROXY: "off"
+    # The FIPS 140-3 configuration of the run. `make integration-test` runs
+    # with these defaults; `make integration-test-fips` overrides all three
+    # with `docker compose run -e` (GOFIPS140=latest, GODEBUG=fips140=only,
+    # GO_ENCLAVE_IT_FIPS_MODE=only). The suite asserts that the runtime
+    # matches GO_ENCLAVE_IT_FIPS_MODE in BOTH directions, so a FIPS run that
+    # silently lost its environment fails rather than passing as non-FIPS.
+    # GODEBUG is deliberately not set here: the default run uses Go's
+    # defaults.
+    GOFIPS140: "off"
+    GO_ENCLAVE_IT_FIPS_MODE: "off"
+    # Must equal ulimits.memlock above (see there).
+    GO_ENCLAVE_IT_MEMLOCK_BYTES: "16777216"
+    GO_ENCLAVE_IT_CORE_BYTES: "1048576"
+
 services:
   integration:
-    <<: *posture
-    build:
-      context: ../../..
-      dockerfile: build/docker/devcontainer/Dockerfile
-      target: integration
-    user: "10001:10001"
-    tmpfs:
-      - /tmp:rw,exec,nosuid,nodev,size=1g,mode=1777
-    volumes:
-      - gocache:/gocache
-    environment:
-      GOTOOLCHAIN: local
-      GOFLAGS: -mod=readonly
-      GOPROXY: "off"
-      # The FIPS 140-3 configuration of the run. `make integration-test` runs
-      # with these defaults; `make integration-test-fips` overrides all three
-      # with `docker compose run -e` (GOFIPS140=latest, GODEBUG=fips140=only,
-      # GO_ENCLAVE_IT_FIPS_MODE=only). The suite asserts that the runtime
-      # matches GO_ENCLAVE_IT_FIPS_MODE in BOTH directions, so a FIPS run that
-      # silently lost its environment fails rather than passing as non-FIPS.
-      # GODEBUG is deliberately not set here: the default run uses Go's
-      # defaults.
-      GOFIPS140: "off"
-      GO_ENCLAVE_IT_FIPS_MODE: "off"
-      # Must equal ulimits.memlock above (see there).
-      GO_ENCLAVE_IT_MEMLOCK_BYTES: "16777216"
-      GO_ENCLAVE_IT_CORE_BYTES: "1048576"
+    <<: *integration_service
+
+  # The root package's user-namespace test (memlock_userns_linux_test.go): it
+  # re-executes the test binary as root of a new user namespace, which Docker's
+  # default seccomp profile refuses (clone with CLONE_NEWUSER needs
+  # CAP_SYS_ADMIN, and the posture drops every capability). seccomp-userns.json
+  # is Docker's default profile (moby/profiles seccomp/default.json, 2026-10-08)
+  # with one change: the clone rule's mask no longer covers CLONE_NEWUSER, so an
+  # unprivileged process may create a user namespace and no other kind. Nothing
+  # else differs from `integration`: no capability, no unconfined profile,
+  # AppArmor on. The test FAILS where the namespace is refused or carries no
+  # capabilities; scripts/userns-test.sh runs it here.
+  userns:
+    <<: *integration_service
+    security_opt:
+      - no-new-privileges:true
+      - seccomp:./seccomp-userns.json
 
   toolchain:
     <<: *posture

@@ -187,7 +187,8 @@ func TestWipeAll_ABorrowThatOutlastsCtxIsCountedNotUnmapped(t *testing.T) {
 	select {
 	case remaining = <-swept:
 	case <-time.After(sweepHangBound):
-		// Not t.Fatal with the borrow still parked: Destroy would block on it.
+		// A failure, not a skip: with the borrow still parked the sweep must
+		// return once ctx ends.
 		t.Fatal("WipeAll did not return after its context was canceled with a borrow in flight: " +
 			"the wait is not bounded by ctx; a stalled holder would hang shutdown")
 	}

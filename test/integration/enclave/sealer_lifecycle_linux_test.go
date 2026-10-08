@@ -20,10 +20,10 @@ import (
 	enclave "github.com/jeremyhahn/go-enclave"
 )
 
-// TestSealerDestroyReportsAndRetriesARefusedRelease: with munlock refused,
+// TestSealing_SealerDestroyReportsAndRetriesARefusedRelease: with munlock refused,
 // Destroy reports that the keys' pages are still held, the sealer is already
 // unusable, and a later Destroy releases them once the kernel allows it.
-func TestSealerDestroyReportsAndRetriesARefusedRelease(t *testing.T) {
+func TestSealing_SealerDestroyReportsAndRetriesARefusedRelease(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		ctx := context.Background()
 		f := installFaultInjector(t, 0)

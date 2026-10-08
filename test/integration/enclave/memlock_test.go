@@ -20,9 +20,9 @@ import (
 // Behavior under the real RLIMIT_MEMLOCK ceiling is covered in
 // allocator_test.go.
 
-// TestLimitSourcesDescribeThemselves: every LimitSource an operator can see
+// TestLockedMemoryBudget_LimitSourcesDescribeThemselves: every LimitSource an operator can see
 // in a log renders as a description, not a number.
-func TestLimitSourcesDescribeThemselves(t *testing.T) {
+func TestLockedMemoryBudget_LimitSourcesDescribeThemselves(t *testing.T) {
 	for _, src := range []enclave.LimitSource{enclave.LimitUnknown, enclave.LimitRLimit, enclave.LimitUnlimited, enclave.LimitNotEnforced, enclave.LimitUnsupported} {
 		if s := src.String(); s == "" || strings.Contains(s, "%") {
 			t.Errorf("LimitSource(%d).String() = %q", int(src), s)

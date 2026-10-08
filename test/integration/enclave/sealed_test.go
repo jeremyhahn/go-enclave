@@ -22,7 +22,7 @@ import (
 // Covers sealed.go: between opens the process holds only ciphertext, measured
 // by sweeping process memory; and OpenWith's admission against a budget.
 
-// TestSealedValueHoldsNoPlaintextBetweenOpens follows one secret through a
+// TestSealing_SealedValueHoldsNoPlaintextBetweenOpens follows one secret through a
 // sealed value's life, in both modes, sweeping every readable mapping at each
 // step:
 //
@@ -35,7 +35,7 @@ import (
 //     straight into locked pages;
 //   - nowhere again once that enclave is destroyed, and likewise for OpenWith;
 //   - nowhere after a shutdown sweep reclaims an enclave still open at exit.
-func TestSealedValueHoldsNoPlaintextBetweenOpens(t *testing.T) {
+func TestSealing_SealedValueHoldsNoPlaintextBetweenOpens(t *testing.T) {
 	for _, mode := range sealerModes {
 		t.Run(mode.String(), func(t *testing.T) {
 			isolated(t, childOpts{}, func(t *testing.T) {
@@ -105,11 +105,11 @@ func TestSealedValueHoldsNoPlaintextBetweenOpens(t *testing.T) {
 	}
 }
 
-// TestOpenWithAdmitsAgainstTheBudget: OpenWith charges the plaintext page to
+// TestLockedMemoryBudget_OpenWithAdmitsAgainstTheBudget: OpenWith charges the plaintext page to
 // the caller's allocator, refuses by budget before any decryption once that is
 // spent (the value surviving intact), returns the charge on Destroy, and
 // refuses a nil allocator rather than falling back to an unbudgeted open.
-func TestOpenWithAdmitsAgainstTheBudget(t *testing.T) {
+func TestLockedMemoryBudget_OpenWithAdmitsAgainstTheBudget(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		ctx := context.Background()
 		page := enclave.LockedSize(1)
@@ -160,11 +160,11 @@ func TestOpenWithAdmitsAgainstTheBudget(t *testing.T) {
 	})
 }
 
-// TestDestroyedAndNilSealedValuesAnswerSafely covers what every accessor of a
+// TestSealing_DestroyedAndNilSealedValuesAnswerSafely covers what every accessor of a
 // destroyed — or nil — SealedEnclave reports: each answers with the
 // documented sentinel, Destroy is idempotent, and String never prints the
 // material.
-func TestDestroyedAndNilSealedValuesAnswerSafely(t *testing.T) {
+func TestSealing_DestroyedAndNilSealedValuesAnswerSafely(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		ctx := context.Background()
 

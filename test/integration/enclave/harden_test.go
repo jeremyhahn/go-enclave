@@ -22,10 +22,10 @@ import (
 	enclave "github.com/jeremyhahn/go-enclave"
 )
 
-// TestHardenProcess_KernelReportsNotDumpable calls HardenProcess in an
+// TestLockedMemory_HardenProcess_KernelReportsNotDumpable calls HardenProcess in an
 // isolated child and reads the result back from the kernel: PR_GET_DUMPABLE
 // is 0 and, for a non-root process, /proc/self/mem is now owned by root.
-func TestHardenProcess_KernelReportsNotDumpable(t *testing.T) {
+func TestLockedMemory_HardenProcess_KernelReportsNotDumpable(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		v, err := unix.PrctlRetInt(unix.PR_GET_DUMPABLE, 0, 0, 0, 0)
 		if err != nil || v == 0 {
@@ -51,10 +51,10 @@ func TestHardenProcess_KernelReportsNotDumpable(t *testing.T) {
 	})
 }
 
-// TestHardenProcess_ReportsARefusedPrctl refuses PR_SET_DUMPABLE with a
+// TestLockedMemory_HardenProcess_ReportsARefusedPrctl refuses PR_SET_DUMPABLE with a
 // seccomp filter and requires the refusal back as a typed error with nothing
 // reported in effect.
-func TestHardenProcess_ReportsARefusedPrctl(t *testing.T) {
+func TestLockedMemory_HardenProcess_ReportsARefusedPrctl(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		installErrnoFilter(t, unix.SYS_PRCTL, 0, unix.PR_SET_DUMPABLE, unix.EPERM)
 

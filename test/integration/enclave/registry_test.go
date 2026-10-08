@@ -29,11 +29,11 @@ import (
 // test owns its process (the ledger is process-global), so each count it reads
 // is exactly its own enclaves.
 
-// TestWipeAllReclaimsEverythingAndLeavesNoResidue places one secret in every
+// TestShutdownSweep_WipeAllReclaimsEverythingAndLeavesNoResidue places one secret in every
 // kind of enclave a process accumulates and requires one WipeAll to leave a
 // zero count, no error, no readable copy, no locked memory, every enclave
 // destroyed, reservations returned, and the sealers wiped (ErrSealerWiped).
-func TestWipeAllReclaimsEverythingAndLeavesNoResidue(t *testing.T) {
+func TestShutdownSweep_WipeAllReclaimsEverythingAndLeavesNoResidue(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		ctx := context.Background()
 		n := newNeedle(t)
@@ -132,12 +132,12 @@ func TestWipeAllReclaimsEverythingAndLeavesNoResidue(t *testing.T) {
 	})
 }
 
-// TestWipeAllWaitsForLiveBorrowsUntilItsDeadline: with a borrow held and a
+// TestShutdownSweep_WipeAllWaitsForLiveBorrowsUntilItsDeadline: with a borrow held and a
 // deadline, WipeAll reclaims everything else, counts the borrowed enclave, and
 // the borrower still reads its material intact. With no deadline, a second
 // sweep waits for the borrow to end and then reclaims it. No timing involved:
 // the borrow is held until after the deadline-bounded sweep returns.
-func TestWipeAllWaitsForLiveBorrowsUntilItsDeadline(t *testing.T) {
+func TestShutdownSweep_WipeAllWaitsForLiveBorrowsUntilItsDeadline(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		n := newNeedle(t)
 		borrowed := enclaveFromNeedle(t, n)
@@ -294,13 +294,13 @@ type sweepResult struct {
 	err   error
 }
 
-// TestWipeAllTurnsAwayAConcurrentCaller: while one sweep runs — held open by a
+// TestShutdownSweep_WipeAllTurnsAwayAConcurrentCaller: while one sweep runs — held open by a
 // borrow it is waiting for — a second caller whose context ends is turned away
 // with ErrSweepInProgress and the CURRENT count, having swept nothing, whether
 // its context had already ended on arrival or reached its deadline while
 // waiting to be admitted. The running sweep then finishes and reports to its
 // own caller.
-func TestWipeAllTurnsAwayAConcurrentCaller(t *testing.T) {
+func TestShutdownSweep_WipeAllTurnsAwayAConcurrentCaller(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		e := enclaveFromNeedle(t, newNeedle(t))
 		entered := make(chan struct{})
@@ -374,11 +374,11 @@ func TestWipeAllTurnsAwayAConcurrentCaller(t *testing.T) {
 	})
 }
 
-// TestWipeAllReportsCanaryCorruptionWithoutPanicking simulates a one-byte
+// TestShutdownSweep_WipeAllReportsCanaryCorruptionWithoutPanicking simulates a one-byte
 // underflow and requires the sweep to reclaim and wipe the enclave and report a
 // SweepError counting one corrupt enclave (ErrEnclaveCorrupted only), without
 // panicking. Healthy enclaves are unaffected, and a later sweep is clean.
-func TestWipeAllReportsCanaryCorruptionWithoutPanicking(t *testing.T) {
+func TestShutdownSweep_WipeAllReportsCanaryCorruptionWithoutPanicking(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		n := newNeedle(t)
 		corrupt := enclaveFromNeedle(t, n)
@@ -411,11 +411,11 @@ func TestWipeAllReportsCanaryCorruptionWithoutPanicking(t *testing.T) {
 	})
 }
 
-// TestDestroyReturnsCanaryCorruptionAfterWiping: on the same simulated
+// TestShutdownSweep_DestroyReturnsCanaryCorruptionAfterWiping: on the same simulated
 // underflow, Destroy wipes the material, releases the pages and RETURNS an
 // error matching ErrEnclaveCorrupted without panicking; the next WipeAll
 // reports the detection once more, and the one after it is clean.
-func TestDestroyReturnsCanaryCorruptionAfterWiping(t *testing.T) {
+func TestShutdownSweep_DestroyReturnsCanaryCorruptionAfterWiping(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		n := newNeedle(t)
 		e := enclaveFromNeedle(t, n)
@@ -465,13 +465,13 @@ func underflowOneByte(t *testing.T, e *enclave.MemoryEnclave) {
 	}
 }
 
-// TestRefusedCleanupLeavesAnOrphanTheSweepReclaims: construction fails (the
+// TestShutdownSweep_RefusedCleanupLeavesAnOrphanTheSweepReclaims: construction fails (the
 // freeze is refused) and so does its rollback's unmap. The library must keep
 // the mapping — on the orphan ledger, counted by WipeAll — refund an admitted
 // charge for pages it managed to unlock, keep the charge for pages still
 // locked, and reclaim everything, refunding exactly once, when the refusal
 // lifts.
-func TestRefusedCleanupLeavesAnOrphanTheSweepReclaims(t *testing.T) {
+func TestShutdownSweep_RefusedCleanupLeavesAnOrphanTheSweepReclaims(t *testing.T) {
 	const n = 64
 	isolated(t, childOpts{}, func(t *testing.T) {
 		f := installFaultInjector(t, mappingLen(n))
@@ -528,10 +528,10 @@ func TestRefusedCleanupLeavesAnOrphanTheSweepReclaims(t *testing.T) {
 	})
 }
 
-// TestSweepErrorRendersEveryValue: SweepError is exported, so a caller can
+// TestShutdownSweep_SweepErrorRendersEveryValue: SweepError is exported, so a caller can
 // build any value of it. The zero value still renders, a value with both
 // findings reports both, and it matches only the sentinels its counts earn.
-func TestSweepErrorRendersEveryValue(t *testing.T) {
+func TestShutdownSweep_SweepErrorRendersEveryValue(t *testing.T) {
 	if msg := (&enclave.SweepError{}).Error(); !strings.HasPrefix(msg, "enclave: ") {
 		t.Errorf("SweepError{}.Error() = %q, want a message in the package's voice", msg)
 	}

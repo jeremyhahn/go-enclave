@@ -11,6 +11,13 @@
 # is named exactly (no /...) so a wrong build tag errors instead of passing
 # vacuously. Every precondition fails rather than skips.
 #
+# The suite runs on an image that scripts/integration-image.sh built once and
+# trivy-scanned (CRITICAL,HIGH, fixable only — devops §8): this script neither
+# builds nor scans. Unless GO_ENCLAVE_IT_IMAGE is set, which that script does,
+# this one runs through it, so a single suite is built and scanned the same way
+# and `make ci-integration` shares one scanned image across userns, default and
+# FIPS.
+#
 # <coverpkg> is the import path the package's coverage floor applies to.
 #
 # Environment (exported by the Makefile): DEVCONTAINER_COMPOSE,
@@ -34,14 +41,21 @@ ls "test/integration/$pkg"/*_test.go >/dev/null 2>&1 || die "test/integration/$p
 { command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; } || die "'docker compose' (Compose v2) is required to run the integration suite in the devcontainer."
 docker version --format '{{.Server.Version}}' >/dev/null 2>&1 || die "the Docker daemon is not reachable (docker version cannot read the server). The integration suite runs in the devcontainer and cannot run without it."
 
-trivy=$(sh "$here/tool.sh" trivy "${TRIVY_VERSION:?TRIVY_VERSION is required}")
+if [ -z "${GO_ENCLAVE_IT_IMAGE-}" ]; then
+  exec sh "$here/integration-image.sh" sh "$here/integration-test.sh" "$pkg" "$coverpkg" "$@"
+fi
+require_scanned_image
+
 project="go-enclave-it-$pkg-$(date +%s)-$$-$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n')"
 echo "compose project: $project"
 
+# The image is not this project's to remove (it is named by GO_ENCLAVE_IT_IMAGE,
+# and compose's --rmi local leaves a named image alone); integration-image.sh
+# removes it after the last suite.
 cleanup() {
   rc=$?
-  if ! docker compose -f "$compose" -p "$project" down --volumes --remove-orphans --rmi local >/dev/null 2>&1; then
-    echo "ERROR: teardown of compose project $project failed; remove it with: docker compose -f '$compose' -p '$project' down --volumes --remove-orphans --rmi local" >&2
+  if ! docker compose -f "$compose" -p "$project" down --volumes --remove-orphans >/dev/null 2>&1; then
+    echo "ERROR: teardown of compose project $project failed; remove it with: docker compose -f '$compose' -p '$project' down --volumes --remove-orphans" >&2
     [ "$rc" -ne 0 ] || rc=1
   fi
   exit "$rc"
@@ -50,11 +64,7 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-docker compose -f "$compose" -p "$project" build "$service"
-echo "trivy image $project-$service (CRITICAL,HIGH, fixable only — devops §8)"
-"$trivy" image --scanners vuln --severity CRITICAL,HIGH --ignore-unfixed --exit-code 1 \
-  --ignorefile .trivyignore --skip-version-check --format table "$project-$service"
-docker compose -f "$compose" -p "$project" run --rm \
+docker compose -f "$compose" -p "$project" run --rm --pull never \
   -e GO_ENCLAVE_IT_TESTFLAGS="${INTEGRATION_TESTFLAGS:?INTEGRATION_TESTFLAGS is required}" \
   -e GO_ENCLAVE_IT_COVERAGE_FLOOR="${COVERAGE_THRESHOLD:?COVERAGE_THRESHOLD is required}" \
   -e GO_ENCLAVE_IT_COVERPKG="$coverpkg" \

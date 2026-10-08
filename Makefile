@@ -73,6 +73,11 @@ tool = $$(sh scripts/tool.sh $(1) $($(2)_VERSION))
 GOSEC_FLAGS := -concurrency=4 -severity=medium -confidence=medium -exclude-dir=test \
 	-fmt=sarif -out=gosec.sarif -stdout -verbose=text
 
+# The same rules for the GOEXPERIMENT=runtimesecret pass: no SARIF (the
+# default pass writes it), the build differs only by secret_erase.go.
+GOSEC_RUNTIMESECRET_FLAGS := -concurrency=4 -severity=medium -confidence=medium -exclude-dir=test \
+	-fmt=text -stdout -verbose=text
+
 # golangci-lint flags. --allow-serial-runners waits for golangci-lint's
 # host-wide lock instead of failing.
 GOLANGCI_FLAGS := run --allow-serial-runners --timeout=5m
@@ -119,18 +124,22 @@ PKGDIR_providertest := ./providertest
 PKGDIR_memscan      := ./internal/memscan
 
 # FEATURE MAPPING (local-software-factory §7). A feature is a directory
-# docs/<feature>/; scripts/features.sh <base> <tip> prints the ones a change
-# touches, which the factory reads as FEATURES_CMD. Each feature runs as
-# test-<feature>, its package's test-<pkg>, and integration-test-<feature>,
-# the one integration suite (integration-test-enclave; which of its tests
-# cover which feature is test/integration/COVERAGE.md). A new docs/<feature>/
-# is mapped here; build/ci/buildgates fails until it is.
-FEATURES := locked-memory locked-memory-budget provider-conformance sealing shutdown-sweep
-FEATURE_PKG_locked-memory        := enclave
-FEATURE_PKG_locked-memory-budget := enclave
-FEATURE_PKG_provider-conformance := providertest
-FEATURE_PKG_sealing              := enclave
-FEATURE_PKG_shutdown-sweep       := enclave
+# docs/<feature>/, mapped in scripts/features.map to its package, its
+# integration suite, the name prefix of its integration tests and its source
+# globs; scripts/features.sh <base> <tip> prints the features a change touches,
+# which the factory reads as FEATURES_CMD. Each feature runs as test-<feature>,
+# its package's test-<pkg>, and integration-test-<feature>, which runs only the
+# tests named with the feature's prefix. A new docs/<feature>/ is mapped there;
+# build/ci/buildgates fails until it is.
+FEATURES := $(shell sh scripts/features.sh list)
+# The feature whose integration run also runs the user-namespace test.
+USERNS_FEATURE := locked-memory-budget
+ifeq ($(strip $(FEATURES)),)
+$(error scripts/features.map maps no feature)
+endif
+$(foreach f,$(FEATURES),$(eval FEATURE_PKG_$(f) := $(shell sh scripts/features.sh field $(f) unit-package)))
+$(foreach f,$(FEATURES),$(eval FEATURE_SUITE_$(f) := $(shell sh scripts/features.sh field $(f) suite)))
+$(foreach f,$(FEATURES),$(eval FEATURE_PREFIX_$(f) := $(shell sh scripts/features.sh field $(f) test-prefix)))
 
 .PHONY: all
 ## all: Same as ci
@@ -219,6 +228,23 @@ gosec:
 govulncheck:
 	@bin=$(call tool,govulncheck,GOVULNCHECK) && SCAN_MODULES=". build/ci/buildgates" sh scripts/scan.sh govulncheck "a vulnerability (a CVE)" "$$bin" $(PKG)
 
+## lint-runtimesecret: golangci-lint under GOEXPERIMENT=runtimesecret, which builds secret_erase.go (#136)
+# The default build never compiles the key-erasure file, so no other lint sees it.
+# The experiment needs the module's own toolchain, so it runs on that go.
+.PHONY: lint-runtimesecret
+lint-runtimesecret:
+	@bin=$(call tool,golangci-lint,GOLANGCI) && GOEXPERIMENT=runtimesecret "$$bin" $(GOLANGCI_FLAGS) $(PKG)
+
+## gosec-runtimesecret: gosec under GOEXPERIMENT=runtimesecret (text only; gosec writes the SARIF)
+.PHONY: gosec-runtimesecret
+gosec-runtimesecret:
+	@bin=$(call tool,gosec,GOSEC) && GOEXPERIMENT=runtimesecret sh scripts/scan.sh gosec "a security finding" "$$bin" $(GOSEC_RUNTIMESECRET_FLAGS) $(PKG)
+
+## govulncheck-runtimesecret: govulncheck under GOEXPERIMENT=runtimesecret
+.PHONY: govulncheck-runtimesecret
+govulncheck-runtimesecret:
+	@bin=$(call tool,govulncheck,GOVULNCHECK) && GOEXPERIMENT=runtimesecret sh scripts/scan.sh govulncheck "a vulnerability (a CVE)" "$$bin" $(PKG)
+
 ## vuln: alias for govulncheck
 .PHONY: vuln
 vuln: govulncheck
@@ -254,30 +280,36 @@ security: lint-go govulncheck modverify trivy
 
 # CI's test flags, defined once so local and CI runs cannot drift; `:=` so an
 # exported TESTFLAGS cannot drop them. None is optional:
-#   -race is the only detector for publication-ordering bugs in the shutdown registry.
+#   -race (TEST_RACE) is the only detector for publication-ordering bugs in the shutdown registry.
 #   -cpu=1,2,8: the reserve retune-vs-admission race is caught only by
 #   contention, so core count is part of the oracle (one core never sees it).
+#   TEST_RACE is its own variable so a TESTFLAGS given on the command line
+#   (`make test TESTFLAGS=-run=X`) cannot drop -race.
 TEST_TIMEOUT := -timeout=900s
-TESTFLAGS    := -race -count=1 -cpu=1,2,8 $(TEST_TIMEOUT)
+TEST_RACE    := -race
+TESTFLAGS    := -count=1 -cpu=1,2,8 $(TEST_TIMEOUT)
 
 # Per-package targets; the aggregates below only depend on them.
 TEST_TARGETS     := $(addprefix test-,$(PACKAGES))
 COVERAGE_TARGETS := $(addprefix coverage-,$(PACKAGES))
 PROFILE_TARGETS  := $(addprefix coverage-profile-,$(PACKAGES))
-BENCH_TARGETS    := $(addprefix bench-,$(PACKAGES))
+# Only the root package has benchmarks; providertest and memscan have none, so
+# a bench target for them ran zero benchmarks.
+BENCH_PACKAGES   := enclave
+BENCH_TARGETS    := $(addprefix bench-,$(BENCH_PACKAGES))
 
 ## test: unit tests with the race detector, across the CPU matrix
 .PHONY: test
 test: $(TEST_TARGETS)
 
-## test-<pkg>, coverage-<pkg>, bench-<pkg>: one package (enclave, providertest, memscan); coverage-<pkg> FAILS below COVERAGE_THRESHOLD
+## test-<pkg>, coverage-<pkg>: one package (enclave, providertest, memscan); coverage-<pkg> FAILS below COVERAGE_THRESHOLD; bench-enclave: the root package's benchmarks
 .PHONY: $(TEST_TARGETS) $(COVERAGE_TARGETS) $(PROFILE_TARGETS) $(BENCH_TARGETS)
 $(TEST_TARGETS): test-%:
-	"$$GOCMD" test $(TESTFLAGS) $(PKGDIR_$*)
+	"$$GOCMD" test $(TEST_RACE) $(TESTFLAGS) $(PKGDIR_$*)
 
 # The floor is checked to be a number BEFORE the suite spends minutes running.
 $(PROFILE_TARGETS): coverage-profile-%: coverage-threshold
-	"$$GOCMD" test $(TESTFLAGS) -covermode=atomic -coverprofile=coverage-$*.out $(PKGDIR_$*)
+	"$$GOCMD" test $(TEST_RACE) $(TESTFLAGS) -covermode=atomic -coverprofile=coverage-$*.out $(PKGDIR_$*)
 
 # The floor binds every package, in total and exactly (no rounding), which also
 # bounds the total: a statement-weighted total cannot hide a small package.
@@ -322,19 +354,28 @@ test-fips:
 # See scripts/test-runtimesecret.sh.
 .PHONY: test-runtimesecret
 test-runtimesecret:
-	@sh scripts/test-runtimesecret.sh $(TESTFLAGS)
+	@sh scripts/test-runtimesecret.sh $(TEST_RACE) $(TESTFLAGS)
 
 ## bench: every benchmark, with allocation counts (no unit tests)
 .PHONY: bench
 bench: $(BENCH_TARGETS)
 
 ## test-<feature>, integration-test-<feature>: one feature's unit and integration suites (see FEATURES)
+# integration-test-<feature> runs the suite's tests named with the feature's
+# prefix and nothing else, so it cannot meet the whole suite's coverage floor:
+# the floor is 0 here, and integration-test-<pkg> and ci-integration keep it.
 .PHONY: $(addprefix test-,$(FEATURES)) $(addprefix integration-test-,$(FEATURES))
 $(foreach f,$(FEATURES),$(eval test-$(f): test-$(FEATURE_PKG_$(f))))
-$(foreach f,$(FEATURES),$(eval integration-test-$(f): integration-test-enclave))
+define FEATURE_INTEGRATION_RULE
+integration-test-$(1): $(if $(filter $(1),$(USERNS_FEATURE)),integration-test-userns)
+	@INTEGRATION_TESTFLAGS="$$$$INTEGRATION_TESTFLAGS -run ^$(FEATURE_PREFIX_$(1))" COVERAGE_THRESHOLD=0 \
+		sh scripts/integration-test.sh $(FEATURE_SUITE_$(1)) "$$(INTEGRATION_COVERPKG_$(FEATURE_SUITE_$(1)))"
+endef
+$(foreach f,$(FEATURES),$(eval $(call FEATURE_INTEGRATION_RULE,$(f))))
 
 # INTEGRATION SUITE. Each package's suite (test/integration/<pkg>/) runs in the
-# devcontainer, never on the host: scripts/integration-test.sh.
+# devcontainer, never on the host: scripts/integration-test.sh, on an image that
+# scripts/integration-image.sh builds once and scans (ci-integration shares it).
 INTEGRATION_PACKAGES  := enclave
 DEVCONTAINER_COMPOSE  := build/docker/devcontainer/compose.yaml
 DEVCONTAINER_SERVICE  := integration
@@ -363,8 +404,16 @@ integration-test: $(IT_TARGETS)
 
 ## integration-test-<pkg>: one package's integration suite, in the devcontainer (enclave)
 .PHONY: $(IT_TARGETS)
-$(IT_TARGETS): integration-test-%:
+$(IT_TARGETS): integration-test-%: integration-test-userns
 	@sh scripts/integration-test.sh $* "$(INTEGRATION_COVERPKG_$*)"
+
+## integration-test-userns: the root package's user-namespace test, in the devcontainer under a seccomp profile that permits CLONE_NEWUSER
+# It is built with the userns tag, so `make test` does not run it (the default
+# toolchain container refuses user namespaces and the test fails there, it does
+# not skip). scripts/userns-test.sh runs it in the `userns` compose service.
+.PHONY: integration-test-userns
+integration-test-userns:
+	@sh scripts/userns-test.sh
 
 ## integration-test-fips: every integration suite under FIPS 140-3 strict mode, in the devcontainer
 .PHONY: integration-test-fips
@@ -423,36 +472,37 @@ cross-build:
 # the root module must not depend on). check-buildgates runs every test the
 # other gates do not claim.
 BUILDGATES_OTHER := ^(TestReleasability|TestChangelogAssemble|TestScripts)
-# gates TEST-FLAGS: vet the gates module, then run its tests.
-gates = cd build/ci/buildgates && "$$GOCMD" vet $(PKG) && "$$GOCMD" test -count=1 $(1) $(PKG)
+# gates TEST-FLAGS: run the gates module's tests. Every check-* target depends
+# on vet-buildgates, which make runs once per invocation.
+gates = cd build/ci/buildgates && "$$GOCMD" test -count=1 $(1) $(PKG)
+
+.PHONY: vet-buildgates
+vet-buildgates:
+	@cd build/ci/buildgates && "$$GOCMD" vet $(PKG)
 
 ## check-buildgates: the repository's own checks: workflow action pins, issue citations, the merge workflow, the feature map, the devcontainer inputs
 .PHONY: check-buildgates
-check-buildgates:
+check-buildgates: vet-buildgates
 	@$(call gates,-skip '$(BUILDGATES_OTHER)')
-
-## check-action-pins: deprecated alias for check-buildgates (removed after the next release)
-.PHONY: check-action-pins
-check-action-pins: check-buildgates
 
 ## check-releasability: no tracked file names the lab fleet or is agent-only
 # Every tracked file is published, so the scrub happens here. Rules and
 # waivers: build/ci/buildgates/releasability_test.go.
 .PHONY: check-releasability
-check-releasability:
+check-releasability: vet-buildgates
 	@$(call gates,-run '^TestReleasability')
 
 ## check-changelog-assembly: the release step folds every fragment in exactly once
 # Tests scripts/changelog-assemble.sh, which release runs, on scratch trees.
 .PHONY: check-changelog-assembly
-check-changelog-assembly:
+check-changelog-assembly: vet-buildgates
 	@$(call gates,-run '^TestChangelogAssemble')
 
 ## check-scripts: the release and tooling scripts, driven on scratch inputs
 # Drives the release and tooling scripts offline on scratch trees, a fake forge
 # API and a local module proxy, since most run for real only on a tag push.
 .PHONY: check-scripts
-check-scripts:
+check-scripts: vet-buildgates
 	@$(call gates,-run '^TestScripts')
 
 # CI AGGREGATES. ci.yml and release.yml each call these, one per job, so a job
@@ -462,7 +512,7 @@ check-scripts:
 
 ## ci-lint: every static check: tidy, lint (staticcheck included), the integration suite's lint, the build gates, releasability, changelog assembly, the scripts
 .PHONY: ci-lint
-ci-lint: tidy-check lint lint-integration check-buildgates check-releasability check-changelog-assembly check-scripts
+ci-lint: tidy-check lint lint-runtimesecret lint-integration check-buildgates check-releasability check-changelog-assembly check-scripts
 	@echo "ci-lint completed successfully"
 
 ## ci-build: compile all packages, then for every supported GOOS/GOARCH
@@ -472,7 +522,7 @@ ci-build: build cross-build
 
 ## ci-security: gosec (SARIF), govulncheck and module verification; trivy runs nightly and on release
 .PHONY: ci-security
-ci-security: gosec govulncheck modverify
+ci-security: gosec gosec-runtimesecret govulncheck govulncheck-runtimesecret modverify
 	@echo "ci-security completed successfully"
 
 ## ci-test: unit tests with coverage (race, CPU matrix, threshold) and the key-schedule erasure build
@@ -481,8 +531,15 @@ ci-test: coverage test-runtimesecret
 	@echo "ci-test completed successfully"
 
 ## ci-integration: both integration variants (default and FIPS 140-3 strict) in the devcontainer
+# One image serves the userns, default and FIPS suites (FIPS is a run-time
+# flag): scripts/integration-image.sh builds it once, trivy-scans that exact
+# image ID, runs both targets against it with no rebuild, and removes it last.
+# The recipe names make through a variable, so `make -n ci-integration` prints it
+# instead of running it (a line with a literal $(MAKE) runs even under -n).
+IT_MAKE = $(MAKE) --no-print-directory
 .PHONY: ci-integration
-ci-integration: integration-test integration-test-fips
+ci-integration:
+	@sh scripts/integration-image.sh $(IT_MAKE) integration-test integration-test-fips
 	@echo "ci-integration completed successfully"
 
 ## ci-fast: everything `ci` runs that does not need Docker (devops §4)

@@ -24,9 +24,9 @@ import (
 // locked memory returns to its baseline however many sealers come and go,
 // and a destroyed sealer or provider fails closed.
 
-// TestDestroyedSealersReturnTheirLockedMemory creates, uses and destroys many
+// TestSealing_DestroyedSealersReturnTheirLockedMemory creates, uses and destroys many
 // sealers of each shape and requires VmLck back at its baseline.
-func TestDestroyedSealersReturnTheirLockedMemory(t *testing.T) {
+func TestSealing_DestroyedSealersReturnTheirLockedMemory(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		ctx := context.Background()
 		a, err := enclave.NewAllocator(1 << 16)
@@ -97,10 +97,10 @@ func TestDestroyedSealersReturnTheirLockedMemory(t *testing.T) {
 	})
 }
 
-// TestSealerDestroyLeavesAnInjectedProviderToItsOwner: an injected
+// TestSealing_SealerDestroyLeavesAnInjectedProviderToItsOwner: an injected
 // SoftwareProvider survives the sealer's Destroy, and its own Destroy then
 // fails every sealer that uses it closed.
-func TestSealerDestroyLeavesAnInjectedProviderToItsOwner(t *testing.T) {
+func TestSealing_SealerDestroyLeavesAnInjectedProviderToItsOwner(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		ctx := context.Background()
 		p := enclave.NewSoftwareProvider()
@@ -152,10 +152,10 @@ func TestSealerDestroyLeavesAnInjectedProviderToItsOwner(t *testing.T) {
 	})
 }
 
-// TestSealerDestroyDuringABlockedUnseal: Destroy returns while the provider
+// TestSealing_SealerDestroyDuringABlockedUnseal: Destroy returns while the provider
 // is still unsealing, and the root it then delivers is released, never
 // published.
-func TestSealerDestroyDuringABlockedUnseal(t *testing.T) {
+func TestSealing_SealerDestroyDuringABlockedUnseal(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		ctx := context.Background()
 		g := &gatedUnsealer{soft: enclave.NewSoftwareProvider(), entered: make(chan struct{}), release: make(chan struct{})}
@@ -185,10 +185,10 @@ func TestSealerDestroyDuringABlockedUnseal(t *testing.T) {
 	})
 }
 
-// TestUnconstructedSealerAndRedactedFormatting: a zero-value Sealer refuses
+// TestSealing_UnconstructedSealerAndRedactedFormatting: a zero-value Sealer refuses
 // without panicking and wipes its input, and %#v never prints an enclave's
 // contents.
-func TestUnconstructedSealerAndRedactedFormatting(t *testing.T) {
+func TestSealing_UnconstructedSealerAndRedactedFormatting(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		ctx := context.Background()
 		var zero enclave.Sealer

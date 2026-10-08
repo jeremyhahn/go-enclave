@@ -302,6 +302,7 @@ const (
 type fakeRelease struct {
 	ID         int    `json:"id"`
 	TagName    string `json:"tag_name"`
+	Target     string `json:"target_commitish"`
 	Name       string `json:"name"`
 	Body       string `json:"body"`
 	Draft      bool   `json:"draft"`
@@ -318,6 +319,10 @@ type fakeForge struct {
 	badAuth   int
 	failWrite bool                // answer 500 to POST/PATCH
 	mangle    func(string) string // what the forge "stores" instead of the sent body
+	// commitState is the combined commit status per commit; a commit absent
+	// from it reads defaultState, and "" there answers 404.
+	commitState  map[string]string
+	defaultState string
 }
 
 func newFakeForge() *fakeForge {
@@ -345,6 +350,17 @@ func (f *fakeForge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(v)
 	}
 	switch {
+	case r.Method == http.MethodGet && strings.HasPrefix(path, "/commits/") && strings.HasSuffix(path, "/status"):
+		sha := strings.TrimSuffix(strings.TrimPrefix(path, "/commits/"), "/status")
+		state, ok := f.commitState[sha]
+		if !ok {
+			state = f.defaultState
+		}
+		if state == "" {
+			reply(http.StatusNotFound, map[string]string{"message": "not found"})
+			return
+		}
+		reply(http.StatusOK, map[string]any{"sha": sha, "state": state, "total_count": 1})
 	case r.Method == http.MethodGet && strings.HasPrefix(path, "/tags/"):
 		tag := strings.TrimPrefix(path, "/tags/")
 		sha, ok := f.tagSHA[tag]
@@ -439,6 +455,9 @@ func TestScriptsReleasePublish_CreatesTheReleaseFromTheChangelog(t *testing.T) {
 			if rel.Body+"\n" != notes || rel.Name != tc.tag || rel.Prerelease != tc.prerelease || rel.Draft {
 				t.Fatalf("release = %+v, want body %q, name %s, prerelease %v, not a draft", rel, notes, tc.tag, tc.prerelease)
 			}
+			if rel.Target != fakeSHA {
+				t.Fatalf("release target_commitish = %q, want the gated commit %s", rel.Target, fakeSHA)
+			}
 			if len(f.writes) != 1 || f.writes[0] != "POST /releases" {
 				t.Fatalf("writes = %v, want exactly one POST /releases", f.writes)
 			}
@@ -458,7 +477,7 @@ func TestScriptsReleasePublish_ConvergesAnExistingRelease(t *testing.T) {
 	if len(f.writes) != 1 || f.writes[0] != "PATCH /releases/7" {
 		t.Fatalf("writes = %v, want exactly one PATCH of the existing release", f.writes)
 	}
-	if rel := f.releases["v1.4.0-alpha"]; rel.Body != "### Added\n\n- a thing" || !rel.Prerelease || rel.Name != "v1.4.0-alpha" {
+	if rel := f.releases["v1.4.0-alpha"]; rel.Body != "### Added\n\n- a thing" || !rel.Prerelease || rel.Name != "v1.4.0-alpha" || rel.Target != fakeSHA {
 		t.Fatalf("release not converged: %+v", rel)
 	}
 }
@@ -907,12 +926,21 @@ func requireAbsent(t *testing.T, env map[string]string, name string) {
 // fake.
 func toolEnv(t *testing.T, bin string, over map[string]string) map[string]string {
 	t.Helper()
+	// A go that only reports the toolchain TOOLCHAIN names as the builder of
+	// any binary; every other invocation (an install attempt) fails loudly.
+	goCmd := filepath.Join(t.TempDir(), "go")
+	goScript := "#!/bin/sh\n" +
+		"if [ \"$1\" = version ] && [ $# -eq 2 ]; then echo \"$2: go1.27.1\"; exit 0; fi\n" +
+		"exit 1\n"
+	if err := os.WriteFile(goCmd, []byte(goScript), 0o755); err != nil {
+		t.Fatalf("write fake go: %v", err)
+	}
 	env := map[string]string{
 		"PATH":         bin + ":" + isolatedPath(t),
 		"TOOL_INSTALL": "0",
 		"TOOLS_DIR":    "",
 		"TOOLCHAIN":    "go1.27.1",
-		"GO":           "/nonexistent/go", // any install attempt fails loudly
+		"GO":           goCmd,
 	}
 	for _, k := range []string{"TRIVY", "SHELLCHECK"} {
 		for _, kind := range []string{"SHA256", "BIN_SHA256"} {
@@ -943,12 +971,28 @@ var toolOutputs = []struct {
 	{"shellcheck", "v0.11.0", "ShellCheck - shell script analysis tool\nversion: 0.11.0\nlicense: GNU General Public License, version 3\nwebsite: https://www.shellcheck.net"},
 }
 
+// pinBinary pins the SHA-256 of the file at p as the binary hash of tool on
+// both architectures, when tool is installed from a release archive (TOOL_INSTALL=0
+// then requires the binary to hash to it). Other tools are left alone.
+func pinBinary(t *testing.T, env map[string]string, tool, p string) map[string]string {
+	t.Helper()
+	prefix := strings.ToUpper(tool)
+	if tool != "trivy" && tool != "shellcheck" {
+		return env
+	}
+	sum := sha256Hex(t, p)
+	return mergeEnv(env, map[string]string{
+		prefix + "_BIN_SHA256_LINUX_AMD64": sum,
+		prefix + "_BIN_SHA256_LINUX_ARM64": sum,
+	})
+}
+
 func TestScriptsToolResolve_AcceptsThePinnedVersionInEveryOutputShape(t *testing.T) {
 	for _, tc := range toolOutputs {
 		t.Run(tc.tool+"/"+tc.version, func(t *testing.T) {
 			bin := t.TempDir()
 			want := fakeTool(t, bin, tc.tool, tc.output)
-			out, ok := runScript(t, t.TempDir(), toolEnv(t, bin, nil), "tool.sh", tc.tool, tc.version)
+			out, ok := runScript(t, t.TempDir(), pinBinary(t, toolEnv(t, bin, nil), tc.tool, want), "tool.sh", tc.tool, tc.version)
 			if !ok {
 				t.Fatalf("refused the pinned version:\n%s", out)
 			}
@@ -971,6 +1015,7 @@ func TestScriptsToolResolve_FailsClosedOnAnythingElse(t *testing.T) {
 		{name: "unversioned trivy", tool: "trivy", version: "v0.75.0", output: "Version: dev", wantMsg: "does not report a version"},
 		{name: "unparseable", tool: "staticcheck", version: "v0.8.1", output: "staticcheck (devel)", wantMsg: "does not report a version"},
 		{name: "shellcheck from another distro", tool: "shellcheck", version: "v0.11.0", output: "ShellCheck - shell script analysis tool\nversion: 0.10.0", wantMsg: "is v0.10.0, but the Makefile pins v0.11.0"},
+		{name: "built by another Go", tool: "gosec", version: "v2.29.0", output: "Version: v2.29.0", env: map[string]string{"TOOLCHAIN": "go1.28.0"}, wantMsg: "was built with 'go1.27.1', but this module's toolchain is go1.28.0"},
 		{name: "absent", tool: "govulncheck", version: "v1.8.0", absent: true, wantMsg: "not on PATH and TOOL_INSTALL=0 forbids installing it"},
 		{name: "absent shellcheck", tool: "shellcheck", version: "v0.11.0", absent: true, wantMsg: "not on PATH and TOOL_INSTALL=0 forbids installing it"},
 		{name: "TOOL_INSTALL unset", tool: "gosec", version: "v2.29.0", output: "Version: v2.29.0", env: map[string]string{"TOOL_INSTALL": ""}, wantMsg: "TOOL_INSTALL must be 0"},
@@ -982,10 +1027,10 @@ func TestScriptsToolResolve_FailsClosedOnAnythingElse(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			bin := t.TempDir()
-			if !tc.absent {
-				fakeTool(t, bin, tc.tool, tc.output)
-			}
 			env := toolEnv(t, bin, tc.env)
+			if !tc.absent {
+				env = pinBinary(t, env, tc.tool, fakeTool(t, bin, tc.tool, tc.output))
+			}
 			if tc.absent {
 				requireAbsent(t, env, tc.tool)
 			}
@@ -995,6 +1040,51 @@ func TestScriptsToolResolve_FailsClosedOnAnythingElse(t *testing.T) {
 			}
 			if !strings.Contains(out, tc.wantMsg) {
 				t.Fatalf("refusal does not say %q:\n%s", tc.wantMsg, out)
+			}
+		})
+	}
+}
+
+// TestScriptsToolResolve_ArchiveToolOnPathMustHashToThePin pins that
+// TOOL_INSTALL=0 does not take an archive tool's word for its version: a
+// binary that prints the pinned version but hashes to something else is
+// refused, and is not executed to find out.
+func TestScriptsToolResolve_ArchiveToolOnPathMustHashToThePin(t *testing.T) {
+	for _, tc := range []struct{ tool, version, output string }{
+		{"trivy", "v0.75.0", "Version: 0.75.0"},
+		{"shellcheck", "v0.11.0", "ShellCheck - shell script analysis tool\nversion: 0.11.0"},
+	} {
+		t.Run(tc.tool, func(t *testing.T) {
+			bin := t.TempDir()
+			marker := filepath.Join(t.TempDir(), "ran")
+			planted := filepath.Join(bin, tc.tool)
+			body := "#!/bin/sh\n: > " + marker + "\ncat <<'EOF'\n" + tc.output + "\nEOF\n"
+			if err := os.WriteFile(planted, []byte(body), 0o755); err != nil {
+				t.Fatalf("write %s: %v", planted, err)
+			}
+
+			// The pins (all "a"s) are not this binary's hash.
+			env := toolEnv(t, bin, nil)
+			out, ok := runScript(t, t.TempDir(), env, "tool.sh", tc.tool, tc.version)
+			if ok || !strings.Contains(out, "does not hash to the pinned binary SHA-256") {
+				t.Fatalf("accepted a %s that reports the pin but hashes to something else (ok=%v):\n%s", tc.tool, ok, out)
+			}
+			if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("executed the unverified %s (stat: %v)", tc.tool, err)
+			}
+
+			// A missing pin is no pin.
+			prefix := strings.ToUpper(tc.tool)
+			missing := mergeEnv(env, map[string]string{prefix + "_BIN_SHA256_LINUX_AMD64": "", prefix + "_BIN_SHA256_LINUX_ARM64": ""})
+			out, ok = runScript(t, t.TempDir(), missing, "tool.sh", tc.tool, tc.version)
+			if ok || !strings.Contains(out, "missing or malformed") {
+				t.Fatalf("accepted a %s with no pinned binary SHA-256 (ok=%v):\n%s", tc.tool, ok, out)
+			}
+
+			// The pinned hash is accepted.
+			out, ok = runScript(t, t.TempDir(), pinBinary(t, env, tc.tool, planted), "tool.sh", tc.tool, tc.version)
+			if !ok || strings.TrimSpace(out) != planted {
+				t.Fatalf("refused a %s that hashes to its pin (ok=%v):\n%s", tc.tool, ok, out)
 			}
 		})
 	}
@@ -1426,6 +1516,7 @@ type releaseRepo struct {
 	t         *testing.T
 	dir, bare string
 	env       map[string]string
+	forge     *fakeForge // answers the combined commit status; green by default
 }
 
 func newReleaseRepo(t *testing.T) *releaseRepo {
@@ -1441,17 +1532,21 @@ func newReleaseRepo(t *testing.T) *releaseRepo {
 	if err := os.WriteFile(wrapper, []byte(script), 0o755); err != nil {
 		t.Fatalf("write wrapper: %v", err)
 	}
-	r := &releaseRepo{t: t, dir: dir, bare: t.TempDir(), env: map[string]string{
+	forge := newFakeForge()
+	forge.defaultState = "success"
+	r := &releaseRepo{t: t, dir: dir, bare: t.TempDir(), forge: forge, env: map[string]string{
 		"GIT_CONFIG_GLOBAL": os.DevNull, "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_COUNT": "0",
 		"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com",
 		"GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.com",
 		"AGENT_GIT": wrapper, "REPO_NAME": "go-enclave-test", "VERSION": "",
+		"FORGE_API_URL": startForge(t, forge), "FORGE_REPOSITORY": "owner/repo", "FORGE_TOKEN": fakeToken,
 	}}
 	r.git(r.bare, "init", "-q", "--bare")
 	r.git(dir, "init", "-q", "-b", "main")
 	r.git(dir, "remote", "add", "dev", r.bare)
 	r.git(dir, "add", "-A")
 	r.git(dir, "commit", "-q", "-m", "root")
+	r.git(dir, "push", "-q", "dev", "main")
 	return r
 }
 
@@ -1476,6 +1571,16 @@ func (r *releaseRepo) state() string {
 		readFile(r.t, filepath.Join(r.dir, "VERSION")),
 		readFile(r.t, filepath.Join(r.dir, "CHANGELOG.md")),
 	}, "\x00")
+}
+
+// advanceDev lands a commit on dev's main from a second clone, leaving the
+// release repository's local main stale.
+func (r *releaseRepo) advanceDev(msg string) {
+	r.t.Helper()
+	other := filepath.Join(r.t.TempDir(), "other")
+	r.git(r.t.TempDir(), "clone", "-q", "-b", "main", r.bare, other)
+	r.git(other, "commit", "-q", "--allow-empty", "-m", msg)
+	r.git(other, "push", "-q", "origin", "HEAD:main")
 }
 
 func (r *releaseRepo) run(kind, version string) (string, bool) {
@@ -1528,7 +1633,26 @@ func TestScriptsRelease_RefusesWhatItMustNotPublish(t *testing.T) {
 		{"nothing to release", "candidate", "v1.5.0-rc.1", func(r *releaseRepo) {
 			r.git(r.dir, "rm", "-q", "changelog.d/134-x.md")
 			r.git(r.dir, "commit", "-q", "-m", "drop the fragment")
+			r.git(r.dir, "push", "-q", "dev", "main")
 		}, "nothing to release"},
+		{"local main behind dev", "candidate", "v1.5.0-rc.1", func(r *releaseRepo) { r.advanceDev("someone else's commit") }, "is not dev/main"},
+		{"local main ahead of dev", "candidate", "v1.5.0-rc.1", func(r *releaseRepo) {
+			r.git(r.dir, "commit", "-q", "--allow-empty", "-m", "unpushed")
+		}, "is not dev/main"},
+		{"dev has no main", "candidate", "v1.5.0-rc.1", func(r *releaseRepo) {
+			r.git(r.bare, "update-ref", "-d", "refs/heads/main")
+		}, "could not fetch main from dev"},
+		{"CI red on main", "candidate", "v1.5.0-rc.1", func(r *releaseRepo) { r.forge.defaultState = "failure" }, "CI is not green"},
+		{"CI pending on main", "candidate", "v1.5.0-rc.1", func(r *releaseRepo) { r.forge.defaultState = "pending" }, "CI is not green"},
+		{"forge has no status", "candidate", "v1.5.0-rc.1", func(r *releaseRepo) { r.forge.defaultState = "" }, "could not read the forge's commit status"},
+		{"forge unreachable", "candidate", "v1.5.0-rc.1", func(r *releaseRepo) { r.env["FORGE_API_URL"] = "http://127.0.0.1:1/api/v1" }, "could not read the forge's commit status"},
+		{"forge rejects the token", "candidate", "v1.5.0-rc.1", func(r *releaseRepo) { r.env["FORGE_TOKEN"] = "wrong" }, "could not read the forge's commit status"},
+		{"no forge URL", "candidate", "v1.5.0-rc.1", func(r *releaseRepo) { r.env["FORGE_API_URL"] = "" }, "FORGE_API_URL is unset"},
+		{"no forge repository", "candidate", "v1.5.0-rc.1", func(r *releaseRepo) { r.env["FORGE_REPOSITORY"] = "" }, "FORGE_REPOSITORY is unset"},
+		{"no forge token", "candidate", "v1.5.0-rc.1", func(r *releaseRepo) { r.env["FORGE_TOKEN"] = "" }, "FORGE_TOKEN is unset"},
+		{"token that could inject curl directives", "candidate", "v1.5.0-rc.1", func(r *releaseRepo) {
+			r.env["FORGE_TOKEN"] = "abc\"\nurl = \"http://example.invalid"
+		}, "refusing to use it"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := newReleaseRepo(t)
@@ -1651,6 +1775,9 @@ func TestScriptsRelease_TagsAndPushesEveryKind(t *testing.T) {
 			if got := r.git(r.bare, "tag", "-l"); got != tc.version {
 				t.Fatalf("dev holds tags %q, want only %s", got, tc.version)
 			}
+			if got, want := r.git(r.bare, "rev-parse", "refs/heads/main"), r.git(r.dir, "rev-parse", "HEAD"); got != want {
+				t.Fatalf("dev's main names %s, want the release commit %s", got, want)
+			}
 			if got := r.git(r.dir, "log", "-1", "--format=%s"); got != "chore(release): "+tc.version {
 				t.Fatalf("release commit = %q", got)
 			}
@@ -1682,11 +1809,31 @@ func TestScriptsRelease_CandidatesFollowOneAnother(t *testing.T) {
 	}
 	r.git(r.dir, "add", "-A")
 	r.git(r.dir, "commit", "-q", "-m", "fix")
+	r.git(r.dir, "push", "-q", "dev", "main")
 	if out, ok := r.run("candidate", "v1.5.0-rc.2"); !ok {
 		t.Fatalf("rc.2 refused:\n%s", out)
 	}
 	if got := r.git(r.bare, "tag", "-l"); got != "v1.5.0-rc.1\nv1.5.0-rc.2" {
 		t.Fatalf("dev holds tags %q", got)
+	}
+}
+
+// TestScriptsRelease_ARejectedMainNeverLeavesTheTag stands in for main moving
+// between the check and the push: dev refuses the main update (a per-ref hook,
+// so only an atomic push stops the tag with it). The immutable tag must not
+// land.
+func TestScriptsRelease_ARejectedMainNeverLeavesTheTag(t *testing.T) {
+	r := newReleaseRepo(t)
+	hook := "#!/bin/sh\n[ \"$1\" = refs/heads/main ] && exit 1\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(r.bare, "hooks", "update"), []byte(hook), 0o755); err != nil {
+		t.Fatalf("write hook: %v", err)
+	}
+	out, ok := r.run("candidate", "v1.5.0-rc.1")
+	if ok {
+		t.Fatalf("released although dev refused main:\n%s", out)
+	}
+	if got := r.git(r.bare, "tag", "-l"); got != "" {
+		t.Fatalf("dev holds tags %q after its main was refused; the push was not atomic", got)
 	}
 }
 
@@ -2020,7 +2167,9 @@ func TestScriptsMakefile_AHostileCheckoutPathIsOneLiteralOperand(t *testing.T) {
 
 	// lint-scripts resolves shellcheck on PATH; its operands are literal.
 	operandLogger(t, fakes, "shellcheck", log, "[ \"$1\" = --version ] && printf 'version: 0.11.0\\n'\nexit 0\n")
-	out, ok = makeIn(withFakes, "lint-scripts")
+	// TOOL_INSTALL=0 requires it to hash to the pin, so the fake's hash is the pin.
+	sum := sha256Hex(t, filepath.Join(fakes, "shellcheck"))
+	out, ok = makeIn(withFakes, "lint-scripts", "SHELLCHECK_BIN_SHA256_LINUX_AMD64="+sum, "SHELLCHECK_BIN_SHA256_LINUX_ARM64="+sum)
 	if logged := readLog(t, log); !ok || !strings.Contains(logged, "<--shell=sh>\n<scripts/changelog-assemble.sh>\n") || !strings.Contains(logged, "<scripts/tool.sh>\n") {
 		t.Fatalf("lint-scripts (ok=%v) passed shellcheck:\n%s\noutput:\n%s", ok, logged, out)
 	}
@@ -2099,6 +2248,48 @@ func TestScriptsMakefile_CleanToolsRefusesWhatItMustNotDelete(t *testing.T) {
 // to run `make test-runtimesecret` on the tag, directly or through the ci-test
 // aggregate that includes it, in a job that publish needs and checks by name,
 // so a regression confined to that build cannot ship.
+func TestScriptsReleaseWorkflow_EveryJobRunsOnTheVerifiedCommit(t *testing.T) {
+	type step struct {
+		Uses string            `yaml:"uses"`
+		With map[string]string `yaml:"with"`
+	}
+	type job struct {
+		Steps []step `yaml:"steps"`
+	}
+	var wf struct {
+		Jobs map[string]job `yaml:"jobs"`
+	}
+	raw, err := os.ReadFile(filepath.Join(repoRoot(t), ".github", "workflows", "release.yml"))
+	if err != nil {
+		t.Fatalf("read release.yml: %v", err)
+	}
+	if err := yaml.Unmarshal(raw, &wf); err != nil {
+		t.Fatalf("parse release.yml: %v", err)
+	}
+	if len(wf.Jobs) < 7 {
+		t.Fatalf("release.yml has %d jobs; the discovery is broken", len(wf.Jobs))
+	}
+	const verified = "${{ needs.verify.outputs.sha }}"
+	for name, j := range wf.Jobs {
+		if name == "verify" {
+			continue // resolves the tag to the commit the others use
+		}
+		checkouts := 0
+		for _, s := range j.Steps {
+			if !strings.HasPrefix(s.Uses, "actions/checkout@") {
+				continue
+			}
+			checkouts++
+			if got := s.With["ref"]; got != verified {
+				t.Errorf("job %s checks out ref %q, want %q: a tag moved after Verify must not change what the gates run on", name, got, verified)
+			}
+		}
+		if checkouts == 0 {
+			t.Errorf("job %s has no checkout step; the discovery is broken", name)
+		}
+	}
+}
+
 func TestScriptsReleaseWorkflow_PublishWaitsForTheErasingBuild(t *testing.T) {
 	type step struct {
 		Run string `yaml:"run"`

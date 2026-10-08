@@ -274,9 +274,13 @@ None. Enclaves live and die with the process.
   frees it unwiped, leaving false residue.
 - **User namespaces**: a test re-executes the binary as root of a new user
   namespace (the `unshare -Ur` case) and asserts `RLIMIT_MEMLOCK` is reported
-  enforced and `mlock` past it fails. It is the suite's one skip, taken only
-  when the host refuses unprivileged user namespaces or grants one without
-  capabilities.
+  enforced and `mlock` past it fails. It fails, never skips, when the host
+  refuses unprivileged user namespaces or grants one without capabilities. It
+  is built with the `userns` tag, which the default toolchain container's
+  seccomp profile cannot run, so `make integration-test-userns` (part of every
+  `integration-test-enclave` and of `integration-test-locked-memory-budget`)
+  runs it in the `userns` compose service, whose profile permits
+  `CLONE_NEWUSER`.
 - **`HardenProcess`** runs in a subprocess, read back with `PR_GET_DUMPABLE`;
   a parent-side test pins that importing the package leaves the process
   dumpable.

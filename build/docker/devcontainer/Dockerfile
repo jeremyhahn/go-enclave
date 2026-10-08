@@ -215,6 +215,9 @@ COPY --chown=root:root build/docker/devcontainer/run-integration-tests.sh build/
 # the suite — e.g. the allowlist stopped admitting a file the module needs.
 # `go vet` with the tag also proves the integration files are selected by it.
 RUN go vet -tags=integration ./test/integration/...
+# The same for the `userns` service: the root package's test files must have
+# arrived and compile under -tags=userns, or `go test` there runs nothing.
+RUN go vet -tags=userns .
 
 # A marker the suite checks, so `go test -tags=integration` run on a host
 # fails saying where it must run instead of measuring the host.

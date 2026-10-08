@@ -10,8 +10,10 @@ go=${GOCMD:-go}
 GOWORK=off
 export GOWORK
 self=$("$go" list -m)
-for m in $("$go" list -m -f '{{if not .Indirect}}{{.Path}}{{end}}' all 2>/dev/null | grep '^github.com/jeremyhahn/' | grep -vx "$self" || true); do
-  v=$("$go" list -m -versions "$m" 2>/dev/null | tr ' ' '\n' | tail -n 1)
+mods=$("$go" list -m -f '{{if not .Indirect}}{{.Path}}{{end}}' all) || die "go list -m all failed"
+for m in $(printf '%s\n' "$mods" | grep '^github.com/jeremyhahn/' | grep -vx "$self" || true); do
+  versions=$("$go" list -m -versions "$m") || die "go list -m -versions $m failed"
+  v=$(printf '%s\n' "$versions" | tr ' ' '\n' | tail -n 1)
   if [ -n "$v" ] && [ "$v" != "$m" ]; then "$go" get "$m@$v"; fi
 done
 "$go" mod tidy

@@ -3,6 +3,7 @@ package buildgates
 import (
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -181,5 +182,106 @@ func TestScriptsDevcontainer_TagIsContentAddressed(t *testing.T) {
 	}
 	if out, ok := tag(); ok || !strings.Contains(out, "scripts/tool-pins.sh is missing") {
 		t.Fatalf("tagged with an input missing (ok=%v): %s", ok, out)
+	}
+}
+
+// dockerignoreAdmits evaluates the devcontainer allowlist for one file at the
+// root of the build context: the last pattern that matches decides, and a
+// leading ! admits. Root-level names are all the userns gate needs.
+func dockerignoreAdmits(t *testing.T, name string) bool {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(repoRoot(t), filepath.FromSlash(devcontainerDockerfile+".dockerignore")))
+	if err != nil {
+		t.Fatalf("read the Dockerfile's dockerignore: %v", err)
+	}
+	admitted := true // no pattern matches: the file is in the context
+	for _, line := range strings.Split(string(b), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		negated := strings.HasPrefix(line, "!")
+		pattern := strings.TrimPrefix(line, "!")
+		if ok, err := path.Match(pattern, name); err != nil {
+			t.Fatalf("dockerignore pattern %q: %v", line, err)
+		} else if ok {
+			admitted = negated
+		}
+	}
+	return admitted
+}
+
+// TestScriptsDevcontainer_UsernsImageCarriesTheRootTests pins the cause of a
+// `userns` service that ran no tests: the allowlist excluded the root
+// package's *_test.go, so `go test -tags=userns .` printed "[no test files]".
+// Every root .go file, tests included, must arrive in the build context; the
+// userns test uses helpers from the other root test files.
+func TestScriptsDevcontainer_UsernsImageCarriesTheRootTests(t *testing.T) {
+	root := repoRoot(t)
+	files, err := filepath.Glob(filepath.Join(root, "*.go"))
+	if err != nil {
+		t.Fatalf("glob: %v", err)
+	}
+	sawUserns := false
+	for _, f := range files {
+		name := filepath.Base(f)
+		if name == "memlock_userns_linux_test.go" {
+			sawUserns = true
+		}
+		if !dockerignoreAdmits(t, name) {
+			t.Errorf("%s.dockerignore excludes %s: the integration image, and the userns service built from it, would not carry it",
+				devcontainerDockerfile, name)
+		}
+	}
+	if !sawUserns {
+		t.Fatal("memlock_userns_linux_test.go is not in the root package: the userns gate has nothing to run")
+	}
+}
+
+// TestScriptsDevcontainer_UsernsServiceRunsItsTest pins the wiring around the
+// image: the compose service builds the integration stage, the Dockerfile
+// proves at build time that the tagged test files compile, the script runs the
+// test with -tags=userns, anchored, from the root package, and still fails
+// when nothing ran, and `make integration-test-userns` runs that script.
+func TestScriptsDevcontainer_UsernsServiceRunsItsTest(t *testing.T) {
+	root := repoRoot(t)
+	read := func(rel string) string {
+		t.Helper()
+		b, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(rel)))
+		if err != nil {
+			t.Fatalf("read %s: %v", rel, err)
+		}
+		return string(b)
+	}
+	const testName = "TestMemlockRLimit_EnforcedInsideAnUnprivilegedUserNamespace"
+
+	test := read("memlock_userns_linux_test.go")
+	if !strings.Contains(test, "func "+testName+"(") {
+		t.Errorf("memlock_userns_linux_test.go no longer defines %s", testName)
+	}
+	if !strings.Contains(test, "//go:build userns") {
+		t.Error("memlock_userns_linux_test.go is not built with the userns tag the script passes")
+	}
+	if !regexp.MustCompile(`(?m)^RUN go vet -tags=userns \.\s*$`).MatchString(read(devcontainerDockerfile)) {
+		t.Error("the Dockerfile does not `go vet -tags=userns .` in the integration stage: a context without the root tests would build")
+	}
+	if !regexp.MustCompile(`(?m)^  userns:\n    <<: \*integration_service\n`).MatchString(read("build/docker/devcontainer/compose.yaml")) {
+		t.Error("compose.yaml's userns service is not the integration service (the image that carries the root tests)")
+	}
+
+	script := read("scripts/userns-test.sh")
+	for _, want := range []string{
+		`test_name=` + testName,
+		`go test -tags=userns `,
+		`-run "^${test_name}\$" .`,
+		`grep -q -- "^--- PASS: $test_name " "$out" || die "$test_name did not pass: nothing ran"`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("scripts/userns-test.sh lacks %q", want)
+		}
+	}
+
+	if !regexp.MustCompile(`(?m)^integration-test-userns:\n\t@sh scripts/userns-test\.sh$`).MatchString(read("Makefile")) {
+		t.Error("the Makefile's integration-test-userns does not run scripts/userns-test.sh")
 	}
 }

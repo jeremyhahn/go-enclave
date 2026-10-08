@@ -141,14 +141,14 @@ func (r rootOnly) UnsealRoot(ctx context.Context, dst []byte) error {
 	return r.soft.UnsealRoot(ctx, dst)
 }
 
-// TestSoftwareProviderConformance runs providertest.TestProvider against the
+// TestProviderConformance_SoftwareProviderConformance runs providertest.TestProvider against the
 // shipped SoftwareProvider for both modes it serves, and requires the residue
 // sweep (which needs Linux and /proc/self/mem) to have run rather than been
 // skipped.
 //
 // Control: told the provider serves ModeRootKey only, the suite must fail,
 // because the provider also satisfies ModePerOperation.
-func TestSoftwareProviderConformance(t *testing.T) {
+func TestProviderConformance_SoftwareProviderConformance(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		ctx := context.Background()
 		var (
@@ -230,11 +230,11 @@ func (p *heapProtector) Unprotect(ctx context.Context, blob, key []byte) error {
 	return nil
 }
 
-// TestAResidueSweepWithoutLockedMemoryIsNotAPass runs providertest.TestProvider
+// TestProviderConformance_AResidueSweepWithoutLockedMemoryIsNotAPass runs providertest.TestProvider
 // in a child whose RLIMIT_MEMLOCK is zero, so the residue sweep cannot place its
 // needle, and requires the run to report the property as ErrNotMeasured —
 // unless SkipResidueSweep accepts that.
-func TestAResidueSweepWithoutLockedMemoryIsNotAPass(t *testing.T) {
+func TestProviderConformance_AResidueSweepWithoutLockedMemoryIsNotAPass(t *testing.T) {
 	isolated(t, childOpts{memlockZero: true}, func(t *testing.T) {
 		const property = "no copy of the key is findable in the process after Unprotect returns"
 		cfg := providertest.Config{
@@ -258,11 +258,11 @@ func TestAResidueSweepWithoutLockedMemoryIsNotAPass(t *testing.T) {
 	})
 }
 
-// TestSoftwareProviderRefusesMisuse calls the software provider directly the
+// TestSealing_SoftwareProviderRefusesMisuse calls the software provider directly the
 // way a misbehaving caller would: a destination of the wrong size, a forged
 // blob, and — after a shutdown sweep has destroyed its root — any further
 // use, which fails closed with ErrSealerWiped instead of minting a new root.
-func TestSoftwareProviderRefusesMisuse(t *testing.T) {
+func TestSealing_SoftwareProviderRefusesMisuse(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		ctx := context.Background()
 		p := enclave.NewSoftwareProvider()
