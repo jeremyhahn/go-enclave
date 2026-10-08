@@ -61,7 +61,7 @@
 #     and verification `make lint` uses, and no second copy of either.
 #     tool.sh uses a verified copy on PATH, so a gate here builds and downloads
 #     nothing.
-#   * test/buildgates' dependencies, beside the root module's.
+#   * build/ci/buildgates' dependencies, beside the root module's.
 #   * HOME=/tmp: nothing a gate needs lives under a home directory.
 #
 # THE INTEGRATION STAGE adds the source, BAKED IN rather than bind-mounted. On
@@ -84,7 +84,7 @@
 # frontend supports everything used here, Dockerfile.dockerignore included.
 #
 # Every file a COPY in the tools, base or toolchain stage reads is an input of
-# the toolchain's content tag (scripts/devcontainer.sh inputs); test/buildgates
+# the toolchain's content tag (scripts/devcontainer.sh inputs); build/ci/buildgates
 # fails when the two disagree.
 
 ARG GO_IMAGE=golang:1.27.1-alpine3.24@sha256:8a5910f31396cd4d89662f56c68b3ae31d374308270a1c3bd96672ee5ed43414
@@ -180,7 +180,7 @@ RUN apk add --no-cache \
 COPY --from=tools /out/ /usr/local/bin/
 
 WORKDIR /build
-COPY test/buildgates/go.mod test/buildgates/go.sum ./
+COPY build/ci/buildgates/go.mod build/ci/buildgates/go.sum ./
 RUN set -eux; \
     GOPROXY="$GO_BUILD_PROXY" go mod download -x; \
     go mod verify; \
@@ -206,6 +206,7 @@ WORKDIR /src
 # By name, not `COPY . .`: the context also carries the toolchain's inputs.
 COPY --chown=root:root go.mod go.sum *.go ./
 COPY --chown=root:root providertest/ providertest/
+COPY --chown=root:root internal/ internal/
 COPY --chown=root:root test/integration/ test/integration/
 COPY --chown=root:root scripts/lib.sh scripts/coverage-gate.sh scripts/
 COPY --chown=root:root build/docker/devcontainer/run-integration-tests.sh build/docker/devcontainer/

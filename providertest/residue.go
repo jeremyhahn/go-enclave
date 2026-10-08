@@ -10,10 +10,10 @@ package providertest
 
 import (
 	"crypto/rand"
-	"fmt"
 	"io"
 
 	enclave "github.com/jeremyhahn/go-enclave"
+	"github.com/jeremyhahn/go-enclave/internal/memscan"
 )
 
 // checkNoResidueAfterUnprotect is the residue sweep: the only instrument that
@@ -32,9 +32,9 @@ func checkNoResidueAfterUnprotect(r *report, cfg Config) {
 			"checked, and the two are different defects", cfg.SkipResidueSweep)
 		return
 	}
-	if !sweepSupported {
+	if !memscan.Supported {
 		r.unmeasured(property, "residue sweep not run: %s. Retention by copy is unmeasured on this platform; "+
-			"run the suite on Linux to measure it, or accept that with Config.SkipResidueSweep", sweepUnsupportedReason)
+			"run the suite on Linux to measure it, or accept that with Config.SkipResidueSweep", memscan.UnsupportedReason)
 		return
 	}
 
@@ -64,7 +64,7 @@ func checkNoResidueAfterUnprotect(r *report, cfg Config) {
 	var home uintptr
 	if err := needle.WithBytes(func(b []byte) error {
 		var aerr error
-		home, aerr = addrOf(b)
+		home, aerr = memscan.Addr(b)
 		return aerr
 	}); err != nil {
 		r.fail(property, "locating the needle: %v", err)
@@ -162,7 +162,7 @@ func checkNoResidueAfterUnprotect(r *report, cfg Config) {
 }
 
 // sweepProcess is the platform sweep; a variable so a test can blind it.
-var sweepProcess = residueMappings
+var sweepProcess = memscan.Find
 
 // sweepOutsideHome returns the mappings, other than the one containing home,
 // in which the material held in probe is byte-exact resident.
@@ -190,19 +190,6 @@ func equalBytes(a, b []byte) bool {
 		}
 	}
 	return true
-}
-
-// addrOf returns the address of a slice's first element, via the %p verb so
-// this package does not import unsafe.
-func addrOf(b []byte) (uintptr, error) {
-	if len(b) == 0 {
-		return 0, errEmptySlice
-	}
-	var addr uint64
-	if _, err := fmt.Sscanf(fmt.Sprintf("%p", b), "0x%x", &addr); err != nil {
-		return 0, &stepError{step: "parsing slice address", err: err}
-	}
-	return uintptr(addr), nil
 }
 
 // release destroys a locked mapping the residue check made for itself. A

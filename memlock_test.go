@@ -338,49 +338,6 @@ func TestLockedMemoryLimit_Refuse(t *testing.T) {
 	}
 }
 
-// TestNewAllocatorWithinRLimit_InvalidBudget pins that a non-positive budget
-// is ErrInvalidBudget, never a host-configuration error.
-func TestNewAllocatorWithinRLimit_InvalidBudget(t *testing.T) {
-	for _, n := range []int64{0, -1, -4096, math.MinInt64} {
-		a, err := NewAllocatorWithinRLimit(n)
-		if !errors.Is(err, ErrInvalidBudget) {
-			t.Errorf("NewAllocatorWithinRLimit(%d) err = %v, want ErrInvalidBudget", n, err)
-		}
-		if errors.Is(err, ErrBudgetExceedsRLimit) {
-			t.Errorf("NewAllocatorWithinRLimit(%d) reported a bad budget as an rlimit refusal", n)
-		}
-		if a != nil {
-			t.Errorf("NewAllocatorWithinRLimit(%d) returned a non-nil allocator on error", n)
-		}
-	}
-}
-
-// TestNewAllocatorWithinRLimit_AcceptsModestBudget is the control for the
-// refusal tests: a single page passes on any host that can run this suite, and
-// the allocator returned is usable.
-func TestNewAllocatorWithinRLimit_AcceptsModestBudget(t *testing.T) {
-	a, err := NewAllocatorWithinRLimit(pageSize)
-	if err != nil {
-		t.Fatalf("NewAllocatorWithinRLimit(%d): %v", pageSize, err)
-	}
-	if a.Limit() != pageSize {
-		t.Errorf("Limit = %d, want %d — the budget must be the one asked for, not a clamped figure", a.Limit(), pageSize)
-	}
-
-	material := []byte("checked-allocator-material")
-	e, err := a.New(material)
-	if err != nil {
-		t.Fatalf("New through a checked allocator: %v", err)
-	}
-	defer e.Destroy()
-	if !holds(e, []byte("checked-allocator-material")) {
-		t.Error("material did not survive into an enclave from a checked allocator")
-	}
-	if a.InUse() != pageSize {
-		t.Errorf("InUse = %d, want one page (%d)", a.InUse(), pageSize)
-	}
-}
-
 // TestDiscoverLockedMemoryLimit_SelfConsistent pins that the figure and
 // flags of the host's real ceiling never disagree.
 func TestDiscoverLockedMemoryLimit_SelfConsistent(t *testing.T) {

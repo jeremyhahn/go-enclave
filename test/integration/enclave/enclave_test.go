@@ -17,6 +17,7 @@ import (
 	"testing"
 
 	enclave "github.com/jeremyhahn/go-enclave"
+	"github.com/jeremyhahn/go-enclave/internal/memscan"
 )
 
 // Where a MemoryEnclave's material lives, and that it is gone after Destroy,
@@ -58,7 +59,7 @@ func TestEnclaveMaterialLivesOnlyInItsEnclaveAndIsGoneAfterDestroy(t *testing.T)
 			if err != nil {
 				t.Fatalf("NewMemoryEnclave: %v", err)
 			}
-			if !allZero(src) {
+			if !memscan.AllZero(src) {
 				t.Fatalf("NewMemoryEnclave did not wipe the caller's slice")
 			}
 			hits, scanned = sweep(t, n)
@@ -96,7 +97,7 @@ func TestEnclaveMaterialLivesOnlyInItsEnclaveAndIsGoneAfterDestroy(t *testing.T)
 			if err != nil {
 				t.Fatalf("Allocator.New: %v", err)
 			}
-			if !allZero(src) {
+			if !memscan.AllZero(src) {
 				t.Fatalf("Allocator.New did not wipe the caller's slice")
 			}
 			hits, scanned := sweep(t, n)
@@ -156,10 +157,6 @@ func TestDestroyedEnclaveRefusesEveryAccess(t *testing.T) {
 		if err := e.WithBytes(func([]byte) error { called = true; return nil }); !errors.Is(err, enclave.ErrEnclaveDestroyed) || called {
 			t.Errorf("WithBytes after Destroy: err %v, callback ran %t; want ErrEnclaveDestroyed and no call", err, called)
 		}
-		//lint:ignore SA1019 the deprecated API keeps working until it is removed; this pins that.
-		if _, err := e.Open(); !errors.Is(err, enclave.ErrEnclaveDestroyed) {
-			t.Errorf("Open after Destroy: err %v, want ErrEnclaveDestroyed", err)
-		}
 		if err := e.Freeze(); !errors.Is(err, enclave.ErrEnclaveDestroyed) {
 			t.Errorf("Freeze after Destroy: err %v, want ErrEnclaveDestroyed", err)
 		}
@@ -186,27 +183,17 @@ func destroyAndRequireGone(t *testing.T, e *enclave.MemoryEnclave, n needle) {
 	requireHitsExactly(t, "after Destroy", hits, scanned)
 }
 
-func allZero(b []byte) bool {
-	for _, c := range b {
-		if c != 0 {
-			return false
-		}
-	}
-	return true
-}
-
 // TestEnclaveAccessorsTellTheTruth exercises the accessors a consumer reads an
 // enclave through, against real locked memory: every constructor, the
-// comparisons, the redacted String, the heap-copy accessors, and what each
+// comparisons, the redacted String, the scoped borrow, and what each
 // reports once the enclave is destroyed.
 func TestEnclaveAccessorsTellTheTruth(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		const secret = "accessor material, 32 bytes long"
 
-		//lint:ignore SA1019 the deprecated API keeps working until it is removed; this pins that.
-		fromString, err := enclave.NewMemoryEnclaveFromString(secret)
+		moved, err := enclave.NewMemoryEnclave([]byte(secret))
 		if err != nil {
-			t.Fatalf("NewMemoryEnclaveFromString: %v", err)
+			t.Fatalf("NewMemoryEnclave: %v", err)
 		}
 		src := []byte(secret)
 		copied, err := enclave.NewMemoryEnclaveCopy(src)
@@ -217,7 +204,7 @@ func TestEnclaveAccessorsTellTheTruth(t *testing.T) {
 			t.Fatal("NewMemoryEnclaveCopy changed its source; it must leave the caller's buffer as it found it")
 		}
 
-		for name, e := range map[string]*enclave.MemoryEnclave{"FromString": fromString, "Copy": copied} {
+		for name, e := range map[string]*enclave.MemoryEnclave{"Move": moved, "Copy": copied} {
 			if e.Size() != len(secret) {
 				t.Errorf("%s: Size = %d, want %d", name, e.Size(), len(secret))
 			}
@@ -233,16 +220,14 @@ func TestEnclaveAccessorsTellTheTruth(t *testing.T) {
 			if s := e.String(); strings.Contains(s, secret) || strings.Contains(s, secret[:8]) {
 				t.Errorf("%s: String() leaks the material: %q", name, s)
 			}
-			// Open aliases the enclave's read-only pages (a write would fault);
-			// OpenString is a deliberate heap copy.
-			//lint:ignore SA1019 the deprecated API keeps working until it is removed; this pins that.
-			b, err := e.Open()
-			if err != nil || string(b) != secret {
-				t.Errorf("%s: Open = (%d bytes, %v)", name, len(b), err)
-			}
-			//lint:ignore SA1019 the deprecated API keeps working until it is removed; this pins that.
-			if s, err := e.OpenString(); err != nil || s != secret {
-				t.Errorf("%s: OpenString = (%q, %v)", name, s, err)
+			// The borrow aliases the enclave's read-only pages (a write would fault).
+			if err := e.WithBytes(func(b []byte) error {
+				if string(b) != secret {
+					t.Errorf("%s: WithBytes lent %d bytes that are not the material", name, len(b))
+				}
+				return nil
+			}); err != nil {
+				t.Errorf("%s: WithBytes = %v", name, err)
 			}
 			if err := e.Destroy(); err != nil {
 				t.Fatalf("%s: Destroy: %v", name, err)
@@ -253,13 +238,8 @@ func TestEnclaveAccessorsTellTheTruth(t *testing.T) {
 			if ok, err := e.EqualTo([]byte(secret)); ok || !errors.Is(err, enclave.ErrEnclaveDestroyed) {
 				t.Errorf("%s: EqualTo after Destroy = (%t, %v), want (false, ErrEnclaveDestroyed)", name, ok, err)
 			}
-			//lint:ignore SA1019 the deprecated API keeps working until it is removed; this pins that.
-			if _, err := e.Open(); !errors.Is(err, enclave.ErrEnclaveDestroyed) {
-				t.Errorf("%s: Open after Destroy = %v, want ErrEnclaveDestroyed", name, err)
-			}
-			//lint:ignore SA1019 the deprecated API keeps working until it is removed; this pins that.
-			if _, err := e.OpenString(); !errors.Is(err, enclave.ErrEnclaveDestroyed) {
-				t.Errorf("%s: OpenString after Destroy = %v, want ErrEnclaveDestroyed", name, err)
+			if err := e.WithBytes(func([]byte) error { return nil }); !errors.Is(err, enclave.ErrEnclaveDestroyed) {
+				t.Errorf("%s: WithBytes after Destroy = %v, want ErrEnclaveDestroyed", name, err)
 			}
 			if s := e.String(); !strings.Contains(strings.ToLower(s), "destroyed") {
 				t.Errorf("%s: String() after Destroy = %q, want it to say so", name, s)
@@ -268,9 +248,8 @@ func TestEnclaveAccessorsTellTheTruth(t *testing.T) {
 
 		// Empty material is refused by every constructor, before any locked
 		// memory is requested.
-		//lint:ignore SA1019 the deprecated API keeps working until it is removed; this pins that.
-		if _, err := enclave.NewMemoryEnclaveFromString(""); !errors.Is(err, enclave.ErrEmptyEnclave) {
-			t.Errorf("NewMemoryEnclaveFromString(\"\") = %v, want ErrEmptyEnclave", err)
+		if _, err := enclave.NewMemoryEnclave(nil); !errors.Is(err, enclave.ErrEmptyEnclave) {
+			t.Errorf("NewMemoryEnclave(nil) = %v, want ErrEmptyEnclave", err)
 		}
 		if _, err := enclave.NewMemoryEnclaveCopy(nil); !errors.Is(err, enclave.ErrEmptyEnclave) {
 			t.Errorf("NewMemoryEnclaveCopy(nil) = %v, want ErrEmptyEnclave", err)
@@ -319,10 +298,6 @@ func TestDestroyedAndNilEnclavesAnswerSafely(t *testing.T) {
 		}
 		if err := nilEnclave.WithBytes(func([]byte) error { return nil }); !errors.Is(err, enclave.ErrEnclaveDestroyed) {
 			t.Errorf("WithBytes on a nil *MemoryEnclave = %v, want ErrEnclaveDestroyed", err)
-		}
-		//lint:ignore SA1019 the deprecated API keeps working until it is removed; this pins that.
-		if b, err := nilEnclave.Open(); b != nil || !errors.Is(err, enclave.ErrEnclaveDestroyed) {
-			t.Errorf("Open on a nil *MemoryEnclave = (%v, %v), want (nil, ErrEnclaveDestroyed)", b, err)
 		}
 		if err := nilEnclave.Freeze(); !errors.Is(err, enclave.ErrEnclaveDestroyed) {
 			t.Errorf("Freeze on a nil *MemoryEnclave = %v, want ErrEnclaveDestroyed", err)

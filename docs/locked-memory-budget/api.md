@@ -1,6 +1,6 @@
 # Locked-memory budget and admission — API
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-01
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-07
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Transports
@@ -27,7 +27,5 @@ scope; no pagination.
 
 ## Versioning
 
-No breaking change to this capability in v0.7. Code that pairs
-`SetAllocator` with a shutdown sweep must move to `WipeAll(ctx)`
-([shutdown-sweep](../shutdown-sweep/user.md#migrating-from-v06)), and
-`OpenWith` now takes a context ([sealing](../sealing/user.md#migrating-from-v06)).
+Pre-1.0: see [Upgrading](../README.md#upgrading) for every breaking change to
+this capability.

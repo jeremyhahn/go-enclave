@@ -21,6 +21,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/jeremyhahn/go-enclave/internal/memscan"
 )
 
 func TestNewMemoryEnclave_HoldsMaterial(t *testing.T) {
@@ -30,14 +32,15 @@ func TestNewMemoryEnclave_HoldsMaterial(t *testing.T) {
 	}
 	defer e.Destroy()
 
-	got, err := e.Open()
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
 	// Compared in place: neither a string conversion nor a %q may carry the
 	// material onto the heap or into the test log.
-	if !bytes.Equal(got, []byte("private-key-material")) {
-		t.Errorf("Open returned a %d-byte view that does not hold the material it was built from", len(got))
+	if err := e.WithBytes(func(got []byte) error {
+		if !bytes.Equal(got, []byte("private-key-material")) {
+			t.Errorf("WithBytes lent a %d-byte view that does not hold the material it was built from", len(got))
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("WithBytes: %v", err)
 	}
 	if e.Size() != len("private-key-material") {
 		t.Errorf("Size = %d, want %d", e.Size(), len("private-key-material"))
@@ -199,27 +202,6 @@ func TestNewMemoryEnclaveCopy_IsPublishedToTheLedger(t *testing.T) {
 	}
 }
 
-func TestNewMemoryEnclaveFromString(t *testing.T) {
-	e, err := NewMemoryEnclaveFromString("AKIAIOSFODNN7EXAMPLE")
-	if err != nil {
-		t.Fatalf("NewMemoryEnclaveFromString: %v", err)
-	}
-	defer e.Destroy()
-
-	// OpenString is the API under test, so its result is judged, never printed.
-	got, err := e.OpenString()
-	if err != nil {
-		t.Fatalf("OpenString: %v", err)
-	}
-	if got != "AKIAIOSFODNN7EXAMPLE" {
-		t.Errorf("OpenString returned a %d-byte string that is not the material", len(got))
-	}
-
-	if _, err := NewMemoryEnclaveFromString(""); !errors.Is(err, ErrEmptyEnclave) {
-		t.Errorf("empty string err = %v, want ErrEmptyEnclave", err)
-	}
-}
-
 func TestMemoryEnclave_Destroy(t *testing.T) {
 	e, err := NewMemoryEnclave([]byte("transient"))
 	if err != nil {
@@ -234,12 +216,6 @@ func TestMemoryEnclave_Destroy(t *testing.T) {
 	}
 	if e.Size() != 0 {
 		t.Errorf("Size = %d after Destroy, want 0", e.Size())
-	}
-	if _, err := e.Open(); !errors.Is(err, ErrEnclaveDestroyed) {
-		t.Errorf("Open err = %v, want ErrEnclaveDestroyed", err)
-	}
-	if _, err := e.OpenString(); !errors.Is(err, ErrEnclaveDestroyed) {
-		t.Errorf("OpenString err = %v, want ErrEnclaveDestroyed", err)
 	}
 	if err := e.WithBytes(func([]byte) error { return nil }); !errors.Is(err, ErrEnclaveDestroyed) {
 		t.Errorf("WithBytes err = %v, want ErrEnclaveDestroyed", err)
@@ -260,8 +236,8 @@ func TestMemoryEnclave_NilReceiver(t *testing.T) {
 	if e.Size() != 0 {
 		t.Errorf("Size = %d on nil enclave, want 0", e.Size())
 	}
-	if _, err := e.Open(); !errors.Is(err, ErrEnclaveDestroyed) {
-		t.Errorf("Open err = %v, want ErrEnclaveDestroyed", err)
+	if err := e.WithBytes(func([]byte) error { return nil }); !errors.Is(err, ErrEnclaveDestroyed) {
+		t.Errorf("WithBytes err = %v, want ErrEnclaveDestroyed", err)
 	}
 	if ok, err := e.EqualTo(nil); ok || !errors.Is(err, ErrEnclaveDestroyed) {
 		t.Errorf("EqualTo = (%t, %v) on nil enclave, want (false, ErrEnclaveDestroyed)", ok, err)
@@ -340,16 +316,6 @@ func TestMemoryEnclave_StringRedacts(t *testing.T) {
 	}
 }
 
-func TestWipe(t *testing.T) {
-	b := []byte("scrub")
-	Wipe(b)
-	for i, c := range b {
-		if c != 0 {
-			t.Errorf("byte %d = %d, want 0", i, c)
-		}
-	}
-}
-
 func TestMemoryEnclave_ConcurrentAccess(t *testing.T) {
 	e, err := NewMemoryEnclave([]byte("concurrent"))
 	if err != nil {
@@ -361,11 +327,9 @@ func TestMemoryEnclave_ConcurrentAccess(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			// Read through the scoped accessor, not Open: Open's slice
-			// outlives the lock and would race Destroy against unmapped pages.
 			// Either the material or ErrEnclaveDestroyed is correct.
-			if s, err := e.OpenString(); err == nil && s != "concurrent" {
-				t.Errorf("OpenString returned a %d-byte string that is not the material", len(s))
+			if ok, err := e.EqualTo([]byte("concurrent")); err == nil && !ok {
+				t.Error("EqualTo found an alive enclave not holding the material")
 			}
 			_ = e.Size()
 			_ = e.IsAlive()
@@ -459,7 +423,6 @@ func TestMemoryEnclave_ConcurrentReadersAndDestroy(t *testing.T) {
 			go func() {
 				defer wg.Done()
 				_ = e.WithBytes(func(b []byte) error { return nil })
-				_, _ = e.OpenString()
 				_ = holds(e, []byte("private-key-material"))
 				_ = e.Size()
 				_ = e.String()
@@ -483,51 +446,6 @@ func TestMemoryEnclave_ConcurrentReadersAndDestroy(t *testing.T) {
 // TestLockedMemoryError pins the typed error's contract: it matches
 // ErrLockedMemoryUnavailable, keeps the diagnostic text, and unwraps a cause
 // that is an error.
-func TestLockedMemoryError(t *testing.T) {
-	t.Run("matches the sentinel with no cause", func(t *testing.T) {
-		err := error(&LockedMemoryError{})
-		if !errors.Is(err, ErrLockedMemoryUnavailable) {
-			t.Error("errors.Is did not match ErrLockedMemoryUnavailable")
-		}
-		if err.Error() != ErrLockedMemoryUnavailable.Error() {
-			t.Errorf("Error() = %q, want the bare sentinel text", err.Error())
-		}
-	})
-
-	t.Run("matches the sentinel and keeps the cause", func(t *testing.T) {
-		err := error(&LockedMemoryError{Cause: "could not acquire lock, limit reached?"})
-		if !errors.Is(err, ErrLockedMemoryUnavailable) {
-			t.Error("errors.Is did not match ErrLockedMemoryUnavailable")
-		}
-		if !strings.Contains(err.Error(), "limit reached?") {
-			t.Errorf("Error() = %q, want the memguard diagnostic retained", err.Error())
-		}
-	})
-
-	t.Run("does not match unrelated sentinels", func(t *testing.T) {
-		if errors.Is(&LockedMemoryError{}, ErrEnclaveDestroyed) {
-			t.Error("matched ErrEnclaveDestroyed")
-		}
-	})
-
-	t.Run("unwraps an error cause", func(t *testing.T) {
-		cause := errors.New("mmap: cannot allocate memory")
-		err := error(&LockedMemoryError{Cause: cause})
-		if !errors.Is(err, cause) {
-			t.Error("errors.Is did not reach the wrapped cause")
-		}
-		if got := errors.Unwrap(err); got != cause {
-			t.Errorf("Unwrap() = %v, want the cause", got)
-		}
-	})
-
-	t.Run("unwraps to nil for a non-error cause", func(t *testing.T) {
-		if got := errors.Unwrap(error(&LockedMemoryError{Cause: "a string panic"})); got != nil {
-			t.Errorf("Unwrap() = %v, want nil", got)
-		}
-	})
-}
-
 // TestEqualToSeparatesMismatchFromDestroyed pins that a mismatch is
 // (false, nil) and a missing enclave is (false, ErrEnclaveDestroyed): an
 // inverted test must never read a destroyed enclave as a definite mismatch.
@@ -535,9 +453,9 @@ func TestEqualToSeparatesMismatchFromDestroyed(t *testing.T) {
 	const material = "the real material"
 
 	t.Run("match", func(t *testing.T) {
-		e, err := NewMemoryEnclaveFromString(material)
+		e, err := NewMemoryEnclave([]byte(material))
 		if err != nil {
-			t.Fatalf("NewMemoryEnclaveFromString: %v", err)
+			t.Fatalf("NewMemoryEnclave: %v", err)
 		}
 		defer e.Destroy()
 
@@ -551,9 +469,9 @@ func TestEqualToSeparatesMismatchFromDestroyed(t *testing.T) {
 	})
 
 	t.Run("genuine mismatch is (false, nil)", func(t *testing.T) {
-		e, err := NewMemoryEnclaveFromString(material)
+		e, err := NewMemoryEnclave([]byte(material))
 		if err != nil {
-			t.Fatalf("NewMemoryEnclaveFromString: %v", err)
+			t.Fatalf("NewMemoryEnclave: %v", err)
 		}
 		defer e.Destroy()
 
@@ -568,9 +486,9 @@ func TestEqualToSeparatesMismatchFromDestroyed(t *testing.T) {
 	})
 
 	t.Run("destroyed is (false, ErrEnclaveDestroyed)", func(t *testing.T) {
-		e, err := NewMemoryEnclaveFromString(material)
+		e, err := NewMemoryEnclave([]byte(material))
 		if err != nil {
-			t.Fatalf("NewMemoryEnclaveFromString: %v", err)
+			t.Fatalf("NewMemoryEnclave: %v", err)
 		}
 		e.Destroy()
 
@@ -601,17 +519,6 @@ func panicValue(fn func()) (r any) {
 	return nil
 }
 
-// allZero reports whether every byte of b is zero. Tests use it in place,
-// inside a borrow, so material is never copied out of locked memory.
-func allZero(b []byte) bool {
-	for _, c := range b {
-		if c != 0 {
-			return false
-		}
-	}
-	return true
-}
-
 // generateInto fills the sized enclave e from the CSPRNG and copies the result,
 // from inside the same borrow, into a second locked enclave (the yardstick), so
 // the material never exists outside locked memory. The caller must Destroy the
@@ -628,7 +535,7 @@ func generateInto(t *testing.T, e *MemoryEnclave) *MemoryEnclave {
 		if _, err := io.ReadFull(rand.Reader, key); err != nil {
 			return err
 		}
-		zero = allZero(key)
+		zero = memscan.AllZero(key)
 		return yardstick.WithBytes(func(w []byte) error {
 			copy(w, key)
 			return nil
@@ -644,11 +551,11 @@ func generateInto(t *testing.T, e *MemoryEnclave) *MemoryEnclave {
 	// Re-read both through fresh borrows: if a borrow handed out a detached
 	// copy, both would read zero and every later comparison would be vacuous.
 	var storedZero, yardstickZero bool
-	if err := e.WithBytes(func(b []byte) error { storedZero = allZero(b); return nil }); err != nil {
+	if err := e.WithBytes(func(b []byte) error { storedZero = memscan.AllZero(b); return nil }); err != nil {
 		_ = yardstick.Destroy()
 		t.Fatalf("re-reading the filled enclave: %v", err)
 	}
-	if err := yardstick.WithBytes(func(b []byte) error { yardstickZero = allZero(b); return nil }); err != nil {
+	if err := yardstick.WithBytes(func(b []byte) error { yardstickZero = memscan.AllZero(b); return nil }); err != nil {
 		_ = yardstick.Destroy()
 		t.Fatalf("re-reading the yardstick: %v", err)
 	}
@@ -697,14 +604,13 @@ func TestDestroy_ReleaseFailureIsReturnedNotPanicked(t *testing.T) {
 	}
 
 	denied := errors.New("munlock: cannot allocate memory")
-	prev := unlockMemory
+	// Registered first, so the enclave is destroyed after the seam is restored.
 	t.Cleanup(func() {
-		unlockMemory = prev
 		if e.m != nil {
 			_ = e.Destroy()
 		}
 	})
-	unlockMemory = func([]byte) error { return denied }
+	prev := swapSeam(t, &unlockMemory, func([]byte) error { return denied })
 
 	var derr error
 	if r := panicValue(func() { derr = e.Destroy() }); r != nil {
@@ -825,9 +731,8 @@ func TestDestroy_CorruptionSurvivesAFailedRelease(t *testing.T) {
 	e.m.canary[len(e.m.canary)-1] ^= 0xFF
 
 	denied := errors.New("munmap: cannot allocate memory")
-	prev := unmapMemory
+	// Registered first, so the enclave is destroyed after the seams are restored.
 	t.Cleanup(func() {
-		unmapMemory = prev
 		if e.m != nil {
 			_ = e.Destroy()
 		}
@@ -835,7 +740,7 @@ func TestDestroy_CorruptionSurvivesAFailedRelease(t *testing.T) {
 	// VirtualUnlock semantics: the first attempt's munlock succeeds, so a retry
 	// that unlocks again is refused on Windows before it reaches the munmap.
 	installStrictUnlock(t)
-	unmapMemory = func([]byte) error { return denied }
+	prev := swapSeam(t, &unmapMemory, func([]byte) error { return denied })
 
 	derr := e.Destroy()
 	if !errors.Is(derr, ErrEnclaveCorrupted) || !errors.Is(derr, ErrLockedMemoryUnavailable) {
@@ -875,7 +780,7 @@ func forgetDestroyedCorruption(t *testing.T) {
 	t.Helper()
 	t.Cleanup(func() {
 		registryMu.Lock()
-		clear(destroyedCorrupt)
+		clear(corruptNoted)
 		registryMu.Unlock()
 	})
 }
@@ -1001,9 +906,6 @@ func TestNewMemoryEnclaveSized_Lifecycle(t *testing.T) {
 	}
 	if err := e.WithBytes(func([]byte) error { return nil }); !errors.Is(err, ErrEnclaveDestroyed) {
 		t.Errorf("WithBytes err = %v, want ErrEnclaveDestroyed", err)
-	}
-	if _, err := e.Open(); !errors.Is(err, ErrEnclaveDestroyed) {
-		t.Errorf("Open err = %v, want ErrEnclaveDestroyed", err)
 	}
 	if holds(e, material) {
 		t.Error("EqualTo = true on a destroyed enclave")
@@ -1538,11 +1440,6 @@ func TestMemoryEnclave_FreezeProtectsAfterTheFill(t *testing.T) {
 	}); err != nil {
 		t.Errorf("borrowing a frozen enclave: %v", err)
 	}
-	// OpenString is the API under test; its result is judged, never printed.
-	if s, err := e.OpenString(); err != nil || s != string(material) {
-		t.Errorf("OpenString() on a frozen enclave: err = %v, holds the material = %v; want the material "+
-			"and no error", err, s == string(material))
-	}
 }
 
 // TestMemoryEnclave_FreezeIsIdempotent pins that Freeze is a nil no-op on an
@@ -1633,7 +1530,7 @@ func TestMemoryEnclave_FreezeReportsDestroyed(t *testing.T) {
 func TestMemoryEnclave_FreezeRefusesAWipedMapping(t *testing.T) {
 	// Unexported constructor: wipeAndVerify is driven directly, so nothing
 	// deregisters, and a ledger entry would leak into every WipeAll test.
-	e, err := newMemoryEnclaveSized(32)
+	e, err := unpublishedSized(32)
 	if err != nil {
 		t.Fatalf("newMemoryEnclaveSized: %v", err)
 	}
@@ -2003,13 +1900,10 @@ func TestRelease_RetryReturnsTheReservationUnderStrictUnlock(t *testing.T) {
 				t.Fatalf("Allocator.NewSized: %v", err)
 			}
 
-			prevUnmap := unmapMemory
-			t.Cleanup(func() {
-				unmapMemory = prevUnmap
-				_, _ = WipeAll(context.Background())
-			})
+			// Registered first, the sweep runs after the seams are restored.
+			t.Cleanup(func() { _, _ = WipeAll(context.Background()) })
 			installStrictUnlock(t)
-			unmapMemory = func([]byte) error { return errors.New("munmap: cannot allocate memory") }
+			prevUnmap := swapSeam(t, &unmapMemory, func([]byte) error { return errors.New("munmap: cannot allocate memory") })
 
 			tc.retry(t, e, true)
 			if used := a.InUse(); used != pageSize {

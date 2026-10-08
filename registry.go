@@ -11,8 +11,6 @@ package enclave
 import (
 	"context"
 	"errors"
-	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 )
@@ -47,15 +45,75 @@ func wakeSweep() {
 	}
 }
 
+// rlock takes the read lock, counted in holders.
+func (e *MemoryEnclave) rlock() {
+	e.holders.Add(1)
+	e.mu.RLock()
+}
+
+// runlock releases what rlock took.
+func (e *MemoryEnclave) runlock() {
+	e.mu.RUnlock()
+	e.unhold()
+}
+
+// lock is rlock for the write lock: Freeze and Destroy.
+func (e *MemoryEnclave) lock() {
+	e.holders.Add(1)
+	e.mu.Lock()
+}
+
+// unlock releases what lock took.
+func (e *MemoryEnclave) unlock() {
+	e.mu.Unlock()
+	e.unhold()
+}
+
+// unhold decrements holders before reading sweepWaiting; reversing them loses
+// wake-ups.
+func (e *MemoryEnclave) unhold() {
+	if e.holders.Add(-1) == 0 && sweepWaiting.Load() {
+		wakeSweep()
+	}
+}
+
+// tryOutcome is what tryRelease reports about the lock.
+type tryOutcome uint8
+
+const (
+	// tryReleased: the lock was taken and a release attempted.
+	tryReleased tryOutcome = iota
+	// tryHeld: a holder will wake the sweep, so it may wait.
+	tryHeld
+	// tryContended: a spurious TryLock failure; retry, never wait.
+	tryContended
+)
+
+// tryRelease is Destroy's release without waiting, for WipeAll only: a
+// blocked Lock cannot be abandoned when ctx ends.
+func (e *MemoryEnclave) tryRelease() (tryOutcome, error) {
+	if !e.mu.TryLock() {
+		// Read after the caller armed sweepWaiting.
+		if e.holders.Load() != 0 {
+			return tryHeld, nil
+		}
+		return tryContended, nil
+	}
+	defer e.mu.Unlock()
+	return tryReleased, e.releaseLocked()
+}
+
 var (
 	registryMu sync.Mutex
 	// live holds every enclave constructed and not yet released.
 	live = make(map[*MemoryEnclave]struct{})
-	// orphans holds the mappings failed constructions could not give back.
-	orphans = make(map[*orphanRecord]struct{})
-	// destroyedCorrupt holds enclaves whose Destroy found a failed canary since
+	// orphans holds the mappings failed constructions could not give back,
+	// each in an enclave no caller can reach, so the sweep releases it
+	// exactly as it releases a live one.
+	orphans = make(map[*MemoryEnclave]struct{})
+	// corruptNoted holds entries whose release found a failed canary since
 	// the last admitted sweep, which reports and clears them.
-	destroyedCorrupt = make(map[*MemoryEnclave]struct{})
+	corruptNoted = make(map[*MemoryEnclave]struct{})
 
 	// sweepGen is a sequence lock behind [SealedEnclave.Openable]'s fallback:
 	// WipeAll bumps it before destroying anything and again on return, so an
@@ -73,13 +131,6 @@ var (
 	// sweepAdmissionWaitForTest runs when a sweep is about to block for the slot.
 	sweepAdmissionWaitForTest func()
 )
-
-// ErrSweepInProgress is returned by [WipeAll] when it was never admitted:
-// another sweep held the process's single sweep slot and this call stopped
-// waiting for it, when its ctx ended or at once for a nil ctx. It is not a
-// [SweepError] and says nothing about the memory: the call reclaimed nothing,
-// and the count returned with it is the current ledger count.
-var ErrSweepInProgress = errors.New("enclave: another WipeAll is in progress; nothing was swept")
 
 // admitSweep takes the sweep slot, waiting for it no longer than ctx allows.
 // A free slot is taken even under a done ctx. A nil ctx only tries.
@@ -111,26 +162,16 @@ func ledgerCount() int {
 	return len(live) + len(orphans)
 }
 
-// orphanRecord is a mapping a failed construction could not hand back to the
-// kernel, kept so [WipeAll] can retry it. refund returns the construction's
-// [Allocator] charge and is nil when there is none to return. It runs exactly
-// once: only WipeAll touches a record after adoption, and the record leaves the
-// ledger in the same step that runs the refund.
-type orphanRecord struct {
-	m      *mapping
-	refund func()
-}
-
 // adoptOrphan puts the mapping a failed construction's err carries onto the
 // orphan ledger, with refund to run when a sweep releases it. It is a no-op
-// when err left nothing mapped. Public constructors call it after the refund
-// decision is made, so a sweep never reaches a record without its refund.
+// when err left nothing mapped. Constructors call it after the refund
+// decision is made, so a sweep never reaches an orphan without its refund.
 func adoptOrphan(err error, refund func()) {
 	var held *pagesHeldError
 	if !errors.As(err, &held) || held.orphan == nil {
 		return
 	}
-	o := &orphanRecord{m: held.orphan, refund: refund}
+	o := &MemoryEnclave{m: held.orphan, release: refund}
 	// One adoption per mapping, however often the error is passed around.
 	held.orphan = nil
 
@@ -138,30 +179,6 @@ func adoptOrphan(err error, refund func()) {
 	orphans[o] = struct{}{}
 	registryMu.Unlock()
 }
-
-// releaseOrphan retries o's release. When the pages went back (by
-// releasedPages, the predicate Destroy uses) it runs the refund, drops the
-// record and reports true. The caller holds the sweep slot.
-func releaseOrphan(o *orphanRecord) (released bool, err error) {
-	err = o.m.release()
-	if !releasedPages(err) {
-		return false, err
-	}
-	if o.refund != nil {
-		o.refund()
-	}
-	registryMu.Lock()
-	delete(orphans, o)
-	registryMu.Unlock()
-	return true, err
-}
-
-// sweepGeneration reports the current sweep sequence. A sealed value records
-// it before it seals; an odd value means a sweep was in flight.
-func sweepGeneration() uint64 { return sweepGen.Load() }
-
-// sweepInFlight reports whether g was taken while a sweep was running.
-func sweepInFlight(g uint64) bool { return g%2 == 1 }
 
 // register adds e to the shutdown ledger and returns it. It publishes e to a
 // concurrent [WipeAll], so it must be the last step of construction, after
@@ -174,83 +191,37 @@ func register(e *MemoryEnclave) *MemoryEnclave {
 	return e
 }
 
-// deregister removes e from the shutdown ledger. It is a no-op for an enclave
-// that is not on it.
-func deregister(e *MemoryEnclave) {
+// settleRelease books the outcome err of a release attempt on the ledger entry
+// e, live or orphan, and reports whether the pages went back. Only then does
+// it return e's Allocator reservation (at most once) and drop e from the
+// ledger; a detected corruption is noted either way, in the same step, so a
+// sweep sees the entry or the note and the next WipeAll reports it even when
+// the caller discarded err.
+func settleRelease(e *MemoryEnclave, err error) bool {
+	released := releasedPages(err)
+	if released && e.release != nil {
+		e.releaseOnce.Do(e.release)
+	}
+
 	registryMu.Lock()
-	delete(live, e)
-	registryMu.Unlock()
-}
-
-// noteCorrupted records that Destroy found e's canary broken, so the next
-// [WipeAll] reports it even when Destroy's caller discarded the error.
-func noteCorrupted(e *MemoryEnclave) {
-	registryMu.Lock()
-	destroyedCorrupt[e] = struct{}{}
-	registryMu.Unlock()
-}
-
-// SweepError reports what an admitted [WipeAll] sweep found that is not a held
-// page: canary corruption, unwiped unmaps, or both. Neither leaves pages held,
-// so the count cannot carry them.
-//
-// Match it with errors.Is against [ErrEnclaveCorrupted] (Corrupt non-zero) and
-// [ErrReleasedWithoutWipe] (Unwiped non-zero); read the numbers with errors.As.
-// WipeAll returns one only when a field is non-zero, and never a nil
-// *SweepError behind a non-nil error.
-type SweepError struct {
-	// Corrupt is how many entries this sweep found with a failed canary
-	// (enclaves, and orphaned mappings that had material copied in), plus
-	// every enclave whose [MemoryEnclave.Destroy] reported [ErrEnclaveCorrupted]
-	// since the previous admitted sweep. Each is counted once per sweep. A
-	// corrupt entry whose pages the kernel would not release is also in the
-	// count WipeAll returns.
-	Corrupt int
-
-	// Unwiped is how many entries this sweep unmapped without the in-process
-	// overwrite because the mprotect that makes a frozen region writable was
-	// denied. Their pages are gone, so they are never in the count.
-	Unwiped int
-}
-
-// Error implements error. Each non-zero condition is one line naming its
-// count and ending in its sentinel's text; both lines appear when both hold.
-func (e *SweepError) Error() string {
-	var b strings.Builder
-	if e.Corrupt > 0 {
-		b.WriteString("enclave: ")
-		b.WriteString(strconv.Itoa(e.Corrupt))
-		b.WriteString(" of the swept enclaves failed canary verification: ")
-		b.WriteString(ErrEnclaveCorrupted.Error())
+	defer registryMu.Unlock()
+	if errors.Is(err, ErrEnclaveCorrupted) {
+		corruptNoted[e] = struct{}{}
 	}
-	if e.Unwiped > 0 {
-		if b.Len() > 0 {
-			b.WriteByte('\n')
-		}
-		b.WriteString("enclave: ")
-		b.WriteString(strconv.Itoa(e.Unwiped))
-		b.WriteString(" of the swept enclaves were unmapped without an in-process wipe because mprotect was denied: ")
-		b.WriteString(ErrReleasedWithoutWipe.Error())
+	if released {
+		// e is on one ledger; deleting from the other is a no-op.
+		delete(live, e)
+		delete(orphans, e)
 	}
-	if b.Len() == 0 {
-		// Only a hand-built SweepError gets here.
-		return "enclave: sweep reported nothing"
-	}
-	return b.String()
+	return released
 }
 
-// Is reports whether e carries the condition target names:
-// [ErrEnclaveCorrupted] when Corrupt is non-zero, [ErrReleasedWithoutWipe]
-// when Unwiped is. A zero field never matches its sentinel.
-func (e *SweepError) Is(target error) bool {
-	switch target {
-	case ErrEnclaveCorrupted:
-		return e.Corrupt > 0
-	case ErrReleasedWithoutWipe:
-		return e.Unwiped > 0
-	}
-	return false
-}
+// sweepGeneration reports the current sweep sequence. A sealed value records
+// it before it seals; an odd value means a sweep was in flight.
+func sweepGeneration() uint64 { return sweepGen.Load() }
+
+// sweepInFlight reports whether g was taken while a sweep was running.
+func sweepInFlight(g uint64) bool { return g%2 == 1 }
 
 // WipeAll destroys every [MemoryEnclave] this package has handed out and not
 // yet reclaimed, including [Sealer] and [SoftwareProvider] keys, and retries
@@ -309,15 +280,14 @@ func WipeAll(ctx context.Context) (int, error) {
 		done = ctx.Done()
 	}
 
-	// Corruption is tallied per entry, not read from the ledger (a reclaimed
-	// corrupt entry is gone from it) and not per release attempt (a refused
-	// release reports it again on retry). Keyed by any: enclaves and orphans.
-	corrupted := make(map[any]struct{})
+	// Corruption is tallied per entry in corruptNoted, not read from the
+	// ledger (a reclaimed corrupt entry is gone from it) and not per release
+	// attempt (a refused release reports it again on retry).
 	unwiped := 0
 
 	// owed is the first pass's snapshot. Later registrations are tried on every
 	// pass but never waited for and never earn a pass.
-	var owed map[any]struct{}
+	var owed map[*MemoryEnclave]struct{}
 
 sweep:
 	for pass := 1; ; pass++ {
@@ -331,31 +301,28 @@ sweep:
 			sweepPassForTest(pass)
 		}
 
-		// Snapshot and unlock before destroying: deregister takes registryMu.
-		// Every registered entry is tried on every pass, because a write TryLock
-		// loses to any momentary reader.
+		// Snapshot and unlock before destroying: settleRelease takes
+		// registryMu. Every registered entry is tried on every pass, because a
+		// write TryLock loses to any momentary reader. Orphans are never held,
+		// so their TryLock always succeeds.
 		registryMu.Lock()
-		batch := make([]*MemoryEnclave, 0, len(live))
+		batch := make([]*MemoryEnclave, 0, len(live)+len(orphans))
 		for e := range live {
 			batch = append(batch, e)
 		}
-		strays := make([]*orphanRecord, 0, len(orphans))
 		for o := range orphans {
-			strays = append(strays, o)
+			batch = append(batch, o)
 		}
 		registryMu.Unlock()
 
 		if owed == nil {
-			owed = make(map[any]struct{}, len(batch)+len(strays))
+			owed = make(map[*MemoryEnclave]struct{}, len(batch))
 			for _, e := range batch {
 				owed[e] = struct{}{}
 			}
-			for _, o := range strays {
-				owed[o] = struct{}{}
-			}
 		}
 
-		if len(batch) == 0 && len(strays) == 0 {
+		if len(batch) == 0 {
 			break
 		}
 
@@ -366,7 +333,7 @@ sweep:
 
 		for _, e := range batch {
 			_, isOwed := owed[e]
-			outcome, err := e.tryReleaseMapping()
+			outcome, err := e.tryRelease()
 			switch outcome {
 			case tryHeld:
 				held = held || isOwed
@@ -377,41 +344,14 @@ sweep:
 			case tryReleased:
 			}
 
-			// Same predicate as Destroy: refund only when the pages went back.
-			if e.release != nil && releasedPages(err) {
-				e.releaseOnce.Do(e.release)
-			}
-
-			if errors.Is(err, ErrEnclaveCorrupted) {
-				corrupted[e] = struct{}{}
-			}
-
-			if !releasedPages(err) {
+			if !settleRelease(e, err) {
 				continue
 			}
-
 			if errors.Is(err, ErrReleasedWithoutWipe) {
 				unwiped++
 			}
-
-			deregister(e)
 			// Also reached when a racing Destroy won; the entry still left the ledger.
 			progressed = progressed || isOwed
-		}
-
-		// Orphans have no lock: only this sweep touches an adopted record.
-		for _, o := range strays {
-			released, err := releaseOrphan(o)
-			if errors.Is(err, ErrEnclaveCorrupted) {
-				corrupted[o] = struct{}{}
-			}
-			if released && errors.Is(err, ErrReleasedWithoutWipe) {
-				unwiped++
-			}
-			if released {
-				_, isOwed := owed[o]
-				progressed = progressed || isOwed
-			}
 		}
 
 		// The only retry not gated on ctx; finite, one per owed entry.
@@ -442,16 +382,15 @@ sweep:
 
 	// The count is the ledger itself, not a tally, so an enclave registered
 	// mid-sweep is never reported as reclaimed.
+	remaining := ledgerCount()
+
 	registryMu.Lock()
-	remaining := len(live) + len(orphans)
-	for e := range destroyedCorrupt {
-		corrupted[e] = struct{}{}
-	}
-	clear(destroyedCorrupt)
+	corrupt := len(corruptNoted)
+	clear(corruptNoted)
 	registryMu.Unlock()
 
-	if len(corrupted) > 0 || unwiped > 0 {
-		return remaining, &SweepError{Corrupt: len(corrupted), Unwiped: unwiped}
+	if corrupt > 0 || unwiped > 0 {
+		return remaining, &SweepError{Corrupt: corrupt, Unwiped: unwiped}
 	}
 	return remaining, nil
 }

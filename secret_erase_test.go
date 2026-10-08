@@ -11,6 +11,7 @@
 package enclave
 
 import (
+	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
 	"runtime"
@@ -69,7 +70,7 @@ func TestWithAEAD_ErasesTheKeyScheduleUnderRuntimeSecret(t *testing.T) {
 				_ = gcm.Seal(nil, nil, []byte("a real seal under this key"), nil)
 				return nil
 			}); err != nil {
-				t.Fatalf("withAEAD: %v", err)
+				t.Fatalf("sealing: %v", err)
 			}
 		}
 		// The locked copy is gone: the key can only survive in what the AES
@@ -84,10 +85,6 @@ func TestWithAEAD_ErasesTheKeyScheduleUnderRuntimeSecret(t *testing.T) {
 
 	residue := func(t *testing.T, probe *MemoryEnclave) []string {
 		t.Helper()
-		hits, err := findNeedle(probe)
-		if err != nil {
-			t.Fatalf("cannot sweep process memory: %v", err)
-		}
 		var home uintptr
 		if err := probe.WithBytes(func(b []byte) error {
 			home = uintptr(unsafe.Pointer(unsafe.SliceData(b)))
@@ -95,11 +92,31 @@ func TestWithAEAD_ErasesTheKeyScheduleUnderRuntimeSecret(t *testing.T) {
 		}); err != nil {
 			t.Fatalf("locating the probe: %v", err)
 		}
-		return rangesOutside(hits, home)
+		hits, err := findNeedle(probe, home)
+		if err != nil {
+			t.Fatalf("cannot sweep process memory: %v", err)
+		}
+		return hits
+	}
+
+	// unerased is withAEAD without secretDo: the same key schedule expansion
+	// and seal, with nothing to erase what they leave behind.
+	unerased := func(key *MemoryEnclave, fn func(cipher.AEAD) error) error {
+		return key.WithBytes(func(k []byte) error {
+			block, err := aes.NewCipher(k)
+			if err != nil {
+				return err
+			}
+			gcm, err := cipher.NewGCMWithRandomNonce(block)
+			if err != nil {
+				return err
+			}
+			return fn(gcm)
+		})
 	}
 
 	// Control: without secretDo the schedule survives the GC.
-	cExact, cSwapped := sealOnce(t, withAEADErasable)
+	cExact, cSwapped := sealOnce(t, unerased)
 	defer func() { _ = cExact.Destroy(); _ = cSwapped.Destroy() }()
 	if len(residue(t, cExact))+len(residue(t, cSwapped)) == 0 {
 		t.Fatal("the control found no key schedule after an UNERASED AES operation: the sweep cannot see " +

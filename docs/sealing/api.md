@@ -1,6 +1,6 @@
 # Sealing and the provider seam — API
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-04
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-07
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Transports
@@ -30,7 +30,5 @@ scope; no pagination.
 
 ## Versioning
 
-v0.7 is BREAKING for this capability: every call that can reach a provider,
-and every provider method, takes a `context.Context` first, and provider
-infrastructure failures on open are joined under the new `ErrOpenFailed`. See
-[user.md](user.md#migrating-from-v06).
+Pre-1.0: see [Upgrading](../README.md#upgrading) for every breaking change to
+this capability.

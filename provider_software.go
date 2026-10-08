@@ -14,13 +14,6 @@ import (
 	"sync"
 )
 
-// ErrProviderMessageLimit reports that a [SoftwareProvider] in
-// [ModePerOperation] has performed as many Protect operations (2^31) as its
-// single root key may safely encrypt, and refuses further ones. The provider
-// does not rotate; use [ModeRootKey], which does, or a hardware
-// [KeyProtector].
-var ErrProviderMessageLimit = errors.New("enclave: software provider reached its per-key message bound; use ModeRootKey or a hardware provider")
-
 // softwareProtectLimit is half of crypto/cipher's 2^32-message bound for one
 // key under NewGCMWithRandomNonce, the same margin as kekMessageLimit.
 const softwareProtectLimit = 1 << 31
@@ -74,21 +67,30 @@ func NewSoftwareProvider() *SoftwareProvider {
 // rootLocked returns the root enclave, generating it on first use. The
 // caller holds p.mu.
 func (p *SoftwareProvider) rootLocked() (*MemoryEnclave, error) {
-	if p.destroyed {
-		return nil, ErrSealerDestroyed
+	root, err := p.liveRootLocked()
+	if err != nil || root != nil {
+		return root, err
 	}
-	if p.root != nil {
-		if !p.root.IsAlive() {
-			return nil, ErrSealerWiped
-		}
-		return p.root, nil
-	}
-	root, err := newKeyEnclave(RootKeyBytes)
-	if err != nil {
+	if root, err = newKeyEnclave(RootKeyBytes); err != nil {
 		return nil, err
 	}
 	p.root = root
 	return root, nil
+}
+
+// liveRootLocked is the one statement of the provider's state: it reports
+// [ErrSealerDestroyed] after Destroy, [ErrSealerWiped] once a shutdown sweep
+// has destroyed the root, and otherwise the root, nil before first use. The
+// caller holds p.mu.
+func (p *SoftwareProvider) liveRootLocked() (*MemoryEnclave, error) {
+	switch {
+	case p.destroyed:
+		return nil, ErrSealerDestroyed
+	case p.root != nil && !p.root.IsAlive():
+		return nil, ErrSealerWiped
+	default:
+		return p.root, nil
+	}
 }
 
 // Health implements [HealthReporter]: it reports [ErrSealerDestroyed] after
@@ -99,13 +101,8 @@ func (p *SoftwareProvider) Health() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	if p.destroyed {
-		return ErrSealerDestroyed
-	}
-	if p.root != nil && !p.root.IsAlive() {
-		return ErrSealerWiped
-	}
-	return nil
+	_, err := p.liveRootLocked()
+	return err
 }
 
 // swept translates [ErrEnclaveDestroyed] from a use of the root into
@@ -142,12 +139,11 @@ func (p *SoftwareProvider) Protect(ctx context.Context, key []byte) ([]byte, err
 	p.protects++
 
 	// The frame's generation field is zero: this provider has one root.
-	header := blobHeader(blobKindProvider, 0)
-	body, err := sealWithKey(root, key, header)
+	blob, err := wrapKey(root, key, blobKindProvider, 0)
 	if err != nil {
 		return nil, swept(err)
 	}
-	return append(header, body...), nil
+	return blob, nil
 }
 
 // Unprotect implements [KeyProtector]: it recovers a Protect-produced blob
@@ -163,23 +159,21 @@ func (p *SoftwareProvider) Unprotect(ctx context.Context, blob, key []byte) erro
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	if p.destroyed {
-		return ErrSealerDestroyed
+	root, err := p.liveRootLocked()
+	if err != nil {
+		return err
 	}
-	if p.root == nil {
+	if root == nil {
 		// This provider has protected nothing, so no blob can be its own.
 		return ErrSealedAuthentication
 	}
-	if !p.root.IsAlive() {
-		return ErrSealerWiped
-	}
 
-	kind, gen, body, err := parseBlobHeader(blob)
+	kind, gen, err := parseBlobHeader(blob)
 	if err != nil || kind != blobKindProvider || gen != 0 {
 		return ErrSealedAuthentication
 	}
 
-	return swept(openWithKeyInto(p.root, body, blob[:blobHeaderLen], key))
+	return swept(unwrapKey(root, blob, key))
 }
 
 // UnsealRoot implements [RootUnsealer]: it copies the provider root,

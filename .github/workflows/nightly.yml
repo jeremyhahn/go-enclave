@@ -10,7 +10,8 @@
 # Every step is a make target (#89, devops §4), exactly as in ci.yml: the FIPS
 # environment, trivy's version, checksum and flags, and the .trivyignore
 # wiring all live in the Makefile, so a nightly finding reproduces with the
-# same `make` line locally.
+# same `make` line locally. The jobs run on the bare runner with actions/setup-go,
+# and get their pinned tools as ci.yml does (see its header).
 
 name: Nightly
 
@@ -25,36 +26,44 @@ permissions:
   contents: read
 
 env:
-  GO_VERSION: "1.27.1"   # MUST equal ci.yml's GO_VERSION (devops.md §9: one toolchain, adopted in one pass)
+  # 0 on our runners: require the image's baked tools at the pins, install
+  # nothing. 1 on github.com, which has no baked image.
+  TOOL_INSTALL: ${{ github.server_url == 'https://github.com' && '1' || '0' }}
 
 jobs:
+  # GOFIPS140=latest + GODEBUG=fips140=only (STRICT, not `on`), set by the
+  # target itself; the Makefile records why `on` is a gate that cannot
+  # fail on the thing it exists to catch. The target covers the same
+  # packages as `make test`, but it is NOT the same run with only the FIPS
+  # env added: it runs once, without -race and without the -cpu=1,2,8
+  # matrix. It exists to find non-approved cryptography on a tested path,
+  # which neither the race detector nor the CPU matrix bears on; the race
+  # and contention defects stay with `make test`/`make coverage` in ci.yml.
+  # If it fails, that failure IS the finding:
+  # something on a tested path uses non-approved cryptography. Do not
+  # weaken it to make it pass — fix the call site, or document a
+  # deliberate exemption with the owner's approval.
   fips:
     name: FIPS
     runs-on: ubuntu-latest
-    # needs: none — nightly runs standalone; build health is ci.yml's job.
+    # nightly runs standalone; build health is ci.yml's job.
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: go.mod
 
-      # GOFIPS140=latest + GODEBUG=fips140=only (STRICT, not `on`), set by the
-      # target itself; the Makefile records why `on` is a gate that cannot
-      # fail on the thing it exists to catch. The target covers the same
-      # packages as `make test`, but it is NOT the same run with only the FIPS
-      # env added: it runs once, without -race and without the -cpu=1,2,8
-      # matrix. It exists to find non-approved cryptography on a tested path,
-      # which neither the race detector nor the CPU matrix bears on; the race
-      # and contention defects stay with `make test`/`make coverage` in ci.yml.
-      # If it fails, that failure IS the finding:
-      # something on a tested path uses non-approved cryptography. Do not
-      # weaken it to make it pass — fix the call site, or document a
-      # deliberate exemption with the owner's approval.
       - name: Build and unit tests (FIPS 140-3 strict)
         run: make test-fips
 
+  # trivy is baked into the toolchain image at the pin in scripts/tool-pins.sh
+  # (the pinned release tarball, accepted only if it matches the SHA-256 pinned
+  # there), as on every other job. This replaced
+  # `curl …/contrib/install.sh from main | sh` — an unreviewed script from a
+  # moving branch, executed as the build user — and the trivy-action steps
+  # that ran on github.com, a third-party action the CLI makes unnecessary.
   trivy:
     name: Trivy
     runs-on: ubuntu-latest
@@ -62,20 +71,12 @@ jobs:
     permissions:
       contents: read
       security-events: write  # the Trivy SARIF upload on github.com; unused on Gitea
-    env:
-      # trivy is NOT baked into the runner image, so this job installs it on
-      # both hosts: the pinned release tarball, accepted only if it matches the
-      # SHA-256 pinned in the Makefile. This replaced
-      # `curl …/contrib/install.sh from main | sh` — an unreviewed script from a
-      # moving branch, executed as the build user — and the trivy-action steps
-      # that ran on github.com, a third-party action the CLI makes unnecessary.
-      TOOL_INSTALL: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: go.mod
 
       # Misconfiguration scanning, ADVISORY: findings surface daily without a
       # new finding class blocking anything (owner direction: enable it).

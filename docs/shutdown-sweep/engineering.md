@@ -1,6 +1,6 @@
 # Shutdown sweep — engineering contract
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-04
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-07
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Exported surface
@@ -20,10 +20,10 @@
    one-token channel rather than a mutex so a waiting caller can abandon it when
    its own `ctx` ends instead of inheriting the running sweep's bound.
 2. **Never unmaps under a reader.** "Reader" is any holder of the enclave's lock:
-   `WithBytes`, `Open`, `OpenString`, `EqualTo`, `Size`, `IsAlive`,
-   `Freeze`, or a `Destroy` waiting its turn. Such an enclave is waited for while
-   `ctx` is live and left mapped (and counted) when it ends. A slice returned by
-   `Open` is **not** a lock holder: the sweep can unmap the pages behind it.
+   `WithBytes`, `EqualTo`, `Size`, `IsAlive`, `Freeze`, or a `Destroy` waiting
+   its turn. Such an enclave is waited for while `ctx` is live and left mapped
+   (and counted) when it ends. A slice kept past `WithBytes` is **not** a lock
+   holder: the sweep can unmap the pages behind it.
    The sweep only ever *tries* an enclave's lock (a blocked `Lock` cannot be
    abandoned when `ctx` ends, and a pending writer stalls new readers), and it
    retries every registered entry on every pass, because a write `TryLock` loses
@@ -116,6 +116,10 @@ An enclave whose release keeps failing stays on the ledger for the process
 lifetime, by design: dropping the only reference to pages the kernel still has
 mapped would make them unreachable and unretryable. The same holds for the
 mapping of a failed construction whose rollback was refused (the orphan ledger).
+An orphan is held in an enclave no caller can reach, so the sweep releases it
+through the same lock attempt and the same bookkeeping step (`settleRelease`:
+refund once, note corruption, leave the ledger) as a live enclave, and
+`Destroy` books its own release through that step too.
 
 ## Configuration and persistence
 

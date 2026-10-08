@@ -84,17 +84,17 @@ only the owed borrows bound the call.
 
 | Concern | File |
 |---|---|
-| Ledgers, orphans, `WipeAll`, `SweepError`, `ErrSweepInProgress`, wake mechanism, generation | [registry.go](../../registry.go) |
-| `holders` counter, `TryLock` classification, release body | [enclave.go](../../enclave.go) |
-| Orphan creation (failed rollback keeps the mapping) | [mapping.go](../../mapping.go) (`abandon`), [admission.go](../../admission.go) (`refundFailed`) |
+| Ledgers, orphans, `WipeAll`, `SweepError`, `ErrSweepInProgress`, wake mechanism, generation, the `holders`-counting locks, `TryLock` classification, `settleRelease` | [registry.go](../../registry.go) |
+| `holders` field, release body (`releaseLocked`), `publish` (every constructor's last step) | [enclave.go](../../enclave.go) |
+| Orphan creation (failed rollback keeps the mapping) | [mapping.go](../../mapping.go) (`abandon`), [enclave.go](../../enclave.go) (`publish`), [allocator.go](../../allocator.go) (`admit` decides the refund) |
 | Generation consumers | [sealer.go](../../sealer.go), [sealed.go](../../sealed.go) |
 
 ## Trust boundaries
 
 `WipeAll` is a **process-wide destroyer**. It belongs to the program that owns
 the process — a signal handler, a defer in `main` — and never to a library, which
-cannot know whether other subsystems' enclaves are still in use. A retained
-`MemoryEnclave.Open` slice faults if read after a sweep.
+cannot know whether other subsystems' enclaves are still in use. A slice
+retained past `WithBytes` faults if read after a sweep.
 
 ## Scope fence
 

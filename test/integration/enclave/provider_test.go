@@ -11,6 +11,7 @@
 package enclave_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"strings"
@@ -25,7 +26,8 @@ import (
 // Covers provider.go and provider_software.go: the shipped SoftwareProvider
 // run through providertest's conformance suite — the instrument a provider
 // author is told to use — inside the devcontainer, where its residue sweep can
-// run; and the provider seam as a consumer injects into it.
+// run, and in a child without locked memory, where it cannot; and the provider
+// seam as a consumer injects into it.
 
 // providerOption injects p in mode m, for tests that range over both modes.
 func providerOption(p any, m enclave.Mode) enclave.SealerOption {
@@ -190,6 +192,68 @@ func TestSoftwareProviderConformance(t *testing.T) {
 
 		if n, err := enclave.WipeAll(ctx); n != 0 || err != nil {
 			t.Fatalf("WipeAll = (%d, %v), want (0, nil)", n, err)
+		}
+	})
+}
+
+// heapProtector keeps a copy of each key under its blob in ordinary heap, so
+// it runs without locked memory.
+type heapProtector struct {
+	mu   sync.Mutex
+	n    int
+	keys map[string][]byte
+}
+
+func (p *heapProtector) Protect(ctx context.Context, key []byte) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.n++
+	blob := []byte{byte(p.n >> 24), byte(p.n >> 16), byte(p.n >> 8), byte(p.n)}
+	p.keys[string(blob)] = bytes.Clone(key)
+	return blob, nil
+}
+
+func (p *heapProtector) Unprotect(ctx context.Context, blob, key []byte) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	k, ok := p.keys[string(blob)]
+	if !ok || len(k) != len(key) {
+		return enclave.ErrSealedAuthentication
+	}
+	copy(key, k)
+	return nil
+}
+
+// TestAResidueSweepWithoutLockedMemoryIsNotAPass runs providertest.TestProvider
+// in a child whose RLIMIT_MEMLOCK is zero, so the residue sweep cannot place its
+// needle, and requires the run to report the property as ErrNotMeasured —
+// unless SkipResidueSweep accepts that.
+func TestAResidueSweepWithoutLockedMemoryIsNotAPass(t *testing.T) {
+	isolated(t, childOpts{memlockZero: true}, func(t *testing.T) {
+		const property = "no copy of the key is findable in the process after Unprotect returns"
+		cfg := providertest.Config{
+			New:   func() (any, error) { return &heapProtector{keys: map[string][]byte{}}, nil },
+			Modes: []enclave.Mode{enclave.ModePerOperation},
+			Logf:  t.Logf,
+		}
+		err := providertest.TestProvider(t.Context(), cfg)
+		var nm *providertest.NotMeasuredError
+		if !errors.Is(err, providertest.ErrNotMeasured) || !errors.As(err, &nm) || nm.Property != property {
+			t.Fatalf("TestProvider = %v; want a *NotMeasuredError for %q", err, property)
+		}
+		if !strings.HasPrefix(nm.Error(), "providertest: "+property+": not measured: ") {
+			t.Errorf("NotMeasuredError renders %q", nm.Error())
+		}
+
+		cfg.SkipResidueSweep = "this run has no locked memory; accepted for the test"
+		if err := providertest.TestProvider(t.Context(), cfg); errors.Is(err, providertest.ErrNotMeasured) {
+			t.Errorf("with SkipResidueSweep set the unmeasured sweep is accepted, got %v", err)
 		}
 	})
 }

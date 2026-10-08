@@ -6,7 +6,7 @@
 // This file is part of go-enclave. Use of this source code is governed by the
 // MIT license that can be found in the LICENSE file.
 
-//go:build aix || darwin || dragonfly || freebsd || illumos || linux || netbsd || openbsd || solaris
+//go:build aix || darwin || dragonfly || freebsd || linux || netbsd || openbsd || solaris
 
 package enclave
 
@@ -18,6 +18,14 @@ import (
 
 // The build constraint is an explicit list, not the unix meta-tag, so a GOOS
 // x/sys cannot serve fails in osmem_unsupported.go rather than inside x/sys.
+// illumos, ios and android are implied by solaris, darwin and linux.
+
+// unixProtections translates a protection to PROT_* bits.
+var unixProtections = protectionTable[int]{
+	noAccess:  unix.PROT_NONE,
+	readOnly:  unix.PROT_READ,
+	readWrite: unix.PROT_READ | unix.PROT_WRITE,
+}
 
 // sysMap returns n bytes of fresh anonymous, private, read-write memory, zeroed
 // by the kernel, with the platform's mapping-time core-dump exclusion. The
@@ -44,7 +52,7 @@ func sysUnlock(b []byte) error {
 
 // sysProtect is mprotect(2), moving b to the given protection.
 func sysProtect(b []byte, p protection) error {
-	prot, err := unixProtection(p)
+	prot, err := unixProtections.translate(p)
 	if err != nil {
 		return err
 	}
@@ -65,15 +73,3 @@ func sysDisableCoreDumps() error {
 }
 
 // unixProtection translates a protection to PROT_* bits.
-func unixProtection(p protection) (int, error) {
-	switch p {
-	case protNoAccess:
-		return unix.PROT_NONE, nil
-	case protReadOnly:
-		return unix.PROT_READ, nil
-	case protReadWrite:
-		return unix.PROT_READ | unix.PROT_WRITE, nil
-	default:
-		return 0, errInvalidProtection
-	}
-}

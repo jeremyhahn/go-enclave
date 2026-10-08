@@ -9,100 +9,18 @@
 package enclave
 
 import (
-	"crypto/subtle"
 	"errors"
-	"fmt"
 	"sync"
 	"sync/atomic"
 )
 
-var (
-	// ErrEmptyEnclave is returned when an enclave is requested for zero bytes
-	// of material.
-	ErrEmptyEnclave = errors.New("enclave: refusing to create an enclave over empty material")
-
-	// ErrEnclaveDestroyed is returned when a destroyed enclave is opened or
-	// read. The locked pages have already been wiped and released.
-	ErrEnclaveDestroyed = errors.New("enclave: enclave has been destroyed")
-
-	// ErrInvalidSize is returned by [NewMemoryEnclaveSized] and
-	// [Allocator.NewSized], before anything is mapped, for a size that is
-	// non-positive or too large to map (the sizes [LockedSize] reports as 0).
-	ErrInvalidSize = errors.New("enclave: enclave size must be positive and small enough to map")
-
-	// ErrLockedMemoryUnavailable reports that the kernel refused to map, lock,
-	// protect or release an enclave's pages (often the RLIMIT_MEMLOCK ceiling).
-	// Every [LockedMemoryError] matches it.
-	ErrLockedMemoryUnavailable = errors.New("enclave: could not allocate locked memory")
-)
-
-// ErrReleasedWithoutWipe reports that an enclave's pages were unmapped without
-// the in-process wipe because mprotect was denied (a seccomp filter, a
-// sandbox). Nothing leaked: the pages were mlock'd throughout and the kernel
-// zeroes them before reuse. An [UnwipedReleaseError] never also matches
-// [ErrLockedMemoryUnavailable].
-var ErrReleasedWithoutWipe = errors.New("enclave: pages unmapped without an in-process wipe; mprotect was denied")
-
-// UnwipedReleaseError is the error behind [ErrReleasedWithoutWipe], which
-// errors.Is reports for every UnwipedReleaseError.
-type UnwipedReleaseError struct {
-	// Cause is the refused mprotect's *os.SyscallError, deliberately not a
-	// LockedMemoryError.
-	Cause error
-}
-
-// Error implements error.
-func (e *UnwipedReleaseError) Error() string {
-	if e.Cause == nil {
-		return ErrReleasedWithoutWipe.Error()
-	}
-	return ErrReleasedWithoutWipe.Error() + ": " + e.Cause.Error()
-}
-
-// Is reports every UnwipedReleaseError as ErrReleasedWithoutWipe.
-func (e *UnwipedReleaseError) Is(target error) bool {
-	return target == ErrReleasedWithoutWipe
-}
-
-// Unwrap returns the underlying mprotect failure so errors.As can reach it.
-func (e *UnwipedReleaseError) Unwrap() error { return e.Cause }
-
-// LockedMemoryError is the error behind [ErrLockedMemoryUnavailable], which
-// errors.Is reports for every LockedMemoryError. Its Cause is diagnostic.
-type LockedMemoryError struct {
-	// Cause is the failing system call's error, or nil. It is typed any for
-	// compatibility; every value this package sets is an error.
-	Cause any
-}
-
-// Error implements error.
-func (e *LockedMemoryError) Error() string {
-	if e.Cause == nil {
-		return ErrLockedMemoryUnavailable.Error()
-	}
-	return ErrLockedMemoryUnavailable.Error() + ": " + fmt.Sprint(e.Cause)
-}
-
-// Is reports every LockedMemoryError as ErrLockedMemoryUnavailable.
-func (e *LockedMemoryError) Is(target error) bool {
-	return target == ErrLockedMemoryUnavailable
-}
-
-// Unwrap returns the cause when it is an error, and nil otherwise.
-func (e *LockedMemoryError) Unwrap() error {
-	if err, ok := e.Cause.(error); ok {
-		return err
-	}
-	return nil
-}
-
 // MemoryEnclave is a region of locked, guarded memory holding sensitive
 // material. Construct one with [NewMemoryEnclave], [NewMemoryEnclaveCopy] or
 // [NewMemoryEnclaveSized]. A nil *MemoryEnclave is a valid receiver: not
-// alive, opens with [ErrEnclaveDestroyed], and Destroy returns nil.
+// alive, borrows fail with [ErrEnclaveDestroyed], and Destroy returns nil.
 //
-// Every method except Open holds the enclave's lock for the whole access, so
-// Destroy and Freeze wait out in-flight readers. Open's slice outlives the lock.
+// Every method holds the enclave's lock for the whole access, so Destroy and
+// Freeze wait out in-flight borrows.
 type MemoryEnclave struct {
 	mu sync.RWMutex
 
@@ -127,20 +45,12 @@ type MemoryEnclave struct {
 // concurrent [WipeAll] can make a successful return an already-destroyed
 // enclave, so callers constructing during shutdown must check IsAlive.
 func NewMemoryEnclave(data []byte) (*MemoryEnclave, error) {
-	e, err := newMemoryEnclave(data)
-	if err != nil {
-		// Pages a refused rollback left mapped go to the orphan ledger.
-		adoptOrphan(err, nil)
-		return nil, err
+	defer Wipe(data)
+	if len(data) == 0 {
+		return nil, ErrEmptyEnclave
 	}
-	return register(e), nil
-}
-
-// newMemoryEnclave builds the enclave without publishing it to the WipeAll
-// ledger; the caller registers it as its last step.
-func newMemoryEnclave(data []byte) (*MemoryEnclave, error) {
-	defer wipe(data)
-	return newMemoryEnclaveCopy(data)
+	m, err := newFrozenCopy(data)
+	return publish(m, err, nil)
 }
 
 // NewMemoryEnclaveCopy is [NewMemoryEnclave] without the wipe: src is left
@@ -148,42 +58,11 @@ func newMemoryEnclave(data []byte) (*MemoryEnclave, error) {
 // unprotected heap copy the caller must [Wipe] when done. The result is frozen
 // and the errors are NewMemoryEnclave's.
 func NewMemoryEnclaveCopy(src []byte) (*MemoryEnclave, error) {
-	e, err := newMemoryEnclaveCopy(src)
-	if err != nil {
-		adoptOrphan(err, nil) // see NewMemoryEnclave
-		return nil, err
-	}
-	return register(e), nil
-}
-
-// newMemoryEnclaveCopy is the unpublished body both constructors share. It
-// never writes src.
-func newMemoryEnclaveCopy(src []byte) (*MemoryEnclave, error) {
 	if len(src) == 0 {
 		return nil, ErrEmptyEnclave
 	}
-
-	m, err := newMapping(len(src))
-	if err != nil {
-		return nil, err
-	}
-
-	copy(m.data, src)
-
-	// A refused freeze leaves the region writable, so release can still wipe
-	// it. A refused release hands the mapping out for the orphan ledger.
-	if ferr := m.freeze(); ferr != nil {
-		if rerr := m.release(); rerr != nil {
-			var held *pagesHeldError
-			if errors.As(rerr, &held) {
-				held.orphan = m
-			}
-			return nil, errors.Join(ferr, rerr)
-		}
-		return nil, ferr
-	}
-
-	return &MemoryEnclave{m: m}, nil
+	m, err := newFrozenCopy(src)
+	return publish(m, err, nil)
 }
 
 // NewMemoryEnclaveSized returns an enclave over n zeroed, WRITABLE bytes, so
@@ -209,90 +88,55 @@ func newMemoryEnclaveCopy(src []byte) (*MemoryEnclave, error) {
 // It returns [ErrInvalidSize] or [ErrLockedMemoryUnavailable], otherwise as
 // [NewMemoryEnclave].
 func NewMemoryEnclaveSized(n int) (*MemoryEnclave, error) {
-	e, err := newMemoryEnclaveSized(n)
-	if err != nil {
-		adoptOrphan(err, nil) // see NewMemoryEnclave
-		return nil, err
-	}
-	return register(e), nil
-}
-
-// newMemoryEnclaveSized is NewMemoryEnclaveSized without the publication step.
-func newMemoryEnclaveSized(n int) (*MemoryEnclave, error) {
-	if _, ok := lockedSize(int64(n)); !ok {
-		return nil, ErrInvalidSize
-	}
-
+	// newMapping is the size check: it refuses n with ErrInvalidSize.
 	m, err := newMapping(n)
+	return publish(m, err, nil)
+}
+
+// newFrozenCopy maps len(src) bytes, copies src in and freezes them. It never
+// writes src, and trusts its caller to have refused an empty src.
+func newFrozenCopy(src []byte) (*mapping, error) {
+	m, err := newMapping(len(src))
 	if err != nil {
 		return nil, err
 	}
-
-	return &MemoryEnclave{m: m}, nil
+	return m.loadFrozen(src)
 }
 
-// NewMemoryEnclaveFromString copies s into a new locked region.
-//
-// Deprecated: the source string cannot be wiped. Build the material as a
-// []byte and use [NewMemoryEnclave], which wipes its input.
-func NewMemoryEnclaveFromString(s string) (*MemoryEnclave, error) {
-	return NewMemoryEnclave([]byte(s))
+// loadFrozen copies src into m and freezes it, releasing m if it cannot.
+func (m *mapping) loadFrozen(src []byte) (*mapping, error) {
+	copy(m.data, src)
+
+	// A refused freeze leaves the region writable, so release can still wipe
+	// it. A refused release hands the mapping out for the orphan ledger.
+	if ferr := m.freeze(); ferr != nil {
+		if rerr := m.release(); rerr != nil {
+			var held *pagesHeldError
+			if errors.As(rerr, &held) {
+				held.orphan = m
+			}
+			return nil, withCleanupFailure(ferr, rerr)
+		}
+		return nil, ferr
+	}
+
+	return m, nil
 }
 
-// withLocked runs fn against the material under the read lock.
-func (e *MemoryEnclave) withLocked(fn func([]byte) error) error {
-	if e == nil {
-		return ErrEnclaveDestroyed
+// publish is the last step of every constructor, admitted or not. On success
+// it registers m as an enclave whose release runs once its pages go back. On
+// failure it hands any pages err left mapped to the orphan ledger with
+// release, so release must be nil unless those pages are still locked: an
+// admitted caller refunds a charge nothing holds itself, at once.
+func publish(m *mapping, err error, release func()) (*MemoryEnclave, error) {
+	if err != nil {
+		adoptOrphan(err, release)
+		return nil, err
 	}
-
-	e.rlock()
-	defer e.runlock()
-
-	if e.m == nil || e.m.wiped {
-		// Wiped but held for a retried release: destroyed, and its guard
-		// pages are already read-write.
-		return ErrEnclaveDestroyed
-	}
-
-	return fn(e.m.data)
-}
-
-// Open returns a slice aliasing the locked pages. It is UNSAFE: once Open
-// returns no lock covers the slice, so a concurrent Destroy or [WipeAll] makes
-// a later read fault the process.
-//
-// Deprecated: the returned slice is covered by no lock, and a concurrent
-// Destroy or [WipeAll] faults a reader holding it. Use
-// [MemoryEnclave.WithBytes], which holds the read lock for the whole borrow.
-func (e *MemoryEnclave) Open() ([]byte, error) {
-	if e == nil {
-		return nil, ErrEnclaveDestroyed
-	}
-
-	e.rlock()
-	defer e.runlock()
-
-	if e.m == nil || e.m.wiped {
-		return nil, ErrEnclaveDestroyed
-	}
-
-	return e.m.data, nil
-}
-
-// OpenString returns an unwipeable heap copy of the material, taken under the
-// read lock, for APIs that only take strings.
-//
-// Deprecated: the returned string cannot be wiped and outlives the enclave.
-// Use [MemoryEnclave.WithBytes] and pass the borrowed bytes on directly.
-func (e *MemoryEnclave) OpenString() (string, error) {
-	var s string
-	if err := e.withLocked(func(b []byte) error {
-		s = string(b)
-		return nil
-	}); err != nil {
-		return "", err
-	}
-	return s, nil
+	// register publishes the enclave to a concurrent WipeAll, so release is set
+	// first: otherwise a sweep could unmap the pages while the budget kept the
+	// charge.
+	return register(&MemoryEnclave{m: m, release: release}), nil
 }
 
 // WithBytes calls fn with a view of the locked pages and returns fn's error,
@@ -301,7 +145,25 @@ func (e *MemoryEnclave) OpenString() (string, error) {
 // method on the same enclave (deadlock); it may use other enclaves. A write
 // through the view fills a sized enclave before Freeze and faults after.
 func (e *MemoryEnclave) WithBytes(fn func([]byte) error) error {
-	return e.withLocked(fn)
+	if e == nil {
+		return ErrEnclaveDestroyed
+	}
+
+	e.rlock()
+	defer e.runlock()
+
+	if !e.holdsMaterial() {
+		return ErrEnclaveDestroyed
+	}
+
+	return fn(e.m.data)
+}
+
+// holdsMaterial reports whether the material is still there. It is false once
+// the pages are released, and once they are wiped but held for a retried
+// release, whose guard pages are already read-write. The caller holds e.mu.
+func (e *MemoryEnclave) holdsMaterial() bool {
+	return e.m != nil && !e.m.wiped
 }
 
 // Freeze makes the pages read-only so a stray write faults. It is idempotent
@@ -320,7 +182,7 @@ func (e *MemoryEnclave) Freeze() error {
 	defer e.unlock()
 
 	// Re-protecting a wiped-but-held mapping would cost its retry an mprotect.
-	if e.m == nil || e.m.wiped {
+	if !e.holdsMaterial() {
 		return ErrEnclaveDestroyed
 	}
 
@@ -329,30 +191,17 @@ func (e *MemoryEnclave) Freeze() error {
 
 // Size reports the number of bytes held, or 0 once destroyed.
 func (e *MemoryEnclave) Size() int {
-	if e == nil {
-		return 0
-	}
-
-	e.rlock()
-	defer e.runlock()
-
-	if e.m == nil || e.m.wiped {
-		return 0
-	}
-
-	return len(e.m.data)
+	n := 0
+	_ = e.WithBytes(func(b []byte) error {
+		n = len(b)
+		return nil
+	})
+	return n
 }
 
 // IsAlive reports whether the locked region still holds material.
 func (e *MemoryEnclave) IsAlive() bool {
-	if e == nil {
-		return false
-	}
-
-	e.rlock()
-	defer e.runlock()
-
-	return e.m != nil && !e.m.wiped
+	return e.WithBytes(func([]byte) error { return nil }) == nil
 }
 
 // EqualTo reports whether the enclave holds exactly other, or
@@ -360,8 +209,8 @@ func (e *MemoryEnclave) IsAlive() bool {
 // the contents.
 func (e *MemoryEnclave) EqualTo(other []byte) (bool, error) {
 	equal := false
-	if err := e.withLocked(func(b []byte) error {
-		equal = subtle.ConstantTimeCompare(b, other) == 1
+	if err := e.WithBytes(func(b []byte) error {
+		equal = equalConstantTime(b, other)
 		return nil
 	}); err != nil {
 		return false, err
@@ -389,29 +238,12 @@ func (e *MemoryEnclave) Destroy() error {
 		return nil
 	}
 
-	err := e.releaseMapping()
+	e.lock()
+	err := e.releaseLocked()
+	e.unlock()
 
-	// Refund only once the pages are gone.
-	if e.release != nil && releasedPages(err) {
-		e.releaseOnce.Do(e.release)
-	}
-
-	// Before deregistering, so a sweep sees the ledger entry or the note.
-	if errors.Is(err, ErrEnclaveCorrupted) {
-		noteCorrupted(e)
-	}
-
-	if releasedPages(err) {
-		deregister(e)
-	}
-
+	settleRelease(e, err)
 	return err
-}
-
-// destroyTransient destroys a package-internal enclave whose release outcome
-// must not change the operation's result; WipeAll keeps the report.
-func destroyTransient(e *MemoryEnclave) {
-	_ = e.Destroy()
 }
 
 // releasedPages reports whether err left the pages returned to the kernel. A
@@ -426,21 +258,6 @@ func releasedPages(err error) bool {
 		errors.Is(err, ErrReleasedWithoutWipe)
 }
 
-// pagesHeldError marks, transparently, a failure that left the pages mapped.
-// locked says they are still mlock'd, so a failed constructor keeps its
-// Allocator charge; orphan is the mapping a failed construction gives up.
-type pagesHeldError struct {
-	err    error
-	locked bool
-	orphan *mapping
-}
-
-// Error implements error, unchanged from the wrapped failure.
-func (e *pagesHeldError) Error() string { return e.err.Error() }
-
-// Unwrap returns the wrapped failure, so the sentinels it matches still match.
-func (e *pagesHeldError) Unwrap() error { return e.err }
-
 // pagesHeld reports whether err's tree holds a pagesHeldError.
 func pagesHeld(err error) bool {
 	var held *pagesHeldError
@@ -453,72 +270,9 @@ func lockedPagesHeld(err error) bool {
 	return errors.As(err, &held) && held.locked
 }
 
-// releaseMapping is the memory half of Destroy.
-func (e *MemoryEnclave) releaseMapping() error {
-	e.lock()
-	defer e.unlock()
-	return e.releaseLocked()
-}
-
-// rlock takes the read lock, counted in holders.
-func (e *MemoryEnclave) rlock() {
-	e.holders.Add(1)
-	e.mu.RLock()
-}
-
-// runlock releases what rlock took.
-func (e *MemoryEnclave) runlock() {
-	e.mu.RUnlock()
-	e.unhold()
-}
-
-// lock is rlock for the write lock: Freeze and Destroy.
-func (e *MemoryEnclave) lock() {
-	e.holders.Add(1)
-	e.mu.Lock()
-}
-
-// unlock releases what lock took.
-func (e *MemoryEnclave) unlock() {
-	e.mu.Unlock()
-	e.unhold()
-}
-
-// unhold decrements holders before reading sweepWaiting; reversing them loses
-// wake-ups.
-func (e *MemoryEnclave) unhold() {
-	if e.holders.Add(-1) == 0 && sweepWaiting.Load() {
-		wakeSweep()
-	}
-}
-
-// tryOutcome is what tryReleaseMapping reports about the lock.
-type tryOutcome uint8
-
-const (
-	// tryReleased: the lock was taken and a release attempted.
-	tryReleased tryOutcome = iota
-	// tryHeld: a holder will wake the sweep, so it may wait.
-	tryHeld
-	// tryContended: a spurious TryLock failure; retry, never wait.
-	tryContended
-)
-
-// tryReleaseMapping is releaseMapping without waiting, for WipeAll only: a
-// blocked Lock cannot be abandoned when ctx ends.
-func (e *MemoryEnclave) tryReleaseMapping() (tryOutcome, error) {
-	if !e.mu.TryLock() {
-		// Read after the caller armed sweepWaiting.
-		if e.holders.Load() != 0 {
-			return tryHeld, nil
-		}
-		return tryContended, nil
-	}
-	defer e.mu.Unlock()
-	return tryReleased, e.releaseLocked()
-}
-
-// releaseLocked is the body both release paths share. The caller holds e.mu.
+// releaseLocked is the memory half of every release: Destroy's and the
+// sweep's. The caller holds e.mu, or is the sweep releasing an orphan no one
+// else can reach.
 func (e *MemoryEnclave) releaseLocked() error {
 	if e.m == nil {
 		return nil
@@ -544,12 +298,6 @@ func (e *MemoryEnclave) String() string {
 // GoString masks the contents under %#v.
 func (e *MemoryEnclave) GoString() string {
 	return e.String()
-}
-
-// Wipe overwrites b with zeroes. On heap memory it is best effort: the bytes
-// may already have been swapped, dumped or copied by the runtime.
-func Wipe(b []byte) {
-	wipe(b)
 }
 
 // KeyScheduleErasure reports whether AES key schedules and HKDF temporaries

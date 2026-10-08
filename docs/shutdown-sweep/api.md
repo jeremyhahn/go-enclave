@@ -1,6 +1,6 @@
 # Shutdown sweep — API
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-01
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-07
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Transports
@@ -20,6 +20,5 @@ Schemas and error mapping: [engineering.md](engineering.md#return-values).
 
 ## Versioning
 
-v0.7 is BREAKING: `WipeAll()` became `WipeAll(ctx)`, its findings became the
-typed `*SweepError`, and `ErrSweepInProgress` is new. See
-[user.md](user.md#migrating-from-v06).
+Pre-1.0: see [Upgrading](../README.md#upgrading) for every breaking change to
+this capability.

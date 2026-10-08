@@ -69,9 +69,6 @@ func TestHardenProcess_MarksTheProcessNotDumpable(t *testing.T) {
 // TestHardenProcess_ReportsFailure refuses each step through the seams, so the
 // test process itself is never changed.
 func TestHardenProcess_ReportsFailure(t *testing.T) {
-	prevSet, prevGet := setDumpable, getDumpable
-	t.Cleanup(func() { setDumpable, getDumpable = prevSet, prevGet })
-
 	setOK := func(uintptr) error { return nil }
 	for _, tc := range []struct {
 		name string
@@ -85,7 +82,8 @@ func TestHardenProcess_ReportsFailure(t *testing.T) {
 		{"still dumpable", setOK, func() (int, error) { return 1, nil }, errDumpableNotCleared},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			setDumpable, getDumpable = tc.set, tc.get
+			swapSeam(t, &setDumpable, tc.set)
+			swapSeam(t, &getDumpable, tc.get)
 			report, err := HardenProcess()
 			if report.NotDumpable {
 				t.Errorf("report = %+v, want nothing reported in effect", report)
@@ -98,8 +96,8 @@ func TestHardenProcess_ReportsFailure(t *testing.T) {
 	}
 
 	var gotArg uintptr = 99
-	setDumpable = func(v uintptr) error { gotArg = v; return nil }
-	getDumpable = func() (int, error) { return 0, nil }
+	swapSeam(t, &setDumpable, func(v uintptr) error { gotArg = v; return nil })
+	swapSeam(t, &getDumpable, func() (int, error) { return 0, nil })
 	if _, err := HardenProcess(); err != nil || gotArg != 0 {
 		t.Errorf("HardenProcess = %v with PR_SET_DUMPABLE(%d), want nil with PR_SET_DUMPABLE(0)", err, gotArg)
 	}

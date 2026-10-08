@@ -10,21 +10,14 @@ package enclave
 
 import (
 	"crypto/rand"
-	"crypto/subtle"
 	"errors"
 	"math"
 	"os"
-	"runtime"
 )
 
 // coreDumpErr records whether the process-wide core-dump hardening took. It is
 // written once, from init, before any goroutine can observe it.
 var coreDumpErr = sysDisableCoreDumps()
-
-// ErrCoreDumpLimitUnsupported is what [CoreDumpsDisabled] reports on Windows,
-// which has no process-wide core-dump limit; dump exposure there must be
-// governed by host policy.
-var ErrCoreDumpLimitUnsupported = errors.New("enclave: this platform has no process-wide core-dump limit to lower")
 
 // Fault-injection seams: each is one system call or construction step with no
 // side effects of its own, reassigned only by this package's tests.
@@ -57,10 +50,6 @@ var pageSize = int64(os.Getpagesize())
 
 // maxInt is the largest int, the ceiling a whole mapping has to fit under.
 const maxInt = int64(^uint(0) >> 1)
-
-// ErrEnclaveCorrupted reports that an enclave's canary or guard pages were
-// overwritten, detected at release. See [MemoryEnclave.Destroy].
-var ErrEnclaveCorrupted = errors.New("enclave: canary verification failed; memory ahead of the enclave was overwritten")
 
 // LockedSize reports the locked memory an n-byte enclave consumes (n rounded
 // up to a page, guard pages excluded), for sizing an [Allocator] budget:
@@ -133,6 +122,12 @@ func newMapping(size int) (*mapping, error) {
 	if !ok {
 		return nil, ErrInvalidSize
 	}
+	return mapLocked(size, innerLen)
+}
+
+// mapLocked is newMapping for a caller that has already rounded size up to
+// innerLen with lockedSize, as the allocator does to charge its budget.
+func mapLocked(size int, innerLen int64) (*mapping, error) {
 	total := int(innerLen) + 2*int(pageSize)
 
 	// Anonymous pages arrive zero-filled.
@@ -187,9 +182,9 @@ func newMapping(size int) (*mapping, error) {
 	return m, nil
 }
 
-// abandon rolls back an empty, partially built mapping and returns cause
-// joined with any cleanup failure. A refused munlock still goes on to munmap,
-// which drops the lock. If munmap is refused, the mapping is handed out in a
+// abandon rolls back an empty, partially built mapping and returns cause with
+// any cleanup failure. A refused munlock still goes on to munmap, which drops
+// the lock. If munmap is refused, the mapping is handed out in a
 // pagesHeldError, marked verified so its half-built canary is never checked.
 func (m *mapping) abandon(cause error, locked bool) error {
 	failure := error(&LockedMemoryError{Cause: cause})
@@ -198,21 +193,21 @@ func (m *mapping) abandon(cause error, locked bool) error {
 	m.unlocked = !locked
 	if !m.unlocked {
 		if err := unlockMemory(m.inner); err != nil {
-			cleanup = errors.Join(cleanup, err)
+			cleanup = err
 		} else {
 			m.unlocked = true
 		}
 	}
 	mapped := false
 	if err := unmapMemory(m.memory); err != nil {
-		cleanup = errors.Join(cleanup, err)
+		cleanup = withCleanupFailure(cleanup, err)
 		mapped = true
 	}
 	if cleanup == nil {
 		return failure
 	}
 
-	report := errors.Join(failure, &LockedMemoryError{Cause: cleanup})
+	report := withCleanupFailure(failure, &LockedMemoryError{Cause: cleanup})
 	if !mapped {
 		// Unmapped, so nothing is held, a refused munlock included.
 		return report
@@ -235,7 +230,9 @@ func (m *mapping) freeze() error {
 }
 
 // wipeAndVerify zeroes the whole mapping, then checks the canary and guards.
-// The check runs at most once; a retry returns the first result.
+// The check runs at most once; a retry returns the first result. It returns
+// ErrEnclaveCorrupted, or the refused mprotect's own error for release to
+// classify.
 func (m *mapping) wipeAndVerify() error {
 	if m.verified {
 		if m.corrupted {
@@ -248,25 +245,25 @@ func (m *mapping) wipeAndVerify() error {
 	// so a refused mprotect below cannot leave an unfrozen enclave's material
 	// behind. Only the data: the canary is still needed for the check.
 	if m.mutable {
-		wipe(m.data)
+		Wipe(m.data)
 		m.wiped = true
 	}
 
 	// The guards are PROT_NONE and a frozen inner is read-only. A refusal is
 	// handled by release.
 	if err := protectMemory(m.memory, protReadWrite); err != nil {
-		return &LockedMemoryError{Cause: err}
+		return err
 	}
 	m.mutable = true
 
-	wipe(m.data)
+	Wipe(m.data)
 
 	// OR'd in, never assigned: corrupted is sticky.
 	m.corrupted = m.corrupted ||
 		!equalConstantTime(m.preguard, m.postguard) ||
 		!equalConstantTime(m.preguard[:len(m.canary)], m.canary)
 
-	wipe(m.memory)
+	Wipe(m.memory)
 
 	// Set before the error return: the guards and canary are now zero, so the
 	// check cannot be redone if a later step fails.
@@ -293,21 +290,16 @@ func (m *mapping) release() error {
 		// reuse. No munlock first; munmap drops the lock.
 		if uerr := unmapMemory(m.memory); uerr != nil {
 			// Refused too: keep everything for a retry.
-			return &pagesHeldError{err: errors.Join(err, uerr), locked: !m.unlocked}
+			return &pagesHeldError{
+				err:    withCleanupFailure(&LockedMemoryError{Cause: err}, uerr),
+				locked: !m.unlocked,
+			}
 		}
 
 		m.forget()
-		// Carry the raw OS error, not the LockedMemoryError wrapper, so this
-		// matches only ErrReleasedWithoutWipe and never reads as "pages still
-		// held".
-		cause := err
-		var lme *LockedMemoryError
-		if errors.As(err, &lme) {
-			if c, ok := lme.Cause.(error); ok {
-				cause = c
-			}
-		}
-		return &UnwipedReleaseError{Cause: cause}
+		// The raw OS error, not a LockedMemoryError, so this matches only
+		// ErrReleasedWithoutWipe and never reads as "pages still held".
+		return &UnwipedReleaseError{Cause: err}
 	}
 
 	// Step 2. An enclave stops at a refused unlock; an abandoned mapping goes
@@ -327,7 +319,7 @@ func (m *mapping) release() error {
 
 	// Step 3.
 	if err := unmapMemory(m.memory); err != nil {
-		return m.held(&LockedMemoryError{Cause: errors.Join(unlockErr, err)})
+		return m.held(&LockedMemoryError{Cause: withCleanupFailure(unlockErr, err)})
 	}
 
 	// The pages are gone: the only place the sticky flags may be cleared.
@@ -348,35 +340,11 @@ func (m *mapping) forget() {
 	m.abandoned = false
 }
 
-// held wraps a refused unlock or unmap as a pagesHeldError, joining in any
+// held wraps a refused unlock or unmap as a pagesHeldError, reported with any
 // corruption already detected.
 func (m *mapping) held(err error) error {
 	if m.corrupted {
-		err = errors.Join(ErrEnclaveCorrupted, err)
+		err = withCleanupFailure(ErrEnclaveCorrupted, err)
 	}
 	return &pagesHeldError{err: err, locked: !m.unlocked}
-}
-
-// wipe overwrites b with zeroes. The KeepAlive stops the compiler eliminating
-// the loop as a dead store.
-func wipe(b []byte) {
-	for i := range b {
-		b[i] = 0
-	}
-	runtime.KeepAlive(b)
-}
-
-// copyConstantTime copies min(len(dst), len(src)) bytes without branching on
-// their contents.
-func copyConstantTime(dst, src []byte) {
-	n := len(dst)
-	if len(src) < n {
-		n = len(src)
-	}
-	subtle.ConstantTimeCopy(1, dst[:n], src[:n])
-}
-
-// equalConstantTime compares two slices without branching on their contents.
-func equalConstantTime(x, y []byte) bool {
-	return subtle.ConstantTimeCompare(x, y) == 1
 }

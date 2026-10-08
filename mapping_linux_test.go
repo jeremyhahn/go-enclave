@@ -10,7 +10,6 @@ package enclave
 
 import (
 	"bufio"
-	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -220,10 +219,7 @@ func frozenWriteChild(t *testing.T) {
 		t.Fatalf("NewMemoryEnclave: %v", err)
 	}
 
-	view, err := e.Open()
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
+	view := e.m.data // a slice no lock covers, as a careless caller would keep
 	fmt.Println(frozenArmed)
 
 	view[0] = 0xFF
@@ -272,10 +268,7 @@ func copyFrozenWriteChild(t *testing.T) {
 	// The caller's source stays writable; only the enclave's view may fault.
 	src[0] = 0xFE
 
-	view, err := e.Open()
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
+	view := e.m.data // a slice no lock covers, as a careless caller would keep
 	fmt.Println(copyFrozenArmed)
 
 	view[0] = 0xFF
@@ -451,7 +444,7 @@ func TestFrozenReleaseUnmapsWhenMprotectIsDenied(t *testing.T) {
 	// Unexported constructor: this test calls m.release() rather than
 	// Destroy, so a ledger-registered enclave would stay registered and skew
 	// every WipeAll test.
-	e, err := newMemoryEnclave(append([]byte(nil), secret...))
+	e, err := unpublishedCopy(append([]byte(nil), secret...))
 	if err != nil {
 		t.Fatalf("newMemoryEnclave: %v", err)
 	}
@@ -468,9 +461,7 @@ func TestFrozenReleaseUnmapsWhenMprotectIsDenied(t *testing.T) {
 	}
 
 	denied := errors.New("mprotect denied by policy")
-	previous := protectMemory
-	t.Cleanup(func() { protectMemory = previous })
-	protectMemory = func([]byte, protection) error { return denied }
+	swapSeam(t, &protectMemory, func([]byte, protection) error { return denied })
 
 	rerr := e.m.release()
 
@@ -499,7 +490,7 @@ func TestFrozenReleaseUnmapsWhenMprotectIsDenied(t *testing.T) {
 // fallback munmap is refused too, release reports a failure and keeps the mapping
 // for a retry.
 func TestFrozenReleaseKeepsTheMappingWhenTheBypassAlsoFails(t *testing.T) {
-	e, err := newMemoryEnclave([]byte("material"))
+	e, err := unpublishedCopy([]byte("material"))
 	if err != nil {
 		t.Fatalf("newMemoryEnclave: %v", err)
 	}
@@ -510,11 +501,8 @@ func TestFrozenReleaseKeepsTheMappingWhenTheBypassAlsoFails(t *testing.T) {
 	})
 
 	denied := errors.New("mprotect denied by policy")
-	prevProtect := protectMemory
-	prevUnmap := unmapMemory
-	t.Cleanup(func() { protectMemory, unmapMemory = prevProtect, prevUnmap })
-	protectMemory = func([]byte, protection) error { return denied }
-	unmapMemory = func([]byte) error { return errors.New("munmap denied too") }
+	swapSeam(t, &protectMemory, func([]byte, protection) error { return denied })
+	swapSeam(t, &unmapMemory, func([]byte) error { return errors.New("munmap denied too") })
 
 	rerr := e.m.release()
 
@@ -533,7 +521,7 @@ func TestFrozenReleaseKeepsTheMappingWhenTheBypassAlsoFails(t *testing.T) {
 // false, Size is 0, and Open, WithBytes and EqualTo return ErrEnclaveDestroyed
 // rather than exposing zeroes.
 func TestKeptMappingReadsAsDestroyedOnceWiped(t *testing.T) {
-	e, err := newMemoryEnclave([]byte("material that is about to be wiped"))
+	e, err := unpublishedCopy([]byte("material that is about to be wiped"))
 	if err != nil {
 		t.Fatalf("newMemoryEnclave: %v", err)
 	}
@@ -562,12 +550,9 @@ func TestKeptMappingReadsAsDestroyedOnceWiped(t *testing.T) {
 	if n := e.Size(); n != 0 {
 		t.Errorf("Size = %d, want 0: there is no material left to have a size", n)
 	}
-	if _, err := e.Open(); !errors.Is(err, ErrEnclaveDestroyed) {
-		t.Errorf("Open = %v, want ErrEnclaveDestroyed: it would otherwise hand "+
-			"back zeroes from a region whose guards are already read-write", err)
-	}
 	if err := e.WithBytes(func([]byte) error { return nil }); !errors.Is(err, ErrEnclaveDestroyed) {
-		t.Errorf("WithBytes = %v, want ErrEnclaveDestroyed", err)
+		t.Errorf("WithBytes = %v, want ErrEnclaveDestroyed: it would otherwise lend "+
+			"zeroes from a region whose guards are already read-write", err)
 	}
 	// The error, not the bool, shows the comparison did not run.
 	if _, err := e.EqualTo([]byte("anything")); !errors.Is(err, ErrEnclaveDestroyed) {
@@ -580,7 +565,7 @@ func TestKeptMappingReadsAsDestroyedOnceWiped(t *testing.T) {
 // release to the fallback rather than the ordinary teardown: no munlock, one
 // munmap, the mprotect denial in the error, and the mapping not marked wiped.
 func TestReleaseNeverUnmapsMaterialItCouldNotWipe(t *testing.T) {
-	e, err := newMemoryEnclave([]byte("material that must not be handed back unwiped"))
+	e, err := unpublishedCopy([]byte("material that must not be handed back unwiped"))
 	if err != nil {
 		t.Fatalf("newMemoryEnclave: %v", err)
 	}
@@ -591,23 +576,18 @@ func TestReleaseNeverUnmapsMaterialItCouldNotWipe(t *testing.T) {
 	})
 
 	denied := errors.New("mprotect denied by policy")
-	prevProtect, prevUnmap := protectMemory, unmapMemory
-	t.Cleanup(func() { protectMemory, unmapMemory = prevProtect, prevUnmap })
-
 	prevUnlock := unlockMemory
-	t.Cleanup(func() { unlockMemory = prevUnlock })
-
 	unmaps, unlocks := 0, 0
-	protectMemory = func([]byte, protection) error { return denied }
-	unlockMemory = func(b []byte) error {
+	swapSeam(t, &protectMemory, func([]byte, protection) error { return denied })
+	swapSeam(t, &unlockMemory, func(b []byte) error {
 		unlocks++
 		return prevUnlock(b)
-	}
-	unmapMemory = func([]byte) error {
+	})
+	swapSeam(t, &unmapMemory, func([]byte) error {
 		unmaps++
 		// Refused, so the mapping is kept for inspection.
 		return errors.New("munmap denied too")
-	}
+	})
 
 	rerr := e.m.release()
 
@@ -639,7 +619,7 @@ func TestReleaseNeverUnmapsMaterialItCouldNotWipe(t *testing.T) {
 // and the fallback munmap were both refused, and the kept mapping must still read
 // as destroyed.
 func TestKeptMutableMappingReadsAsDestroyedOnceWiped(t *testing.T) {
-	e, err := newMemoryEnclaveSized(32)
+	e, err := unpublishedSized(32)
 	if err != nil {
 		t.Fatalf("newMemoryEnclaveSized: %v", err)
 	}
@@ -658,10 +638,8 @@ func TestKeptMutableMappingReadsAsDestroyedOnceWiped(t *testing.T) {
 	}
 
 	denied := errors.New("mprotect denied by policy")
-	prevProtect, prevUnmap := protectMemory, unmapMemory
-	t.Cleanup(func() { protectMemory, unmapMemory = prevProtect, prevUnmap })
-	protectMemory = func([]byte, protection) error { return denied }
-	unmapMemory = func([]byte) error { return errors.New("munmap denied too") }
+	swapSeam(t, &protectMemory, func([]byte, protection) error { return denied })
+	swapSeam(t, &unmapMemory, func([]byte) error { return errors.New("munmap denied too") })
 
 	_ = e.m.release()
 
@@ -676,96 +654,11 @@ func TestKeptMutableMappingReadsAsDestroyedOnceWiped(t *testing.T) {
 	if n := e.Size(); n != 0 {
 		t.Errorf("Size = %d, want 0: there is no material left to have a size", n)
 	}
-	if _, err := e.Open(); !errors.Is(err, ErrEnclaveDestroyed) {
-		t.Errorf("Open = %v, want ErrEnclaveDestroyed: it would otherwise hand "+
-			"back zeroes from a region whose guards are already read-write", err)
-	}
 	if err := e.WithBytes(func([]byte) error { return nil }); !errors.Is(err, ErrEnclaveDestroyed) {
-		t.Errorf("WithBytes = %v, want ErrEnclaveDestroyed", err)
+		t.Errorf("WithBytes = %v, want ErrEnclaveDestroyed: it would otherwise lend "+
+			"zeroes from a region whose guards are already read-write", err)
 	}
 	if _, err := e.EqualTo([]byte("anything")); !errors.Is(err, ErrEnclaveDestroyed) {
 		t.Errorf("EqualTo = %v, want ErrEnclaveDestroyed", err)
 	}
-}
-
-// rangesOutside returns the matches that do not contain addr — that is, every
-// copy of the needle other than the one the test is holding on purpose.
-func rangesOutside(hits []string, addr uintptr) []string {
-	var out []string
-	for _, h := range hits {
-		lo, hi, ok := parseSmapsHeader(h)
-		if ok && addr >= lo && addr < hi {
-			continue
-		}
-		out = append(out, h)
-	}
-	return out
-}
-
-// processMemoryFind returns the /proc/self/maps lines of every anonymous mapping
-// that contains needle. File-backed mappings are skipped because the test
-// binary's rodata would match; kernel-named anonymous mappings such as
-// [anon: Go: heap] are swept.
-//
-// It needs an unfiltered /proc; tests that sweep fail without one. Callers must
-// keep their needles out of plain heap or stack locals (generate into locked
-// pages, compare inside borrows), or the sweep finds those copies.
-func processMemoryFind(needle []byte) ([]string, error) {
-	maps, err := os.ReadFile("/proc/self/maps")
-	if err != nil {
-		return nil, err
-	}
-	mem, err := os.Open("/proc/self/mem")
-	if err != nil {
-		return nil, err
-	}
-	defer mem.Close()
-
-	const chunk = 1 << 20
-	// Chunks overlap by len(needle)-1 so a needle on a boundary is found.
-	overlap := len(needle) - 1
-	buf := make([]byte, chunk+overlap)
-	// Wiped on every return: buf holds copies of the needle, and as heap
-	// garbage they would show up in a later sweep as a false leak.
-	defer wipe(buf)
-
-	var hits []string
-	for _, line := range strings.Split(string(maps), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) < 5 {
-			continue
-		}
-		if !strings.HasPrefix(fields[1], "r") {
-			continue
-		}
-		// File-backed only: a pathname starts with '/'. Kernel labels like
-		// [anon: Go: heap], [stack] and [heap] are anonymous and ARE swept.
-		if len(fields) > 5 && strings.HasPrefix(fields[5], "/") {
-			continue
-		}
-		lo, hi, ok := parseSmapsHeader(line)
-		if !ok || hi <= lo {
-			continue
-		}
-
-		for off := lo; off < hi; {
-			n := chunk
-			if remaining := int(hi - off); remaining < n {
-				n = remaining
-			}
-			read, rerr := mem.ReadAt(buf[:n], int64(off))
-			if read > 0 && bytes.Contains(buf[:read], needle) {
-				hits = append(hits, strings.TrimSpace(line))
-				break
-			}
-			if rerr != nil {
-				break
-			}
-			if read <= overlap {
-				break
-			}
-			off += uintptr(read - overlap)
-		}
-	}
-	return hits, nil
 }

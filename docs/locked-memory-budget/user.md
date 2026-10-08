@@ -106,16 +106,6 @@ refused there and authenticated work keeps its headroom.
 | `ErrNilAllocator` from `New`, `NewSized` or a retune | The `*Allocator` is nil: an unset field or a skipped configuration step | Construct the allocator, or use `ProcessAllocator()`. `New` has already wiped the data. |
 | Budget not returned after a failed allocation | The kernel refused to unlock the rolled-back pages; the charge is kept until a `WipeAll` reclaims them | Expected; the shutdown sweep refunds it. |
 
-## Migrating from v0.7
+## Upgrading
 
-`LimitError` is renamed `BudgetInUseError`; code that matches the
-`ErrBudgetInUse` sentinel with `errors.Is` needs no change, and code using
-`errors.As` changes the type name only. A nil `*Allocator` now returns
-`ErrNilAllocator` instead of panicking.
-
-## Migrating from v0.6
-
-No source change is needed for this capability. Two neighbors changed:
-`WipeAll()` became `WipeAll(ctx)` and `OpenWith(a)` became `OpenWith(ctx, a)` —
-see [shutdown-sweep](../shutdown-sweep/user.md#migrating-from-v06) and
-[sealing](../sealing/user.md#migrating-from-v06).
+Migration guidance lives in one place: [Upgrading](../README.md#upgrading).

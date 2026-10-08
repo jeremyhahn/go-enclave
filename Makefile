@@ -66,6 +66,8 @@ tool = $$(sh scripts/tool.sh $(1) $($(2)_VERSION))
 # too (lint-go), but cannot write the SARIF code scanning reads.
 #   -concurrency=4: gosec sizes workers from host cores, ignoring cgroup limits.
 #   -exclude-dir=test: test/ is never shipped; shipped packages are always scanned.
+#     build/ci/buildgates is its own module, which `./...` from the root never
+#     reaches, so it needs no exclusion; trivy and govulncheck still cover it.
 #   SARIF for code scanning, plus text on stdout for Gitea logs.
 #   No -exclude rules: fix the finding or annotate `#nosec G### -- why`.
 GOSEC_FLAGS := -concurrency=4 -severity=medium -confidence=medium -exclude-dir=test \
@@ -109,17 +111,20 @@ CROSS_TARGETS := linux/amd64 linux/arm64 linux/386 linux/arm \
 	illumos/amd64 solaris/amd64 aix/ppc64 windows/amd64 windows/386 \
 	android/arm64
 
-# Per-package targets (test-, coverage-, bench-<pkg>). The root package is enclave.
-PACKAGES          := enclave providertest
+# Per-package targets (test-, coverage-, bench-<pkg>). The root package is enclave;
+# memscan is internal/memscan, the process-memory sweep the Linux tests share.
+PACKAGES          := enclave providertest memscan
 PKGDIR_enclave      := .
 PKGDIR_providertest := ./providertest
+PKGDIR_memscan      := ./internal/memscan
 
 # FEATURE MAPPING (local-software-factory §7). A feature is a directory
 # docs/<feature>/; scripts/features.sh <base> <tip> prints the ones a change
 # touches, which the factory reads as FEATURES_CMD. Each feature runs as
-# test-<feature> and integration-test-<feature>, which are its package's
-# test-<pkg> and integration-test-<pkg>. A new docs/<feature>/ is mapped here;
-# test/buildgates fails until it is.
+# test-<feature>, its package's test-<pkg>, and integration-test-<feature>,
+# the one integration suite (integration-test-enclave; which of its tests
+# cover which feature is test/integration/COVERAGE.md). A new docs/<feature>/
+# is mapped here; build/ci/buildgates fails until it is.
 FEATURES := locked-memory locked-memory-budget provider-conformance sealing shutdown-sweep
 FEATURE_PKG_locked-memory        := enclave
 FEATURE_PKG_locked-memory-budget := enclave
@@ -161,12 +166,12 @@ vet: lint-go
 tidy:
 	"$$GOCMD" mod tidy
 
-## tidy-check: fail if go.mod/go.sum (root or test/buildgates) are not tidy
+## tidy-check: fail if go.mod/go.sum (root or build/ci/buildgates) are not tidy
 # Reports the diff and changes nothing: a gate must not repair what it checks.
 .PHONY: tidy-check
 tidy-check:
 	@"$$GOCMD" mod tidy -diff || { echo "go.mod/go.sum are not tidy: run 'make tidy'"; exit 1; }
-	@cd test/buildgates && "$$GOCMD" mod tidy -diff || { echo "test/buildgates/go.mod is not tidy: run 'go mod tidy' there"; exit 1; }
+	@cd build/ci/buildgates && "$$GOCMD" mod tidy -diff || { echo "build/ci/buildgates/go.mod is not tidy: run 'go mod tidy' there"; exit 1; }
 
 ## lint: gofmt, golangci-lint (vet, staticcheck, gosec), actionlint, shellcheck (devops §4)
 .PHONY: lint
@@ -174,12 +179,12 @@ lint: fmt-check lint-go lint-actions lint-scripts
 
 ## lint-go: golangci-lint (pinned) over .golangci.yml: vet, staticcheck, gosec and the rest
 # .golangci.yml must enable staticcheck, errcheck, unused, ineffassign,
-# misspell and gocritic. test/buildgates is a separate module, so it is
+# misspell and gocritic. build/ci/buildgates is a separate module, so it is
 # linted there too.
 .PHONY: lint-go
 lint-go:
 	@bin=$(call tool,golangci-lint,GOLANGCI) && "$$bin" $(GOLANGCI_FLAGS) $(PKG) && \
-	cd test/buildgates && "$$bin" $(GOLANGCI_FLAGS) $(PKG)
+	cd build/ci/buildgates && "$$bin" $(GOLANGCI_FLAGS) $(PKG)
 
 ## lint-actions: actionlint (pinned) over .github/workflows, with the pinned shellcheck on every run: block
 # The pinned shellcheck is passed explicitly: actionlint silently skips shell
@@ -189,13 +194,16 @@ lint-actions:
 	@sc=$(call tool,shellcheck,SHELLCHECK) && \
 	bin=$(call tool,actionlint,ACTIONLINT) && "$$bin" -shellcheck "$$sc"
 
-## lint-scripts: shellcheck (pinned) over scripts/*.sh
+## lint-scripts: shellcheck (pinned) over scripts/*.sh, build/docker/devcontainer/*.sh and build/ci/*.sh
 # The scripts are POSIX sh, and release.yml runs them with a write token. -x
-# follows the `. lib.sh` every script sources.
+# follows the `. lib.sh` every script sources. build/ci/*.sh are the workflows'
+# scripts; each names its own shell on its first line (automerge.sh is bash).
 .PHONY: lint-scripts
 lint-scripts:
 	@sc=$(call tool,shellcheck,SHELLCHECK) && \
-	echo "shellcheck $(SHELLCHECK_VERSION) -x --shell=sh scripts/*.sh build/docker/devcontainer/*.sh" && "$$sc" -x --source-path=SCRIPTDIR --shell=sh scripts/*.sh build/docker/devcontainer/*.sh
+	echo "shellcheck $(SHELLCHECK_VERSION) -x --shell=sh scripts/*.sh build/docker/devcontainer/*.sh; build/ci/*.sh" && \
+	"$$sc" -x --source-path=SCRIPTDIR --shell=sh scripts/*.sh build/docker/devcontainer/*.sh && \
+	"$$sc" -x --source-path=SCRIPTDIR build/ci/*.sh
 
 ## staticcheck: staticcheck (golangci-lint's, the one implementation, lint-go)
 .PHONY: staticcheck
@@ -209,7 +217,7 @@ gosec:
 ## govulncheck: known-vuln scan (pinned; also the toolchain-currency forcing function)
 .PHONY: govulncheck
 govulncheck:
-	@bin=$(call tool,govulncheck,GOVULNCHECK) && SCAN_MODULES=". test/buildgates" sh scripts/scan.sh govulncheck "a vulnerability (a CVE)" "$$bin" $(PKG)
+	@bin=$(call tool,govulncheck,GOVULNCHECK) && SCAN_MODULES=". build/ci/buildgates" sh scripts/scan.sh govulncheck "a vulnerability (a CVE)" "$$bin" $(PKG)
 
 ## vuln: alias for govulncheck
 .PHONY: vuln
@@ -262,7 +270,7 @@ BENCH_TARGETS    := $(addprefix bench-,$(PACKAGES))
 .PHONY: test
 test: $(TEST_TARGETS)
 
-## test-<pkg>, coverage-<pkg>, bench-<pkg>: one package (enclave, providertest); coverage-<pkg> FAILS below COVERAGE_THRESHOLD
+## test-<pkg>, coverage-<pkg>, bench-<pkg>: one package (enclave, providertest, memscan); coverage-<pkg> FAILS below COVERAGE_THRESHOLD
 .PHONY: $(TEST_TARGETS) $(COVERAGE_TARGETS) $(PROFILE_TARGETS) $(BENCH_TARGETS)
 $(TEST_TARGETS): test-%:
 	"$$GOCMD" test $(TESTFLAGS) $(PKGDIR_$*)
@@ -320,14 +328,14 @@ test-runtimesecret:
 .PHONY: bench
 bench: $(BENCH_TARGETS)
 
-## test-<feature>, integration-test-<feature>: one feature's package suites (see FEATURES)
+## test-<feature>, integration-test-<feature>: one feature's unit and integration suites (see FEATURES)
 .PHONY: $(addprefix test-,$(FEATURES)) $(addprefix integration-test-,$(FEATURES))
 $(foreach f,$(FEATURES),$(eval test-$(f): test-$(FEATURE_PKG_$(f))))
-$(foreach f,$(FEATURES),$(eval integration-test-$(f): integration-test-$(FEATURE_PKG_$(f))))
+$(foreach f,$(FEATURES),$(eval integration-test-$(f): integration-test-enclave))
 
 # INTEGRATION SUITE. Each package's suite (test/integration/<pkg>/) runs in the
 # devcontainer, never on the host: scripts/integration-test.sh.
-INTEGRATION_PACKAGES  := enclave providertest
+INTEGRATION_PACKAGES  := enclave
 DEVCONTAINER_COMPOSE  := build/docker/devcontainer/compose.yaml
 DEVCONTAINER_SERVICE  := integration
 INTEGRATION_TESTFLAGS := -tags=integration -race -count=1 -v -timeout=1800s
@@ -338,9 +346,9 @@ export INTEGRATION_TESTFLAGS
 GO_ENCLAVE_IT_PROFILE_OUT ?=
 $(call raw_bind,GO_ENCLAVE_IT_PROFILE_OUT)
 # Integration coverage is gated per suite on the package it is FOR, against
-# COVERAGE_THRESHOLD.
-INTEGRATION_COVERPKG_enclave      := github.com/jeremyhahn/go-enclave
-INTEGRATION_COVERPKG_providertest := github.com/jeremyhahn/go-enclave/providertest
+# COVERAGE_THRESHOLD. providertest has no suite of its own: the enclave suite
+# drives it in the devcontainer, and coverage-providertest gates the harness.
+INTEGRATION_COVERPKG_enclave := github.com/jeremyhahn/go-enclave
 # FIPS strict run: same suite with GOFIPS140=latest and fips140=only. The suite
 # fails unless the runtime reports the promised GO_ENCLAVE_IT_FIPS_MODE.
 INTEGRATION_FIPS_ENV  := -e GOFIPS140=latest -e GODEBUG=fips140=only -e GO_ENCLAVE_IT_FIPS_MODE=only
@@ -353,7 +361,7 @@ IT_FIPS_TARGETS := $(addprefix integration-test-fips-,$(INTEGRATION_PACKAGES))
 .PHONY: integration-test
 integration-test: $(IT_TARGETS)
 
-## integration-test-<pkg>: one package's integration suite, in the devcontainer (enclave, providertest)
+## integration-test-<pkg>: one package's integration suite, in the devcontainer (enclave)
 .PHONY: $(IT_TARGETS)
 $(IT_TARGETS): integration-test-%:
 	@sh scripts/integration-test.sh $* "$(INTEGRATION_COVERPKG_$*)"
@@ -362,7 +370,7 @@ $(IT_TARGETS): integration-test-%:
 .PHONY: integration-test-fips
 integration-test-fips: $(IT_FIPS_TARGETS)
 
-## integration-test-fips-<pkg>: one package's integration suite under FIPS 140-3 strict mode (enclave, providertest)
+## integration-test-fips-<pkg>: one package's integration suite under FIPS 140-3 strict mode (enclave)
 .PHONY: $(IT_FIPS_TARGETS)
 $(IT_FIPS_TARGETS): integration-test-fips-%:
 	@sh scripts/integration-test.sh $* "$(INTEGRATION_COVERPKG_$*)" $(INTEGRATION_FIPS_ENV)
@@ -411,21 +419,25 @@ build:
 cross-build:
 	@sh scripts/cross-build.sh $(CROSS_TARGETS) -- $(PKG)
 
-# BUILD GATES: their own module under test/buildgates (it needs a YAML parser
-# the root module must not depend on). check-action-pins runs every test the
+# BUILD GATES: their own module under build/ci/buildgates (it needs a YAML parser
+# the root module must not depend on). check-buildgates runs every test the
 # other gates do not claim.
 BUILDGATES_OTHER := ^(TestReleasability|TestChangelogAssemble|TestScripts)
 # gates TEST-FLAGS: vet the gates module, then run its tests.
-gates = cd test/buildgates && "$$GOCMD" vet $(PKG) && "$$GOCMD" test -count=1 $(1) $(PKG)
+gates = cd build/ci/buildgates && "$$GOCMD" vet $(PKG) && "$$GOCMD" test -count=1 $(1) $(PKG)
 
-## check-action-pins: every `uses:` in a workflow names a 40-hex commit
-.PHONY: check-action-pins
-check-action-pins:
+## check-buildgates: the repository's own checks: workflow action pins, issue citations, the merge workflow, the feature map, the devcontainer inputs
+.PHONY: check-buildgates
+check-buildgates:
 	@$(call gates,-skip '$(BUILDGATES_OTHER)')
+
+## check-action-pins: deprecated alias for check-buildgates (removed after the next release)
+.PHONY: check-action-pins
+check-action-pins: check-buildgates
 
 ## check-releasability: no tracked file names the lab fleet or is agent-only
 # Every tracked file is published, so the scrub happens here. Rules and
-# waivers: test/buildgates/releasability_test.go.
+# waivers: build/ci/buildgates/releasability_test.go.
 .PHONY: check-releasability
 check-releasability:
 	@$(call gates,-run '^TestReleasability')
@@ -443,17 +455,45 @@ check-changelog-assembly:
 check-scripts:
 	@$(call gates,-run '^TestScripts')
 
+# CI AGGREGATES. ci.yml and release.yml each call these, one per job, so a job
+# is one `make` line and the two workflows cannot drift apart. Each target runs
+# once per invocation, however many others depend on it: lint-go carries vet,
+# staticcheck and gosec for lint and security alike.
+
+## ci-lint: every static check: tidy, lint (staticcheck included), the integration suite's lint, the build gates, releasability, changelog assembly, the scripts
+.PHONY: ci-lint
+ci-lint: tidy-check lint lint-integration check-buildgates check-releasability check-changelog-assembly check-scripts
+	@echo "ci-lint completed successfully"
+
+## ci-build: compile all packages, then for every supported GOOS/GOARCH
+.PHONY: ci-build
+ci-build: build cross-build
+	@echo "ci-build completed successfully"
+
+## ci-security: gosec (SARIF), govulncheck and module verification; trivy runs nightly and on release
+.PHONY: ci-security
+ci-security: gosec govulncheck modverify
+	@echo "ci-security completed successfully"
+
+## ci-test: unit tests with coverage (race, CPU matrix, threshold) and the key-schedule erasure build
+.PHONY: ci-test
+ci-test: coverage test-runtimesecret
+	@echo "ci-test completed successfully"
+
+## ci-integration: both integration variants (default and FIPS 140-3 strict) in the devcontainer
+.PHONY: ci-integration
+ci-integration: integration-test integration-test-fips
+	@echo "ci-integration completed successfully"
+
 ## ci-fast: everything `ci` runs that does not need Docker (devops §4)
-# Each target runs once per invocation, however many others depend on it:
-# lint-go carries vet, staticcheck and gosec for lint and security alike.
 .PHONY: ci-fast
-ci-fast: tidy-check lint lint-integration check-action-pins check-releasability check-changelog-assembly check-scripts security coverage test-runtimesecret build cross-build
+ci-fast: ci-lint ci-security trivy ci-test ci-build
 	@echo "ci-fast completed successfully"
 
 ## ci: the full local gate — what a PR must pass, security included (devops §4)
 # Adds both integration variants; Docker is required (fails, never skips).
 .PHONY: ci
-ci: ci-fast integration-test integration-test-fips
+ci: ci-fast ci-integration
 	@echo "CI pipeline completed successfully"
 
 ## deps-latest: bump internal dependencies to their latest tags (none today)

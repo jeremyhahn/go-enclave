@@ -14,6 +14,8 @@ import (
 	"errors"
 	"io"
 	"testing"
+
+	"github.com/jeremyhahn/go-enclave/internal/memscan"
 )
 
 // TestWipeAll_LeavesNoResidentMaterial pins that after the sweep no material
@@ -35,7 +37,7 @@ func TestWipeAll_LeavesNoResidentMaterial(t *testing.T) {
 	if _, err := io.ReadFull(rand.Reader, m.data); err != nil {
 		t.Fatalf("generating the needle: %v", err)
 	}
-	home, err := sliceAddr(m.data)
+	home, err := memscan.Addr(m.data)
 	if err != nil {
 		t.Fatalf("needle address: %v", err)
 	}
@@ -63,27 +65,27 @@ func TestWipeAll_LeavesNoResidentMaterial(t *testing.T) {
 
 	// Control: with the enclaves alive the material must be findable outside
 	// the needle's mapping, proving the scan sees where a leak would live.
-	withLive, err := processMemoryFind(m.data)
+	withLive, err := memscan.Find(m.data, home)
 	if err != nil {
-		t.Fatalf("cannot sweep process memory: %v (see processMemoryFind for what the runner must allow)", err)
+		t.Fatalf("cannot sweep process memory: %v (see memscan.Find for what the runner must allow)", err)
 	}
-	if outside := rangesOutside(withLive, home); len(outside) == 0 {
+	if len(withLive) == 0 {
 		t.Fatalf("the sweep found no match outside the needle's own mapping while %d enclaves held the "+
-			"material (%d matches total); it cannot see the mappings a leak would live in and a negative "+
-			"result would be vacuous", copies, len(withLive))
+			"material; it cannot see the mappings a leak would live in and a negative result would be "+
+			"vacuous", copies)
 	}
 
 	if remaining := sweep(t); remaining != 0 {
 		t.Fatalf("WipeAll = %d, want 0", remaining)
 	}
 
-	after, err := processMemoryFind(m.data)
+	after, err := memscan.Find(m.data, home)
 	if err != nil {
 		t.Fatalf("cannot sweep process memory: %v", err)
 	}
-	if outside := rangesOutside(after, home); len(outside) > 0 {
+	if len(after) > 0 {
 		t.Errorf("the material is present in %d mapping(s) outside the needle's own mapping after WipeAll: "+
-			"the sweep did not reclaim everything. First at %s", len(outside), outside[0])
+			"the sweep did not reclaim everything. First at %s", len(after), after[0])
 	}
 }
 
@@ -150,9 +152,7 @@ func TestWipeAllAccountsAnUnwipedRelease(t *testing.T) {
 	}
 
 	denied := errors.New("mprotect denied by policy")
-	prev := protectMemory
-	t.Cleanup(func() { protectMemory = prev })
-	protectMemory = func([]byte, protection) error { return denied }
+	swapSeam(t, &protectMemory, func([]byte, protection) error { return denied })
 
 	remaining, werr := WipeAll(context.Background())
 

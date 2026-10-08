@@ -3,3 +3,4 @@
 \.github/.* @jeremyhahn
 Makefile @jeremyhahn
 scripts/.* @jeremyhahn
+build/.* @jeremyhahn

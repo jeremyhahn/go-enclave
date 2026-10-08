@@ -1,6 +1,6 @@
 # Provider conformance — engineering contract
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-04
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-07
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Exported surface
@@ -16,7 +16,7 @@ Package `providertest` (import path `github.com/jeremyhahn/go-enclave/providerte
 | `Config.SingleUseRoot string` | Non-empty reason relaxes the two `RootUnsealer` checks that need a second `UnsealRoot` call; echoed to `Logf`. |
 | `Config.Logf func(format string, args ...any)` | Receives what was measured, skipped and why. Pass `t.Logf`. |
 | `ErrInvalidConfig` / `*ConfigError{Field, Reason}` | `cfg` cannot be run; no provider was tested. |
-| `ErrAborted` / `*AbortedError{Err}` | `ctx` ended before the run finished; unwraps to `ctx.Err()`. Never a pass. |
+| `ErrAborted` / `*AbortedError{Err}` | `ctx` ended before the run finished; unwraps to `ctx.Err()` and renders as `ErrAborted`'s text, `": "` and `Err`. Never a pass. |
 | `ErrNotMeasured` / `*NotMeasuredError{Property, Reason}` | A property could not be measured on this host (residue sweep off Linux, without locked memory, or blind) and `cfg` did not accept that. Neither a pass nor a provider defect. |
 | `*PropertyError{Property, Detail}` | One failed assertion; several can share a `Property`. Walk them via the joined error's `Unwrap() []error`. |
 
@@ -130,6 +130,12 @@ own goroutine once the provider returns, never under a running provider.
 | matches `ErrNotMeasured` | A property could not be measured on this host | Run on Linux with locked memory, or set `SkipResidueSweep` with the reason it is acceptable; inspect any joined `*PropertyError`. |
 | joined `*PropertyError`s | Provider violates the seam | Fix the provider. |
 
+Every sentinel and error type is declared in
+[errors.go](../../providertest/errors.go). `AbortedError` is an alias of the
+package's one cause-carrying shape, which matches its sentinel and unwraps to
+`Err`. The joined findings are the only `errors.Join` the package builds
+(`joinFindings`).
+
 ## Configuration and persistence
 
 Only `Config`. Nothing persisted.
@@ -139,7 +145,10 @@ Only `Config`. Nothing persisted.
 The suite is itself tested in `providertest` against `SoftwareProvider` (which
 must pass) and against deliberately defective providers (which each property
 must catch), so a check that cannot fail is found. `make test-providertest` and
-`make coverage-providertest` run it alone.
+`make coverage-providertest` run it alone. In the devcontainer, the enclave
+integration suite (`test/integration/enclave/provider_test.go`) runs it against
+`SoftwareProvider` with the residue sweep required to run, and in a child with
+`RLIMIT_MEMLOCK` at zero, where the sweep must report `ErrNotMeasured`.
 
 ## Observability
 

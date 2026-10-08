@@ -18,7 +18,7 @@ import (
 )
 
 // Behavior under the real RLIMIT_MEMLOCK ceiling is covered in
-// admission_test.go.
+// allocator_test.go.
 
 // TestLimitSourcesDescribeThemselves: every LimitSource an operator can see
 // in a log renders as a description, not a number.

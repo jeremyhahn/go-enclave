@@ -1,37 +1,37 @@
 # CI for go-enclave.
 #
-# EVERY STEP IS A MAKE TARGET (#89, handbook devops §4: "the Makefile is the
-# contract"). This file decides WHERE and IN WHAT ORDER checks run; the
+# EVERY JOB IS ONE MAKE LINE (#89, #129; handbook devops §4: "the Makefile is
+# the contract"). This file decides WHERE and IN WHAT ORDER checks run; the
 # Makefile decides WHAT they are — commands, flags, pinned tool versions and
-# the coverage floor. A red step here reproduces locally with the same `make`
-# line, and a check cannot pass in one place and fail in the other because
-# the two were spelled differently.
+# the coverage floor — and groups them into the ci-lint, ci-security, ci-build,
+# ci-test and ci-integration aggregates that release.yml calls too. A red job
+# here reproduces locally with the same `make` line, and a check cannot pass in
+# one place and fail in the other because the two were spelled differently.
+# Why each check exists is documented beside its Makefile target and its test.
 #
 # Every job starts at once, so a run takes as long as its slowest job. CI Gate,
 # the one required check, needs every job and fails closed on any result but
 # success. automerge.yml's merge trains are PRs from merge-train/* and get
 # their CI from the pull_request trigger like any PR.
 #
-# Long-horizon checks — the FIPS-strict UNIT test run and `trivy fs` — live in
-# nightly.yml rather than on the push path (devops §8a: alpha phase), so a slow
-# job cannot burn runner time per push to tell us something a nightly run
-# already does. The integration suite's FIPS run is the exception: it is on the
-# push path, in `integration`. release.yml runs everything, trivy included, on a tag.
+# Jobs run on the bare runner (devops §1, §9): `runs-on: ubuntu-latest` plus
+# actions/setup-go at the version go.mod declares. The devcontainer is for the
+# integration suite, which `make ci-integration` runs through compose.
 #
 # Things here that are the result of being burned, and are worth understanding
 # before editing:
 #
 #   * TOOLS ARE NEVER NETWORK-INSTALLED ON OUR RUNNERS. TOOL_INSTALL=0 makes
 #     every lint and security target require its tool on PATH at exactly the
-#     Makefile's pin and fail closed otherwise. The runner image bakes the
-#     tools at those versions; a workflow that `go install`ed over them once
-#     replaced the baked golangci-lint v2.13.2 with a v2.12.2 that cannot lint
-#     Go 1.27 (9 of 12 sampled repos were in that state), `@latest` installs
-#     produced unattributable "Version: dev" scans (go-luks2 #21), and the
-#     installs themselves failed whenever sum.golang.org was unreachable. A
-#     mismatch is fixed by raising the pin and the image together, never by
-#     installing. On github.com there is no baked image, so the same targets
-#     install the same pins into the workspace (TOOL_INSTALL=1).
+#     pin in scripts/tool-pins.sh and fail closed otherwise. A workflow that
+#     `go install`ed over a baked golangci-lint once replaced it with a
+#     version that cannot lint Go 1.27, `@latest` installs produced
+#     unattributable "Version: dev" scans (go-luks2 #21), and the installs
+#     themselves failed whenever sum.golang.org was unreachable. The pins track
+#     each tool's latest upstream release; a mismatch is fixed by raising the
+#     pin, never by installing over it. On github.com there is no baked image,
+#     so the same targets install the same pins into the workspace
+#     (TOOL_INSTALL=1).
 #
 #   * gosec and govulncheck TRIAGE THEIR OWN EXIT CODES (in the Makefile). A
 #     shell reports a signal death as 128+N, so a scanner killed by the OOM
@@ -45,6 +45,11 @@
 #
 # Some steps are guarded on `github.server_url` so host-specific tooling runs
 # only where it exists.
+#
+# Long-horizon checks — the FIPS-strict UNIT test run and `trivy fs` — live in
+# nightly.yml rather than on the push path (devops §8a: alpha phase). The
+# integration suite's FIPS run is the exception: it is on the push path, in
+# `integration`. release.yml runs everything, trivy included, on a tag.
 
 name: CI
 
@@ -63,17 +68,17 @@ permissions:
   contents: read
 
 env:
-  GO_VERSION: "1.27.1"        # portfolio standard (owner ruling 2026-09-01). The
-                              # ci-runner image seeds this into the toolcache and
-                              # the review image runs it with GOTOOLCHAIN=local, so
-                              # both halves of the bump are in place -- raising the
-                              # go directive alone would break the hosted review.
-                              # nightly.yml and release.yml MUST carry the same value.
-  # 0 on our runners: require the image's baked tools at the Makefile's pins,
-  # install nothing. 1 on github.com, which has no baked image.
+  # 0 on our runners: require the image's baked tools at the pins, install
+  # nothing. 1 on github.com, which has no baked image.
   TOOL_INSTALL: ${{ github.server_url == 'https://github.com' && '1' || '0' }}
 
 jobs:
+  # make ci-lint: tidiness, gofmt, golangci-lint (vet, staticcheck, gosec),
+  # actionlint with shellcheck over every run: block, shellcheck over the
+  # scripts, the integration suite's lint (with its build tag), and the build
+  # gates: action pins (#70), issue citations, the merge workflow, the public
+  # releasability gate (#80), CHANGELOG assembly and the release scripts. The
+  # Makefile and the tests under build/ci/buildgates say why each exists.
   lint:
     name: Lint
     runs-on: ubuntu-latest
@@ -82,67 +87,9 @@ jobs:
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: go.mod
 
-      - name: go.mod and go.sum are tidy
-        run: make tidy-check
-
-      # gofmt, go vet, golangci-lint, actionlint (with shellcheck over every
-      # run: block) and shellcheck over scripts/. .golangci.yml must enable
-      # staticcheck, errcheck, unused, ineffassign, misspell, gocritic — the
-      # umbrella with the security linters off does not satisfy the gate.
-      - name: Lint
-        run: make lint
-
-      - name: staticcheck
-        run: make staticcheck
-
-      # The integration suite is `//go:build integration`, so the two steps
-      # above never open it — an analyser not given the tag reports clean over
-      # files it did not read (devops §8). Same pinned tools, with the tag, after
-      # proving the tag selects the suite's files and nothing builds without it.
-      - name: Lint the integration suite (with its build tag)
-        run: make lint-integration
-
-      # THE PIN GATE (#70). Every `uses:` in every workflow must name a 40-hex
-      # commit, not a tag and never a branch.
-      #
-      # This runs here, on every push, because the pin does not hold by itself.
-      # A sibling repo re-pinned the same line four times; each regression
-      # arrived as collateral in a fleet rollout of a workflow template whose
-      # real payload was something else, and four reviewers read past it. A
-      # one-line ref change inside a large mechanical diff is precisely what
-      # human review is worst at, so the check has to be mechanical too.
-      #
-      # It parses the YAML rather than grepping it — see the rationale in
-      # test/buildgates/action_pins_test.go — and it lives in its own Go module
-      # so that the parser never enters the root module's dependency graph.
-      - name: Action refs are pinned to commit shas
-        run: make check-action-pins
-
-      # THE PUBLIC-RELEASABILITY GATE (#80). No tracked file names the lab
-      # fleet — an address, a host, the owner's paths — and no agent-only file
-      # (CLAUDE.md, task-worker.yml) is tracked. The public tree is
-      # byte-identical to the release tag, so the scrub has to hold in the
-      # source on every push, not be redone at publication. Rules, waivers and
-      # rationale: test/buildgates/releasability_test.go.
-      - name: Tracked tree is publicly releasable
-        run: make check-releasability
-
-      # The CHANGELOG fragment assembly the release targets run before
-      # tagging (#80, release-versioning §5): every fragment lands in the
-      # version's section exactly once and is then deleted.
-      - name: CHANGELOG fragments assemble into the release
-        run: make check-changelog-assembly
-
-      # The scripts release.yml runs on a tag — with a token that can write to
-      # the forge — and the tool resolver every gate above trusts (#89). They
-      # are driven offline on scratch inputs here, because the tag is too late
-      # to find out one is broken. Includes building and running the
-      # throwaway consumer against this tree, so an API change that breaks it
-      # fails in the PR that made it.
-      - name: Release and tooling scripts
-        run: make check-scripts
+      - run: make ci-lint
 
   security:
     name: Security
@@ -186,12 +133,12 @@ jobs:
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: go.mod
 
-      # Writes gosec.sarif and prints the same findings as text, so a Gitea
-      # failure (no code-scanning API) shows them in the log.
-      - name: gosec
-        run: make gosec
+      # gosec writes gosec.sarif and prints the same findings as text, so a
+      # Gitea failure (no code-scanning API) shows them in the log; then
+      # govulncheck and module verification.
+      - run: make ci-security
 
       - name: Upload gosec SARIF
         # Gitea has no code-scanning API; the upload 404s and fails the job.
@@ -201,12 +148,10 @@ jobs:
           sarif_file: gosec.sarif
           category: gosec
 
-      - name: govulncheck
-        run: make govulncheck
-
-      - name: Verify module integrity
-        run: make modverify
-
+  # Every supported GOOS/GOARCH, 32-bit included: providertest did not compile
+  # on linux/386 or linux/arm through v0.6.1-alpha and nothing noticed, because
+  # nothing built it there. The target list lives in the Makefile so a local
+  # `make ci` and this job cannot disagree.
   build:
     name: Build
     runs-on: ubuntu-latest
@@ -215,22 +160,31 @@ jobs:
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: go.mod
 
-      - name: Build all packages
-        run: make build
-
-      # Every supported GOOS/GOARCH, 32-bit included. providertest did not
-      # compile on linux/386 or linux/arm through v0.6.1-alpha and nothing here
-      # noticed, because nothing built it there. The target list lives in the
-      # Makefile so a local `make ci` and this job cannot disagree.
-      - name: Cross-build all packages
-        run: make cross-build
+      - run: make ci-build
 
   # FIPS (owner mandate 2026-08-17, security-review.md §6) runs nightly
   # (nightly.yml -> `make test-fips`), not here; moving it onto the push path
   # is a deliberate decision, not a drive-by.
 
+  # make ci-test runs the suite with TESTFLAGS (-race -count=1 -cpu=1,2,8) and
+  # FAILS below the Makefile's COVERAGE_THRESHOLD, then the erasing build
+  # (GOEXPERIMENT=runtimesecret, #98).
+  #
+  # -race IS NOT OPTIONAL. It is the sole detector for the publication-ordering
+  # defect class in the shutdown registry: measured 10/10 against the restored
+  # defect with the detector on, 0/10 with it off. -cpu=1,2,8 IS NOT OPTIONAL
+  # EITHER (#61): the retune/admission race is caught only by CONTENTION, so how
+  # reliably it is caught is a property of the RUNNER's core count, which this
+  # repo does not control; the list makes a multi-core run happen on any runner.
+  # Measured against `reserve` regressed to read-then-subtract: -cpu=1 killed
+  # the mutant 0/10, -cpu=2 6/10, -cpu=8 10/10. Do not trim the list to save
+  # time: the cost is ~3.3 min against this job's 30-minute timeout.
+  #
+  # Repo-specific environment tuning goes here (e.g. QUIC UDP buffer sysctls).
+  # Note job containers may have a read-only /proc/sys — tune the runner HOST
+  # for settings that matter; with host networking the host's values apply.
   test:
     name: Test
     runs-on: ubuntu-latest
@@ -240,66 +194,21 @@ jobs:
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: go.mod
 
-      # repo-specific environment tuning goes here (e.g. QUIC UDP
-      # buffer sysctls). Note job containers may have a read-only /proc/sys —
-      # tune the runner HOST for settings that matter; with host networking
-      # the host's values apply.
-
-      # `make coverage` runs the suite with TESTFLAGS (-race -count=1
-      # -cpu=1,2,8) and FAILS below the Makefile's COVERAGE_THRESHOLD.
-      #
-      # -race IS NOT OPTIONAL. It is the sole detector for the
-      # publication-ordering defect class in the shutdown registry: measured
-      # 10/10 against the restored defect with the detector on, 0/10 with it
-      # off. Removing the flag to speed this job up would retire that
-      # guarantee silently — every test would still pass.
-      #
-      # -cpu=1,2,8 IS NOT OPTIONAL EITHER, and for the mirror-image reason
-      # (#61). One direction of the retune/admission race — a lowering that
-      # takes the contested page while `reserve` is between its read of the
-      # headroom counter and the compare-and-swap that acts on it — has no test
-      # seam and cannot get one: the seam would sit on the lock-free admission
-      # path this type exists to keep free of branches and syscalls (benchmarked
-      # in #49). It is caught by CONTENTION instead, so how reliably it is caught
-      # is a property of the RUNNER, not of the suite — and a runner's core count
-      # is not something this repo controls. The list makes a multi-core run
-      # happen even on a single-core or heavily-pinned runner.
-      #
-      # Measured on an 8-core host against `reserve` regressed to
-      # read-then-subtract, 10 runs of the whole package at each setting:
-      #     -cpu=1  ->  0/10 killed the mutant   (single core CANNOT see it)
-      #     -cpu=2  ->  6/10
-      #     -cpu=8  -> 10/10
-      # So -cpu=1 alone is blind to it and the default (GOMAXPROCS = whatever the
-      # runner has) is a coin toss on a small runner. Do not trim the list to one
-      # value to save time; 8 is what makes the kill reliable and 1 is what keeps
-      # the few-core paths honest.
-      #
-      # Cost, measured on the same host: 74s -> 195s for this step (2.6x, not 3x
-      # — the coverage-instrumented build dominates). That is ~3.3 min against
-      # this job's 30-minute timeout.
-      - name: Tests with coverage (race, CPU matrix, threshold)
-        run: make coverage
-
-      # The erasing build (#98): every AES operation under runtime/secret.Do,
-      # and the test that proves the key schedule is gone from memory, exist
-      # only with GOEXPERIMENT=runtimesecret, so they get a run of their own.
-      - name: Unit tests with key-schedule erasure (GOEXPERIMENT=runtimesecret)
-        run: make test-runtimesecret
+      - run: make ci-test
 
   # a repo that builds container images adds an `image` job here that
   # builds each image and gates it with `trivy image --severity CRITICAL,HIGH
   # --exit-code 1` BEFORE any push to either registry. Never
   # image-scan the devcontainer into code scanning.
 
-  # THE INTEGRATION SUITE (#91), in the project devcontainer
-  # (build/docker/devcontainer), never on the runner itself — exactly the two
-  # `make` targets a developer runs. The suite drives the public API against
-  # the real kernel: admission under a real RLIMIT_MEMLOCK ceiling, core-dump
-  # exclusion and mlock read back from /proc/self/smaps, plaintext residue swept
-  # from /proc/self/mem, sealing in both modes, and the shutdown sweep.
+  # THE INTEGRATION SUITE (#91), in the hardened `integration` image of the
+  # project devcontainer, never on the runner itself — exactly the `make`
+  # target a developer runs. The suite drives the public API against the real
+  # kernel: admission under a real RLIMIT_MEMLOCK ceiling, core-dump exclusion
+  # and mlock read back from /proc/self/smaps, plaintext residue swept from
+  # /proc/self/mem, sealing in both modes, and the shutdown sweep.
   #
   # Docker is a HARD requirement and is never skipped around: the targets fail,
   # naming what is missing, when `docker`, Compose v2 or a reachable daemon is
@@ -310,44 +219,33 @@ jobs:
   #
   # On our Gitea runners `docker compose` reaches the HOST daemon through the
   # socket act_runner mounts into job containers (docker-outside-of-docker). The
-  # devcontainer therefore bakes the source into its image — the build context
-  # is sent by the client — and bind-mounts nothing from the job's filesystem,
-  # which on a runner would resolve on the host, where the checkout does not
-  # exist. Each run is its own compose project (unique name: time, pid, random
-  # bytes) and is torn down with its volume and image on exit, so concurrent
-  # jobs on one host cannot collide (integration-testing §7).
+  # integration image therefore bakes the source in — the build context is sent
+  # by the client — and bind-mounts nothing from the job's filesystem, which on
+  # a runner would resolve on the host, where the checkout does not exist. Each
+  # run is its own compose project (unique name: time, pid, random bytes) and is
+  # torn down with its volume and image on exit, so concurrent jobs on one host
+  # cannot collide (integration-testing §7).
   #
-  # Both FIPS configurations run here, one after the other: the default, and
-  # FIPS 140-3 strict (GOFIPS140=latest, GODEBUG=fips140=only), which the suite
-  # verifies actually took effect (crypto/fips140.Enabled/Enforced).
+  # Both FIPS configurations run (`make ci-integration`), one after the other:
+  # the default, and FIPS 140-3 strict (GOFIPS140=latest, GODEBUG=fips140=only),
+  # which the suite verifies actually took effect (crypto/fips140.Enabled/
+  # Enforced). Each run trivy-scans the image it builds; trivy is not on the
+  # runner host, so it is installed from the pinned release tarball, verified
+  # against scripts/tool-pins.sh's SHA-256 (TOOL_INSTALL=1).
   integration:
     name: Integration
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    env:
+      TOOL_INSTALL: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      # The Makefile resolves the module's toolchain at parse time (`go env
-      # GOVERSION`); the suite itself runs on the devcontainer's Go.
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: go.mod
 
-      # Each run trivy-scans the image it builds; trivy is not baked into the
-      # runner image, so it is installed from the pinned release tarball,
-      # verified against the Makefile's SHA-256 (as for `trivy fs`).
-      - name: Integration suite (devcontainer)
-        env:
-          TOOL_INSTALL: "1"
-        run: make integration-test
-
-      # Each run trivy-scans the image it builds; trivy is not baked into the
-      # runner image, so it is installed from the pinned release tarball,
-      # verified against the Makefile's SHA-256 (as for `trivy fs`).
-      - name: Integration suite, FIPS 140-3 strict (devcontainer)
-        env:
-          TOOL_INSTALL: "1"
-        run: make integration-test-fips
+      - run: make ci-integration
 
   # The single required check. Every job above must appear in
   # BOTH the needs list and the results check — a gate that can pass vacuously
@@ -362,19 +260,13 @@ jobs:
     # of `integration` and gates.
     needs: [lint, security, build, test, integration]
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
       - name: Fail closed on any non-success
         run: |
-          # skipped ≠ failed, but BOTH fail the gate: a job that never ran
-          # proved nothing.
-          check() { case "$2" in
-            success) echo "OK   $1";;
-            skipped) echo "SKIP $1 (did not run — see its job)"; BAD=1;;
-            *)       echo "FAIL $1 ($2)"; BAD=1;;
-          esac; }
-          BAD=0
-          check lint     "${{ needs.lint.result }}"
-          check security "${{ needs.security.result }}"
-          check build    "${{ needs.build.result }}"
-          check test     "${{ needs.test.result }}"
-          check integration "${{ needs.integration.result }}"
-          exit $BAD
+          sh build/ci/summary.sh "a CI job did not pass" \
+            lint="${{ needs.lint.result }}" \
+            security="${{ needs.security.result }}" \
+            build="${{ needs.build.result }}" \
+            test="${{ needs.test.result }}" \
+            integration="${{ needs.integration.result }}"

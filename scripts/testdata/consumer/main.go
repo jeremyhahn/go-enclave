@@ -4,7 +4,7 @@
 // the working tree.
 //
 // It lives under testdata/ so the root module's `./...` (build, vet, lint,
-// coverage) never sees it. test/buildgates builds and runs it against the
+// coverage) never sees it. build/ci/buildgates builds and runs it against the
 // working tree on every change, so an API change that breaks it fails in that
 // change's PR rather than at the next tag.
 //

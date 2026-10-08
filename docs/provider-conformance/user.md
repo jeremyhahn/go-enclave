@@ -92,17 +92,6 @@ Never set either to silence a failure you have not explained.
 | Run reported aborted, no property failed | `ctx` deadline too short for your device, or a call that never returns. |
 | `ErrNotMeasured` — residue sweep not run | Not Linux, `RLIMIT_MEMLOCK` too low for two locked pages, or `/proc/self/mem` unreadable. Fix the host, or set `SkipResidueSweep` with the reason. |
 
-## Migrating from v0.6
+## Upgrading
 
-```go
-// v0.6
-err := providertest.TestProvider(providertest.Config{ /* ... */ })
-
-// v0.7
-err := providertest.TestProvider(t.Context(), providertest.Config{ /* ... */ })
-```
-
-Your provider's methods also take a context first (`Protect(ctx, key)`,
-`Unprotect(ctx, blob, key)`, `UnsealRoot(ctx, dst)`), and the suite now checks
-that they refuse an already-ended one. See
-[sealing](../sealing/user.md#migrating-from-v06).
+Migration guidance lives in one place: [Upgrading](../README.md#upgrading).

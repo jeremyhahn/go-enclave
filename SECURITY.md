@@ -10,7 +10,7 @@ go-enclave is pre-1.0. Only the **latest release** receives security fixes: the
 newest `vX.Y.Z-alpha` tag, or the newest `vX.Y.Z` once tagged releases exist.
 Fixes ship as a new version and are never backported to an older minor.
 Breaking changes land in a MINOR bump while the module is pre-1.0, so upgrading
-to get a fix can require the steps in [docs/README.md](docs/README.md#upgrading-from-v06-to-v07).
+to get a fix can require the steps in [docs/README.md](docs/README.md#v070-alpha-from-v06).
 
 | Version | Supported |
 |---|---|
@@ -87,7 +87,7 @@ show the documentation understates them are in scope):
   that survives the garbage collection after its operation IS in scope.
 - Core dumps on Windows, darwin, NetBSD, AIX, Solaris and illumos, where no
   per-mapping exclusion is available; and copies the caller makes itself
-  (the deprecated `OpenString` and `Open`, and `NewMemoryEnclaveCopy` sources).
+  (bytes taken out of a `WithBytes` borrow, and `NewMemoryEnclaveCopy` sources).
 - `GOEXPERIMENT=boringcrypto` builds refusing to seal.
 - Defects in third-party providers (TPM, HSM, KMS): report those to their
   authors, unless the seam or the conformance suite is at fault.

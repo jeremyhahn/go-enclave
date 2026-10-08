@@ -23,6 +23,8 @@ import (
 	"unsafe"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/jeremyhahn/go-enclave/internal/memscan"
 )
 
 // runTestChild re-executes this test binary running exactly the named test,
@@ -419,7 +421,7 @@ func TestNewMemoryEnclaveSized_MemoryIsLocked(t *testing.T) {
 	for i := range heap {
 		heap[i] = 1 // fault the page in so it has a mapping to find
 	}
-	heapAddr, err := sliceAddr(heap)
+	heapAddr, err := memscan.Addr(heap)
 	if err != nil {
 		t.Fatalf("heap address: %v", err)
 	}
@@ -446,7 +448,7 @@ func TestNewMemoryEnclaveSized_MemoryIsLocked(t *testing.T) {
 	var addr uintptr
 	if err := e.WithBytes(func(b []byte) error {
 		var aerr error
-		addr, aerr = sliceAddr(b)
+		addr, aerr = memscan.Addr(b)
 		return aerr
 	}); err != nil {
 		t.Fatalf("borrow: %v", err)
@@ -464,15 +466,6 @@ func TestNewMemoryEnclaveSized_MemoryIsLocked(t *testing.T) {
 	}
 }
 
-// sliceAddr returns the address of a slice's first element via the %p verb.
-func sliceAddr(b []byte) (uintptr, error) {
-	var addr uint64
-	if _, err := fmt.Sscanf(fmt.Sprintf("%p", b), "0x%x", &addr); err != nil {
-		return 0, fmt.Errorf("parsing slice address: %w", err)
-	}
-	return uintptr(addr), nil
-}
-
 // lockedKBForAddress reports the Locked: figure of the /proc/self/smaps mapping
 // that contains addr. found is false when no mapping covers addr, or when the
 // kernel does not emit the field for it.
@@ -487,7 +480,7 @@ func lockedKBForAddress(addr uintptr) (kb int64, found bool, err error) {
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {
 		line := sc.Text()
-		if lo, hi, ok := parseSmapsHeader(line); ok {
+		if lo, hi, ok := memscan.ParseMapsHeader(line); ok {
 			inRange = addr >= lo && addr < hi
 			continue
 		}
@@ -505,28 +498,6 @@ func lockedKBForAddress(addr uintptr) (kb int64, found bool, err error) {
 		return v, true, nil
 	}
 	return 0, false, sc.Err()
-}
-
-// parseSmapsHeader recognizes an smaps mapping header ("7f0c…-7f0c… rw-p …")
-// and returns its bounds; detail lines never parse as one.
-func parseSmapsHeader(line string) (lo, hi uintptr, ok bool) {
-	first, _, cut := strings.Cut(line, " ")
-	if !cut {
-		return 0, 0, false
-	}
-	l, r, cut := strings.Cut(first, "-")
-	if !cut {
-		return 0, 0, false
-	}
-	lv, err := strconv.ParseUint(l, 16, 64)
-	if err != nil {
-		return 0, 0, false
-	}
-	rv, err := strconv.ParseUint(r, 16, 64)
-	if err != nil {
-		return 0, 0, false
-	}
-	return uintptr(lv), uintptr(rv), true
 }
 
 const (
@@ -672,11 +643,8 @@ func TestMemoryEnclave_FrozenSizedPagesFault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewMemoryEnclaveSized: %v", err)
 	}
-	view, err := unfrozen.Open()
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	view[0] = 0xFF // must not fault: nothing has frozen these pages
+	view := unfrozen.m.data // a slice no lock covers, as a careless caller would keep
+	view[0] = 0xFF          // must not fault: nothing has frozen these pages
 	if !holds(unfrozen, append([]byte{0xFF}, make([]byte, 31)...)) {
 		t.Error("the write into an unfrozen sized enclave did not take")
 	}
@@ -696,10 +664,7 @@ func sealedWriteChild(t *testing.T) {
 	}
 
 	// Retain the slice past the fill, the mistake Freeze makes loud.
-	view, err := e.Open()
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
+	view := e.m.data // a slice no lock covers, as a careless caller would keep
 	copy(view, []byte("0123456789abcdef0123456789abcdef"))
 
 	if err := e.Freeze(); err != nil {
@@ -755,9 +720,7 @@ func TestMemoryEnclave_FrozenDestroyFallsBackToUnmap(t *testing.T) {
 	}
 
 	denied := errors.New("mprotect denied by policy")
-	prev := protectMemory
-	t.Cleanup(func() { protectMemory = prev })
-	protectMemory = func([]byte, protection) error { return denied }
+	swapSeam(t, &protectMemory, func([]byte, protection) error { return denied })
 
 	derr := e.Destroy()
 
@@ -809,7 +772,7 @@ func TestMemoryEnclave_FreezeIsWhatPutsMaterialOnTheFallbackPath(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			// Unexported constructor: release runs without Destroy, so the
 			// exported one would leak a ledger entry into every WipeAll test.
-			e, err := newMemoryEnclaveSized(len(material))
+			e, err := unpublishedSized(len(material))
 			if err != nil {
 				t.Fatalf("newMemoryEnclaveSized: %v", err)
 			}
@@ -828,17 +791,16 @@ func TestMemoryEnclave_FreezeIsWhatPutsMaterialOnTheFallbackPath(t *testing.T) {
 			// mapped; frozen pages are readable, and nothing is copied out.
 			view := e.m.data
 			var unmapRan, zeroed, isMaterial bool
-			prevProtect, prevUnmap := protectMemory, unmapMemory
-			t.Cleanup(func() { protectMemory, unmapMemory = prevProtect, prevUnmap })
-			protectMemory = func([]byte, protection) error {
+			prevUnmap := unmapMemory
+			swapSeam(t, &protectMemory, func([]byte, protection) error {
 				return errors.New("mprotect denied by policy")
-			}
-			unmapMemory = func(b []byte) error {
+			})
+			swapSeam(t, &unmapMemory, func(b []byte) error {
 				unmapRan = true
-				zeroed = allZero(view)
+				zeroed = memscan.AllZero(view)
 				isMaterial = bytes.Equal(view, material)
 				return prevUnmap(b)
-			}
+			})
 
 			if rerr := e.m.release(); !errors.Is(rerr, ErrReleasedWithoutWipe) {
 				t.Fatalf("release = %v, want ErrReleasedWithoutWipe", rerr)
@@ -868,9 +830,7 @@ func TestDestroyReportsTheDeniedMprotect(t *testing.T) {
 	}
 
 	denied := errors.New("mprotect denied by policy")
-	prev := protectMemory
-	t.Cleanup(func() { protectMemory = prev })
-	protectMemory = func([]byte, protection) error { return denied }
+	swapSeam(t, &protectMemory, func([]byte, protection) error { return denied })
 
 	derr := e.Destroy()
 	if !errors.Is(derr, ErrReleasedWithoutWipe) {

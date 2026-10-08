@@ -86,6 +86,7 @@ import (
 	"time"
 
 	enclave "github.com/jeremyhahn/go-enclave"
+	"github.com/jeremyhahn/go-enclave/internal/memscan"
 )
 
 // keyBytes is the only key length go-enclave hands a provider: the
@@ -238,9 +239,9 @@ func (r *report) note(format string, args ...any) {
 // carries an *AbortedError.
 func (r *report) err() error {
 	if cerr := r.ctx.Err(); cerr != nil {
-		return errors.Join(append(r.failures, &AbortedError{Err: cerr})...)
+		return joinFindings(append(r.failures, &AbortedError{Err: cerr}))
 	}
-	return errors.Join(r.failures...)
+	return joinFindings(r.failures)
 }
 
 type endedContext struct {
@@ -339,13 +340,17 @@ func newProvider(cfg Config) (any, error) {
 	return p, nil
 }
 
+// isNilProvider reports whether p is the untyped nil or an interface wrapping
+// a nil value, by the same test as [enclave.NewSealer]'s provider check. The
+// kind switch covers exactly the kinds reflect.Value.IsNil accepts other than
+// reflect.Interface, which reflect.ValueOf never returns, so it never panics.
 func isNilProvider(p any) bool {
 	if p == nil {
 		return true
 	}
 	v := reflect.ValueOf(p)
 	switch v.Kind() {
-	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice, reflect.UnsafePointer:
+	case reflect.Pointer, reflect.Map, reflect.Chan, reflect.Func, reflect.Slice, reflect.UnsafePointer:
 		return v.IsNil()
 	default:
 		return false
@@ -382,15 +387,6 @@ func randKey() ([]byte, error) {
 		return nil, &stepError{step: "generating a test key", err: err}
 	}
 	return k, nil
-}
-
-func allZero(b []byte) bool {
-	for _, c := range b {
-		if c != 0 {
-			return false
-		}
-	}
-	return true
 }
 
 // plaintextRunBytes is the window containsRun matches on: a chance match is a
@@ -553,7 +549,7 @@ func checkProtectDoesNotRetainTheKey(r *report, cfg Config) {
 		r.fail(property, "after the caller wiped the key slice Protect was handed, Unprotect of that blob "+
 			"failed with %v — Protect kept the caller's SLICE rather than copying out of it, so wiping the "+
 			"caller's locked pages destroyed the provider's only copy", err)
-	case allZero(dst):
+	case memscan.AllZero(dst):
 		r.fail(property, "after the caller wiped the key slice Protect was handed, Unprotect recovered all "+
 			"zeros — Protect kept the caller's SLICE rather than copying out of it")
 	case !bytes.Equal(dst, want):
@@ -622,7 +618,7 @@ func checkDestinationNotWrittenAfterTheCallerWipedIt(r *report, cfg Config) {
 		return
 	}
 
-	if !allZero(spy) {
+	if !memscan.AllZero(spy) {
 		what := "unrecognized bytes"
 		switch {
 		case bytes.Equal(spy, first):
@@ -693,7 +689,7 @@ func checkDestinationNotDisturbedByALaterCall(r *report, cfg Config) {
 
 	if !bytes.Equal(spy, first) {
 		detail := "overwritten"
-		if allZero(spy) {
+		if memscan.AllZero(spy) {
 			detail = "ZEROED — the caller is now holding zeros where its key was, and will use them as one"
 		} else if bytes.Equal(spy, second) {
 			detail = "overwritten with the SECOND key"
@@ -956,7 +952,7 @@ func withLocked(n, size int, fn func(bufs [][]byte) error) error {
 // checkRootIsNotAPlaceholder fails an all-zero or constant-fill root. A real
 // 32-byte root fails these with probability 2^-256 and 2^-248.
 func checkRootIsNotAPlaceholder(r *report, property string, root []byte) {
-	if allZero(root) {
+	if memscan.AllZero(root) {
 		r.fail(property, "UnsealRoot produced an all-zero root; a stub returning a zero buffer is accepted by "+
 			"a Sealer that has no way to tell it from a real unseal, and every value in the process is then "+
 			"sealed under a key an attacker already knows")
@@ -992,7 +988,7 @@ func checkRootDestinationNotDisturbedByALaterCall(r *report, cfg Config) {
 			r.fail(property, "UnsealRoot: %v", err)
 			return nil
 		}
-		if allZero(spy) {
+		if memscan.AllZero(spy) {
 			r.fail(property, "the control did not hold — UnsealRoot returned nil and left the destination all "+
 				"zero, so nothing below could be told apart from a destination that was never populated")
 			return nil
@@ -1005,7 +1001,7 @@ func checkRootDestinationNotDisturbedByALaterCall(r *report, cfg Config) {
 		}
 		if !bytes.Equal(spy, want) {
 			detail := "overwritten"
-			if allZero(spy) {
+			if memscan.AllZero(spy) {
 				detail = "ZEROED — a Sealer would run its whole KEK hierarchy under zeros"
 			}
 			r.fail(property, "the destination of an earlier UnsealRoot was %s by a later call: the provider "+
@@ -1017,7 +1013,7 @@ func checkRootDestinationNotDisturbedByALaterCall(r *report, cfg Config) {
 			r.fail(property, "a third UnsealRoot failed: %v", err)
 			return nil
 		}
-		if !allZero(spy) {
+		if !memscan.AllZero(spy) {
 			r.fail(property, "the destination of an earlier UnsealRoot was written again after the caller wiped "+
 				"it: the provider writes root material into pages the caller has released")
 		}
@@ -1148,7 +1144,7 @@ func checkRootUnsealerRefusesAnEndedContext(r *report, cfg Config) {
 				"that failed, and a one-shot handle spent on a refusal leaves it no root at all", err)
 			return nil
 		}
-		if allZero(root) {
+		if memscan.AllZero(root) {
 			r.fail(property, "the control did not hold — the live UnsealRoot returned nil and an all-zero root")
 			return nil
 		}

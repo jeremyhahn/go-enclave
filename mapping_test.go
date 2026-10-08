@@ -582,14 +582,13 @@ func TestMapping_CorruptionIsStickyAcrossAFailedRelease(t *testing.T) {
 	m.canary[len(m.canary)-1] ^= 0xFF
 
 	denied := errors.New("munlock: cannot allocate memory")
-	prev := unlockMemory
+	// Registered first, so the mapping is released after the seam is restored.
 	t.Cleanup(func() {
-		unlockMemory = prev
 		if m.memory != nil {
 			_ = m.release()
 		}
 	})
-	unlockMemory = func([]byte) error { return denied }
+	prev := swapSeam(t, &unlockMemory, func([]byte) error { return denied })
 
 	for attempt := 1; attempt <= 2; attempt++ {
 		err = m.release()
@@ -634,14 +633,13 @@ func TestMapping_RetryDoesNotReverify(t *testing.T) {
 		t.Fatalf("newMapping: %v", err)
 	}
 
-	prevUnlock, prevProtect := unlockMemory, protectMemory
+	// Registered first, so the mapping is released after the seams are restored.
 	t.Cleanup(func() {
-		unlockMemory, protectMemory = prevUnlock, prevProtect
 		if m.memory != nil {
 			_ = m.release()
 		}
 	})
-	unlockMemory = func([]byte) error { return errors.New("munlock refused") }
+	prevUnlock := swapSeam(t, &unlockMemory, func([]byte) error { return errors.New("munlock refused") })
 
 	if err := m.release(); err == nil || releasedPages(err) {
 		t.Fatalf("release with a refused munlock = %v, want a held failure", err)
@@ -649,10 +647,11 @@ func TestMapping_RetryDoesNotReverify(t *testing.T) {
 
 	unlockMemory = prevUnlock
 	protects := 0
-	protectMemory = func(b []byte, p protection) error {
+	prevProtect := protectMemory
+	swapSeam(t, &protectMemory, func(b []byte, p protection) error {
 		protects++
 		return prevProtect(b, p)
-	}
+	})
 	if err := m.release(); err != nil {
 		t.Fatalf("retry = %v, want nil for a clean mapping", err)
 	}
@@ -687,22 +686,20 @@ func TestMapping_AbandonReportsWhetherLockedPagesWereLeft(t *testing.T) {
 			memory := m.memory
 
 			prevUnlock, prevUnmap := unlockMemory, unmapMemory
-			restore := func() { unlockMemory, unmapMemory = prevUnlock, prevUnmap }
-			t.Cleanup(restore)
 			if tc.unlock {
-				unlockMemory = refused
+				swapSeam(t, &unlockMemory, refused)
 			}
 			unmaps := 0
-			unmapMemory = func(b []byte) error {
+			swapSeam(t, &unmapMemory, func(b []byte) error {
 				unmaps++
 				if tc.unmap {
 					return errors.New("refused")
 				}
 				return prevUnmap(b)
-			}
+			})
 
 			err = m.abandon(cause, true)
-			restore()
+			unlockMemory, unmapMemory = prevUnlock, prevUnmap
 
 			if !errors.Is(err, cause) || !errors.Is(err, ErrLockedMemoryUnavailable) {
 				t.Errorf("abandon = %v, want the original cause as ErrLockedMemoryUnavailable", err)
@@ -777,20 +774,19 @@ func TestMapping_ReleaseIsExactlyItsExplicitSteps(t *testing.T) {
 
 			var steps []string
 			prevProtect, prevUnlock, prevUnmap := protectMemory, unlockMemory, unmapMemory
-			t.Cleanup(func() { protectMemory, unlockMemory, unmapMemory = prevProtect, prevUnlock, prevUnmap })
-			protectMemory = func(b []byte, p protection) error {
+			swapSeam(t, &protectMemory, func(b []byte, p protection) error {
 				steps = append(steps, "protect "+names[p]+" "+region(b))
 				if tc.deny {
 					return errors.New("mprotect denied by policy")
 				}
 				return prevProtect(b, p)
-			}
-			unlockMemory = func(b []byte) error {
+			})
+			swapSeam(t, &unlockMemory, func(b []byte) error {
 				steps = append(steps, "unlock "+region(b))
 				wipedAt["unlock"] = bytes.Equal(memory, make([]byte, len(memory)))
 				return prevUnlock(b)
-			}
-			unmapMemory = func(b []byte) error {
+			})
+			swapSeam(t, &unmapMemory, func(b []byte) error {
 				steps = append(steps, "unmap "+region(b))
 				// On the denied row the guards stay inaccessible, so the
 				// whole-mapping read is skipped.
@@ -798,7 +794,7 @@ func TestMapping_ReleaseIsExactlyItsExplicitSteps(t *testing.T) {
 					wipedAt["unmap"] = bytes.Equal(memory, make([]byte, len(memory)))
 				}
 				return prevUnmap(b)
-			}
+			})
 
 			err = m.release()
 			if tc.wantErr == nil && err != nil {
@@ -831,12 +827,10 @@ var errNotLocked = errors.New("VirtualUnlock: ERROR_NOT_LOCKED")
 // t.Cleanup, so register cleanups that need the real unlock before calling it.
 func installStrictUnlock(t *testing.T) {
 	t.Helper()
-	prev := unlockMemory
-	t.Cleanup(func() { unlockMemory = prev })
-
 	var mu sync.Mutex
 	unlocked := make(map[*byte]struct{})
-	unlockMemory = func(b []byte) error {
+	prev := unlockMemory
+	swapSeam(t, &unlockMemory, func(b []byte) error {
 		mu.Lock()
 		defer mu.Unlock()
 		if _, done := unlocked[&b[0]]; done {
@@ -847,7 +841,7 @@ func installStrictUnlock(t *testing.T) {
 		}
 		unlocked[&b[0]] = struct{}{}
 		return nil
-	}
+	})
 }
 
 // TestMapping_RetryAfterARefusedUnmapDoesNotUnlockAgain pins that after a
@@ -859,9 +853,8 @@ func TestMapping_RetryAfterARefusedUnmapDoesNotUnlockAgain(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newMapping: %v", err)
 	}
-	prevUnmap := unmapMemory
+	// Registered first, so the mapping is released after the seams are restored.
 	t.Cleanup(func() {
-		unmapMemory = prevUnmap
 		if m.memory != nil {
 			_ = m.release()
 		}
@@ -869,13 +862,14 @@ func TestMapping_RetryAfterARefusedUnmapDoesNotUnlockAgain(t *testing.T) {
 	installStrictUnlock(t)
 
 	unmaps := 0
-	unmapMemory = func(b []byte) error {
+	prevUnmap := unmapMemory
+	swapSeam(t, &unmapMemory, func(b []byte) error {
 		unmaps++
 		if unmaps == 1 {
 			return errors.New("munmap: cannot allocate memory")
 		}
 		return prevUnmap(b)
-	}
+	})
 
 	err = m.release()
 	if !pagesHeld(err) {
@@ -917,15 +911,14 @@ func TestNewMapping_EveryConstructionStepRollsBack(t *testing.T) {
 		lockMemory, unlockMemory, unmapMemory, protectMemory = saved.lock, saved.unlock, saved.unmap, saved.protect
 		excludeCoreDump, excludeFork, fillCanary = saved.core, saved.fork, saved.canary
 	}
-	t.Cleanup(restore)
 
 	cause := errors.New("the step that failed")
 	fail := func([]byte) error { return cause }
 	// guardFailure fails the nth guard-page mprotect (1 = preguard).
-	guardFailure := func(nth int) func() {
-		return func() {
+	guardFailure := func(nth int) func(*testing.T) {
+		return func(t *testing.T) {
 			calls := 0
-			protectMemory = func(b []byte, p protection) error {
+			swapSeam(t, &protectMemory, func(b []byte, p protection) error {
 				if p == protNoAccess {
 					calls++
 					if calls == nth {
@@ -933,19 +926,19 @@ func TestNewMapping_EveryConstructionStepRollsBack(t *testing.T) {
 					}
 				}
 				return saved.protect(b, p)
-			}
+			})
 		}
 	}
 
 	steps := []struct {
 		name   string
-		inject func()
+		inject func(*testing.T)
 		locked bool
 	}{
-		{"mlock", func() { lockMemory = fail }, false},
-		{"core-dump exclusion", func() { excludeCoreDump = fail }, true},
-		{"fork exclusion", func() { excludeFork = fail }, true},
-		{"canary fill", func() { fillCanary = fail }, true},
+		{"mlock", func(t *testing.T) { swapSeam(t, &lockMemory, fail) }, false},
+		{"core-dump exclusion", func(t *testing.T) { swapSeam(t, &excludeCoreDump, fail) }, true},
+		{"fork exclusion", func(t *testing.T) { swapSeam(t, &excludeFork, fail) }, true},
+		{"canary fill", func(t *testing.T) { swapSeam(t, &fillCanary, fail) }, true},
 		{"preguard mprotect", guardFailure(1), true},
 		{"postguard mprotect", guardFailure(2), true},
 	}
@@ -962,24 +955,23 @@ func TestNewMapping_EveryConstructionStepRollsBack(t *testing.T) {
 		for _, cl := range cleanups {
 			t.Run(step.name+"/"+cl.name, func(t *testing.T) {
 				requireCleanLedger(t)
-				t.Cleanup(restore)
-				step.inject()
+				step.inject(t)
 
 				unlocks, unmaps := 0, 0
-				unlockMemory = func(b []byte) error {
+				swapSeam(t, &unlockMemory, func(b []byte) error {
 					unlocks++
 					if cl.unlockRefused {
 						return errors.New("munlock refused")
 					}
 					return saved.unlock(b)
-				}
-				unmapMemory = func(b []byte) error {
+				})
+				swapSeam(t, &unmapMemory, func(b []byte) error {
 					unmaps++
 					if cl.unmapRefused {
 						return errors.New("munmap refused")
 					}
 					return saved.unmap(b)
-				}
+				})
 
 				e, err := NewMemoryEnclaveSized(64)
 				restore()

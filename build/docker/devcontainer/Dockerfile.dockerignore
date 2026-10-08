@@ -3,8 +3,8 @@
 #
 # Everything is excluded, then exactly what the stages read is re-admitted:
 # the toolchain's inputs (both modules' go.mod/go.sum and the tool installer
-# with its pins), and for the integration stage the root package's and
-# providertest's non-test sources, the integration suite and the two scripts
+# with its pins), and for the integration stage the non-test sources of the
+# root package, providertest and internal/, the integration suite and the two scripts
 # it runs. Each stage COPYs its own part by name, so the integration image
 # does not carry the toolchain's. Neither image can carry .git, local.mk, a
 # stray credentials file, the repository-local tool cache (bin/) or a coverage
@@ -13,19 +13,21 @@
 *
 !go.mod
 !go.sum
-!test/buildgates/go.mod
-!test/buildgates/go.sum
+!build/ci/buildgates/go.mod
+!build/ci/buildgates/go.sum
 !scripts/lib.sh
 !scripts/tool.sh
 !scripts/tool-pins.sh
 !scripts/install-tools.sh
 !*.go
 !providertest/*.go
+!internal/**/*.go
 !test/integration/**/*.go
 !build/docker/devcontainer/run-integration-tests.sh
 !scripts/coverage-gate.sh
-# The root package's and providertest's own unit tests are not part of this
-# suite and are not compiled by it.
+# The unit tests of the root package, providertest and internal/ are not part
+# of this suite and are not compiled by it.
 *_test.go
 providertest/*_test.go
+internal/**/*_test.go
 !test/integration/**/*_test.go

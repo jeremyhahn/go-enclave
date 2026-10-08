@@ -90,37 +90,16 @@ defer func() {
 
 ## Platforms
 
-| GOOS | Locked memory | Per-mapping core-dump exclusion | `CoreDumpsDisabled()` |
-|---|---|---|---|
-| linux, android | `mlock` | `MADV_DONTDUMP` (verified) | `RLIMIT_CORE` lowered to 0 |
-| freebsd, dragonfly | `mlock` | `MAP_NOCORE` + `MADV_NOCORE` (verified) | `RLIMIT_CORE` lowered to 0 |
-| openbsd | `mlock` | `MAP_CONCEAL` | `RLIMIT_CORE` lowered to 0 |
-| darwin, ios, netbsd | `mlock` | none available | `RLIMIT_CORE` lowered to 0 |
-| aix, solaris, illumos | `mlock` (needs privilege) | none available | `RLIMIT_CORE` lowered to 0 |
-| windows | `VirtualLock` | none (WER API deliberately unused) | `ErrCoreDumpLimitUnsupported` |
-
-Any other GOOS (js, wasip1, plan9) fails to compile with
-`undefined: go_enclave_does_not_support_this_GOOS`. A zero `RLIMIT_CORE` stops
-core files only; a Linux `core_pattern` that pipes to a collector ignores it,
-and there the per-mapping exclusion is what protects enclave pages. Child
-processes inherit the zero `RLIMIT_CORE`. On Linux enclave pages are also
-excluded from `fork` children (`MADV_DONTFORK`), and a binary can opt in to
-`HardenProcess()` (non-dumpable, no same-uid `ptrace`). Details:
-[docs/locked-memory](docs/locked-memory/engineering.md#platform-contract).
+Linux (including Android), the BSDs, darwin, iOS, illumos, Solaris, AIX and
+Windows are supported; any other GOOS (js, wasip1, plan9) fails to compile. The
+per-OS lock primitive, core-dump exclusion and `CoreDumpsDisabled()` result are
+in the [platform contract](docs/locked-memory/engineering.md#platform-contract).
 
 ## Documentation
 
-| Feature | Read |
-|---|---|
-| Locked-memory enclaves | [docs/locked-memory](docs/locked-memory/user.md) |
-| Budgets and admission control | [docs/locked-memory-budget](docs/locked-memory-budget/user.md) |
-| Sealing and the provider seam | [docs/sealing](docs/sealing/user.md) |
-| Shutdown sweep | [docs/shutdown-sweep](docs/shutdown-sweep/user.md) |
-| Provider conformance suite | [docs/provider-conformance](docs/provider-conformance/user.md) |
-| Upgrading from v0.7 | [docs/README.md](docs/README.md#upgrading-from-v07) |
-| Upgrading from v0.6 | [docs/README.md](docs/README.md#upgrading-from-v06-to-v07) |
-
-Each folder also has `architecture.md`, `engineering.md` and `api.md`. The API
+The [documentation index](docs/README.md) lists every feature, each with
+`user.md`, `architecture.md`, `engineering.md` and `api.md`. Breaking changes
+between releases are in [Upgrading](docs/README.md#upgrading). The API
 reference is on [pkg.go.dev](https://pkg.go.dev/github.com/jeremyhahn/go-enclave).
 
 ## Development
@@ -130,14 +109,14 @@ reference is on [pkg.go.dev](https://pkg.go.dev/github.com/jeremyhahn/go-enclave
 | `make test` | Unit tests with `-race` across `-cpu=1,2,8` |
 | `make coverage` | The same run with coverage; fails below 90% (`make coverage-report` for HTML) |
 | `make test-fips` | Build and test under `GOFIPS140=latest GODEBUG=fips140=only`: strict-mode compatibility, not validation ([details](docs/sealing/engineering.md#fips-140-3)) |
-| `make lint` / `make staticcheck` / `make security` | gofmt, vet, golangci-lint, actionlint, shellcheck / staticcheck / gosec, govulncheck, module verification, trivy. golangci-lint, staticcheck and govulncheck also analyze the `test/buildgates` module |
+| `make lint` / `make staticcheck` / `make security` | gofmt, vet, golangci-lint, actionlint, shellcheck / staticcheck / gosec, govulncheck, module verification, trivy. golangci-lint, staticcheck and govulncheck also analyze the `build/ci/buildgates` module |
 | `make vuln` | Alias for `make govulncheck` |
-| `make cross-build` | Build and vet the configured `CROSS_TARGETS` matrix (Linux, the BSDs, darwin, illumos, Solaris, AIX, Windows; Android and iOS are not in it) |
+| `make cross-build` | Build and vet the configured `CROSS_TARGETS` matrix (`make help` lists the targets; the matrix includes `android/arm64`) |
 | `make bench` | Benchmarks with allocation counts |
 | `make check-releasability` | Fails if a tracked file names private hosts, addresses or workstation paths |
 | `make ci-fast` | The full gate except anything that needs Docker |
 | `make ci` | The full local gate a change must pass |
-| `make integration-test` | Integration suites under `test/integration/`, run in the project devcontainer (needs Docker); fails rather than passes when there is nothing to run |
+| `make integration-test` | The integration suite, `test/integration/enclave/`, run in the project devcontainer (needs Docker); fails rather than passes when there is nothing to run. Which test covers which feature: `test/integration/COVERAGE.md` |
 | `make docker-build` / `make docker-run CMD='make lint'` / `make toolchain-image` | Build the devcontainer (`build/docker/devcontainer/`) / run a command in its `toolchain` image with the checkout mounted, offline, as you / print that image's content-addressed tag |
 | `make help` | Every target |
 

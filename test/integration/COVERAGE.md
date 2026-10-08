@@ -1,0 +1,41 @@
+# Integration coverage by feature
+
+Which integration tests exercise each feature in [docs/](../../docs/README.md).
+There is one integration suite, `test/integration/enclave/`. It runs only in the
+project devcontainer (`make integration-test-enclave`, and
+`make integration-test-fips-enclave` for FIPS 140-3 strict mode), and is gated
+at `COVERAGE_THRESHOLD` on the root package. Each case needs what a unit test
+cannot have: the real kernel's `RLIMIT_MEMLOCK`, VmLck and VmFlags, a full
+`/proc/self/mem` sweep, a seccomp fault injector, or a process-wide limit set
+in a fresh child process. Everything else is a unit test in the package itself.
+
+`providertest` has no suite of its own: its devcontainer cases are in the
+enclave suite (provider-conformance below), and its harness is gated at
+`COVERAGE_THRESHOLD` by the unit `make coverage-providertest`.
+
+| Feature | `enclave` suite |
+|---|---|
+| [locked-memory](../../docs/locked-memory/user.md) | `enclave_test.go`: material lives only in its enclave and is gone after `Destroy`; destroyed and nil enclaves refuse every access; accessors and error rendering. `mapping_test.go`: mappings are locked, undumpable and guarded (smaps VmFlags); the core-dump limit is lowered on import; refused `mlock`, `munmap`, `mprotect`, guard page and exclusion each fail closed. `harden_test.go`: the kernel reports the process not dumpable; a refused `prctl` is reported. |
+| [locked-memory-budget](../../docs/locked-memory-budget/user.md) | `allocator_test.go`: admission under the real ceiling, alone and under contention, VmLck cross-checked; the process allocator defaults to the kernel ceiling; `SetAllocator` is one-shot; a zero ceiling fails closed; `ForceLimit` reports its excess; invalid arguments and a nil allocator are refused. `memlock_test.go`: limit sources render. `sealed_test.go`: `OpenWith` admits against the budget. |
+| [sealing](../../docs/sealing/user.md) | `sealed_test.go`: no plaintext in the process between opens; destroyed and nil sealed values. `sealer_test.go`: round trips in both modes, contexts reach the provider, root unseal is serialized and abandonable, KEK rotation in real locked memory, running out of locked memory mid-hierarchy, a refused freeze, sweeps overlapping sealer use, configuration and misconfiguration. `sealer_lifecycle_test.go`, `sealer_lifecycle_linux_test.go`: destroyed sealers return their locked memory, an injected provider stays its owner's, destroy during a blocked unseal, a refused release is reported and retried. `enclave_test.go`: key-schedule erasure reports this build. `provider_test.go`: the software provider refuses misuse. |
+| [shutdown-sweep](../../docs/shutdown-sweep/user.md) | `registry_test.go`: `WipeAll` reclaims everything and leaves no residue; waits for live borrows until its deadline; turns away a concurrent caller; reports canary corruption without panicking; reclaims an orphan a refused cleanup left; `SweepError` renders. `sealer_test.go`: a sealer is wiped for good after a sweep. |
+| [provider-conformance](../../docs/provider-conformance/user.md) | `provider_test.go`: `SoftwareProvider` passes `TestProvider` in both modes with the residue sweep running, and an under-claimed mode list fails; in a child with `RLIMIT_MEMLOCK` at zero the sweep cannot run, and `TestProvider` reports `ErrNotMeasured` unless `SkipResidueSweep` accepts it. |
+
+## Helpers
+
+These files hold no feature tests; each is named for what it provides.
+
+- `main_test.go`: `TestMain`, which refuses to run outside the devcontainer
+  (`../internal/devcontainer`).
+- `procfs_test.go`: the `/proc/self` oracle (status VmLck, smaps VmFlags, and a
+  residue sweep that reports every address the material is at).
+- `isolation_test.go`: re-runs a test in a fresh child process with its own
+  limits.
+- `seccomp_test.go`: the seccomp fault injector that refuses chosen syscalls,
+  and the tests of the injector itself.
+
+The `/proc/self/mem` sweep the unit tests and `providertest` share is
+`internal/memscan`. `procfs_test.go` keeps its own sweep because it asserts
+more: exact addresses, every readable mapping including file-backed ones, a
+needle that is never assembled in memory, and failure on any mapping it cannot
+read.

@@ -11,22 +11,19 @@ package enclave
 import (
 	"bytes"
 	"context"
-	"crypto/aes"
-	"crypto/cipher"
 	"errors"
 	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"math"
 	"os"
 	"path/filepath"
-	"reflect"
 	"runtime"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
-	"unsafe"
 )
 
 // sealedMaterial is long and distinctive so a plaintext-residency search
@@ -503,17 +500,17 @@ func TestSealedEnclave_OversizedMaterialIsRefusedNotPanicked(t *testing.T) {
 	}
 
 	// At the ceiling is legal; one byte past it is not.
-	if err := sealableLength(maxSealedPlaintext); err != nil {
-		t.Errorf("sealableLength(the exact ceiling) = %v, want nil: the bound is inclusive", err)
+	if err := sealableWithin(maxSealedPlaintext, math.MaxInt); err != nil {
+		t.Errorf("sealableWithin(the exact ceiling) = %v, want nil: the bound is inclusive", err)
 	}
-	if err := sealableLength(maxSealedPlaintext + 1); !errors.Is(err, ErrMaterialTooLarge) {
-		t.Errorf("sealableLength(ceiling+1) = %v, want ErrMaterialTooLarge; crypto/cipher would panic here", err)
+	if err := sealableWithin(maxSealedPlaintext+1, math.MaxInt); !errors.Is(err, ErrMaterialTooLarge) {
+		t.Errorf("sealableWithin(ceiling+1) = %v, want ErrMaterialTooLarge; crypto/cipher would panic here", err)
 	}
 
 	// And an ordinary length still passes, so the guard is not refusing
 	// everything.
-	if err := sealableLength(uint64(len(sealedMaterial))); err != nil {
-		t.Errorf("sealableLength(%d) = %v, want nil", len(sealedMaterial), err)
+	if err := sealableWithin(uint64(len(sealedMaterial)), math.MaxInt); err != nil {
+		t.Errorf("sealableWithin(%d) = %v, want nil", len(sealedMaterial), err)
 	}
 
 	// On a 32-bit platform no slice can reach the ceiling; the helper is still
@@ -524,109 +521,31 @@ func TestSealedEnclave_OversizedMaterialIsRefusedNotPanicked(t *testing.T) {
 	}
 }
 
-// TestSealedEnclave_AADRefusesMismatch pins the additional-authenticated-data
-// path of the shared AEAD helpers: a message sealed under one AAD must not
-// open under another, and must open under its own. Everything the envelope's
-// blob-binding claims rests on this behavior;
-// TestSealer_EnvelopeBindsBlobToCiphertext exercises it end to end.
-func TestSealedEnclave_AADRefusesMismatch(t *testing.T) {
-	key, err := newKeyEnclave(dekBytes)
+func TestEnclaves_GoStringIsRedacted(t *testing.T) {
+	ctx := t.Context()
+	s, err := NewSealer()
 	if err != nil {
-		t.Fatalf("newKeyEnclave: %v", err)
+		t.Fatalf("NewSealer: %v", err)
 	}
-	defer key.Destroy()
-
-	msg := []byte("aad-bound-message")
-	ct, err := sealWithKey(key, msg, []byte("the-sealing-aad"))
+	t.Cleanup(func() { _ = s.Destroy() })
+	v, err := s.Seal(ctx, []byte("gostring-material"))
 	if err != nil {
-		t.Fatalf("sealWithKey: %v", err)
+		t.Fatalf("Seal: %v", err)
 	}
-
-	dst := make([]byte, len(msg))
-	if err := openWithKeyInto(key, ct, []byte("a-different-aad"), dst); !errors.Is(err, ErrSealedAuthentication) {
-		t.Errorf("open under the wrong AAD = %v, want ErrSealedAuthentication", err)
+	if got := fmt.Sprintf("%#v", v); got != "SealedEnclave(sealed)" {
+		t.Errorf("%%#v of a SealedEnclave = %q, want the redacted form", got)
 	}
-	if err := openWithKeyInto(key, ct, nil, dst); !errors.Is(err, ErrSealedAuthentication) {
-		t.Errorf("open with the AAD dropped = %v, want ErrSealedAuthentication", err)
-	}
-
-	// Control: the right AAD opens, so the refusals above were the AAD's
-	// doing.
-	if err := openWithKeyInto(key, ct, []byte("the-sealing-aad"), dst); err != nil {
-		t.Fatalf("open under the correct AAD: %v", err)
-	}
-	if !bytes.Equal(dst, msg) {
-		t.Error("the AAD-bound message opened to the wrong plaintext")
-	}
-}
-
-// aesCipherSink defends the allocation measurement below from being optimized
-// away; it is never read.
-var aesCipherSink cipher.Block
-
-// TestSealedEnclave_KeyScheduleReachesTheHeapAsDocumented pins the exposure
-// documented in docs/sealing/engineering.md, "Key-schedule heap exposure":
-// aes.NewCipher allocates on the heap, and its schedule holds the key either
-// byte-exact (hardware path, including fips140=only) or as big-endian uint32
-// words (generic path). Offset and layout are not asserted. A failure means
-// the documentation needs re-measuring, not that the package is broken.
-func TestSealedEnclave_KeyScheduleReachesTheHeapAsDocumented(t *testing.T) {
-	key := make([]byte, dekBytes)
-	for i := range key {
-		key[i] = byte(0xA0 + i)
-	}
-
-	block, err := aes.NewCipher(key)
+	e, err := v.Open(ctx)
 	if err != nil {
-		t.Fatalf("aes.NewCipher: %v", err)
+		t.Fatalf("Open: %v", err)
 	}
-
-	// A crypto/aes that does not return the expanded-schedule struct
-	// (BoringCrypto, say) leaves the documented exposure unmeasured, so this fails
-	// rather than skips. Every toolchain this repository builds with, including
-	// make test-fips, returns the struct.
-	v := reflect.ValueOf(block)
-	if v.Kind() != reflect.Pointer || v.Elem().Kind() != reflect.Struct {
-		t.Fatalf("crypto/aes returned %T, which is not the expanded-schedule struct this measurement reads: "+
-			"the key-schedule exposure withAEAD documents is unmeasured under this toolchain. Re-measure it "+
-			"and update the documentation before building with it", block)
+	if got := fmt.Sprintf("%#v", e); got != "MemoryEnclave(redacted)" {
+		t.Errorf("%%#v of a MemoryEnclave = %q, want the redacted form", got)
 	}
-	expanded := v.Elem()
-
-	// The claim is about crypto/aes internals, so the test reads them.
-	raw := unsafe.Slice((*byte)(unsafe.Pointer(expanded.UnsafeAddr())), expanded.Type().Size())
-
-	swapped := make([]byte, len(key))
-	for i := 0; i < len(key); i += 4 {
-		swapped[i], swapped[i+1], swapped[i+2], swapped[i+3] = key[i+3], key[i+2], key[i+1], key[i]
-	}
-
-	exact, beWords := bytes.Index(raw, key), bytes.Index(raw, swapped)
-	switch {
-	case exact >= 0:
-		t.Logf("master key present BYTE-EXACT at offset %d of the %d-byte expanded schedule (hardware-AES path)", exact, len(raw))
-	case beWords >= 0:
-		t.Logf("master key present as BIG-ENDIAN WORDS at offset %d of the %d-byte expanded schedule (generic path)", beWords, len(raw))
-	default:
-		t.Errorf("the master key is in NEITHER form inside the %d-byte expanded AES schedule. "+
-			"The documented threat model on withAEAD says it is, and every concession that model makes "+
-			"follows from it — re-measure the exposure and rewrite the comment before trusting this suite again", len(raw))
-	}
-
-	// And the schedule is a heap allocation rather than a stack temporary: it
-	// is returned through the cipher.Block interface, so it escapes. Without
-	// this half, the key being in the schedule would say nothing about where
-	// the schedule is.
-	allocs := testing.AllocsPerRun(100, func() {
-		b, cerr := aes.NewCipher(key)
-		if cerr != nil {
-			t.Fatalf("aes.NewCipher: %v", cerr)
-		}
-		aesCipherSink = b
-	})
-	if allocs < 1 {
-		t.Errorf("aes.NewCipher allocated %.1f times per call; the documentation says the expanded schedule "+
-			"escapes to the heap, and a stack-resident schedule would make the exposure smaller than documented", allocs)
+	_ = e.Destroy()
+	v.Destroy()
+	if got := fmt.Sprintf("%#v", v); got != "SealedEnclave(destroyed)" {
+		t.Errorf("%%#v of a destroyed SealedEnclave = %q", got)
 	}
 }
 
@@ -710,34 +629,6 @@ func TestSealedEnclave_WipeAllFailsClosed(t *testing.T) {
 		t.Error("the fresh Sealer's value opened to the wrong material")
 	}
 	e.Destroy()
-}
-
-// TestSealedEnclave_KeysAreDrawnFromTheCSPRNG pins that newKeyEnclave fills
-// keys from the CSPRNG. A constant-key mutant survives every envelope test,
-// because the random nonce keeps sealed bytes non-deterministic.
-func TestSealedEnclave_KeysAreDrawnFromTheCSPRNG(t *testing.T) {
-	a, err := newKeyEnclave(dekBytes)
-	if err != nil {
-		t.Fatalf("newKeyEnclave: %v", err)
-	}
-	defer a.Destroy()
-	b, err := newKeyEnclave(dekBytes)
-	if err != nil {
-		t.Fatalf("newKeyEnclave: %v", err)
-	}
-	defer b.Destroy()
-
-	if err := a.WithBytes(func(ka []byte) error {
-		if holds(b, ka) {
-			t.Error("two generated keys are identical; the CSPRNG is not being consulted per key")
-		}
-		if bytes.Equal(ka, make([]byte, dekBytes)) {
-			t.Error("a generated key is all zeroes")
-		}
-		return nil
-	}); err != nil {
-		t.Fatalf("WithBytes: %v", err)
-	}
 }
 
 // sweepForOpenableTest runs a [WipeAll] inside freshProcessSealer, so later
@@ -929,26 +820,6 @@ func TestSealedEnclave_OpenableSplitsByMode(t *testing.T) {
 	})
 }
 
-// TestSoftwareProvider_OpenableDoesNotGenerateARoot pins that Openable has no
-// side effects: it does not generate a root for a provider that sealed
-// nothing.
-func TestSoftwareProvider_OpenableDoesNotGenerateARoot(t *testing.T) {
-	p := NewSoftwareProvider()
-
-	if err := p.Health(); err != nil {
-		t.Errorf("Health on a fresh provider = %v, want nil: nothing was sealed through it, "+
-			"so nothing it holds is unopenable", err)
-	}
-
-	p.mu.Lock()
-	root := p.root
-	p.mu.Unlock()
-	if root != nil {
-		t.Error("asking whether a provider can open generated its root; a diagnostic must not " +
-			"allocate locked memory or draw from the CSPRNG")
-	}
-}
-
 // TestWipeAll_DoesNotSweepSealedEnclaves pins that WipeAll's count excludes
 // sealed values: they hold no locked memory; the sealer's keys do.
 func TestWipeAll_DoesNotSweepSealedEnclaves(t *testing.T) {
@@ -995,44 +866,6 @@ func TestWipeAll_DoesNotSweepSealedEnclaves(t *testing.T) {
 		}
 	}
 }
-
-// enclaveBackedProtector is a KeyProtector that keeps its key in this
-// process's locked memory and does not implement [HealthReporter], standing in
-// for a third-party provider that reports nothing.
-type enclaveBackedProtector struct{ key *MemoryEnclave }
-
-func newEnclaveBackedProtector(t *testing.T) *enclaveBackedProtector {
-	t.Helper()
-	k, err := NewMemoryEnclaveSized(32)
-	if err != nil {
-		t.Fatalf("NewMemoryEnclaveSized: %v", err)
-	}
-	return &enclaveBackedProtector{key: k}
-}
-
-func (p *enclaveBackedProtector) Protect(ctx context.Context, key []byte) ([]byte, error) {
-	return sealWithKey(p.key, key, nil)
-}
-
-func (p *enclaveBackedProtector) Unprotect(ctx context.Context, blob []byte, key []byte) error {
-	return openWithKeyInto(p.key, blob, nil, key)
-}
-
-// reportingProtector is enclaveBackedProtector opted in to [HealthReporter].
-type reportingProtector struct{ *enclaveBackedProtector }
-
-func (p reportingProtector) Health() error {
-	if !p.key.IsAlive() {
-		return ErrSealerWiped
-	}
-	return nil
-}
-
-// healthyProtector reports healthy unconditionally, standing in for a provider
-// whose key lives outside this process.
-type healthyProtector struct{ KeyProtector }
-
-func (healthyProtector) Health() error { return nil }
 
 // TestSealedEnclave_OpenableClosesTheExternalProviderFailOpen pins that a
 // provider without HealthReporter, whose in-process key a sweep destroyed,
@@ -1238,14 +1071,13 @@ func TestWipeAll_BumpsTheGenerationBeforeDestroying(t *testing.T) {
 		parked       bool
 	)
 
-	sweepParkedForTest = func() {
+	swapSeam(t, &sweepParkedForTest, func() {
 		mu.Lock()
 		defer mu.Unlock()
 		parked = true
 		genInWindow = sweepGeneration()
 		aliveInWndow = e.IsAlive()
-	}
-	t.Cleanup(func() { sweepParkedForTest = nil })
+	})
 
 	if _, err := WipeAll(context.Background()); err != nil {
 		t.Fatalf("WipeAll: %v", err)
@@ -1314,7 +1146,7 @@ func TestSealedEnclave_OpenableSuspectsASealThatOverlappedASweep(t *testing.T) {
 	)
 
 	// Seal from INSIDE the sweep window, between the bump and the destruction.
-	sweepParkedForTest = func() {
+	swapSeam(t, &sweepParkedForTest, func() {
 		mu.Lock()
 		defer mu.Unlock()
 		parked = true
@@ -1326,8 +1158,7 @@ func TestSealedEnclave_OpenableSuspectsASealThatOverlappedASweep(t *testing.T) {
 		if sealErr == nil {
 			openableInWindow = v.Openable()
 		}
-	}
-	t.Cleanup(func() { sweepParkedForTest = nil })
+	})
 
 	if _, err := WipeAll(context.Background()); err != nil {
 		t.Fatalf("WipeAll: %v", err)
@@ -1367,18 +1198,6 @@ func TestSealedEnclave_OpenableSuspectsASealThatOverlappedASweep(t *testing.T) {
 			"sequence reads equal at both ends, and only its parity records that a sweep "+
 			"was in flight when this was sealed", got)
 	}
-}
-
-// wipedReportingUnsealer is a RootUnsealer whose HealthReporter always
-// reports wiped and records that it was asked.
-type wipedReportingUnsealer struct {
-	RootUnsealer
-	called *bool
-}
-
-func (u wipedReportingUnsealer) Health() error {
-	*u.called = true
-	return ErrSealerWiped
 }
 
 // TestSealer_ProviderHealthIsIgnoredInRootKeyMode pins that a RootUnsealer's
@@ -1428,7 +1247,7 @@ func TestWipeAll_ConcurrentSweepsKeepTheParityInvariant(t *testing.T) {
 		mu       sync.Mutex
 		observed []uint64
 	)
-	sweepParkedForTest = func() {
+	swapSeam(t, &sweepParkedForTest, func() {
 		g := sweepGeneration()
 		mu.Lock()
 		observed = append(observed, g)
@@ -1436,8 +1255,7 @@ func TestWipeAll_ConcurrentSweepsKeepTheParityInvariant(t *testing.T) {
 		// Widen the window so a second sweep, if it were able to start, would
 		// have every chance to land its own bump inside this one.
 		runtime.Gosched()
-	}
-	t.Cleanup(func() { sweepParkedForTest = nil })
+	})
 
 	var wg sync.WaitGroup
 	for i := 0; i < sweepers; i++ {

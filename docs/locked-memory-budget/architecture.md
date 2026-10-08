@@ -1,6 +1,6 @@
 # Locked-memory budget and admission — architecture
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-01
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-07
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Problem
@@ -55,7 +55,7 @@ flowchart TD
   D -- "still mapped, unlocked" --> F[refund now; mapping to orphan ledger, no refund attached]
   D -- "still mapped and mlock'd" --> G[keep charge; mapping to orphan ledger with refund attached]
   G --> H{"a WipeAll retry unmaps it?"}
-  H -- yes --> I[refund exactly once, drop the record]
+  H -- yes --> I[refund exactly once, drop the entry]
   H -- "no (even if it unlocked)" --> J[charge stays attached until a later sweep unmaps it]
 ```
 
@@ -102,9 +102,9 @@ sequenceDiagram
 
 | Concern | File |
 |---|---|
-| `Allocator`, admission, retune, transfer, `BudgetError`, `BudgetInUseError` | [admission.go](../../admission.go) |
-| Process allocator | [process_allocator.go](../../process_allocator.go) |
-| Ceiling discovery, `NewAllocatorWithinRLimit`, `RLimitError` | [memlock.go](../../memlock.go), [memlock_linux.go](../../memlock_linux.go), [memlock_bsd.go](../../memlock_bsd.go), [memlock_other.go](../../memlock_other.go) |
+| `Allocator`, its constructors (`NewAllocatorWithinRLimit` included), admission (`admit`, one refund decision for `New` and `NewSized`), retune, transfer, the process allocator | [allocator.go](../../allocator.go) |
+| The install-once, lazily defaulted process slot the process allocator lives in | [singleton.go](../../singleton.go) |
+| Ceiling discovery (`DiscoverLockedMemoryLimit` is the platform function itself) | [memlock.go](../../memlock.go), [memlock_linux.go](../../memlock_linux.go), [memlock_unix.go](../../memlock_unix.go), [memlock_bsd.go](../../memlock_bsd.go), [memlock_unsupported.go](../../memlock_unsupported.go) |
 | Orphan ledger the refund rides on | [registry.go](../../registry.go) |
 
 ## Trust boundaries

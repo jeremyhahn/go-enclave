@@ -1,6 +1,6 @@
 # Locked-memory enclaves — engineering contract
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-04
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-07
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Exported surface
@@ -12,25 +12,26 @@ All in package `enclave` (import path `github.com/jeremyhahn/go-enclave`).
 | `NewMemoryEnclave(data []byte) (*MemoryEnclave, error)` | Moves `data` in and **wipes the caller's slice on every return path**. Result is frozen read-only. |
 | `NewMemoryEnclaveCopy(src []byte) (*MemoryEnclave, error)` | Copies `src` in and leaves it **untouched on every path**. Result is frozen. The heap copy in `src` is the caller's to wipe. |
 | `NewMemoryEnclaveSized(n int) (*MemoryEnclave, error)` | `n` zeroed, **writable** bytes to fill through `WithBytes`; call `Freeze` when the fill is done. |
-| `NewMemoryEnclaveFromString(s string) (*MemoryEnclave, error)` | **Deprecated.** Boundary helper; the source string cannot be wiped. |
-| `(*MemoryEnclave).WithBytes(fn func([]byte) error) error` | Preferred access. Holds the read lock across `fn`; returns `fn`'s error. |
-| `(*MemoryEnclave).OpenString() (string, error)` | **Deprecated.** Unwipeable copy for string-only APIs; taken under the read lock. |
+| `(*MemoryEnclave).WithBytes(fn func([]byte) error) error` | The only access. Holds the read lock across `fn`; returns `fn`'s error. |
 | `(*MemoryEnclave).EqualTo(other []byte) (bool, error)` | Compare under the read lock; a destroyed or nil enclave returns `ErrEnclaveDestroyed`. Time does not depend on the contents but does reveal whether the lengths differ. |
 | `(*MemoryEnclave).Size() int` / `IsAlive() bool` / `String() string` | Locked accessors; `String` never prints the material. |
 | `(*MemoryEnclave).Freeze() error` | `mprotect` the data read-only. Idempotent, irreversible, waits out borrows. |
-| `(*MemoryEnclave).Open() ([]byte, error)` | **Deprecated, unsafe**: the slice is not covered by any lock once `Open` returns. |
 | `(*MemoryEnclave).Destroy() error` | Wipe, verify, unlock, unmap; idempotent, nil-safe. See below. |
 | `LockedSize(n int) int64` | Locked bytes an `n`-byte enclave costs (page-rounded); `0` for an impossible size. |
 | `CoreDumpsDisabled() error` | Result of lowering `RLIMIT_CORE` (soft and hard) to zero at package init. |
 | `HardenProcess() (ProcessHardening, error)` | Opt-in, never called by the package. Linux: `prctl(PR_SET_DUMPABLE, 0)`, read back. Elsewhere `ErrProcessHardeningUnsupported`. |
 | `ProcessHardening{NotDumpable bool}` | What `HardenProcess` verified in effect. |
-| `ProcessHardeningError{Cause error}` | A refused or ineffective hardening step; `Unwrap` reaches the `prctl` error. |
+| `ProcessHardeningError{Cause error}` | A refused or ineffective hardening step. Matches `ErrProcessHardeningFailed`; `Unwrap` reaches the `prctl` error. |
 | `Wipe(b []byte)` | Best-effort zeroing of an ordinary heap slice. |
-| `LockedMemoryError{Cause any}` | Matches `ErrLockedMemoryUnavailable`; `Unwrap` reaches the syscall error. |
+| `LockedMemoryError{Cause error}` | Matches `ErrLockedMemoryUnavailable`; `Unwrap` reaches the syscall error. |
 | `UnwipedReleaseError{Cause error}` | Matches `ErrReleasedWithoutWipe`; `Unwrap` reaches the `mprotect` refusal. |
 
-A nil `*MemoryEnclave` is a valid receiver for every method: not alive, opens
-with `ErrEnclaveDestroyed`, `Destroy` returns `nil`.
+A nil `*MemoryEnclave` is a valid receiver for every method: not alive, borrows
+fail with `ErrEnclaveDestroyed`, `Destroy` returns `nil`.
+
+`Open`, `OpenString` and `NewMemoryEnclaveFromString` were removed in v0.8: a
+slice handed out past the lock is unmapped under its reader by `Destroy` or
+`WipeAll`, and a string source cannot be wiped.
 
 ## Invariants
 
@@ -44,8 +45,8 @@ with `ErrEnclaveDestroyed`, `Destroy` returns `nil`.
    never writes `src`.
 3. **Borrows are safe against `Destroy`, `Freeze` and `WipeAll`.** Each of those
    needs the write lock (the sweep only `TryLock`s it), so pages are never
-   wiped, re-protected or unmapped under a `WithBytes`, `OpenString`, `EqualTo`,
-   `Size` or `IsAlive`. `Open`'s slice is the one exception.
+   wiped, re-protected or unmapped under a `WithBytes`, `EqualTo`, `Size` or
+   `IsAlive`. Every read is a borrow; no accessor hands out a slice past it.
 4. **Inside a borrow**, `fn` must not call any method on the same enclave
    (nested `Destroy`/`Freeze` deadlock; a nested read deadlocks once a writer is
    waiting). `fn` may construct, borrow and destroy **other** enclaves.
@@ -58,8 +59,7 @@ with `ErrEnclaveDestroyed`, `Destroy` returns `nil`.
    check and a successful unlock are not repeated; see Platform contract for
    why the unlock must not be).
 7. **"Wiped but held" reads as destroyed.** Once the wipe has run, every
-   accessor (`WithBytes`, `Open`, `OpenString`, `EqualTo`, `Size`,
-   `IsAlive`, `String`, `Freeze`) reports the enclave destroyed even if its
+   accessor (`WithBytes`, `EqualTo`, `Size`, `IsAlive`, `String`, `Freeze`) reports the enclave destroyed even if its
    pages are still held; `Destroy` retries the release. Such a mapping holds
    zeroes and its guard pages are already read-write, so reading it would hand
    back an unguarded all-zero "key".
@@ -71,15 +71,24 @@ with `ErrEnclaveDestroyed`, `Destroy` returns `nil`.
 
 | Error | Returned by | Meaning / fail-closed behavior |
 |---|---|---|
-| `ErrEmptyEnclave` | `NewMemoryEnclave`, `NewMemoryEnclaveCopy`, `NewMemoryEnclaveFromString` | Zero-length material; nothing mapped. |
+| `ErrEmptyEnclave` | `NewMemoryEnclave`, `NewMemoryEnclaveCopy` | Zero-length material; nothing mapped. |
 | `ErrInvalidSize` | `NewMemoryEnclaveSized` | `n <= 0` or too large to map (data + two guard pages overflow `int`); decided before `mmap`. |
 | `ErrLockedMemoryUnavailable` (`*LockedMemoryError`) | constructors, `Freeze`, `Destroy` | Kernel refused `mmap`/`mlock`/`madvise`/`mprotect`/`munlock`/`munmap`. From `Destroy` it means the release was refused and the pages are held (retry by calling `Destroy` again) **only if the error does not also match `ErrReleasedWithoutWipe`** — see below. |
-| `ErrEnclaveDestroyed` | `WithBytes`, `Open`, `OpenString`, `EqualTo`, `Freeze` | Material gone (destroyed, swept, or wiped-but-held). |
-| `ErrReleasedWithoutWipe` (`*UnwipedReleaseError`) | `Destroy`; `NewMemoryEnclave`/`NewMemoryEnclaveCopy`/`NewMemoryEnclaveFromString` (joined into a freeze failure's rollback); `Allocator.New` likewise | `mprotect` denied, pages handed back with a bare `munmap` and **released**. They were locked for their whole life (never swapped) and the kernel zeroes anonymous pages before reuse, but the in-process wipe did not run. |
+| `ErrEnclaveDestroyed` | `WithBytes`, `EqualTo`, `Freeze` | Material gone (destroyed, swept, or wiped-but-held). |
+| `ErrReleasedWithoutWipe` (`*UnwipedReleaseError`) | `Destroy`; `NewMemoryEnclave`/`NewMemoryEnclaveCopy` (joined into a freeze failure's rollback); `Allocator.New` likewise | `mprotect` denied, pages handed back with a bare `munmap` and **released**. They were locked for their whole life (never swapped) and the kernel zeroes anonymous pages before reuse, but the in-process wipe did not run. |
 | `ErrEnclaveCorrupted` | `Destroy`; also counted by the next `WipeAll` | Canary or guard mismatch. See below. |
 | `ErrCoreDumpLimitUnsupported` | `CoreDumpsDisabled` | Windows: no process-wide core-dump limit exists. |
 | `ErrProcessHardeningUnsupported` | `HardenProcess` | Not Linux: nothing applied. |
-| `*ProcessHardeningError` | `HardenProcess` | `PR_SET_DUMPABLE` refused, or the read-back still shows the process dumpable. |
+| `ErrProcessHardeningFailed` (`*ProcessHardeningError`) | `HardenProcess` | `PR_SET_DUMPABLE` refused, or the read-back still shows the process dumpable. |
+
+Every sentinel and error type is declared in [errors.go](../../errors.go).
+`LockedMemoryError`, `UnwipedReleaseError`, `ProcessHardeningError` and the
+other cause-carrying types share one shape: a single `Cause error` field, a
+message of the sentinel's text followed by `": "` and the cause, `Is` matching
+that sentinel only, and `Unwrap` returning `Cause`. Where a failure and an
+independent cleanup failure happen together (a refused rollback, a refused
+unlock), the error is an `errors.Join` of the two, so it matches both; that is
+the only join the package builds.
 
 ### `ErrReleasedWithoutWipe` and `ErrLockedMemoryUnavailable` are disjoint on release
 
@@ -133,7 +142,7 @@ should stop is the caller's decision.
 
 | GOOS | Lock primitive | Per-mapping dump exclusion (verified) | Fork exclusion (verified) | `CoreDumpsDisabled()` | Notes |
 |---|---|---|---|---|---|
-| linux, android | `mlock` | `MADV_DONTDUMP` (refusal fails the allocation) | `MADV_DONTFORK` on the whole mapping (refusal fails the allocation) | `setrlimit(RLIMIT_CORE, 0/0)` result | Only OS in CI. |
+| linux, android | `mlock` | `MADV_DONTDUMP` (refusal fails the allocation) | `MADV_DONTFORK` on the whole mapping (refusal fails the allocation) | `setrlimit(RLIMIT_CORE, 0/0)` result | Only OS the tests run on. |
 | freebsd, dragonfly | `mlock` | `MAP_NOCORE` + `MADV_NOCORE` (madvise refusal fails the allocation) | none: x/sys exposes no `minherit` | setrlimit result | |
 | openbsd | `mlock` | `MAP_CONCEAL` on the `mmap` itself | none: x/sys exposes no `minherit`, and raw syscalls are refused | setrlimit result | |
 | darwin, ios, netbsd | `mlock` | none exposed by x/sys | none | setrlimit result | `RLIMIT_CORE` is the only control. |
@@ -186,6 +195,29 @@ exactly one system call, with no hidden wipe, protection change or advice, so
 has a single unmap. `VirtualUnlock` refuses pages that are not locked (unlike
 `munlock`), so release unlocks at most once per mapping. An unsupported GOOS
 (js, wasip1, plan9) fails to compile with an error naming the reason.
+
+**One implementation per concern per GOOS.** The platform layer is five
+concerns, each a set of files named `<concern>_<platform>.go`. A build compiles
+exactly one implementation of each:
+
+| Concern | Files | Catch-all |
+|---|---|---|
+| `osmem`: mmap, mlock, mprotect primitives and the protection table | `_unix` (aix, darwin, dragonfly, freebsd, linux, netbsd, openbsd, solaris), `_windows` | `_unsupported`: fails to compile |
+| `madvise`: dump and fork exclusion, `coreDumpMapFlags` | `_linux`, `_bsd` (dragonfly, freebsd), `_openbsd` | `_unsupported`: darwin, netbsd, aix, solaris, windows; the hooks are no-ops |
+| `memlock`: ceiling discovery | `_linux`, `_bsd` (darwin, dragonfly, freebsd, netbsd, openbsd) | `_unsupported`: aix, solaris, windows; reports `LimitUnsupported` |
+| `harden`: `HardenProcess` | `_linux` | `_unsupported`: `ErrProcessHardeningUnsupported` |
+| `secret`: key-schedule erasure | `secret_erase.go` (linux, amd64 or arm64, `GOEXPERIMENT=runtimesecret`) | `secret_noerase.go` |
+
+`_unsupported` is the only catch-all; its build constraint is the exact
+complement of the named files. `_unix` holds code the named platforms share
+(`madvise_unix.go`, `memlock_unix.go`) and compiles exactly where a named
+platform file does. `madvise_<platform>.go` states only constants (the advice
+for core dumps and fork, and the mapping-time flag), and `madvise_unix.go`
+makes the one `madvise` call. `_bsd` states its members in its constraint and
+doc: `memlock_bsd.go` includes darwin, `madvise_bsd.go` does not. The `secret`
+files keep their names because the Makefile's `test-runtimesecret` target
+checks them. `TestPlatformLayer_EveryGOOSHasExactlyOneImplementation` holds
+every concern to this for every GOOS, and `make cross-build` compiles each one.
 
 ## Configuration
 

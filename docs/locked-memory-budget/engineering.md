@@ -1,6 +1,6 @@
 # Locked-memory budget and admission — engineering contract
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-04
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-07
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Exported surface
@@ -45,13 +45,15 @@
    returns it once (guarded by `sync.Once`) after the pages are unmapped — or
    after a corrupted or unwiped release, both of which do unmap. A refused
    release keeps it.
-4. **A failed construction's charge is decided once, at rollback.** If the
-   rollback left the pages still `mlock`'d, the charge is kept and attached to
-   the orphan record; otherwise it is refunded at once (the record, if any,
-   carries no refund). An attached charge then stays until a `WipeAll` retry
-   **unmaps** the pages — a retry that unlocks them but is refused the
-   `munmap` keeps the record, and the charge, for the next sweep
-   ([shutdown-sweep](../shutdown-sweep/engineering.md)).
+4. **A failed construction's charge is decided once, at rollback.** `New` and
+   `NewSized` share one admission step (`admit`) with one refund closure. If
+   the rollback left the pages still `mlock`'d, the charge is kept and the
+   closure becomes the orphan's release; otherwise it is refunded at once (the
+   orphan, if any, carries no refund). An attached charge then stays until a
+   `WipeAll` retry **unmaps** the pages — a retry that unlocks them but is
+   refused the `munmap` keeps the orphan, and the charge, for the next sweep
+   ([shutdown-sweep](../shutdown-sweep/engineering.md)). An orphan is booked
+   exactly as a `Destroy`ed enclave is, so the refund runs at most once.
 5. **Refused retunes change nothing.** `SetLimit` and `TransferTo` either apply
    the whole change or none of it.
 6. **Ceiling checks apply only to opted-in allocators and only to raises.** An
@@ -78,7 +80,8 @@
    when it binds (keeping the ceiling check), `0` for a zero ceiling, and
    `math.MaxInt64` when no ceiling binds. A discovery failure installs nothing;
    a later call retries. The installed allocator is never replaced, which would
-   strand live reservations on an allocator nothing admits against.
+   strand live reservations on an allocator nothing admits against. The slot is
+   the package's generic install-once process singleton (`singleton.go`).
 9. **Readers never see ungranted headroom.** Where a retune writes both words,
    `limit` is stored before `free` is credited, so a lock-free reader may
    overstate usage but never understates it. A lock-free refusal can still pair
@@ -101,6 +104,13 @@
 | `ErrNilAllocator` | `SetAllocator(nil)`; `OpenWith(ctx, nil)`; `New`, `NewSized`, `SetLimit`, `ForceLimit`, `TransferTo` on a nil `*Allocator` (`New` still wipes `data`) | Yes — never falls back to unbudgeted. |
 | `ErrAllocatorInstalled` | Second `SetAllocator`, or `SetAllocator` after a `ProcessAllocator` call that installed the lazy default (a discovery failure installs nothing) | Yes |
 | `ErrLockedMemoryUnavailable` | Admitted, but the kernel refused | Reservation refunded unless locked pages were left behind (invariant 4). |
+
+All of these are declared in [errors.go](../../errors.go). `BudgetError` and
+`BudgetInUseError` render as `<sentinel>: <Requested> bytes requested, <InUse>
+of <Limit> bytes in use`, and `RLimitError` as `<sentinel>: <Requested> bytes
+requested, <Source> is <Bytes> bytes`. `LimitDiscoveryError` has the shared
+cause shape of [locked-memory](../locked-memory/engineering.md#error-semantics):
+the sentinel's text, `": "` and the cause.
 
 ## Platform contract for discovery
 

@@ -1,6 +1,6 @@
 # Sealing and the provider seam — engineering contract
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-04
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-07
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Exported surface
@@ -147,10 +147,10 @@
 
 | Error | From | Meaning |
 |---|---|---|
-| `ErrSealFailed` | seal paths | AEAD, CSPRNG or provider failure (cause joined), or the context ended (joined with `ctx.Err()`). |
-| `ErrOpenFailed` | `Open`, `OpenWith` | The context ended, or a `ModePerOperation` provider failed with its own error (joined, reachable). It says nothing about the value, which is intact, and nothing about whether the provider's failure is transient. It can be **joined** with a verdict the provider returned as the context ended — `ErrSealedAuthentication`, `ErrSealerWiped`, `ErrEnclaveDestroyed` — so test those first, then inspect the provider's cause before retrying (see [Classifying an open failure](#classifying-an-open-failure)). |
+| `ErrSealFailed` (`*SealError`) | seal paths | AEAD, CSPRNG or provider failure (the `Cause`), or the context ended (`Cause` matches `ctx.Err()`). |
+| `ErrOpenFailed` (`*OpenError`) | `Open`, `OpenWith` | The context ended, or a `ModePerOperation` provider failed with its own error (the `Cause`, reachable). It says nothing about the value, which is intact, and nothing about whether the provider's failure is transient. It can **also match** a verdict the provider returned as the context ended — `ErrSealedAuthentication`, `ErrSealerWiped`, `ErrEnclaveDestroyed` — so test those first, then inspect the provider's cause before retrying (see [Classifying an open failure](#classifying-an-open-failure)). |
 | `ErrSealedAuthentication` | open paths, providers | Tampered, truncated, forged, re-paired or foreign. Deliberately indistinguishable between causes. |
-| `ErrSealerWiped` | all sealing paths, `Openable` | **This sealer could not serve this operation because an enclave it was using is gone** — not, on its own, proof that the sealer is dead. See [Where `ErrSealerWiped` comes from](#where-errsealerwiped-comes-from). |
+| `ErrSealerWiped` (bare, or `*SealerWipedError` carrying the failure that met the sweep) | all sealing paths, `Openable` | **This sealer could not serve this operation because an enclave it was using is gone** — not, on its own, proof that the sealer is dead. See [Where `ErrSealerWiped` comes from](#where-errsealerwiped-comes-from). |
 | `ErrOpenabilityUnknown` | `Openable` | A sweep ran since sealing (or during it), `ModePerOperation`, and the provider reports no health. Open the value to find out. |
 | `ErrEnclaveDestroyed` | `Open`, `OpenWith`, `Openable`; seal paths | From `Openable`, and from `Open`/`OpenWith` before any work: the `SealedEnclave` was destroyed (or is nil). From later in a seal or open: an enclave **this call** allocated was destroyed by a concurrent `WipeAll`, and the sealed value may be intact — the DEK while sealing the material under it (either mode), the open's destination or DEK while decrypting into it (either mode), or the DEK while a `ModePerOperation` provider uses it. A provider returning it is passed through too. In `ModeRootKey` the same holds for a per-call key destroyed during the wrap or unwrap under the KEK; only when a **hierarchy** key (the root or the current KEK) is dead does the failure become `ErrSealerWiped` (see below). |
 | `ErrLockedMemoryUnavailable` | seal, open | Kernel refused a locked page; the sealed value survives an open failure. |
@@ -159,7 +159,7 @@
 | `ErrSealerDestroyed` | all sealing paths, `Openable`, `SoftwareProvider` | `Destroy` ran on the sealer (or on its software provider). Permanent. |
 | `ErrSealerNotConstructed` | `Seal`, `Open` | The `Sealer` was not built by `NewSealer` (e.g. a zero value). |
 | `ErrInvalidProvider` | `NewSealer` | A provider option was given nil or a typed nil, or both provider options were given. |
-| `ErrSealerExhausted` | `Seal` (`ModeRootKey`), joined with `ErrSealFailed` | A rotation would need a KEK generation past 2^31, the bound on the sealer's own wrapping key. Nothing is minted; existing values keep opening; new seals need a new `Sealer`. |
+| `ErrSealerExhausted` | `Seal` (`ModeRootKey`), as the `Cause` of a `*SealError` | A rotation would need a KEK generation past 2^31, the bound on the sealer's own wrapping key. Nothing is minted; existing values keep opening; new seals need a new `Sealer`. |
 | `ErrInvalidRotationLimit` | `NewSealer` | `WithKEKRotationLimit` of zero, above 2^31, or given for `ModePerOperation`. |
 | `ErrSealerInstalled`, `ErrNilSealer` | `SetSealer`, nil `(*Sealer).Seal` | One-shot install; nil sealer. |
 | `ErrProviderMessageLimit` | `SoftwareProvider.Protect` | Per-key message bound reached. |
@@ -167,8 +167,11 @@
 
 ### Context error shapes
 
-Built by `contextFailure` in [sealer.go](../../sealer.go): `errors.Join(op,
-…)`, where `op` is `ErrSealFailed` or `ErrOpenFailed`.
+Built by `contextFailure` in [errors.go](../../errors.go): a `*SealError` or
+`*OpenError` matching `op` (`ErrSealFailed` or `ErrOpenFailed`), whose `Cause`
+holds the context's error, any `context.Cause` and any provider error, each
+reachable through `errors.Is`/`errors.As`. It renders as `<op>: <ctx.Err()>`,
+then `: <cause>` when the cause is distinct, then `; provider: <error>`.
 
 | Situation | Matches (`errors.Is`) |
 |---|---|
@@ -179,9 +182,10 @@ Built by `contextFailure` in [sealer.go](../../sealer.go): `errors.Join(op,
 | Queued for the init slot when the context ended | `ErrSealFailed`, `ctx.Err()` |
 | Successful unseal, then failed mint, context ended | `ErrSealFailed`, `ctx.Err()`, the mint failure; the root is kept |
 
-While the context is live, a provider error passes through unjoined when it
-matches one of these sentinels, and is joined under `op` otherwise
-(`providerSealFailure` / `providerOpenFailure` in [sealer.go](../../sealer.go)):
+While the context is live, a provider error passes through unwrapped when it
+matches one of these sentinels, and becomes the `Cause` of a `*SealError` or
+`*OpenError` otherwise
+(`providerFailure` and its `providerVerdicts` table in [errors.go](../../errors.go)):
 
 - open: `ErrSealedAuthentication`, `ErrSealerWiped`, `ErrSealerDestroyed`,
   `ErrOpenFailed`, `ErrLockedMemoryUnavailable`, `ErrEnclaveDestroyed`;
@@ -218,7 +222,7 @@ whatever the provider means by it:
 
 A sweep that destroys only a **per-call** enclave — the call's own DEK, or a
 retired KEK materialized for one unwrap — is not one of these paths:
-`hierarchyFailure` ([sealer.go](../../sealer.go)) reports `ErrSealerWiped` only
+`hierarchyFailure` ([hierarchy.go](../../hierarchy.go)) reports `ErrSealerWiped` only
 when a hierarchy key the operation used (the root, or the current KEK) is
 itself dead, and otherwise passes `ErrEnclaveDestroyed` through. That failure
 is this call losing its working key, and the sealer keeps working.
@@ -256,11 +260,11 @@ first match:
 5. `ErrOpenFailed` — the context ended, or a provider failed with its own
    error. The value is intact, but `ErrOpenFailed` alone does not say the
    failure is transient: a provider's permanent errors (a deleted or disabled
-   key, a revoked authorization) are joined under it exactly like transient
+   key, a revoked authorization) are wrapped under it exactly like transient
    ones, and the same error can carry a cancellation AND a provider failure
    that arrived as the context ended. Classify the provider's cause FIRST with
    `errors.Is`/`errors.As`: a permanent cause means do not retry, whatever
-   else is joined; a transient one means retry. Only when no provider cause
+   else it carries; a transient one means retry. Only when no provider cause
    rules it out is a cancellation worth retrying with a live context.
 
 ### Openable
@@ -307,7 +311,7 @@ Measured on go1.27 linux/amd64: the `aes.NewCipher` block is 488 bytes (the
 byte-exact on the hardware path, as eight big-endian `uint32` words on the
 generic path (`GODEBUG=cpu.aes=off`). Size and offset follow the block layout
 and nothing depends on them; the key's presence is what matters.
-`withAEAD` ([sealed.go](../../sealed.go)) is the only place a key leaves locked
+`withAEAD` ([aead.go](../../aead.go)) is the only place a key leaves locked
 memory. `TestSealedEnclave_KeyScheduleReachesTheHeapAsDocumented` fails if the
 key stops appearing in the schedule in either form, or `NewCipher` stops
 allocating; either means this section must be re-measured. Core-dump

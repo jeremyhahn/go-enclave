@@ -1,6 +1,6 @@
 # Provider conformance — API
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-04
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-07
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Transports
@@ -18,13 +18,5 @@ Schemas and error mapping: [engineering.md](engineering.md).
 
 ## Versioning
 
-v0.7 is BREAKING: `TestProvider(cfg)` became `TestProvider(ctx, cfg)`, and
-`ErrAborted`/`AbortedError` are new. The suite also gained the ended-context
-checks, so a provider that passed under v0.6 but ignores its context now fails.
-See [user.md](user.md#migrating-from-v06).
-
-`ErrNotMeasured`/`NotMeasuredError` are new and BREAKING in behavior: a
-residue sweep that cannot run (non-Linux, no locked memory, blind control) used
-to be logged and return `nil`; it now returns an error matching
-`ErrNotMeasured` unless `Config.SkipResidueSweep` is set. Every error message
-now starts with `providertest:`.
+Pre-1.0: see [Upgrading](../README.md#upgrading) for every breaking change to
+this capability.

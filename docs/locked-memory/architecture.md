@@ -1,6 +1,6 @@
 # Locked-memory enclaves — architecture
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-04
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-07
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Problem
@@ -98,9 +98,10 @@ the `munmap` when its `munlock` is refused, since unmapping drops the lock.)
 |---|---|
 | `MemoryEnclave`, constructors, borrow, `Freeze`, `Destroy` | [enclave.go](../../enclave.go) |
 | Mapping layout, canary, release sequence, `LockedSize`, `CoreDumpsDisabled` | [mapping.go](../../mapping.go) |
+| `Wipe` and the constant-time copy and compare | [constanttime.go](../../constanttime.go) |
 | OS primitives, one syscall each | [osmem.go](../../osmem.go), [osmem_unix.go](../../osmem_unix.go), [osmem_windows.go](../../osmem_windows.go), [osmem_unsupported.go](../../osmem_unsupported.go) |
-| Per-mapping core-dump exclusion | [dontdump_linux.go](../../dontdump_linux.go), [dontdump_nocore.go](../../dontdump_nocore.go), [dontdump_openbsd.go](../../dontdump_openbsd.go), [dontdump_other.go](../../dontdump_other.go), [dontdump_windows.go](../../dontdump_windows.go) |
-| Shutdown ledger | [registry.go](../../registry.go) — see [shutdown-sweep](../shutdown-sweep/architecture.md) |
+| Per-mapping core-dump and fork exclusion | [madvise_unix.go](../../madvise_unix.go), [madvise_linux.go](../../madvise_linux.go), [madvise_bsd.go](../../madvise_bsd.go), [madvise_openbsd.go](../../madvise_openbsd.go), [madvise_unsupported.go](../../madvise_unsupported.go) |
+| Shutdown ledger, the holder-counting locks the sweep waits on, and `settleRelease`, the one bookkeeping step after every release | [registry.go](../../registry.go) — see [shutdown-sweep](../shutdown-sweep/architecture.md) |
 
 go-enclave is a bottom-layer module: its only dependency is `golang.org/x/sys`,
 and consumers reach it only through the exported Go API of package `enclave`.
@@ -124,8 +125,8 @@ in to `HardenProcess`), a debugger, a cold-boot capture. While an enclave exists
 `mlock` keeps pages out of swap, not out of a hibernation (suspend-to-disk)
 image or a virtual-machine snapshot, which capture locked memory too.
 Nor does it cover copies the caller makes: the `[]byte` handed to
-`NewMemoryEnclaveCopy`, the string from the deprecated `OpenString`, or bytes generated on the
-heap before being moved in. For narrowing the live-memory window, see
+`NewMemoryEnclaveCopy`, a string made from bytes borrowed through `WithBytes`, or bytes
+generated on the heap before being moved in. For narrowing the live-memory window, see
 [sealing](../sealing/architecture.md).
 
 ## Scope fence

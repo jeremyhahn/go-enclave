@@ -17,6 +17,7 @@ import (
 	"testing"
 
 	enclave "github.com/jeremyhahn/go-enclave"
+	"github.com/jeremyhahn/go-enclave/internal/memscan"
 )
 
 // Covers Sealer.Destroy and SoftwareProvider.Destroy as the kernel sees them:
@@ -70,8 +71,8 @@ func TestDestroyedSealersReturnTheirLockedMemory(t *testing.T) {
 					t.Errorf("%s: Openable after Destroy = %v, want ErrSealerDestroyed", name, err)
 				}
 				buf := heapBytes(needleLen)
-				if _, err := s.Seal(ctx, buf); !errors.Is(err, enclave.ErrSealerDestroyed) || !allZero(buf) {
-					t.Errorf("%s: Seal after Destroy = %v (wiped=%t), want ErrSealerDestroyed and a wiped slice", name, err, allZero(buf))
+				if _, err := s.Seal(ctx, buf); !errors.Is(err, enclave.ErrSealerDestroyed) || !memscan.AllZero(buf) {
+					t.Errorf("%s: Seal after Destroy = %v (wiped=%t), want ErrSealerDestroyed and a wiped slice", name, err, memscan.AllZero(buf))
 				}
 				if err := s.Destroy(); err != nil {
 					t.Errorf("%s: second Destroy = %v", name, err)
@@ -193,8 +194,8 @@ func TestUnconstructedSealerAndRedactedFormatting(t *testing.T) {
 		var zero enclave.Sealer
 		buf := heapBytes(needleLen)
 		newNeedle(t).fill(buf)
-		if _, err := zero.Seal(ctx, buf); !errors.Is(err, enclave.ErrSealerNotConstructed) || !allZero(buf) {
-			t.Errorf("zero-value Seal = %v (wiped=%t), want ErrSealerNotConstructed and a wiped slice", err, allZero(buf))
+		if _, err := zero.Seal(ctx, buf); !errors.Is(err, enclave.ErrSealerNotConstructed) || !memscan.AllZero(buf) {
+			t.Errorf("zero-value Seal = %v (wiped=%t), want ErrSealerNotConstructed and a wiped slice", err, memscan.AllZero(buf))
 		}
 		if err := zero.Destroy(); err != nil {
 			t.Errorf("zero-value Destroy = %v", err)

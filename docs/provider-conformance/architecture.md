@@ -82,7 +82,7 @@ at the next boundary once `ctx` ends.
 |---|---|
 | `Config`, `TestProvider`, the checks | [providertest/providertest.go](../../providertest/providertest.go) |
 | `ErrInvalidConfig`/`ConfigError`, `ErrAborted`/`AbortedError`, `PropertyError` | [providertest/errors.go](../../providertest/errors.go) |
-| Residue sweep | [providertest/residue.go](../../providertest/residue.go), [providertest/residue_linux.go](../../providertest/residue_linux.go), [providertest/residue_other.go](../../providertest/residue_other.go) |
+| Residue sweep | [providertest/residue.go](../../providertest/residue.go); the `/proc/self/mem` scan it shares with the root package's tests is [internal/memscan](../../internal/memscan/memscan_linux.go) |
 
 The provider under test is the author's; the suite runs in the author's
 repository and test binary.

@@ -20,18 +20,6 @@ import (
 // unix.RLIM_INFINITY is untyped and per-architecture; a test asserts they agree.
 const rlimInfinity = ^uint64(0)
 
-// discoverLockedMemoryLimit reads RLIMIT_MEMLOCK and reports what it means for
-// this process.
-func discoverLockedMemoryLimit() (LockedMemoryLimit, error) {
-	var rl unix.Rlimit
-	if err := unix.Getrlimit(unix.RLIMIT_MEMLOCK, &rl); err != nil {
-		return LockedMemoryLimit{}, &LimitDiscoveryError{Cause: err}
-	}
-	// The soft limit is the one mlock is checked against; raising it toward the
-	// hard limit is the application's business.
-	return classifyRlimit(rl.Cur, rlimInfinity, memlockRLimitEnforced()), nil
-}
-
 // memlockRLimitEnforced reports whether RLIMIT_MEMLOCK binds this process's
 // mlock calls. It does not when the calling thread holds CAP_IPC_LOCK
 // (effective set, read with capget, not inferred from uid) in the initial user

@@ -64,8 +64,8 @@ deadline; an ended context fails a seal with an error matching both
 `ErrSealFailed` and `ctx.Err()`, and an open with one matching both
 `ErrOpenFailed` and `ctx.Err()`.
 
-A provider verdict that arrives as the context ends is **joined** with the
-cancellation, so one error can match `ErrOpenFailed` and a permanent sentinel at
+A provider verdict that arrives as the context ends is **carried** with the
+cancellation in one `*OpenError`, so one error can match `ErrOpenFailed` and a permanent sentinel at
 once. Classify the security and lifecycle outcomes first; `ErrOpenFailed` on
 its own tells you the value is intact, not that the failure is transient:
 
@@ -183,108 +183,6 @@ A wiped sealer never re-keys. Construct a new `Sealer` and re-seal from source.
 | `ErrProviderMessageLimit` | `SoftwareProvider` used in `ModePerOperation` past 2^31 seals | Use `ModeRootKey` (rotates KEKs) or a hardware provider. |
 | Locked memory grows with traffic | Each `Open` takes a locked page | Destroy opened enclaves promptly; use `OpenWith` so the budget sees it. |
 
-## Migrating from v0.7
+## Upgrading
 
-**Typed provider options replace `WithProvider` and `WithMode`.** The option
-now selects the mode, and `ErrProviderMode` and `ErrInvalidMode` are gone: a
-mismatch no longer compiles.
-
-```go
-// v0.7
-s, err := enclave.NewSealer(enclave.WithProvider(p), enclave.WithMode(enclave.ModePerOperation))
-r, err := enclave.NewSealer(enclave.WithProvider(p)) // ModeRootKey
-
-// v0.8
-s, err := enclave.NewSealer(enclave.WithKeyProtector(p))
-r, err := enclave.NewSealer(enclave.WithRootUnsealer(p))
-```
-
-A nil or typed-nil provider, or both options at once, returns
-`ErrInvalidProvider`. `WithMode(ModePerOperation)` with no provider used a
-software provider the sealer owned; pass one explicitly and destroy it
-yourself:
-
-```go
-p := enclave.NewSoftwareProvider()
-defer p.Destroy()
-s, err := enclave.NewSealer(enclave.WithKeyProtector(p))
-```
-
-**`WithProviderHealth` is replaced by the `HealthReporter` interface.** Move
-the callback onto the provider as a `Health() error` method; the sealer finds
-it by type assertion.
-
-```go
-// v0.7
-enclave.NewSealer(enclave.WithProvider(p), enclave.WithMode(enclave.ModePerOperation),
-	enclave.WithProviderHealth(p.health))
-
-// v0.8
-func (p *MyProvider) Health() error { return p.health() }
-enclave.NewSealer(enclave.WithKeyProtector(p))
-```
-
-**`(*SealedEnclave).Destroy` returns `error`**, like `MemoryEnclave.Destroy`
-and `Sealer.Destroy`. It is always `nil` today; a `defer s.Destroy()` still
-compiles, and a method value passed as `func()` (for example
-`t.Cleanup(s.Destroy)`) needs a wrapper.
-
-## Migrating from v0.6
-
-Every call that can reach a provider takes a `context.Context` first.
-
-```go
-// v0.6
-s, err := enclave.NewSealed(data)
-s2, err := sealer.Seal(data)
-e, err := s.Open()
-e2, err := s.OpenWith(alloc)
-
-// v0.7
-s, err := enclave.NewSealed(ctx, data)
-s2, err := sealer.Seal(ctx, data)
-e, err := s.Open(ctx)
-e2, err := s.OpenWith(ctx, alloc)
-```
-
-Provider implementations gain a context on every method and must honor it:
-
-```go
-// v0.6
-func (p *MyProvider) Protect(key []byte) ([]byte, error)
-func (p *MyProvider) Unprotect(blob, key []byte) error
-func (p *MyProvider) UnsealRoot(dst []byte) error
-
-// v0.7
-func (p *MyProvider) Protect(ctx context.Context, key []byte) ([]byte, error)
-func (p *MyProvider) Unprotect(ctx context.Context, blob, key []byte) error
-func (p *MyProvider) UnsealRoot(ctx context.Context, dst []byte) error
-```
-
-Behavior changes to check for:
-
-- A `ModePerOperation` provider's infrastructure error on open now arrives
-  joined under the new `ErrOpenFailed` (still reachable with `errors.Is`/`As`).
-  Code that matched only the provider's error keeps working; code that treated
-  "anything not `ErrSealedAuthentication`" as one class can now match
-  `ErrOpenFailed`.
-- `(*SealedEnclave).Destroy` no longer waits for an `Open` in flight.
-- **`Open` and `OpenWith` return a FROZEN (read-only) enclave**, like every
-  constructor whose material is final. Reading through `WithBytes` is
-  unchanged; a write into the opened plaintext now faults. Code that edited an
-  opened value must copy it into its own `NewMemoryEnclaveSized` enclave
-  inside the borrow. A refused freeze fails the open closed instead of
-  handing back writable plaintext: no enclave is returned and the destination
-  is wiped. `OpenWith`'s reservation is returned once the destination's pages
-  are; if the kernel also refuses that release, the charge stays until a
-  `WipeAll` reclaims them.
-- A `ModeRootKey` sealer refuses a seal that would need a KEK generation past
-  2^31 (the bound on its wrapping key, which each sealer derives from the
-  root under its own salt) with `ErrSealerExhausted`, joined with
-  `ErrSealFailed`. Existing values keep opening; new seals need a new
-  `Sealer`, which derives a fresh wrapping key even over the same root. Only a very small `WithKEKRotationLimit` can reach it.
-- New option `WithKEKRotationLimit(n)` sets a `ModeRootKey` KEK generation's
-  crypto-period (1 to 2^31 wraps); out-of-range values, or the option with
-  `ModePerOperation`, fail `NewSealer` with `ErrInvalidRotationLimit`.
-- `providertest.TestProvider(cfg)` became `TestProvider(ctx, cfg)`; see
-  [provider-conformance](../provider-conformance/user.md#migrating-from-v06).
+Migration guidance lives in one place: [Upgrading](../README.md#upgrading).

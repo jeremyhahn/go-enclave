@@ -1,6 +1,6 @@
 # Sealing and the provider seam — architecture
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-04
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-07
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Problem
@@ -60,7 +60,7 @@ recover between opens:
    value's DEK.
 2. **Residual per-value keys on the heap.** Every AES-GCM operation expands its
    key into a heap-allocated key schedule that Go neither zeroes nor frees
-   promptly ([sealed.go](../../sealed.go), `withAEAD`). Each seal and each open
+   promptly ([aead.go](../../aead.go), `withAEAD`). Each seal and each open
    leaves its value's DEK schedule behind, and that schedule plus the value's
    heap ciphertext recovers the value until the allocator reuses the memory.
    This holds in **every** mode, hardware included — except in a build with
@@ -135,7 +135,7 @@ sequenceDiagram
 | `sync.Once` for the root unseal | One transient failure (memlock ceiling, device hiccup) would be permanent for the process. |
 | A mutex for first-time initialization | A mutex wait cannot be abandoned when a caller's context ends. The init slot is a channel selected against `ctx.Done()`. |
 | Holding `Sealer.mu` across `UnsealRoot` (before v0.7) | A stalled provider stalled every `Seal`, `Open` and `Openable` on that sealer, with no way to give up. |
-| `cipher.NewGCM` with caller-supplied nonces (and with it `GOEXPERIMENT=boringcrypto`) | FIPS 140-only mode refuses GCM with arbitrary IVs. `NewGCMWithRandomNonce` removes caller-managed nonces; random 96-bit nonces can still collide, so collision risk is bounded by per-key usage limits: at most 2^31 DEK wraps per KEK generation before rotation (`kekMessageLimit`, [sealer.go](../../sealer.go); `WithKEKRotationLimit` can only lower it), at most 2^31 KEK generations per sealer wrapping key (`maxKEKGenerations`; past it a seal fails with `ErrSealerExhausted`) — a key each sealer derives from the provider's root with HKDF-SHA256 under its own random salt, so sealers sharing a root, or restarts unsealing the same one, never share it — and 2^31 `Protect` calls per `SoftwareProvider` root (`softwareProtectLimit`, [provider_software.go](../../provider_software.go)), half of crypto/cipher's documented 2^32 bound. boringcrypto builds therefore cannot seal; Go's native FIPS 140-3 module is the supported route. |
+| `cipher.NewGCM` with caller-supplied nonces (and with it `GOEXPERIMENT=boringcrypto`) | FIPS 140-only mode refuses GCM with arbitrary IVs. `NewGCMWithRandomNonce` removes caller-managed nonces; random 96-bit nonces can still collide, so collision risk is bounded by per-key usage limits: at most 2^31 DEK wraps per KEK generation before rotation (`kekMessageLimit`, [hierarchy.go](../../hierarchy.go); `WithKEKRotationLimit` can only lower it), at most 2^31 KEK generations per sealer wrapping key (`maxKEKGenerations`; past it a seal fails with `ErrSealerExhausted`) — a key each sealer derives from the provider's root with HKDF-SHA256 under its own random salt, so sealers sharing a root, or restarts unsealing the same one, never share it — and 2^31 `Protect` calls per `SoftwareProvider` root (`softwareProtectLimit`, [provider_software.go](../../provider_software.go)), half of crypto/cipher's documented 2^32 bound. boringcrypto builds therefore cannot seal; Go's native FIPS 140-3 module is the supported route. |
 | XSalsa20-Poly1305 / ChaCha20-Poly1305 (no key schedule) | Not FIPS-approved. |
 | A hand-written AES whose schedule lives in locked memory | Unvalidated, unreviewed cryptography; a worse class of defect than the bounded heap exposure it removes. |
 | Shipping a `crypto.Decrypter` + signer composition | Out of scope for the bottom layer: device adapters belong with the layer that owns the devices, where they can be held to the conformance suite. Confidentiality-only providers (bare RSA-OAEP) do not satisfy the seam. |
@@ -152,8 +152,12 @@ sequenceDiagram
 |---|---|
 | Seam interfaces, `RootKeyBytes`, provider context contract | [provider.go](../../provider.go) |
 | `SoftwareProvider` | [provider_software.go](../../provider_software.go) |
-| `Sealer`, modes, options, hierarchy, init slot, rotation, `SetSealer` | [sealer.go](../../sealer.go) |
-| `SealedEnclave`, envelope, AEAD use and its heap audit (`withAEAD`) | [sealed.go](../../sealed.go) |
+| `Sealer`, modes, options, `NewSealer`, seal and open, `ModePerOperation` provider calls, lifecycle, `SetSealer` | [sealer.go](../../sealer.go) |
+| `ModeRootKey` hierarchy: wrapping-key derivation, the one state check (`hierarchyStateLocked`), init slot, KEK rotation, dead-hierarchy cleanup | [hierarchy.go](../../hierarchy.go) |
+| Blob framing and the one key wrap (`wrapKey` / `unwrapKey`), shared by the hierarchy and `SoftwareProvider` | [keywrap.go](../../keywrap.go) |
+| AEAD primitives, the sealable-length bound, key generation, and the heap audit (`withAEAD`) | [aead.go](../../aead.go) |
+| `SealedEnclave`, envelope lifecycle | [sealed.go](../../sealed.go) |
+| Error shaping (`contextFailure`, `providerFailure`) and key cleanup (`destroyAll`, `destroyOnFailure`) | [errors.go](../../errors.go) |
 | Conformance suite for providers | [providertest](../../providertest/providertest.go) — see [provider-conformance](../provider-conformance/architecture.md) |
 
 TPM, HSM and KMS providers live in higher layers and are injected through

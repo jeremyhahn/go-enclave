@@ -16,6 +16,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/jeremyhahn/go-enclave/internal/memscan"
 )
 
 const (
@@ -215,7 +217,7 @@ func TestSealedEnclave_NoPlaintextInProcessMemory(t *testing.T) {
 	var home uintptr
 	if err := needleEnclave.WithBytes(func(b []byte) error {
 		var aerr error
-		home, aerr = sliceAddr(b)
+		home, aerr = memscan.Addr(b)
 		return aerr
 	}); err != nil {
 		t.Fatalf("needle address: %v", err)
@@ -227,37 +229,37 @@ func TestSealedEnclave_NoPlaintextInProcessMemory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	withOpen, err := findNeedle(needleEnclave)
+	withOpen, err := findNeedle(needleEnclave, home)
 	if err != nil {
 		open.Destroy()
-		t.Fatalf("cannot sweep process memory: %v (see processMemoryFind for what the runner must allow)", err)
+		t.Fatalf("cannot sweep process memory: %v (see memscan.Find for what the runner must allow)", err)
 	}
-	if outside := rangesOutside(withOpen, home); len(outside) == 0 {
+	if len(withOpen) == 0 {
 		open.Destroy()
-		t.Fatalf("the sweep found no match outside the needle's own mapping even with an enclave open "+
-			"(%d matches total); it cannot see the mappings a leak would live in and a negative result "+
-			"would be vacuous", len(withOpen))
+		t.Fatalf("the sweep found no match outside the needle's own mapping even with an enclave open; it " +
+			"cannot see the mappings a leak would live in and a negative result would be vacuous")
 	}
 	open.Destroy()
 
 	// Nothing is open, so the only match may be the needle itself.
-	closed, err := findNeedle(needleEnclave)
+	closed, err := findNeedle(needleEnclave, home)
 	if err != nil {
 		t.Fatalf("cannot sweep process memory: %v", err)
 	}
-	if outside := rangesOutside(closed, home); len(outside) > 0 {
+	if len(closed) > 0 {
 		t.Errorf("the material is present in %d mapping(s) outside the enclave holding it, with nothing open: "+
-			"a copy survived sealing, opening or destroying. First at %s", len(outside), outside[0])
+			"a copy survived sealing, opening or destroying. First at %s", len(closed), closed[0])
 	}
 }
 
-// findNeedle sweeps process memory for the material held in probe, comparing
-// from inside a borrow so the needle never exists as a heap value.
-func findNeedle(probe *MemoryEnclave) ([]string, error) {
+// findNeedle sweeps process memory outside the mapping containing home for the
+// material held in probe, comparing from inside a borrow so the needle never
+// exists as a heap value.
+func findNeedle(probe *MemoryEnclave, home uintptr) ([]string, error) {
 	var hits []string
 	var err error
 	berr := probe.WithBytes(func(needle []byte) error {
-		hits, err = processMemoryFind(needle)
+		hits, err = memscan.Find(needle, home)
 		return err
 	})
 	if berr != nil {
@@ -361,7 +363,7 @@ func TestSealedEnclave_SizeMismatchDoesNotDecryptOntoTheHeap(t *testing.T) {
 	var home uintptr
 	if err := needleEnclave.WithBytes(func(b []byte) error {
 		var aerr error
-		home, aerr = sliceAddr(b)
+		home, aerr = memscan.Addr(b)
 		return aerr
 	}); err != nil {
 		t.Fatalf("needle address: %v", err)
@@ -374,15 +376,15 @@ func TestSealedEnclave_SizeMismatchDoesNotDecryptOntoTheHeap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	withOpen, err := findNeedle(needleEnclave)
+	withOpen, err := findNeedle(needleEnclave, home)
 	if err != nil {
 		open.Destroy()
-		t.Fatalf("cannot sweep process memory: %v (see processMemoryFind for what the runner must allow)", err)
+		t.Fatalf("cannot sweep process memory: %v (see memscan.Find for what the runner must allow)", err)
 	}
-	if outside := rangesOutside(withOpen, home); len(outside) == 0 {
+	if len(withOpen) == 0 {
 		open.Destroy()
-		t.Fatalf("the sweep found no match outside the needle's own mapping even with an enclave open "+
-			"(%d matches total); a negative result would be vacuous", len(withOpen))
+		t.Fatalf("the sweep found no match outside the needle's own mapping even with an enclave open; " +
+			"a negative result would be vacuous")
 	}
 	open.Destroy()
 
@@ -409,14 +411,14 @@ func TestSealedEnclave_SizeMismatchDoesNotDecryptOntoTheHeap(t *testing.T) {
 
 	runtime.GC()
 
-	closed, err := findNeedle(needleEnclave)
+	closed, err := findNeedle(needleEnclave, home)
 	if err != nil {
 		t.Fatalf("cannot sweep process memory: %v", err)
 	}
-	if outside := rangesOutside(closed, home); len(outside) > 0 {
+	if len(closed) > 0 {
 		t.Errorf("the material is present in %d mapping(s) outside the enclave holding it after a REFUSED "+
 			"Open: the AEAD decrypted onto the heap before the mismatch was noticed, so the refusal is "+
-			"cosmetic and the plaintext is in unlocked memory. First at %s", len(outside), outside[0])
+			"cosmetic and the plaintext is in unlocked memory. First at %s", len(closed), closed[0])
 	}
 }
 

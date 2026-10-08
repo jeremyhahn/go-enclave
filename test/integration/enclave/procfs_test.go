@@ -25,6 +25,7 @@ import (
 	"unsafe"
 
 	enclave "github.com/jeremyhahn/go-enclave"
+	"github.com/jeremyhahn/go-enclave/internal/memscan"
 )
 
 // Readers of /proc/self (status VmLck, smaps VmFlags, mem) that the suite
@@ -99,7 +100,7 @@ func readSmaps(t *testing.T) []vma {
 	}
 	var out []vma
 	for _, line := range strings.Split(string(raw), "\n") {
-		if lo, hi, ok := parseMapsHeader(line); ok {
+		if lo, hi, ok := memscan.ParseMapsHeader(line); ok {
 			fields := strings.Fields(line)
 			v := vma{lo: lo, hi: hi, perms: fields[1], header: strings.TrimSpace(line)}
 			if len(fields) > 5 {
@@ -149,28 +150,6 @@ func lockedVMAs(maps []vma) []vma {
 		}
 	}
 	return out
-}
-
-// parseMapsHeader recognizes a maps/smaps header line ("7f0c…-7f0c… rw-p …").
-// A non-header smaps line ("Size:   4 kB") fails the hex parse.
-func parseMapsHeader(line string) (lo, hi uintptr, ok bool) {
-	first, _, cut := strings.Cut(line, " ")
-	if !cut {
-		return 0, 0, false
-	}
-	l, r, cut := strings.Cut(first, "-")
-	if !cut {
-		return 0, 0, false
-	}
-	lv, err := strconv.ParseUint(l, 16, 64)
-	if err != nil {
-		return 0, 0, false
-	}
-	rv, err := strconv.ParseUint(r, 16, 64)
-	if err != nil || rv <= lv {
-		return 0, 0, false
-	}
-	return uintptr(lv), uintptr(rv), true
 }
 
 // dataAddr returns the address of an enclave's first data byte. Only the
@@ -301,7 +280,7 @@ func sweep(t *testing.T, n needle) ([]residueHit, sweepScanned) {
 	var hits []residueHit
 	var scanned sweepScanned
 	for _, line := range strings.Split(string(maps), "\n") {
-		lo, hi, ok := parseMapsHeader(line)
+		lo, hi, ok := memscan.ParseMapsHeader(line)
 		if !ok {
 			continue
 		}

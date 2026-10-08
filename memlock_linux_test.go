@@ -599,10 +599,7 @@ func TestMemlockRLimitEnforced_TrustsTheCapabilityOnlyInTheInitialNamespace(t *t
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 
-	prev := readUIDMap
-	t.Cleanup(func() { readUIDMap = prev })
-
-	readUIDMap = func() ([]byte, error) { return []byte("0 1000 1\n"), nil }
+	swapSeam(t, &readUIDMap, func() ([]byte, error) { return []byte("0 1000 1\n"), nil })
 	if !memlockRLimitEnforced() {
 		t.Error("memlockRLimitEnforced() = false in a child user namespace, want true")
 	}

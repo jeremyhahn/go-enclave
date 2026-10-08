@@ -25,15 +25,7 @@ func TestCoreDumpsDisabled_IsTheSentinelOnWindows(t *testing.T) {
 // release path is built around: a second unlock is refused. installStrictUnlock
 // models this on Linux.
 func TestSysUnlock_RefusesAnUnlockedRegion(t *testing.T) {
-	b, err := sysMap(int(pageSize))
-	if err != nil {
-		t.Fatalf("sysMap: %v", err)
-	}
-	t.Cleanup(func() {
-		if err := sysUnmap(b); err != nil {
-			t.Errorf("sysUnmap: %v", err)
-		}
-	})
+	b := mapPagesForTest(t, int(pageSize))
 	if err := sysLock(b); err != nil {
 		t.Fatalf("sysLock: %v", err)
 	}

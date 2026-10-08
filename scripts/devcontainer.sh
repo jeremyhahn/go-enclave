@@ -30,7 +30,7 @@ project=go-enclave-devcontainer
 repo=go-enclave-toolchain
 
 # Every file a COPY in the Dockerfile's tools and toolchain stages reads, plus
-# the Dockerfile and its context allowlist. test/buildgates holds this list to
+# the Dockerfile and its context allowlist. build/ci/buildgates holds this list to
 # the Dockerfile's COPY lines.
 inputs() {
   printf '%s\n' \
@@ -38,8 +38,8 @@ inputs() {
     "$dockerfile.dockerignore" \
     go.mod \
     go.sum \
-    test/buildgates/go.mod \
-    test/buildgates/go.sum \
+    build/ci/buildgates/go.mod \
+    build/ci/buildgates/go.sum \
     scripts/lib.sh \
     scripts/tool.sh \
     scripts/tool-pins.sh \

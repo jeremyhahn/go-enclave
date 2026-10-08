@@ -175,11 +175,10 @@ func TestWipeAll_ABorrowThatOutlastsCtxIsCountedNotUnmapped(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	var waits atomic.Int32
-	sweepWaitingForTest = func() {
+	swapSeam(t, &sweepWaitingForTest, func() {
 		waits.Add(1)
 		cancel()
-	}
-	t.Cleanup(func() { sweepWaitingForTest = nil })
+	})
 
 	swept := make(chan int, 1)
 	go func() { n, _ := WipeAll(ctx); swept <- n }()
@@ -598,7 +597,7 @@ func TestWipeAll_RetriesAReaderRatherThanAbandoningIt(t *testing.T) {
 			<-readerDone
 		}
 
-		// Bounded: a tryReleaseMapping that blocked on the lock would deadlock here,
+		// Bounded: a tryRelease that blocked on the lock would deadlock here,
 		// since the reader is released only from inside WipeAll.
 		swept := make(chan int, 1)
 		go func() { n, _ := WipeAll(context.Background()); swept <- n }()
@@ -779,21 +778,19 @@ func TestWipeAll_ReportsCorruptionWhoseReleaseWasRefused(t *testing.T) {
 		t.Fatalf("NewMemoryEnclaveSized: %v", err)
 	}
 
-	prev := unmapMemory
-	t.Cleanup(func() {
-		unmapMemory = prev
-		_, _ = WipeAll(context.Background())
-	})
+	// Registered first, the sweep runs after the seams are restored.
+	t.Cleanup(func() { _, _ = WipeAll(context.Background()) })
 	installStrictUnlock(t)
 	refused := &e.m.memory[0]
 	var refusals atomic.Int32
-	unmapMemory = func(b []byte) error {
+	prev := unmapMemory
+	swapSeam(t, &unmapMemory, func(b []byte) error {
 		if &b[0] == refused {
 			refusals.Add(1)
 			return errors.New("munmap: cannot allocate memory")
 		}
 		return prev(b)
-	}
+	})
 
 	remaining, err := WipeAll(context.Background())
 	if remaining != 1 {
@@ -938,15 +935,14 @@ func TestWipeAll_ABorrowEndingWakesTheSweep(t *testing.T) {
 	<-inBorrow
 
 	var waits atomic.Int32
-	sweepWaitingForTest = func() {
+	swapSeam(t, &sweepWaitingForTest, func() {
 		if waits.Add(1) == 1 {
 			// End the borrow inside the wait window: its wake-up is the only
 			// thing that can end a Background wait.
 			close(release)
 			<-borrowDone
 		}
-	}
-	t.Cleanup(func() { sweepWaitingForTest = nil })
+	})
 
 	type result struct {
 		n   int
@@ -1056,8 +1052,7 @@ func TestWipeAll_ACanceledCtxStillSweepsWhatIsFree(t *testing.T) {
 	end := holdBorrow(t, held)
 
 	var waits atomic.Int32
-	sweepWaitingForTest = func() { waits.Add(1) }
-	t.Cleanup(func() { sweepWaitingForTest = nil })
+	swapSeam(t, &sweepWaitingForTest, func() { waits.Add(1) })
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -1103,8 +1098,7 @@ func TestWipeAll_ANilCtxNeverWaitsAndNeverPanics(t *testing.T) {
 	end := holdBorrow(t, held)
 
 	var waits atomic.Int32
-	sweepWaitingForTest = func() { waits.Add(1) }
-	t.Cleanup(func() { sweepWaitingForTest = nil })
+	swapSeam(t, &sweepWaitingForTest, func() { waits.Add(1) })
 
 	var nilCtx context.Context // a variable, so vet's nil-context check is not what is being tested
 	var r sweepResult
@@ -1339,8 +1333,7 @@ func TestWipeAll_ALateBorrowIsNeverWaitedFor(t *testing.T) {
 	}
 
 	var waits atomic.Int32
-	sweepWaitingForTest = func() { waits.Add(1) }
-	t.Cleanup(func() { sweepWaitingForTest = nil })
+	swapSeam(t, &sweepWaitingForTest, func() { waits.Add(1) })
 
 	r := sweepAsync(t, context.Background(),
 		"the sweep waited for a borrow on an enclave registered after it began; only owed entries are waited for")
@@ -1383,17 +1376,13 @@ func TestWipeAll_RetriesAContendedLockAtOnce(t *testing.T) {
 	t.Cleanup(unlock)
 
 	var passes, waits atomic.Int32
-	sweepPassForTest = func(pass int) {
+	swapSeam(t, &sweepPassForTest, func(pass int) {
 		passes.Store(int32(pass))
 		if pass == 2 {
 			unlock()
 		}
-	}
-	sweepWaitingForTest = func() { waits.Add(1) }
-	t.Cleanup(func() {
-		sweepPassForTest = nil
-		sweepWaitingForTest = nil
 	})
+	swapSeam(t, &sweepWaitingForTest, func() { waits.Add(1) })
 
 	r := sweepAsync(t, context.Background(),
 		"the sweep waited on a contended lock that no holder would ever announce")
@@ -1427,35 +1416,35 @@ func TestTryReleaseMapping_ClassifiesTheLock(t *testing.T) {
 	t.Run("a counted reader is held", func(t *testing.T) {
 		e := newEnclave(t)
 		e.rlock()
-		got, err := e.tryReleaseMapping()
+		got, err := e.tryRelease()
 		e.runlock()
 		if got != tryHeld || err != nil {
-			t.Errorf("tryReleaseMapping = (%d, %v), want (tryHeld, nil)", got, err)
+			t.Errorf("tryRelease = (%d, %v), want (tryHeld, nil)", got, err)
 		}
 	})
 	t.Run("a counted writer is held", func(t *testing.T) {
 		e := newEnclave(t)
 		e.lock()
-		got, err := e.tryReleaseMapping()
+		got, err := e.tryRelease()
 		e.unlock()
 		if got != tryHeld || err != nil {
-			t.Errorf("tryReleaseMapping = (%d, %v), want (tryHeld, nil)", got, err)
+			t.Errorf("tryRelease = (%d, %v), want (tryHeld, nil)", got, err)
 		}
 	})
 	t.Run("an uncounted lock is contended", func(t *testing.T) {
 		e := newEnclave(t)
 		e.mu.RLock()
-		got, err := e.tryReleaseMapping()
+		got, err := e.tryRelease()
 		e.mu.RUnlock()
 		if got != tryContended || err != nil {
-			t.Errorf("tryReleaseMapping = (%d, %v), want (tryContended, nil)", got, err)
+			t.Errorf("tryRelease = (%d, %v), want (tryContended, nil)", got, err)
 		}
 	})
 	t.Run("a free lock is released", func(t *testing.T) {
 		e := newEnclave(t)
-		got, err := e.tryReleaseMapping()
+		got, err := e.tryRelease()
 		if got != tryReleased || err != nil {
-			t.Errorf("tryReleaseMapping = (%d, %v), want (tryReleased, nil)", got, err)
+			t.Errorf("tryRelease = (%d, %v), want (tryReleased, nil)", got, err)
 		}
 		if e.IsAlive() {
 			t.Error("a released enclave still reports alive")
@@ -1539,8 +1528,6 @@ func TestHolders_EveryMethodLeavesTheCountBalanced(t *testing.T) {
 		{"WithBytes", func() { _ = e.WithBytes(func([]byte) error { return nil }) }},
 		{"WithBytes returning an error", func() { _ = e.WithBytes(func([]byte) error { return errBoom }) }},
 		{"WithBytes panicking", func() { _ = panicValue(func() { _ = e.WithBytes(func([]byte) error { panic(errBoom) }) }) }},
-		{"Open", func() { _, _ = e.Open() }},
-		{"OpenString", func() { _, _ = e.OpenString() }},
 		{"EqualTo", func() { _ = holds(e, []byte("x")) }},
 		{"Size", func() { _ = e.Size() }},
 		{"IsAlive", func() { _ = e.IsAlive() }},
@@ -1689,8 +1676,7 @@ func parkSweepOnABorrow(t *testing.T, e *MemoryEnclave) (end func(), result <-ch
 	end = holdBorrow(t, e)
 	parked := make(chan struct{})
 	var once sync.Once
-	sweepWaitingForTest = func() { once.Do(func() { close(parked) }) }
-	t.Cleanup(func() { sweepWaitingForTest = nil })
+	swapSeam(t, &sweepWaitingForTest, func() { once.Do(func() { close(parked) }) })
 
 	out := make(chan sweepResult, 1)
 	finished := make(chan struct{})
@@ -1743,11 +1729,10 @@ func TestWipeAll_AParkedSweepDoesNotHoldASecondCallerHostage(t *testing.T) {
 	waiting, cancelWaiting := context.WithCancel(context.Background())
 	defer cancelWaiting()
 	var admissionWaits atomic.Int32
-	sweepAdmissionWaitForTest = func() {
+	swapSeam(t, &sweepAdmissionWaitForTest, func() {
 		admissionWaits.Add(1)
 		cancelWaiting()
-	}
-	t.Cleanup(func() { sweepAdmissionWaitForTest = nil })
+	})
 	check(t, "canceled while waiting", sweepAsync(t, waiting,
 		"a context canceled while waiting for admission did not release the caller"))
 	if got := admissionWaits.Load(); got != 1 {
@@ -1796,13 +1781,12 @@ func TestWipeAll_ContentionRetriesHonorCtx(t *testing.T) {
 	var passes atomic.Int32
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	sweepPassForTest = func(pass int) {
+	swapSeam(t, &sweepPassForTest, func(pass int) {
 		passes.Store(int32(pass))
 		if pass == 3 {
 			cancel()
 		}
-	}
-	t.Cleanup(func() { sweepPassForTest = nil })
+	})
 
 	r := sweepAsync(t, ctx, "contention retries ignored a canceled context")
 	if r.n != 1 || r.err != nil {
@@ -1857,15 +1841,13 @@ func requireCleanLedger(t *testing.T) {
 func denyProtect(t *testing.T) (lift func()) {
 	t.Helper()
 	prev := protectMemory
-	lift = func() { protectMemory = prev }
-	t.Cleanup(lift)
-	protectMemory = func(b []byte, p protection) error {
+	swapSeam(t, &protectMemory, func(b []byte, p protection) error {
 		if p == protNoAccess {
 			return prev(b, p)
 		}
 		return errors.New("mprotect denied by policy")
-	}
-	return lift
+	})
+	return func() { protectMemory = prev }
 }
 
 // denyProtectAndUnmap is denyProtect with the unmap refused too, so release
@@ -1874,11 +1856,8 @@ func denyProtect(t *testing.T) (lift func()) {
 func denyProtectAndUnmap(t *testing.T) (lift func()) {
 	t.Helper()
 	liftProtect := denyProtect(t)
-	prev := unmapMemory
-	liftUnmap := func() { unmapMemory = prev }
-	t.Cleanup(liftUnmap)
-	unmapMemory = func([]byte) error { return errors.New("munmap denied too") }
-	return func() { liftProtect(); liftUnmap() }
+	prev := swapSeam(t, &unmapMemory, func([]byte) error { return errors.New("munmap denied too") })
+	return func() { liftProtect(); unmapMemory = prev }
 }
 
 // TestAllocator_New_FailedConstructionIsReclaimedByWipeAll pins that a
@@ -1955,10 +1934,8 @@ func TestAllocator_NewSized_UnlockedOrphanIsReclaimedWithoutASecondRefund(t *tes
 	t.Cleanup(func() { _, _ = WipeAll(context.Background()) })
 
 	prevLock, prevUnmap := lockMemory, unmapMemory
-	restore := func() { lockMemory, unmapMemory = prevLock, prevUnmap }
-	t.Cleanup(restore)
-	lockMemory = func([]byte) error { return errors.New("mlock: cannot allocate memory") }
-	unmapMemory = func([]byte) error { return errors.New("munmap refused") }
+	swapSeam(t, &lockMemory, func([]byte) error { return errors.New("mlock: cannot allocate memory") })
+	swapSeam(t, &unmapMemory, func([]byte) error { return errors.New("munmap refused") })
 
 	if _, err := a.NewSized(32); !pagesHeld(err) || lockedPagesHeld(err) {
 		t.Fatalf("NewSized = %v, want pages held but not locked", err)
@@ -1973,7 +1950,7 @@ func TestAllocator_NewSized_UnlockedOrphanIsReclaimedWithoutASecondRefund(t *tes
 		t.Errorf("WipeAll = %d with the unmap still refused, want 1", remaining)
 	}
 
-	restore()
+	lockMemory, unmapMemory = prevLock, prevUnmap
 	if remaining := sweep(t); remaining != 0 {
 		t.Errorf("WipeAll = %d once the unmap is allowed, want 0", remaining)
 	}
@@ -2023,10 +2000,9 @@ func TestWipeAll_ReclaimsALockedOrphanWhoseUnlockStaysRefused(t *testing.T) {
 		t.Fatalf("newMapping: %v", err)
 	}
 
-	prevUnlock, prevUnmap := unlockMemory, unmapMemory
-	t.Cleanup(func() { unlockMemory, unmapMemory = prevUnlock, prevUnmap })
 	refused := func([]byte) error { return errors.New("refused") }
-	unlockMemory, unmapMemory = refused, refused
+	swapSeam(t, &unlockMemory, refused)
+	prevUnmap := swapSeam(t, &unmapMemory, refused)
 
 	herr := m.abandon(errors.New("the step that failed"), true)
 	if !lockedPagesHeld(herr) {
@@ -2080,10 +2056,9 @@ func TestWipeAll_ReclaimsOrphansAddedConcurrently(t *testing.T) {
 	var firstReclaimOnce sync.Once
 
 	prevProtect, prevUnmap := protectMemory, unmapMemory
-	t.Cleanup(func() { protectMemory, unmapMemory = prevProtect, prevUnmap })
 	var mu sync.Mutex
 	refusedOnce := make(map[*byte]struct{})
-	protectMemory = func(b []byte, p protection) error {
+	swapSeam(t, &protectMemory, func(b []byte, p protection) error {
 		if p == protReadOnly {
 			return errors.New("mprotect denied by policy") // every freeze fails
 		}
@@ -2104,11 +2079,11 @@ func TestWipeAll_ReclaimsOrphansAddedConcurrently(t *testing.T) {
 		reclaimed.Add(1)
 		firstReclaimOnce.Do(func() { close(firstReclaim) })
 		return prevProtect(b, p)
-	}
+	})
 	// The unmap is refused exactly while a region's wipe-enabling mprotect is:
 	// the construction's fallback unmap fails, so the pages are stranded, and
 	// the retry that was allowed its mprotect is allowed its unmap too.
-	unmapMemory = func(b []byte) error {
+	swapSeam(t, &unmapMemory, func(b []byte) error {
 		mu.Lock()
 		_, pending := refusedOnce[&b[0]]
 		mu.Unlock()
@@ -2116,7 +2091,7 @@ func TestWipeAll_ReclaimsOrphansAddedConcurrently(t *testing.T) {
 			return errors.New("munmap denied too")
 		}
 		return prevUnmap(b)
-	}
+	})
 
 	var adopted atomic.Int64
 	var waitedOnce atomic.Bool

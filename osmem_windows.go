@@ -42,7 +42,7 @@ func sysUnlock(b []byte) error {
 
 // sysProtect is VirtualProtect, moving b to the given protection.
 func sysProtect(b []byte, p protection) error {
-	prot, err := windowsProtection(p)
+	prot, err := windowsProtections.translate(p)
 	if err != nil {
 		return err
 	}
@@ -61,17 +61,11 @@ func sysUnmap(b []byte) error {
 func sysDisableCoreDumps() error { return ErrCoreDumpLimitUnsupported }
 
 // windowsProtection translates a protection to a PAGE_* constant.
-func windowsProtection(p protection) (uint32, error) {
-	switch p {
-	case protNoAccess:
-		return windows.PAGE_NOACCESS, nil
-	case protReadOnly:
-		return windows.PAGE_READONLY, nil
-	case protReadWrite:
-		return windows.PAGE_READWRITE, nil
-	default:
-		return 0, errInvalidProtection
-	}
+// windowsProtections translates a protection to a PAGE_* constant.
+var windowsProtections = protectionTable[uint32]{
+	noAccess:  windows.PAGE_NOACCESS,
+	readOnly:  windows.PAGE_READONLY,
+	readWrite: windows.PAGE_READWRITE,
 }
 
 // regionAddr is the address of b's first byte. unsafe.SliceData rather than

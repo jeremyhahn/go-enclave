@@ -21,6 +21,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	enclave "github.com/jeremyhahn/go-enclave"
+	"github.com/jeremyhahn/go-enclave/internal/memscan"
 )
 
 // Covers sealer.go: sealing end to end with the shipped SoftwareProvider
@@ -71,7 +72,7 @@ func TestSealerRoundTripsManyValuesInBothModes(t *testing.T) {
 					if err != nil {
 						return err
 					}
-					if !allZero(buf) {
+					if !memscan.AllZero(buf) {
 						return errors.New("Seal did not wipe the caller's slice")
 					}
 					sealed[i] = sv
@@ -213,7 +214,7 @@ func TestSealerContextReachesTheProvider(t *testing.T) {
 		n.fill(buf)
 		_, err = s.Seal(canceled, buf)
 		requireContextFailure(t, "Seal with an ended context", err, enclave.ErrSealFailed, context.Canceled)
-		if !allZero(buf) {
+		if !memscan.AllZero(buf) {
 			t.Errorf("Seal with an ended context did not wipe the caller's slice")
 		}
 		if dev.protects.Load() != before {
@@ -234,7 +235,7 @@ func TestSealerContextReachesTheProvider(t *testing.T) {
 		<-entered
 		dl.expire()
 		requireContextFailure(t, "Seal past its deadline in the provider", <-sealErr, enclave.ErrSealFailed, context.DeadlineExceeded)
-		if !allZero(buf) {
+		if !memscan.AllZero(buf) {
 			t.Errorf("Seal that timed out in the provider did not wipe the caller's slice")
 		}
 		dl = newDeadlineContext()
@@ -571,7 +572,7 @@ func TestSealerFailsCleanlyWhenLockedMemoryRunsOutMidHierarchy(t *testing.T) {
 			buf := heapBytes(needleLen)
 			newNeedle(t).fill(buf)
 			_, err := s.Seal(ctx, buf)
-			if err != nil && !allZero(buf) {
+			if err != nil && !memscan.AllZero(buf) {
 				t.Error("a refused Seal did not wipe the caller's slice")
 			}
 			return err
@@ -928,7 +929,7 @@ func sealNeedle(t *testing.T, ctx context.Context, s *enclave.Sealer, n needle) 
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
-	if !allZero(buf) {
+	if !memscan.AllZero(buf) {
 		t.Fatalf("Seal did not wipe the caller's slice")
 	}
 	return v
@@ -1110,17 +1111,17 @@ func TestSealerRefusesInvalidArgumentsBeforeAnyLockedMemory(t *testing.T) {
 		if _, err := s.Seal(ended, buf); !errors.Is(err, enclave.ErrSealFailed) || !errors.Is(err, context.Canceled) || !errors.Is(err, why) {
 			t.Errorf("Seal with a canceled context = %v, want ErrSealFailed, context.Canceled and the cause", err)
 		}
-		if !allZero(buf) {
+		if !memscan.AllZero(buf) {
 			t.Error("Seal refused for its context did not wipe the caller's slice")
 		}
 		var nilSealer *enclave.Sealer
 		buf = []byte("sealed by nobody")
-		if _, err := nilSealer.Seal(ctx, buf); !errors.Is(err, enclave.ErrNilSealer) || !allZero(buf) {
-			t.Errorf("Seal on a nil *Sealer = %v (caller's slice wiped: %t), want ErrNilSealer and a wiped slice", err, allZero(buf))
+		if _, err := nilSealer.Seal(ctx, buf); !errors.Is(err, enclave.ErrNilSealer) || !memscan.AllZero(buf) {
+			t.Errorf("Seal on a nil *Sealer = %v (caller's slice wiped: %t), want ErrNilSealer and a wiped slice", err, memscan.AllZero(buf))
 		}
 		buf = []byte("refused before the process sealer")
-		if _, err := enclave.NewSealed(ended, buf); !errors.Is(err, enclave.ErrSealFailed) || !errors.Is(err, context.Canceled) || !allZero(buf) {
-			t.Errorf("NewSealed with a canceled context = %v (slice wiped: %t), want ErrSealFailed, context.Canceled and a wiped slice", err, allZero(buf))
+		if _, err := enclave.NewSealed(ended, buf); !errors.Is(err, enclave.ErrSealFailed) || !errors.Is(err, context.Canceled) || !memscan.AllZero(buf) {
+			t.Errorf("NewSealed with a canceled context = %v (slice wiped: %t), want ErrSealFailed, context.Canceled and a wiped slice", err, memscan.AllZero(buf))
 		}
 		for _, n := range []uint64{0, 1<<31 + 1} {
 			if _, err := enclave.NewSealer(enclave.WithKEKRotationLimit(n)); !errors.Is(err, enclave.ErrInvalidRotationLimit) {

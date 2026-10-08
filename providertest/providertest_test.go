@@ -20,6 +20,7 @@ import (
 	"time"
 
 	enclave "github.com/jeremyhahn/go-enclave"
+	"github.com/jeremyhahn/go-enclave/internal/memscan"
 )
 
 // testMemlockRequirement is the locked memory this suite needs at once: about
@@ -134,7 +135,7 @@ func (p *retainingProtector) Unprotect(ctx context.Context, blob, key []byte) er
 // The deliberate-leak control for retainingProtector is
 // TestSuiteCatchesAProviderThatRetainsACopy, in residue_linux_test.go, since
 // the residue sweep exists only on Linux. Its non-Linux counterpart,
-// TestResidueSweepReportsItselfNotRunOffLinux in residue_other_test.go, pins
+// TestResidueSweepReportsItselfNotRunOffLinux in residue_unsupported_test.go, pins
 // that the suite reports the sweep unmeasured there instead of passing.
 
 // TestResidueSweepSkipIsRecordedNotSilent pins that a skipped sweep is
@@ -214,9 +215,6 @@ func TestErrorMessagesNameThePackage(t *testing.T) {
 			strings.HasPrefix(msg, "providertest: providertest: ") {
 			t.Errorf("%T renders %q; want exactly one \"providertest: \" prefix", err, msg)
 		}
-	}
-	if _, err := addrOf(nil); err == nil || !strings.HasPrefix(err.Error(), "providertest: ") {
-		t.Errorf("addrOf(nil) = %v; want a providertest-prefixed error", err)
 	}
 }
 
@@ -466,7 +464,7 @@ func (p *forgeableProtector) Unprotect(ctx context.Context, blob, key []byte) er
 		return enclave.ErrSealedAuthentication
 	}
 	tail := blob[forgeablePrefix:]
-	if allZero(tail) {
+	if memscan.AllZero(tail) {
 		copy(key, k)
 		return nil
 	}
@@ -1173,23 +1171,6 @@ func TestFlipPositions(t *testing.T) {
 	}
 }
 
-// TestAddrOfLandsInsideTheMapping pins the residue sweep's home exclusion: an
-// address outside the needle's mapping would make every legitimate match read
-// as a leak.
-func TestAddrOfLandsInsideTheMapping(t *testing.T) {
-	if _, err := addrOf(nil); err == nil {
-		t.Error("addrOf(nil) = nil error; an empty slice has no first element")
-	}
-	b := make([]byte, 64)
-	addr, err := addrOf(b)
-	if err != nil {
-		t.Fatalf("addrOf: %v", err)
-	}
-	if addr == 0 {
-		t.Error("addrOf returned 0 for a live slice")
-	}
-}
-
 // ---------------------------------------------------------------------------
 // The context contract
 // ---------------------------------------------------------------------------
@@ -1374,7 +1355,7 @@ func (u *rootKeepingUnsealer) keptAllZero() (n int, zero bool) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	for _, d := range u.kept {
-		if !allZero(d) {
+		if !memscan.AllZero(d) {
 			return len(u.kept), false
 		}
 	}

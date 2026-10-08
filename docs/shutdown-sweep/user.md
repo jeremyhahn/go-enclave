@@ -74,33 +74,10 @@ reporting `IsAlive() == true`; use `Openable()` to ask. See
 | Symptom | Cause | Fix |
 |---|---|---|
 | Shutdown hangs in `WipeAll` | `context.Background()` (or no deadline) and a goroutine is still borrowing an enclave, or `WipeAll` was called from inside a borrow | Pass a deadline; stop workers first; never call it inside `WithBytes`. |
-| A crash (SIGSEGV) right after the sweep | A goroutine read a slice from `MemoryEnclave.Open` after the sweep unmapped it | Use `WithBytes`; stop readers first. |
+| A crash (SIGSEGV) right after the sweep | A goroutine kept a slice past `WithBytes` and read it after the sweep unmapped it | Never retain borrowed slices; stop readers first. |
 | `ErrEnclaveDestroyed` in a component after shutdown began | The sweep destroyed its enclave | Expected; stop the component before the sweep. |
 | Count non-zero every time | A release the kernel keeps refusing (e.g. `vm.max_map_count` reached) | Inspect the host; the entries stay on the ledger and are retried. |
 
-## Migrating from v0.6
+## Upgrading
 
-```go
-// v0.6
-n, err := enclave.WipeAll()
-if err != nil && errors.Is(err, enclave.ErrEnclaveCorrupted) { /* ... */ }
-
-// v0.7
-ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-defer cancel()
-n, err := enclave.WipeAll(ctx)
-var sweep *enclave.SweepError
-if errors.As(err, &sweep) && sweep.Corrupt > 0 { /* ... */ }
-```
-
-- `WipeAll` takes a context; it bounds every wait (for borrows, contended
-  locks, and admission behind another sweep). The fixed 200 µs × 8-pass backoff
-  is gone: borrows are now waited for until they end or `ctx` does.
-- Findings are a typed `*SweepError{Corrupt, Unwiped}`. `errors.Is` against
-  `ErrEnclaveCorrupted` and `ErrReleasedWithoutWipe` still works; `errors.As`
-  now exposes the counts.
-- New `ErrSweepInProgress` when the call was not admitted. Treat it as "nothing
-  swept", not as a finding.
-- Under `context.Background()` a sweep, and a second `Background` caller
-  queued behind it, now wait for the borrows they owe for as long as those
-  take. Give shutdown a deadline.
+Migration guidance lives in one place: [Upgrading](../README.md#upgrading).
