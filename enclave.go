@@ -300,6 +300,10 @@ func (e *MemoryEnclave) GoString() string {
 	return e.String()
 }
 
+// Backend returns the locked-memory backend, [DefaultBackend], which made
+// every MemoryEnclave. It is nil-safe, and the same once destroyed.
+func (e *MemoryEnclave) Backend() Backend { return lockedMemory{} }
+
 // KeyScheduleErasure reports whether AES key schedules and HKDF temporaries
 // are erased after use. It is true only with GOEXPERIMENT=runtimesecret on
 // linux/amd64 or linux/arm64 (not Android), where they run under

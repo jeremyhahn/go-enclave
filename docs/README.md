@@ -1,6 +1,6 @@
 # go-enclave documentation
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-07
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-08
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 One folder per capability, each with the same five files: `architecture.md`
@@ -18,6 +18,7 @@ legacy documents to migrate. The generated API reference is on
 | [sealing](sealing/user.md) | `SealedEnclave`, `Sealer` modes, the `KeyProtector`/`RootUnsealer` seam, contexts, `Openable`, FIPS, the key-schedule heap exposure and its erasure under `runtime/secret` |
 | [shutdown-sweep](shutdown-sweep/user.md) | `WipeAll(ctx)`: admission, waiting for borrows, termination, the count and `SweepError` |
 | [provider-conformance](provider-conformance/user.md) | `providertest.TestProvider(ctx, cfg)` for TPM/HSM/KMS provider authors |
+| [backends](backends/user.md) | The seam for hardware enclaves: `Handle`, `Backend`, capabilities, the named registry, `As`, and the decided design of the wiring still to come |
 
 ## Upgrading
 

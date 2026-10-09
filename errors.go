@@ -417,6 +417,73 @@ func (e *contextError) Unwrap() []error {
 	return errs
 }
 
+// Backends.
+var (
+	// ErrBackendNotRegistered is returned by [Lookup] for a name no backend is
+	// registered under. Every [BackendNotRegisteredError] matches it.
+	ErrBackendNotRegistered = errors.New("enclave: no backend is registered under this name")
+
+	// ErrBackendExists is returned by [Register] for a name already taken, by
+	// an earlier Register or by the default backend. Every
+	// [BackendExistsError] matches it.
+	ErrBackendExists = errors.New("enclave: a backend is already registered under this name")
+
+	// ErrInvalidBackend is returned by [Register] for a nil or typed-nil
+	// backend, or one whose name breaks the rule on [Backend.Name]. Like a nil
+	// provider, it is a lost configuration step, never a request for the
+	// default.
+	ErrInvalidBackend = errors.New("enclave: backend is nil or its name is not a valid backend name")
+
+	// ErrCapabilityUnsupported reports that an operation needs a capability
+	// the handle or backend it was given does not provide, such as byte access
+	// to material that never leaves its device. Nothing was attempted: a
+	// missing capability is never a panic and never a fallback to another
+	// backend. Every [CapabilityError] matches it.
+	ErrCapabilityUnsupported = errors.New("enclave: the backend does not provide a capability this operation needs")
+
+	// ErrInvalidImport is returned by [NewImportSpec], and so by every
+	// [Importer], for a nil option, a missing or unknown purpose, or an
+	// algorithm the purpose does not take; and by an Importer for material
+	// whose length the algorithm does not take. Like a nil provider, it is a
+	// lost configuration step, never a request for a default.
+	ErrInvalidImport = errors.New("enclave: import options or material do not describe a valid import")
+
+	// ErrInvalidNonce is returned by an [AEAD]'s Seal and Open for a nonce
+	// that is not NonceSize bytes.
+	ErrInvalidNonce = errors.New("enclave: AEAD nonce is not the cipher's nonce size")
+
+	// ErrAEADAuthentication is returned by an [AEAD]'s Open when the
+	// ciphertext or additional data fails authentication. No plaintext is
+	// returned.
+	ErrAEADAuthentication = errors.New("enclave: AEAD ciphertext failed authentication")
+)
+
+// BackendNotRegisteredError reports the name [Lookup] found nothing under.
+// Match on [ErrBackendNotRegistered].
+type BackendNotRegisteredError = nameError[backendNotRegistered]
+
+// BackendExistsError reports the name [Register] found taken. Match on
+// [ErrBackendExists].
+type BackendExistsError = nameError[backendExists]
+
+// CapabilityError reports which capability an operation needed and which
+// backend's handle or backend lacked it. Match on [ErrCapabilityUnsupported].
+type CapabilityError struct {
+	// Backend is the name of the backend that lacks the capability.
+	Backend string
+	// Capability is the capability the operation needed.
+	Capability Capability
+}
+
+// Error implements error.
+func (e *CapabilityError) Error() string {
+	return ErrCapabilityUnsupported.Error() + ": backend " + strconv.Quote(e.Backend) +
+		" does not provide " + strconv.Quote(string(e.Capability))
+}
+
+// Is reports every CapabilityError as [ErrCapabilityUnsupported].
+func (e *CapabilityError) Is(target error) bool { return target == ErrCapabilityUnsupported }
+
 // Shutdown sweep.
 
 // ErrSweepInProgress is returned by [WipeAll] when it was never admitted:
@@ -499,6 +566,8 @@ type (
 	sealFailed              struct{}
 	openFailed              struct{}
 	sealerWiped             struct{}
+	backendNotRegistered    struct{}
+	backendExists           struct{}
 )
 
 func (lockedMemoryUnavailable) sentinel() error { return ErrLockedMemoryUnavailable }
@@ -508,6 +577,8 @@ func (processHardeningFailed) sentinel() error  { return ErrProcessHardeningFail
 func (sealFailed) sentinel() error              { return ErrSealFailed }
 func (openFailed) sentinel() error              { return ErrOpenFailed }
 func (sealerWiped) sentinel() error             { return ErrSealerWiped }
+func (backendNotRegistered) sentinel() error    { return ErrBackendNotRegistered }
+func (backendExists) sentinel() error           { return ErrBackendExists }
 
 // causeError is the shape of every error type that is its kind's sentinel
 // plus a diagnostic cause.
@@ -533,6 +604,25 @@ func (e *causeError[K]) Is(target error) bool {
 
 // Unwrap returns the cause.
 func (e *causeError[K]) Unwrap() error { return e.Cause }
+
+// nameError is the shape of every error type that is its kind's sentinel
+// plus the backend name it concerns.
+type nameError[K kind] struct {
+	// Name is the backend name the failure concerns.
+	Name string
+}
+
+// Error is the sentinel's text followed by the quoted name.
+func (e *nameError[K]) Error() string {
+	var k K
+	return k.sentinel().Error() + ": " + strconv.Quote(e.Name)
+}
+
+// Is reports every error of kind K as K's sentinel.
+func (e *nameError[K]) Is(target error) bool {
+	var k K
+	return target == k.sentinel()
+}
 
 // withCause returns K's sentinel itself when cause is nil, and the causeError
 // carrying cause otherwise.

@@ -12,7 +12,7 @@ in a fresh child process. Everything else is a unit test in the package itself.
 Every test is named for the one feature it belongs to, with the prefix
 [scripts/features.map](../../scripts/features.map) gives that feature
 (`TestLockedMemory_`, `TestLockedMemoryBudget_`, `TestSealing_`,
-`TestShutdownSweep_`, `TestProviderConformance_`). `make
+`TestShutdownSweep_`, `TestProviderConformance_`, `TestBackends_`). `make
 integration-test-<feature>` runs the tests with that prefix and nothing else,
 and `build/ci/buildgates` fails on a test with no feature's prefix. A test that
 serves two features (the table below lists some) carries the prefix of the one
@@ -35,6 +35,7 @@ enclave suite (provider-conformance below), and its harness is gated at
 | [sealing](../../docs/sealing/user.md) | `sealed_test.go`: no plaintext in the process between opens; destroyed and nil sealed values. `sealer_test.go`: round trips in both modes, contexts reach the provider, root unseal is serialized and abandonable, KEK rotation in real locked memory, running out of locked memory mid-hierarchy, a refused freeze, sweeps overlapping sealer use, configuration and misconfiguration. `sealer_lifecycle_test.go`, `sealer_lifecycle_linux_test.go`: destroyed sealers return their locked memory, an injected provider stays its owner's, destroy during a blocked unseal, a refused release is reported and retried. `enclave_test.go`: key-schedule erasure reports this build. `provider_test.go`: the software provider refuses misuse. |
 | [shutdown-sweep](../../docs/shutdown-sweep/user.md) | `registry_test.go`: `WipeAll` reclaims everything and leaves no residue; waits for live borrows until its deadline; turns away a concurrent caller; reports canary corruption without panicking; reclaims an orphan a refused cleanup left; `SweepError` renders. `sealer_test.go`: a sealer is wiped for good after a sweep. |
 | [provider-conformance](../../docs/provider-conformance/user.md) | `provider_test.go`: `SoftwareProvider` passes `TestProvider` in both modes with the residue sweep running, and an under-claimed mode list fails; in a child with `RLIMIT_MEMLOCK` at zero the sweep cannot run, and `TestProvider` reports `ErrNotMeasured` unless `SkipResidueSweep` accepts it. |
+| [backends](../../docs/backends/user.md) | `backend_test.go`: an enclave on the real kernel's locked memory reports the registered default backend, before and after `Destroy`, and `As` reaches its capabilities. `Register` refuses an invalid name, a duplicate, the default's name and a nil or typed-nil backend, each with its typed error, and accepts a valid one that `Lookup` and `BackendNames` then return; `Lookup` reports an unknown name. `As` covers assignable targets, a wrapper's `As` method, nil and typed-nil values and bad targets. `NewImportSpec` with `WithPurpose` and `WithAlgorithm` resolves valid combinations and refuses invalid ones with `ErrInvalidImport`. |
 
 ## Helpers
 

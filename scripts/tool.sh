@@ -23,7 +23,7 @@
 #                 exists to prevent. Any other value is refused rather than
 #                 read as either.
 #   TOOLS_DIR     where TOOL_INSTALL=1 installs (absolute path).
-#   TOOLCHAIN     the Go toolchain to build Go tools with, e.g. go1.27.1 — this
+#   TOOLCHAIN     the Go toolchain to build Go tools with, e.g. go1.27.2 — this
 #                 module's own, resolved inside the module when unset (#83):
 #                 `go install tool@version` runs outside the module, and
 #                 under GOTOOLCHAIN=auto it would build with the TOOL's go
