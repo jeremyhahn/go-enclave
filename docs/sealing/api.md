@@ -1,6 +1,6 @@
 # Sealing and the provider seam — API
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-07
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-10
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Transports
@@ -17,9 +17,10 @@ transport itself, behind the `KeyProtector`/`RootUnsealer` interfaces.
 | Install the process sealer | `enclave.SetSealer(s)` | N/A |
 | Seal under an explicit sealer | `(*Sealer).Seal(ctx, data)`, `(*Sealer).SealFrom(ctx, src)` | N/A |
 | Open (locked memory / another backend) | `(*Sealed).Open(ctx)`, `(*Sealed).OpenIn(ctx, b)` | N/A |
-| Probe openability | `(*Sealed).Openable()` | N/A |
+| Read a sealer's mode | `(*Sealer).Mode()` | N/A |
+| Probe openability | `(*Sealed).Openable()`, `(*Sealed).IsAlive()` | N/A |
 | Release ciphertext | `(*Sealed).Destroy() error` | N/A |
-| Release a sealer's keys | `(*Sealer).Destroy() error` | N/A |
+| End a sealer and release its keys | `(*Sealer).Destroy() error` (what it releases per mode: [engineering.md](engineering.md#exported-surface)) | N/A |
 | Release the software provider's root | `(*SoftwareProvider).Destroy() error` | N/A |
 | Implement a provider | `KeyProtector`, `RootUnsealer`, optional `HealthReporter`, `RootKeyBytes` | N/A |
 | Software provider | `enclave.NewSoftwareProvider()` | N/A |

@@ -107,7 +107,7 @@
 | `ErrInvalidTransfer` | `n <= 0`, `dst == nil`, or `dst` is the source or a copy of it | Yes |
 | `ErrBudgetExceedsRLimit` (`*RLimitError`) | Budget or raise above a bounded ceiling (opted-in allocators) | Yes |
 | `ErrLimitDiscoveryFailed` (`*LimitDiscoveryError`) | `getrlimit` failed: construction, an opted-in raise, or the lazy default | Yes — nothing was compared, so nothing passed. |
-| `ErrNilAllocator` | `SetAllocator(nil)`; `OpenIn(ctx, nil)`; `New`, `NewSized`, `SetLimit`, `ForceLimit`, `TransferTo` on a nil `*Allocator` (`New` still wipes `data`) | Yes — never falls back to unbudgeted. |
+| `ErrNilAllocator` | `SetAllocator(nil)`; `OpenIn` given a nil `*Allocator` (a bare nil `Backend` is `ErrInvalidBackend`); `New`, `NewSized`, `SetLimit`, `ForceLimit`, `TransferTo` on a nil `*Allocator` (`New` still wipes `data`) | Yes — never falls back to unbudgeted. |
 | `ErrAllocatorNotConstructed` | The same calls (and `Import`) on a zero `Allocator{}`, which no constructor returned; `New` and `Import` still wipe their input | Yes — a zero value has no budget to admit against. |
 | `ErrAllocatorInstalled` | Second `SetAllocator`, or `SetAllocator` after a `ProcessAllocator` call that installed the lazy default (a discovery failure installs nothing) | Yes |
 | `ErrLockedMemoryUnavailable` | Admitted, but the kernel refused | Reservation refunded unless locked pages were left behind (invariant 4). |

@@ -113,7 +113,7 @@ func NewSealed(ctx context.Context, data []byte) (*Sealed, error) {
 
 	// The lookup below installs the default one-shot; an abandoned call must
 	// not lock the configuration a later SetSealer is meant to make.
-	if err := contextFailure[sealFailed](ctx, nil); err != nil {
+	if err := contextFailure[SealError](ctx, nil); err != nil {
 		Wipe(data)
 		return nil, err
 	}
@@ -131,7 +131,7 @@ func NewSealed(ctx context.Context, data []byte) (*Sealed, error) {
 // src as it was. A context already ended on entry is refused before the
 // process Sealer is looked up.
 func NewSealedFrom(ctx context.Context, src Handle) (*Sealed, error) {
-	if err := contextFailure[sealFailed](ctx, nil); err != nil {
+	if err := contextFailure[SealError](ctx, nil); err != nil {
 		return nil, err
 	}
 
@@ -264,10 +264,10 @@ func (s *Sealed) openImported(ctx context.Context, imp Importer) (Handle, error)
 	// A handle that refuses Destroy still holds the plaintext: the sealer
 	// keeps it for its next Destroy to retry, and the CleanupError says so.
 	if err != nil {
-		if cerr := contextFailure[openFailed](ctx, err); cerr != nil {
+		if cerr := contextFailure[OpenError](ctx, err); cerr != nil {
 			err = cerr
 		} else {
-			err = backendFailure[openFailed](err)
+			err = backendFailure[OpenError](err)
 		}
 		return nil, sealer.destroyOrRetain(err, h)
 	}

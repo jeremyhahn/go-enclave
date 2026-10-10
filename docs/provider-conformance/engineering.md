@@ -19,9 +19,10 @@ Package `providertest` (import path `github.com/jeremyhahn/go-enclave/providerte
 | `Config.SkipForgery string` | Non-empty reason skips the forged-blob check; echoed to `Logf`. |
 | `Config.Logf func(format string, args ...any)` | Receives what was measured, skipped and why. Pass `t.Logf`. |
 | `ErrInvalidConfig` / `*ConfigError{Field, Reason}` | `cfg` cannot be run (`New` nil, `Modes` empty or invalid, `PublicKey` or `Forge` without `ModePerOperation`); no provider was tested. |
-| `ErrAborted` / `*AbortedError{Err}` | `ctx` ended before the run finished; unwraps to `ctx.Err()` and renders as `ErrAborted`'s text, `": "` and `Err`. Never a pass. |
+| `ErrAborted` / `*AbortedError{Cause}` | `ctx` ended before the run finished; unwraps to `ctx.Err()` and renders as `ErrAborted`'s text, `": "` and `Cause`. Never a pass. |
 | `ErrNotMeasured` / `*NotMeasuredError{Property, Reason}` | A property could not be measured (residue sweep off Linux, without locked memory, or blind; a `PublicKey` provider without `Forge`) and `cfg` did not accept that. Neither a pass nor a provider defect. |
-| `*PropertyError{Property, Detail}` | One failed assertion; several can share a `Property`. Walk them via the joined error's `Unwrap() []error`. |
+| `*PropertyError{Property, Detail}` | One failed assertion; several can share a `Property`. Walk them via `FindingsError.Findings`. |
+| `*FindingsError{Findings}` | What `TestProvider` returns when the run found anything: every `*PropertyError`, `*NotMeasuredError` and `*AbortedError`, in order. `errors.Is`/`errors.As` reach each through `Unwrap() []error`. |
 
 ## Properties checked
 
@@ -124,7 +125,7 @@ own goroutine once the provider returns, never under a running provider.
 ## Invariants
 
 1. **An ended run is never a pass.** It returns an error matching `ErrAborted`,
-   joined with any properties that had already failed while `ctx` was live.
+   alongside any properties that had already failed while `ctx` was live.
 2. **Never a false finding from the run's own context.** A failure recorded
    after `ctx` ended is dropped (the run reports aborted instead).
 3. **Calls with an ended context run on their own goroutine**, so a provider
@@ -144,15 +145,14 @@ own goroutine once the provider returns, never under a running provider.
 |---|---|---|
 | `nil` | Every property was measured and held, except those `cfg` relaxed | Read `Logf` output for what was relaxed. |
 | matches `ErrInvalidConfig` | `New` nil, `Modes` empty or invalid, `PublicKey` or `Forge` without `ModePerOperation` | Fix the test harness. |
-| matches `ErrAborted` | Run incomplete | Re-run with a longer deadline; inspect any joined `*PropertyError`. |
-| matches `ErrNotMeasured` | A property could not be measured | Run on Linux with locked memory, or set `SkipResidueSweep` with the reason it is acceptable; for a `PublicKey` provider set `Forge`, or `SkipForgery` with the reason; inspect any joined `*PropertyError`. |
-| joined `*PropertyError`s | Provider violates the seam | Fix the provider. |
+| matches `ErrAborted` | Run incomplete | Re-run with a longer deadline; inspect any `*PropertyError` among the findings. |
+| matches `ErrNotMeasured` | A property could not be measured | Run on Linux with locked memory, or set `SkipResidueSweep` with the reason it is acceptable; for a `PublicKey` provider set `Forge`, or `SkipForgery` with the reason; inspect any `*PropertyError` among the findings. |
+| `*PropertyError`s in the `*FindingsError` | Provider violates the seam | Fix the provider. |
 
 Every sentinel and error type is declared in
-[errors.go](../../providertest/errors.go). `AbortedError` is an alias of the
-package's one cause-carrying shape, which matches its sentinel and unwraps to
-`Err`. The joined findings are the only `errors.Join` the package builds
-(`joinFindings`).
+[errors.go](../../providertest/errors.go). `AbortedError` matches its sentinel
+and unwraps to `Cause`. A run's findings are one `*FindingsError`; the package
+builds no `errors.Join`.
 
 ## Configuration and persistence
 

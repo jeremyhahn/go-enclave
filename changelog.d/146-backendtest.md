@@ -1,0 +1,3 @@
+### Added
+
+- Add `backendtest`, a conformance suite for backend authors. It checks the core `Handle` lifecycle and every declared capability live and after `Destroy`, sweeps for residue with `internal/memscan`, and refuses a capability it cannot exercise or observe with `ErrUncheckedCapability`, including a claimed `Importer` with no imported case. A panic in a concurrent operation is a finding, not a crash, and a run whose context ends reports `ErrAborted` without false findings. Every failure is typed: `ConfigError`, `FindingsError`, `PropertyError`, `NotMeasuredError`, `UncheckedCapabilityError` and `AbortedError`.

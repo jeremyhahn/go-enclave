@@ -1,7 +1,6 @@
 package buildgates
 
 import (
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -31,9 +30,7 @@ func TestScriptsDepsLatest_FailsWhenGoListFails(t *testing.T) {
 	script := "#!/bin/sh\n" +
 		"if [ \"$1 $2\" = \"list -m\" ] && [ $# -eq 2 ]; then echo example.com/self; exit 0; fi\n" +
 		"echo \"go list failed\" >&2\nexit 1\n"
-	if err := os.WriteFile(goCmd, []byte(script), 0o755); err != nil {
-		t.Fatalf("write fake go: %v", err)
-	}
+	writeExecutable(t, goCmd, []byte(script))
 	out, ok := runScript(t, dir, map[string]string{"GOCMD": goCmd}, "deps-latest.sh")
 	if ok {
 		t.Fatalf("succeeded although go list failed:\n%s", out)

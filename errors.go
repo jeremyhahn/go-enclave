@@ -66,13 +66,39 @@ var (
 // LockedMemoryError is the error behind [ErrLockedMemoryUnavailable], which
 // errors.Is reports for every LockedMemoryError. Its Cause, the failing system
 // call's error or nil, is diagnostic; Unwrap returns it.
-type LockedMemoryError = causeError[lockedMemoryUnavailable]
+type LockedMemoryError struct {
+	// Cause is the failing system call's error, or nil.
+	Cause error
+}
+
+// Error is [ErrLockedMemoryUnavailable]'s text, followed by the cause's when
+// there is one.
+func (e *LockedMemoryError) Error() string { return causeText(ErrLockedMemoryUnavailable, e.Cause) }
+
+// Is reports every LockedMemoryError as [ErrLockedMemoryUnavailable].
+func (e *LockedMemoryError) Is(target error) bool { return target == ErrLockedMemoryUnavailable }
+
+// Unwrap returns the cause.
+func (e *LockedMemoryError) Unwrap() error { return e.Cause }
 
 // UnwipedReleaseError is the error behind [ErrReleasedWithoutWipe], which
 // errors.Is reports for every UnwipedReleaseError. Its Cause is the refused
 // mprotect's *os.SyscallError, deliberately not a [LockedMemoryError]; Unwrap
 // returns it.
-type UnwipedReleaseError = causeError[releasedWithoutWipe]
+type UnwipedReleaseError struct {
+	// Cause is the refused mprotect's error.
+	Cause error
+}
+
+// Error is [ErrReleasedWithoutWipe]'s text, followed by the cause's when there
+// is one.
+func (e *UnwipedReleaseError) Error() string { return causeText(ErrReleasedWithoutWipe, e.Cause) }
+
+// Is reports every UnwipedReleaseError as [ErrReleasedWithoutWipe].
+func (e *UnwipedReleaseError) Is(target error) bool { return target == ErrReleasedWithoutWipe }
+
+// Unwrap returns the cause.
+func (e *UnwipedReleaseError) Unwrap() error { return e.Cause }
 
 // pagesHeldError marks, transparently, a failure that left the pages mapped.
 // locked says they are still mlock'd, so a failed constructor keeps its
@@ -222,7 +248,20 @@ func (e *RLimitError) Is(target error) bool { return target == ErrBudgetExceedsR
 // not be read. Match on [ErrLimitDiscoveryFailed]. Its Cause, the getrlimit
 // failure, is never nil in an error this package constructs; Unwrap returns
 // it, as diagnostic rather than contract.
-type LimitDiscoveryError = causeError[limitDiscoveryFailed]
+type LimitDiscoveryError struct {
+	// Cause is the getrlimit failure.
+	Cause error
+}
+
+// Error is [ErrLimitDiscoveryFailed]'s text, followed by the cause's when
+// there is one.
+func (e *LimitDiscoveryError) Error() string { return causeText(ErrLimitDiscoveryFailed, e.Cause) }
+
+// Is reports every LimitDiscoveryError as [ErrLimitDiscoveryFailed].
+func (e *LimitDiscoveryError) Is(target error) bool { return target == ErrLimitDiscoveryFailed }
+
+// Unwrap returns the cause.
+func (e *LimitDiscoveryError) Unwrap() error { return e.Cause }
 
 // budgetText renders a refused budget figure: the sentinel's text, the bytes
 // requested, and what they were refused against.
@@ -269,13 +308,40 @@ var (
 // ProcessHardeningError is the error behind [ErrProcessHardeningFailed]. Its
 // Cause is the refused system call, the read-back that disagreed, or a
 // [CoreDumpLimitError]; Unwrap returns it.
-type ProcessHardeningError = causeError[processHardeningFailed]
+type ProcessHardeningError struct {
+	// Cause is the refused system call, the read-back that disagreed, or a
+	// [CoreDumpLimitError].
+	Cause error
+}
+
+// Error is [ErrProcessHardeningFailed]'s text, followed by the cause's when
+// there is one.
+func (e *ProcessHardeningError) Error() string { return causeText(ErrProcessHardeningFailed, e.Cause) }
+
+// Is reports every ProcessHardeningError as [ErrProcessHardeningFailed].
+func (e *ProcessHardeningError) Is(target error) bool { return target == ErrProcessHardeningFailed }
+
+// Unwrap returns the cause.
+func (e *ProcessHardeningError) Unwrap() error { return e.Cause }
 
 // CoreDumpLimitError is the error behind [ErrCoreDumpLimitFailed], which
 // errors.Is reports for every CoreDumpLimitError. Its Cause is the refused
 // setrlimit or getrlimit's *os.SyscallError, or the read-back that disagreed;
 // Unwrap returns it.
-type CoreDumpLimitError = causeError[coreDumpLimitFailed]
+type CoreDumpLimitError struct {
+	// Cause is the refused system call or the read-back that disagreed.
+	Cause error
+}
+
+// Error is [ErrCoreDumpLimitFailed]'s text, followed by the cause's when there
+// is one.
+func (e *CoreDumpLimitError) Error() string { return causeText(ErrCoreDumpLimitFailed, e.Cause) }
+
+// Is reports every CoreDumpLimitError as [ErrCoreDumpLimitFailed].
+func (e *CoreDumpLimitError) Is(target error) bool { return target == ErrCoreDumpLimitFailed }
+
+// Unwrap returns the cause.
+func (e *CoreDumpLimitError) Unwrap() error { return e.Cause }
 
 // Sealing.
 var (
@@ -428,23 +494,68 @@ var (
 // SealError is the error behind [ErrSealFailed], which errors.Is reports for
 // every SealError. Its Cause is what failed: the AEAD, the CSPRNG, the
 // provider, or the caller's ended context; Unwrap returns it.
-type SealError = causeError[sealFailed]
+type SealError struct {
+	// Cause is what failed, or nil.
+	Cause error
+}
+
+// Error is [ErrSealFailed]'s text, followed by the cause's when there is one.
+func (e *SealError) Error() string { return causeText(ErrSealFailed, e.Cause) }
+
+// Is reports every SealError as [ErrSealFailed].
+func (e *SealError) Is(target error) bool { return target == ErrSealFailed }
+
+// Unwrap returns the cause.
+func (e *SealError) Unwrap() error { return e.Cause }
 
 // OpenError is the error behind [ErrOpenFailed], which errors.Is reports for
 // every OpenError. Its Cause is the caller's ended context or the provider's
 // infrastructure failure; Unwrap returns it.
-type OpenError = causeError[openFailed]
+type OpenError struct {
+	// Cause is what failed, or nil.
+	Cause error
+}
+
+// Error is [ErrOpenFailed]'s text, followed by the cause's when there is one.
+func (e *OpenError) Error() string { return causeText(ErrOpenFailed, e.Cause) }
+
+// Is reports every OpenError as [ErrOpenFailed].
+func (e *OpenError) Is(target error) bool { return target == ErrOpenFailed }
+
+// Unwrap returns the cause.
+func (e *OpenError) Unwrap() error { return e.Cause }
 
 // SealerWipedError is [ErrSealerWiped] with the failure that left the sealer
 // wiped, such as a key derivation that failed after a root unseal that may
 // not be repeated. errors.Is reports ErrSealerWiped for every
 // SealerWipedError; Unwrap returns the Cause.
-type SealerWipedError = causeError[sealerWiped]
+type SealerWipedError struct {
+	// Cause is the failure that left the sealer wiped.
+	Cause error
+}
+
+// Error is [ErrSealerWiped]'s text, followed by the cause's when there is one.
+func (e *SealerWipedError) Error() string { return causeText(ErrSealerWiped, e.Cause) }
+
+// Is reports every SealerWipedError as [ErrSealerWiped].
+func (e *SealerWipedError) Is(target error) bool { return target == ErrSealerWiped }
+
+// Unwrap returns the cause.
+func (e *SealerWipedError) Unwrap() error { return e.Cause }
 
 // KeyScheduleExposedError is the error behind [ErrKeyScheduleExposed], which
 // errors.Is reports for every KeyScheduleExposedError. Its Name is the first
 // key class found exposed: "wrapping-key", "kek" or "dek".
-type KeyScheduleExposedError = nameError[keyScheduleExposed]
+type KeyScheduleExposedError struct {
+	// Name is the key class found exposed.
+	Name string
+}
+
+// Error is [ErrKeyScheduleExposed]'s text followed by the quoted name.
+func (e *KeyScheduleExposedError) Error() string { return nameText(ErrKeyScheduleExposed, e.Name) }
+
+// Is reports every KeyScheduleExposedError as [ErrKeyScheduleExposed].
+func (e *KeyScheduleExposedError) Is(target error) bool { return target == ErrKeyScheduleExposed }
 
 // contextError reports that the caller's context ended before or during an
 // operation. It unwraps to each of its non-nil fields, so the error matches
@@ -522,11 +633,29 @@ var (
 
 // BackendNotRegisteredError reports the name [Lookup] found nothing under.
 // Match on [ErrBackendNotRegistered].
-type BackendNotRegisteredError = nameError[backendNotRegistered]
+type BackendNotRegisteredError struct {
+	// Name is the name looked up.
+	Name string
+}
+
+// Error is [ErrBackendNotRegistered]'s text followed by the quoted name.
+func (e *BackendNotRegisteredError) Error() string { return nameText(ErrBackendNotRegistered, e.Name) }
+
+// Is reports every BackendNotRegisteredError as [ErrBackendNotRegistered].
+func (e *BackendNotRegisteredError) Is(target error) bool { return target == ErrBackendNotRegistered }
 
 // BackendExistsError reports the name [Register] found taken. Match on
 // [ErrBackendExists].
-type BackendExistsError = nameError[backendExists]
+type BackendExistsError struct {
+	// Name is the name found taken.
+	Name string
+}
+
+// Error is [ErrBackendExists]'s text followed by the quoted name.
+func (e *BackendExistsError) Error() string { return nameText(ErrBackendExists, e.Name) }
+
+// Is reports every BackendExistsError as [ErrBackendExists].
+func (e *BackendExistsError) Is(target error) bool { return target == ErrBackendExists }
 
 // CapabilityError reports which capability an operation needed and which
 // backend's handle or backend lacked it. Match on [ErrCapabilityUnsupported].
@@ -548,34 +677,43 @@ func (e *CapabilityError) Is(target error) bool { return target == ErrCapability
 
 // Handle cleanup.
 
-// ErrCleanupFailed reports that a [Handle] the operation no longer needed,
-// such as a sealer's outgoing KEK or a plaintext handle an open did not
-// return, refused its Destroy and still holds its material. Every
-// [CleanupError] matches it.
-var ErrCleanupFailed = errors.New("enclave: a handle refused its Destroy and still holds its material")
+// ErrCleanupFailed reports that cleanup an operation did failed alongside
+// another failure: a [Handle] the operation no longer needed, such as a
+// sealer's outgoing KEK or a plaintext handle an open did not return, refused
+// its Destroy and still holds its material, or a release of locked memory was
+// refused after the operation had already failed. Every [CleanupError]
+// matches it.
+var ErrCleanupFailed = errors.New("enclave: cleanup failed; what it released may still hold its material")
 
-// CleanupError reports a [Handle] that refused its Destroy, with the failure
-// of the operation that wanted it gone. The [Sealer] the operation ran under
-// keeps the handle and retries its Destroy on every [Sealer.Destroy], so the
-// material stays reachable until it is released.
+// CleanupError reports cleanup that failed: the operation's own failure, if
+// any, and every cleanup failure that followed it. A [Handle] that refused its
+// Destroy is kept by the [Sealer] the operation ran under, which retries it on
+// every [Sealer.Destroy], so the material stays reachable until it is
+// released; a release of locked memory the kernel refused stays on the
+// [WipeAll] ledger.
 //
 // Match it with errors.Is against [ErrCleanupFailed], and against the
-// operation's failure and the cause, which Unwrap returns; read both with
+// operation's failure and each cause, which Unwrap returns; read them with
 // errors.As.
 type CleanupError struct {
 	// Failure is the operation's own error, or nil when the operation did its
-	// work and failed only for the refused Destroy.
+	// work and failed only for its cleanup.
 	Failure error
-	// Cause is what the handle's Destroy returned.
-	Cause error
+	// Causes holds each cleanup failure, in the order they happened: what a
+	// handle's Destroy, or a release of locked memory, returned.
+	Causes []error
 }
 
 // Error is the operation's failure, when there is one, followed by
-// [ErrCleanupFailed]'s text and the cause's.
+// [ErrCleanupFailed]'s text and each cause's.
 func (e *CleanupError) Error() string {
 	msg := ErrCleanupFailed.Error()
-	if e.Cause != nil {
-		msg += ": " + e.Cause.Error()
+	sep := ": "
+	for _, cause := range e.Causes {
+		if cause != nil {
+			msg += sep + cause.Error()
+			sep = "; "
+		}
 	}
 	if e.Failure != nil {
 		msg = e.Failure.Error() + "; " + msg
@@ -586,10 +724,10 @@ func (e *CleanupError) Error() string {
 // Is reports every CleanupError as [ErrCleanupFailed].
 func (e *CleanupError) Is(target error) bool { return target == ErrCleanupFailed }
 
-// Unwrap returns the operation's failure and the cause, skipping a nil one.
+// Unwrap returns the operation's failure and each cause, skipping nil ones.
 func (e *CleanupError) Unwrap() []error {
-	errs := make([]error, 0, 2)
-	for _, err := range []error{e.Failure, e.Cause} {
+	errs := make([]error, 0, 1+len(e.Causes))
+	for _, err := range append([]error{e.Failure}, e.Causes...) {
 		if err != nil {
 			errs = append(errs, err)
 		}
@@ -704,103 +842,97 @@ func (e *SweepError) Is(target error) bool {
 
 // The shared shape.
 
-// kind names the sentinel a causeError matches. Each kind is an empty struct,
-// so the sentinel is fixed by the error's type and holds for its zero value.
-type kind interface{ sentinel() error }
-
-type (
-	lockedMemoryUnavailable struct{}
-	releasedWithoutWipe     struct{}
-	limitDiscoveryFailed    struct{}
-	processHardeningFailed  struct{}
-	coreDumpLimitFailed     struct{}
-	sealFailed              struct{}
-	openFailed              struct{}
-	sealerWiped             struct{}
-	keyScheduleExposed      struct{}
-	backendNotRegistered    struct{}
-	backendExists           struct{}
-)
-
-func (lockedMemoryUnavailable) sentinel() error { return ErrLockedMemoryUnavailable }
-func (releasedWithoutWipe) sentinel() error     { return ErrReleasedWithoutWipe }
-func (limitDiscoveryFailed) sentinel() error    { return ErrLimitDiscoveryFailed }
-func (processHardeningFailed) sentinel() error  { return ErrProcessHardeningFailed }
-func (coreDumpLimitFailed) sentinel() error     { return ErrCoreDumpLimitFailed }
-func (sealFailed) sentinel() error              { return ErrSealFailed }
-func (openFailed) sentinel() error              { return ErrOpenFailed }
-func (sealerWiped) sentinel() error             { return ErrSealerWiped }
-func (keyScheduleExposed) sentinel() error      { return ErrKeyScheduleExposed }
-func (backendNotRegistered) sentinel() error    { return ErrBackendNotRegistered }
-func (backendExists) sentinel() error           { return ErrBackendExists }
-
-// causeError is the shape of every error type that is its kind's sentinel
-// plus a diagnostic cause.
-type causeError[K kind] struct {
-	// Cause is the underlying failure, or nil.
-	Cause error
-}
-
-// Error is the sentinel's text, followed by the cause's when there is one.
-func (e *causeError[K]) Error() string {
-	var k K
-	if e.Cause == nil {
-		return k.sentinel().Error()
-	}
-	return k.sentinel().Error() + ": " + e.Cause.Error()
-}
-
-// Is reports every error of kind K as K's sentinel.
-func (e *causeError[K]) Is(target error) bool {
-	var k K
-	return target == k.sentinel()
-}
-
-// Unwrap returns the cause.
-func (e *causeError[K]) Unwrap() error { return e.Cause }
-
-// nameError is the shape of every error type that is its kind's sentinel
-// plus the name it concerns: a backend's, or a sealing key class's.
-type nameError[K kind] struct {
-	// Name is the backend name or key class the failure concerns.
-	Name string
-}
-
-// Error is the sentinel's text followed by the quoted name.
-func (e *nameError[K]) Error() string {
-	var k K
-	return k.sentinel().Error() + ": " + strconv.Quote(e.Name)
-}
-
-// Is reports every error of kind K as K's sentinel.
-func (e *nameError[K]) Is(target error) bool {
-	var k K
-	return target == k.sentinel()
-}
-
-// withCause returns K's sentinel itself when cause is nil, and the causeError
-// carrying cause otherwise.
-func withCause[K kind](cause error) error {
+// causeText is the text of every error type that is a sentinel plus a
+// diagnostic cause: the sentinel's text, followed by the cause's when there is
+// one.
+func causeText(sentinel, cause error) string {
 	if cause == nil {
-		var k K
-		return k.sentinel()
+		return sentinel.Error()
 	}
-	return &causeError[K]{Cause: cause}
+	return sentinel.Error() + ": " + cause.Error()
 }
 
-// withCleanupFailure reports failure together with an independent cleanup
-// failure that followed it, such as a refused release after a failed
-// operation; both stay reachable with errors.Is and errors.As. Either may be
-// nil, and the other is then returned unchanged. It is this package's only
-// errors.Join.
-func withCleanupFailure(failure, cleanup error) error {
-	switch {
-	case cleanup == nil:
-		return failure
-	case failure == nil:
-		return cleanup
+// nameText is the text of every error type that is a sentinel plus the name
+// it concerns: the sentinel's text followed by the quoted name.
+func nameText(sentinel error, name string) string {
+	return sentinel.Error() + ": " + strconv.Quote(name)
+}
+
+// causeShape is the struct every cause error type is defined as.
+type causeShape interface{ ~struct{ Cause error } }
+
+// causeError constrains the generic helpers to a cause error type: P is *E,
+// an error, and names the sentinel it matches.
+type causeError[E causeShape] interface {
+	*E
+	error
+	sentinel() error
+}
+
+func (*SealError) sentinel() error        { return ErrSealFailed }
+func (*OpenError) sentinel() error        { return ErrOpenFailed }
+func (*SealerWipedError) sentinel() error { return ErrSealerWiped }
+
+// newCause returns the E carrying cause.
+func newCause[E causeShape, P causeError[E]](cause error) error {
+	return P(&E{Cause: cause})
+}
+
+// withCause returns E's sentinel itself when cause is nil, and the E carrying
+// cause otherwise.
+func withCause[E causeShape, P causeError[E]](cause error) error {
+	if cause == nil {
+		var p P
+		return p.sentinel()
 	}
-	return errors.Join(failure, cleanup)
+	return newCause[E, P](cause)
+}
+
+// withCleanupFailure reports failure together with the cleanup failures that
+// followed it, such as a refused release after a failed operation, as one
+// [CleanupError]; every one stays reachable with errors.Is and errors.As. Nil
+// cleanups are skipped, and a CleanupError among them contributes its own
+// failure and causes, so the report stays flat; so does a failure that is
+// already a CleanupError, which is extended. With no cleanup failure, failure
+// is returned unchanged; with one and a nil failure, so is that one.
+func withCleanupFailure(failure error, cleanups ...error) error {
+	var causes []error
+	var last error
+	n := 0
+	for _, c := range cleanups {
+		if c == nil {
+			continue
+		}
+		n, last = n+1, c
+		var ce *CleanupError
+		if !asCleanupError(c, &ce) {
+			causes = append(causes, c)
+			continue
+		}
+		if ce.Failure != nil {
+			causes = append(causes, ce.Failure)
+		}
+		causes = append(causes, ce.Causes...)
+	}
+	switch {
+	case n == 0:
+		return failure
+	case failure == nil && n == 1:
+		return last
+	}
+	var ce *CleanupError
+	if asCleanupError(failure, &ce) {
+		return &CleanupError{Failure: ce.Failure, Causes: append(append([]error(nil), ce.Causes...), causes...)}
+	}
+	return &CleanupError{Failure: failure, Causes: causes}
+}
+
+// asCleanupError sets *ce when err itself, not an error it wraps, is a
+// *CleanupError: only those are merged.
+func asCleanupError(err error, ce **CleanupError) bool {
+	var ok bool
+	*ce, ok = err.(*CleanupError) //nolint:errorlint // only a top-level CleanupError is merged
+	return ok
 }
 
 // destroyOnFailure destroys e, which a failed operation leaves unwanted, and
@@ -811,10 +943,10 @@ func destroyOnFailure(failure error, e *Memory) error {
 }
 
 // contextFailure returns nil while ctx is live; otherwise the operation's
-// error (kind K) carrying a contextError. A provider error cause is kept: it
+// error (an E) carrying a contextError. A provider error cause is kept: it
 // replaces the bare context error when it already matches it, and is carried
 // alongside otherwise. A distinct [context.Cause] is carried too.
-func contextFailure[K kind](ctx context.Context, cause error) error {
+func contextFailure[E causeShape, P causeError[E]](ctx context.Context, cause error) error {
 	ended := ctx.Err()
 	if ended == nil {
 		return nil
@@ -831,7 +963,7 @@ func contextFailure[K kind](ctx context.Context, cause error) error {
 	if why := context.Cause(ctx); why != nil && !errors.Is(why, ended) {
 		ce.cause = why
 	}
-	return &causeError[K]{Cause: ce}
+	return newCause[E, P](ce)
 }
 
 // providerVerdicts lists, by operation sentinel, the errors providerFailure
@@ -846,19 +978,19 @@ var providerVerdicts = map[error][]error{
 	},
 }
 
-// providerFailure shapes a provider's failure as operation K's: one of its
+// providerFailure shapes a provider's failure as an E: one of its
 // providerVerdicts passes through, and anything else is wrapped in a
 // [SealError] or [OpenError], so an open failure that is not a verdict cannot
 // be mistaken for one.
-func providerFailure[K kind](err error) error {
+func providerFailure[E causeShape, P causeError[E]](err error) error {
 	if err == nil {
 		return nil
 	}
-	var k K
-	for _, verdict := range providerVerdicts[k.sentinel()] {
+	var p P
+	for _, verdict := range providerVerdicts[p.sentinel()] {
 		if errors.Is(err, verdict) {
 			return err
 		}
 	}
-	return &causeError[K]{Cause: err}
+	return newCause[E, P](err)
 }

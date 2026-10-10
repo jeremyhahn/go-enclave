@@ -15,7 +15,7 @@ why a bottom-layer library has none).
 | Create a budget checked against `RLIMIT_MEMLOCK` | `enclave.NewAllocatorWithinRLimit(maxBytes)` | N/A |
 | Admitted allocation (move / generate) | `(*Allocator).New(data)`, `(*Allocator).NewSized(n)` | N/A |
 | Admitted open of a sealed value | `(*Sealed).OpenIn(ctx, a)` ([sealing](../sealing/api.md)) | N/A |
-| Admitted import as the locked-memory backend | `(*Allocator).Import(ctx, material, opts...)` ([backends](../backends/api.md)) | N/A |
+| Admitted import as the locked-memory backend | `(*Allocator).Name()`, `(*Allocator).Import(ctx, material, opts...)` ([backends](../backends/api.md)) | N/A |
 | Retune | `(*Allocator).SetLimit(n)`, `(*Allocator).ForceLimit(n)` | N/A |
 | Rebalance | `(*Allocator).TransferTo(dst, n)` | N/A |
 | Observe | `(*Allocator).InUse()`, `Limit()`, `Available()` | N/A |

@@ -1,6 +1,6 @@
 # go-enclave documentation
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-08
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-10
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 One folder per capability, each with the same five files: `architecture.md`
@@ -11,6 +11,10 @@ Every feature of this repository is documented in this layout; there are no
 legacy documents to migrate. The generated API reference is on
 [pkg.go.dev](https://pkg.go.dev/github.com/jeremyhahn/go-enclave).
 
+Platforms: tests run on Linux only. The BSDs and Windows are build-only for
+v0.9.0-rc.1: they compile, and no test runs on them
+([test status](locked-memory/engineering.md#test-status)).
+
 | Feature | What it covers |
 |---|---|
 | [locked-memory](locked-memory/user.md) | `Memory`: constructors, borrowing, `Freeze`, `Destroy` and canary corruption, guard pages and canary, platform and core-dump matrix |
@@ -18,7 +22,7 @@ legacy documents to migrate. The generated API reference is on
 | [sealing](sealing/user.md) | `Sealed`, `Sealer` modes, the `KeyProtector`/`RootUnsealer` seam, contexts, `Openable`, FIPS, the key-schedule heap exposure and its erasure under `runtime/secret` |
 | [shutdown-sweep](shutdown-sweep/user.md) | `WipeAll(ctx)`: admission, waiting for borrows, termination, the count and `SweepError` |
 | [provider-conformance](provider-conformance/user.md) | `providertest.TestProvider(ctx, cfg)` for TPM/HSM/KMS provider authors |
-| [backends](backends/user.md) | The seam for hardware enclaves: `Handle`, `Backend`, capabilities, the named registry, `As`, and the decided design of the wiring still to come |
+| [backends](backends/user.md) | The seam for hardware enclaves: `Handle`, `Backend`, capabilities, the named registry, `As`, the sealing wiring (`WithBackend`, `OpenIn`, `SealFrom`) and the [`backendtest`](backends/architecture.md#conformance-backendtest) conformance suite |
 
 ## Upgrading
 
@@ -40,6 +44,7 @@ are no deprecated aliases; rename with a search and replace.
 | `NewMemoryEnclave`, `NewMemoryEnclaveCopy`, `NewMemoryEnclaveSized` | `NewMemory`, `NewMemoryCopy`, `NewMemorySized` |
 | `SealedEnclave` | `Sealed` |
 | `(*SealedEnclave).OpenWith(ctx, a)` | `(*Sealed).OpenIn(ctx, a)` |
+| `providertest.AbortedError.Err` | `providertest.AbortedError.Cause` |
 
 #### Locked memory
 
@@ -104,6 +109,21 @@ intact.
 **`SetSealer` refuses a zero-value or destroyed `Sealer`** with
 `ErrSealerNotConstructed` or `ErrSealerDestroyed`, and **`NewSealer` refuses a
 nil option** with `ErrInvalidSealerOption`.
+
+#### Errors
+
+**No failure is an `errors.Join` composite any more** (#146). Where an
+operation's failure came with cleanup that also failed, or a release refused
+more than once, the error is a `*CleanupError` (`ErrCleanupFailed`): `Failure`
+is the operation's own error and `Causes` each refusal. Every `errors.Is` and
+`errors.As` match on what it carries still holds; code that tested the error
+for `Unwrap() []error` should use `errors.As` with `*CleanupError` instead.
+`providertest.TestProvider` returns a `*FindingsError` whose `Findings` are the
+run's findings, where it returned a join.
+
+The cause- and name-carrying error types are defined types, no longer aliases
+of a generic one, so `go doc` shows their fields and methods. Struct literals,
+`errors.Is` and `errors.As` are unchanged.
 
 The sections below describe each release under the names it shipped.
 

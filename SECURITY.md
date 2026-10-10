@@ -7,15 +7,20 @@ and handled privately.
 ## Supported versions
 
 go-enclave is pre-1.0. Only the **latest release** receives security fixes: the
-newest `vX.Y.Z-alpha` tag, or the newest `vX.Y.Z` once tagged releases exist.
-Fixes ship as a new version and are never backported to an older minor.
-Breaking changes land in a MINOR bump while the module is pre-1.0, so upgrading
-to get a fix can require the steps in [docs/README.md](docs/README.md#v070-alpha-from-v06).
+newest tag (`vX.Y.Z-alpha`, `vX.Y.Z-rc.N`), or the newest `vX.Y.Z` once final
+releases exist. Fixes ship as a new version and are never backported to an
+older minor. Breaking changes land in a MINOR bump while the module is pre-1.0,
+so upgrading to get a fix can require the steps in
+[Upgrading](docs/README.md#upgrading).
 
 | Version | Supported |
 |---|---|
 | Latest release | Yes |
 | Anything older | No — upgrade |
+
+Only Linux runs the tests. The BSDs and Windows are **build-only** for
+v0.9.0-rc.1, so a report against them is welcome and in scope, but no test has
+exercised that code ([test status](docs/locked-memory/engineering.md#test-status)).
 
 ## Reporting a vulnerability
 

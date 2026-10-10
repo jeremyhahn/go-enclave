@@ -50,9 +50,7 @@ case " $* " in
 esac
 `
 	for name, body := range map[string]string{"docker": docker, "trivy": fakeTrivy(0)} {
-		if err := os.WriteFile(filepath.Join(bin, name), []byte(body), 0o755); err != nil {
-			t.Fatalf("write fake %s: %v", name, err)
-		}
+		writeExecutable(t, filepath.Join(bin, name), []byte(body))
 	}
 	return pinFakeTrivy(t, map[string]string{
 		"PATH":                   bin + ":" + os.Getenv("PATH"),
@@ -193,9 +191,7 @@ func TestIntegrationImage_SuiteRefusesAnImageThatWasNotScanned(t *testing.T) {
 func TestIntegrationImage_AFailedScanRunsNoSuite(t *testing.T) {
 	env, log, _ := fakeImageWorld(t)
 	trivy := filepath.Join(strings.SplitN(env["PATH"], ":", 2)[0], "trivy")
-	if err := os.WriteFile(trivy, []byte(fakeTrivy(1)), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	writeExecutable(t, trivy, []byte(fakeTrivy(1)))
 	pinFakeTrivy(t, env, trivy)
 	out, ok := runImageScript(t, env, "sh", "-c", "sh scripts/integration-test.sh enclave github.com/jeremyhahn/go-enclave")
 	if ok {

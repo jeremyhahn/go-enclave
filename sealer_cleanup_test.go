@@ -11,6 +11,7 @@ package enclave
 import (
 	"context"
 	"errors"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -112,8 +113,8 @@ func requireCleanupFailure(t *testing.T, err error, failures ...error) {
 	if !errors.As(err, &ce) || !errors.Is(err, ErrCleanupFailed) || !errors.Is(err, errDestroyRefused) {
 		t.Fatalf("err = %v, want a *CleanupError carrying the refused Destroy", err)
 	}
-	if !errors.Is(ce.Cause, errDestroyRefused) {
-		t.Fatalf("CleanupError.Cause = %v, want the refused Destroy", ce.Cause)
+	if !slices.ContainsFunc(ce.Causes, func(c error) bool { return errors.Is(c, errDestroyRefused) }) {
+		t.Fatalf("CleanupError.Causes = %v, want the refused Destroy", ce.Causes)
 	}
 	for _, f := range failures {
 		if !errors.Is(err, f) {

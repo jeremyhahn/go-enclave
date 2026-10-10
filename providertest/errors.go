@@ -37,18 +37,63 @@ func (e *ConfigError) Is(target error) bool { return target == ErrInvalidConfig 
 // ErrAborted matches the error [TestProvider] returns when its context ended
 // before the run finished. The run is incomplete: it is neither a pass nor, by
 // itself, a finding against the provider. Properties that had already failed
-// while the context was live are joined alongside it and are real.
+// while the context was live are reported alongside it and are real.
 var ErrAborted = errors.New("providertest: run aborted because its context ended")
 
-// AbortedError is the concrete error behind [ErrAborted]. Its Err is the run
-// context's error: it matches ErrAborted under errors.Is and unwraps to Err,
-// so a caller can also match context.Canceled or context.DeadlineExceeded. It
-// renders as "providertest: run aborted because its context ended: <Err>".
-type AbortedError = causeError[aborted]
+// AbortedError is the concrete error behind [ErrAborted]. Its Cause is the
+// run context's error: it matches ErrAborted under errors.Is and unwraps to
+// Cause, so a caller can also match context.Canceled or
+// context.DeadlineExceeded.
+type AbortedError struct {
+	// Cause is the run context's error.
+	Cause error
+}
+
+// Error renders as "providertest: run aborted because its context ended:
+// <Cause>", or [ErrAborted]'s text alone for a nil Cause.
+func (e *AbortedError) Error() string {
+	if e.Cause == nil {
+		return ErrAborted.Error()
+	}
+	return ErrAborted.Error() + ": " + e.Cause.Error()
+}
+
+// Is reports whether target is [ErrAborted].
+func (e *AbortedError) Is(target error) bool { return target == ErrAborted }
+
+// Unwrap returns the cause.
+func (e *AbortedError) Unwrap() error { return e.Cause }
+
+// FindingsError is what [TestProvider] returns when its run found anything:
+// every [*PropertyError], [*NotMeasuredError] and [*AbortedError] of the run,
+// in the order they were found. errors.Is and errors.As reach each one through
+// Unwrap.
+type FindingsError struct {
+	// Findings holds the run's findings, never empty in an error TestProvider
+	// returns.
+	Findings []error
+}
+
+// Error renders each finding on its own line.
+func (e *FindingsError) Error() string {
+	msg := ""
+	for i, f := range e.Findings {
+		if i > 0 {
+			msg += "\n"
+		}
+		if f != nil {
+			msg += f.Error()
+		}
+	}
+	return msg
+}
+
+// Unwrap returns the findings.
+func (e *FindingsError) Unwrap() []error { return e.Findings }
 
 // PropertyError is one property of the seam that the provider under test did
-// not honor. [TestProvider] joins every one it found; walk them via the joined
-// error's Unwrap() []error. Several may share a Property.
+// not honor. [TestProvider] reports every one it found in a [*FindingsError].
+// Several may share a Property.
 type PropertyError struct {
 	// Property names the property, as the suite's documentation does.
 	Property string
@@ -108,36 +153,11 @@ func (e *missingSeamError) Error() string {
 		e.provider, e.iface, e.mode)
 }
 
-// kind names the sentinel a causeError matches; each is an empty struct.
-type kind interface{ sentinel() error }
-
-type aborted struct{}
-
-func (aborted) sentinel() error { return ErrAborted }
-
-// causeError is the shape of every exported providertest error that carries a
-// cause: it renders as its sentinel's text, then ": " and the cause when there
-// is one, matches the sentinel under errors.Is, and unwraps to the cause.
-type causeError[K kind] struct {
-	// Err is the cause.
-	Err error
-}
-
-func (e *causeError[K]) Error() string {
-	var k K
-	if e.Err == nil {
-		return k.sentinel().Error()
+// findingsOf reports a run's findings: nil when there are none, otherwise a
+// [*FindingsError] holding them.
+func findingsOf(findings []error) error {
+	if len(findings) == 0 {
+		return nil
 	}
-	return k.sentinel().Error() + ": " + e.Err.Error()
+	return &FindingsError{Findings: findings}
 }
-
-func (e *causeError[K]) Is(target error) bool {
-	var k K
-	return target == k.sentinel()
-}
-
-func (e *causeError[K]) Unwrap() error { return e.Err }
-
-// joinFindings reports a run's findings as one error: nil when there are none,
-// otherwise a join a caller walks via its Unwrap() []error.
-func joinFindings(findings []error) error { return errors.Join(findings...) }

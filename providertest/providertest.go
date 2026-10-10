@@ -172,14 +172,14 @@ type Config struct {
 }
 
 // TestProvider runs the conformance suite against the provider cfg describes
-// and returns nil if it conforms. Otherwise it returns an error joining one
-// [*PropertyError] per failed assertion, each naming the property, what was
-// observed and what the seam requires.
+// and returns nil if it conforms. Otherwise it returns a [*FindingsError]
+// holding one [*PropertyError] per failed assertion, each naming the property,
+// what was observed and what the seam requires.
 //
 // ctx is handed to every provider call the suite makes and bounds the run. If
 // it ends before the run finishes, the suite stops at the next check and the
 // returned error matches [ErrAborted] (an [*AbortedError] carrying the
-// context's error), joined with whatever properties had already failed while
+// context's error), alongside whatever properties had already failed while
 // the context was live. A call that failed only because the run's context
 // ended is not reported against the provider.
 //
@@ -281,13 +281,13 @@ func (r *report) failed(property string) bool {
 	return false
 }
 
-// err joins the recorded failures. A run whose context ended is never nil: it
-// carries an *AbortedError.
+// err reports the recorded failures as a *FindingsError. A run whose context
+// ended is never nil: it carries an *AbortedError.
 func (r *report) err() error {
 	if cerr := r.ctx.Err(); cerr != nil {
-		return joinFindings(append(r.failures, &AbortedError{Err: cerr}))
+		return findingsOf(append(r.failures, &AbortedError{Cause: cerr}))
 	}
-	return joinFindings(r.failures)
+	return findingsOf(r.failures)
 }
 
 type endedContext struct {

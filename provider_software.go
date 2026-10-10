@@ -310,5 +310,5 @@ func (p *SoftwareProvider) Destroy() error {
 	defer s.mu.Unlock()
 
 	s.destroyed = true
-	return withCleanupFailure(s.protectKey.Destroy(), s.root.Destroy())
+	return withCleanupFailure(nil, s.protectKey.Destroy(), s.root.Destroy())
 }

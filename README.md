@@ -91,9 +91,13 @@ defer func() {
 ## Platforms
 
 Linux (including Android), the BSDs, darwin, iOS, illumos, Solaris, AIX and
-Windows are supported; any other GOOS (js, wasip1, plan9) fails to compile. The
-per-OS lock primitive, core-dump exclusion and `CoreDumpsDisabled()` result are
-in the [platform contract](docs/locked-memory/engineering.md#platform-contract).
+Windows compile; any other GOOS (js, wasip1, plan9) fails to compile. Only Linux
+runs the tests: the BSDs and Windows are **build-only** for v0.9.0-rc.1 (built
+and vetted by `make cross-build`, never executed), with test runners to come in
+a later release. The per-OS lock primitive, core-dump exclusion and
+`CoreDumpsDisabled()` result are in the
+[platform contract](docs/locked-memory/engineering.md#platform-contract); what
+is tested is in its [test status](docs/locked-memory/engineering.md#test-status).
 
 ## Documentation
 

@@ -177,25 +177,25 @@ func mapLocked(size int, innerLen int64) (*mapping, error) {
 func (m *mapping) abandon(cause error, locked bool) error {
 	failure := error(&LockedMemoryError{Cause: cause})
 
-	var cleanup error
+	var cleanup []error
 	m.unlocked = !locked
 	if !m.unlocked {
 		if err := unlockMemory(m.inner); err != nil {
-			cleanup = err
+			cleanup = append(cleanup, &LockedMemoryError{Cause: err})
 		} else {
 			m.unlocked = true
 		}
 	}
 	mapped := false
 	if err := unmapMemory(m.memory); err != nil {
-		cleanup = withCleanupFailure(cleanup, err)
+		cleanup = append(cleanup, &LockedMemoryError{Cause: err})
 		mapped = true
 	}
 	if cleanup == nil {
 		return failure
 	}
 
-	report := withCleanupFailure(failure, &LockedMemoryError{Cause: cleanup})
+	report := withCleanupFailure(failure, cleanup...)
 	if !mapped {
 		// Unmapped, so nothing is held, a refused munlock included.
 		return report
@@ -315,7 +315,11 @@ func (m *mapping) release() error {
 
 	// Step 3.
 	if err := unmapMemory(m.memory); err != nil {
-		return m.held(&LockedMemoryError{Cause: withCleanupFailure(unlockErr, err)})
+		held := error(&LockedMemoryError{Cause: err})
+		if unlockErr != nil {
+			held = withCleanupFailure(&LockedMemoryError{Cause: unlockErr}, held)
+		}
+		return m.held(held)
 	}
 
 	// The pages are gone: the only place the sticky flags may be cleared.

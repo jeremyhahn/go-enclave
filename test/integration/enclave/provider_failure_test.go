@@ -380,7 +380,7 @@ func TestProviderConformance_MissingProvidersAndSeamsAreReported(t *testing.T) {
 func requireAborted(t *testing.T, err, cause error) {
 	t.Helper()
 	var ae *providertest.AbortedError
-	if !errors.Is(err, providertest.ErrAborted) || !errors.Is(err, cause) || !errors.As(err, &ae) || !errors.Is(ae.Err, cause) {
+	if !errors.Is(err, providertest.ErrAborted) || !errors.Is(err, cause) || !errors.As(err, &ae) || !errors.Is(ae.Cause, cause) {
 		t.Fatalf("TestProvider = %v; want an *AbortedError matching ErrAborted and %v", err, cause)
 	}
 	if !strings.HasPrefix(ae.Error(), providertest.ErrAborted.Error()+": ") {

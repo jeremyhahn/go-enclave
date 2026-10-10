@@ -51,9 +51,7 @@ func toolchainTrivyTree(t *testing.T, good, served string) (script, path string)
 		"esac\n"
 	fakeMake := "#!/bin/sh\necho go-enclave-toolchain:planted\n"
 	for name, body := range map[string]string{"docker": docker, "make": fakeMake} {
-		if err := os.WriteFile(filepath.Join(bin, name), []byte(body), 0o755); err != nil {
-			t.Fatalf("write fake %s: %v", name, err)
-		}
+		writeExecutable(t, filepath.Join(bin, name), []byte(body))
 	}
 	return script, bin + ":" + os.Getenv("PATH")
 }

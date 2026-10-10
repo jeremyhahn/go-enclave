@@ -1,6 +1,6 @@
 ### Added
 
-- **`ErrCleanupFailed` and `*CleanupError`** (#145). A key or plaintext handle the sealer no longer needs and whose `Destroy` fails is kept by the sealer, and the operation fails with a `*CleanupError` carrying its own failure (`Failure`) and the refusal (`Cause`). Every `(*Sealer).Destroy` retries the kept handles. See [sealing](docs/sealing/engineering.md#error-semantics).
+- **`ErrCleanupFailed` and `*CleanupError`** (#145). A key or plaintext handle the sealer no longer needs and whose `Destroy` fails is kept by the sealer, and the operation fails with a `*CleanupError` carrying its own failure (`Failure`) and the refusals (`Causes`). Every `(*Sealer).Destroy` retries the kept handles. See [sealing](docs/sealing/engineering.md#error-semantics).
 
 ### Fixed
 

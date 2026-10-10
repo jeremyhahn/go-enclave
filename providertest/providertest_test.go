@@ -771,11 +771,11 @@ func wantOnlyProperty(t *testing.T, cfg Config, property string, wants ...string
 			t.Errorf("the suite failed, but not on %q:\n%v", want, err)
 		}
 	}
-	joined, ok := err.(interface{ Unwrap() []error })
-	if !ok {
-		t.Fatalf("TestProvider returned %T, want the joined property failures", err)
+	var findings *FindingsError
+	if !errors.As(err, &findings) {
+		t.Fatalf("TestProvider returned %T, want a *FindingsError holding the property failures", err)
 	}
-	for _, e := range joined.Unwrap() {
+	for _, e := range findings.Findings {
 		var pe *PropertyError
 		if !errors.As(e, &pe) || pe.Property != property {
 			t.Errorf("a finding is not a *PropertyError for %q: %v", property, e)
@@ -1912,7 +1912,7 @@ func assertAbortedOnly(t *testing.T, err error) {
 		t.Errorf("TestProvider = %v, want an error matching ErrAborted and context.Canceled", err)
 	}
 	var ae *AbortedError
-	if !errors.As(err, &ae) || !errors.Is(ae.Err, context.Canceled) {
+	if !errors.As(err, &ae) || !errors.Is(ae.Cause, context.Canceled) {
 		t.Errorf("TestProvider = %#v, want an *AbortedError carrying the context's error", err)
 	}
 	var pe *PropertyError

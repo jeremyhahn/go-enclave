@@ -93,7 +93,7 @@ func (s *sealerState) protectRootKey(ctx context.Context, dek *Memory) (blob []b
 	defer func() { err = s.withDeadHierarchyCleanup(err) }()
 
 	for {
-		if err := contextFailure[sealFailed](ctx, nil); err != nil {
+		if err := contextFailure[SealError](ctx, nil); err != nil {
 			return nil, err
 		}
 
@@ -292,21 +292,21 @@ func hierarchyFailure(err error, hierarchy ...Handle) error {
 // ledger; destroying it again retries the release, and destroying a released
 // one again is a no-op.
 func destroyKeys(keys ...Handle) error {
-	var errs error
+	var refused []error
 	for _, k := range keys {
 		if !isNilInterface(k) {
-			errs = withCleanupFailure(errs, k.Destroy())
+			refused = append(refused, k.Destroy())
 		}
 	}
-	return errs
+	return withCleanupFailure(nil, refused...)
 }
 
 // importKey moves the key src holds into s's importer, for wrapping with
 // AES-256-GCM, and destroys src on every path. A backend's own failure is a
-// failure of kind K; a handle the sealer cannot wrap with, one with neither
+// failure, an E; a handle the sealer cannot wrap with, one with neither
 // AEAD nor ByteAccess, is destroyed and refused. A handle that refuses that
 // Destroy is retained (destroyOrRetain). The caller must not hold s.mu.
-func importKey[K kind](ctx context.Context, s *sealerState, src *Memory) (Handle, error) {
+func importKey[E causeShape, P causeError[E]](ctx context.Context, s *sealerState, src *Memory) (Handle, error) {
 	var h Handle
 	err := src.WithBytes(func(k []byte) error {
 		var ierr error
@@ -318,10 +318,10 @@ func importKey[K kind](ctx context.Context, s *sealerState, src *Memory) (Handle
 	_ = src.Destroy()
 
 	if err != nil {
-		if cerr := contextFailure[K](ctx, err); cerr != nil {
+		if cerr := contextFailure[E, P](ctx, err); cerr != nil {
 			err = cerr
 		} else {
-			err = backendFailure[K](err)
+			err = backendFailure[E, P](err)
 		}
 		return nil, s.destroyOrRetain(err, h)
 	}
@@ -340,11 +340,11 @@ func importKey[K kind](ctx context.Context, s *sealerState, src *Memory) (Handle
 
 // backendFailure is providerFailure for a backend's error, which keeps the
 // seam's own refusals as they are.
-func backendFailure[K kind](err error) error {
+func backendFailure[E causeShape, P causeError[E]](err error) error {
 	if errors.Is(err, ErrCapabilityUnsupported) || errors.Is(err, ErrInvalidImport) {
 		return err
 	}
-	return providerFailure[K](err)
+	return providerFailure[E, P](err)
 }
 
 // initHierarchy performs the once-per-sealer root unseal and mints the first
@@ -367,7 +367,7 @@ func (s *sealerState) initHierarchy(ctx context.Context) (err error) {
 	select {
 	case s.initSlot <- struct{}{}:
 	case <-ctx.Done():
-		return contextFailure[sealFailed](ctx, nil)
+		return contextFailure[SealError](ctx, nil)
 	}
 	// Released under mu, so a Destroy that found the slot taken is seen here
 	// and its pending keys released; a destroyed sealer reports only that.
@@ -383,7 +383,7 @@ func (s *sealerState) initHierarchy(ctx context.Context) (err error) {
 
 	// select picks randomly among ready cases, so an ended context can still
 	// win the slot.
-	if err := contextFailure[sealFailed](ctx, nil); err != nil {
+	if err := contextFailure[SealError](ctx, nil); err != nil {
 		return err
 	}
 
@@ -480,7 +480,7 @@ func (s *sealerState) wrappingKey(ctx context.Context, root *Memory) (Handle, er
 	}); err != nil {
 		return nil, destroyOnFailure(hierarchyFailure(err, root), cp)
 	}
-	return importKey[sealFailed](ctx, s, cp)
+	return importKey[SealError](ctx, s, cp)
 }
 
 // firstGeneration mints KEK generation 1 under wrap, imported into the
@@ -493,7 +493,7 @@ func (s *sealerState) firstGeneration(ctx context.Context, wrap Handle) (Handle,
 	if s.importer == nil {
 		return kek, blob, nil
 	}
-	h, err := importKey[sealFailed](ctx, s, kek)
+	h, err := importKey[SealError](ctx, s, kek)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -528,7 +528,7 @@ func (s *sealerState) unsealRoot(ctx context.Context) (*Memory, error) {
 			unsealed = true
 			return deriveWrappingKey(b, salt)
 		}
-		if cerr := contextFailure[sealFailed](ctx, uerr); cerr != nil {
+		if cerr := contextFailure[SealError](ctx, uerr); cerr != nil {
 			return cerr
 		}
 		return uerr
@@ -548,7 +548,7 @@ func (s *sealerState) unsealRoot(ctx context.Context) (*Memory, error) {
 		}
 		// The unseal itself failed, so it may be asked again.
 		_ = root.Destroy()
-		return nil, providerFailure[sealFailed](err)
+		return nil, providerFailure[SealError](err)
 	}
 	// The unseal succeeded, even if the context ended meanwhile: the root is
 	// retained and published, and the caller is told of its context by
@@ -565,7 +565,7 @@ func initFailure(ctx context.Context, err error) error {
 	if err == nil || ended == nil || (errors.Is(err, ErrSealFailed) && errors.Is(err, ended)) {
 		return err
 	}
-	return contextFailure[sealFailed](ctx, err)
+	return contextFailure[SealError](ctx, err)
 }
 
 // discardIfSwept returns nil unless a sweep has overlapped the initialization
@@ -579,7 +579,7 @@ func (s *sealerState) discardIfSwept(cause error) error {
 	if !sweepInFlight(s.pendingGen) && sweepGeneration() == s.pendingGen {
 		return nil
 	}
-	return withCleanupFailure(withCause[sealerWiped](cause), s.releasePending())
+	return withCleanupFailure(withCause[SealerWipedError](cause), s.releasePending())
 }
 
 // releasePending destroys pendingKEK, pendingWrap and pendingRoot. Once all
@@ -625,7 +625,7 @@ func (s *sealerState) rotateKEK(ctx context.Context) error {
 	// Imported with mu released, as a device may block; seals under the
 	// current generation go on meanwhile. A failure keeps that generation,
 	// and the next seal retries the rotation.
-	h, err := importKey[sealFailed](ctx, s, kek)
+	h, err := importKey[SealError](ctx, s, kek)
 	if err != nil {
 		return err
 	}
@@ -637,7 +637,7 @@ func (s *sealerState) rotateKEK(ctx context.Context) error {
 	case s.destroyed:
 		return s.destroyOrRetainLocked(ErrSealerDestroyed, h)
 	case sweepInFlight(gen) || sweepGeneration() != gen:
-		return withCleanupFailure(s.destroyOrRetainLocked(withCause[sealerWiped](nil), h), destroyKeys(s.kek, s.root))
+		return withCleanupFailure(s.destroyOrRetainLocked(withCause[SealerWipedError](nil), h), destroyKeys(s.kek, s.root))
 	case s.kekGen+1 != next:
 		// Another seal rotated meanwhile; its generation stands.
 		return s.destroyOrRetainLocked(nil, h)
@@ -674,7 +674,7 @@ func (s *sealerState) mintNextLocked(gen uint64) (*Memory, []byte, error) {
 	// and KEK whenever a seal or open finds the hierarchy dead.
 	kek, blob, err := newGeneration(s.root, s.kekGen+1)
 	if sweepInFlight(gen) || sweepGeneration() != gen {
-		return nil, nil, withCleanupFailure(withCause[sealerWiped](err), destroyKeys(kek, s.kek, s.root))
+		return nil, nil, withCleanupFailure(withCause[SealerWipedError](err), destroyKeys(kek, s.kek, s.root))
 	}
 	// On failure the current generation stays; the next seal retries.
 	return kek, blob, err

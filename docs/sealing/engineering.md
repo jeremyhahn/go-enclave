@@ -1,6 +1,6 @@
 # Sealing and the provider seam — engineering contract
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-07
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-10
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Exported surface
@@ -14,9 +14,10 @@
 | `WithKEKRotationLimit(n uint64) SealerOption` | `ModeRootKey` only: DEK wraps per KEK generation before rotation, 1 to 2^31 (the default, half of crypto/cipher's 2^32 random-nonce bound). Out of range, or with `ModePerOperation`: `ErrInvalidRotationLimit`. |
 | `SetSealer(s *Sealer) error` | Installs the process sealer. One-shot. |
 | `(*Sealer).Seal(ctx, data) (*Sealed, error)` / `Mode() Mode` | `NewSealed` for an explicit sealer. |
-| `(*Sealer).Destroy() error` | Releases the wrapping key, current KEK, retained KEK blobs, any pending root/KEK, and the default `SoftwareProvider` it created (never an injected provider). Idempotent, nil-safe; later seals/opens/`Openable` report `ErrSealerDestroyed`. |
+| `(*Sealer).Destroy() error` | Ends the sealer: later seals, opens and `Openable` report `ErrSealerDestroyed`, and a `Sealed` opens only through the sealer that sealed it, so this package cannot open its values again. `ModeRootKey` releases the root, wrapping key, current KEK, retained KEK blobs and any pending root or KEK, plus the default `SoftwareProvider` it created. `ModePerOperation` holds no key of its own and releases none. It never destroys an injected provider, so that provider's key outlives the sealer. Retries every handle a `CleanupError` reported. Idempotent, nil-safe. |
+| `(*Sealer).SealFrom(ctx, src Handle) (*Sealed, error)` / `NewSealedFrom(ctx, src Handle)` | `Seal` for material already in an enclave, such as a frozen `Memory` that `Seal` refuses with `ErrSealSourceReadOnly`. Reads `src` under its own borrow and leaves it unwiped and undestroyed; the caller keeps it. `src` needs `ByteAccess` (`*CapabilityError`, `CapabilityBytes`). Nil or destroyed: `ErrEnclaveDestroyed`. |
 | `(*Sealed).Open(ctx) (*Memory, error)` | Decrypts into a **new** enclave the caller owns and must `Destroy`. Unbudgeted. |
-| `(*Sealed).OpenIn(ctx, a *Allocator) (*Memory, error)` | As `Open`, destination admitted against `a`. |
+| `(*Sealed).OpenIn(ctx, b Backend) (Handle, error)` | `Open` into any backend that can hold the material; the caller owns the handle. `DefaultBackend` is `Open`; an `*Allocator` admits the destination against its budget (typed-nil: `ErrNilAllocator`); another `Importer` receives the plaintext from a locked scratch enclave. Nil or typed-nil `b`: `ErrInvalidBackend`; not an `Importer`: `*CapabilityError` (`CapabilityImport`). Backend contract: [backends](../backends/engineering.md). |
 | `(*Sealed).Openable() error` | Diagnostic snapshot; takes no context and calls no provider. |
 | `(*Sealed).IsAlive() bool` | Ciphertext still held — **not** "can be opened". |
 | `(*Sealed).Destroy() error` / `String()` / `GoString()` | Idempotent, nil-safe; does not wait for in-flight opens; the error is always `nil` today. `%v` and `%#v` print a redacted form. |
@@ -26,6 +27,8 @@
 | `RootKeyBytes = 32` | Length of every root and of every key handed to a provider. |
 | `SoftwareProvider`, `NewSoftwareProvider()` | Implements `KeyProtector`, `RootUnsealer` and `HealthReporter`; root generated into a locked enclave at first use. `Protect` wraps under HKDF-SHA256 of the root (info `go-enclave v1 SoftwareProvider Protect key`), never the root `UnsealRoot` exports. State is behind a pointer: a copy shares the original's root and lock. |
 | `(*SoftwareProvider).Destroy() error` | Releases the root and Protect key; later calls, on it or a copy, report `ErrSealerDestroyed`. Idempotent, nil-safe. |
+| `WithBackend(b Backend) SealerOption` | `ModeRootKey`: the wrapping key and every KEK are imported into `b` (`PurposeWrappingKey`, `AlgorithmAES256GCM`); a handle with `AEAD` wraps inside the device, one with only `ByteAccess` wraps here. Data keys stay in this process. In `ModePerOperation` it only answers `WithRequireKeyScheduleErasure`. Nil or typed-nil: `ErrInvalidBackend`; not an `Importer`: `*CapabilityError` (`CapabilityImport`). |
+| `WithRequireKeyScheduleErasure() SealerOption` | `NewSealer` refuses, with `*KeyScheduleExposedError` matching `ErrKeyScheduleExposed`, a configuration where an AES key schedule would stay on the heap: each key class must be covered by `KeyScheduleErasure()` or by a backend that is a `Confiner` confining this process. Checked once, in `NewSealer`. |
 | `KeyScheduleErasure() bool` | Whether this build erases AES key schedules (`GOEXPERIMENT=runtimesecret`, linux/amd64 or linux/arm64 (not Android)). See [Erasure under `runtime/secret`](#erasure-under-runtimesecret). |
 
 ## Provider contract
@@ -177,7 +180,7 @@
 | `ErrProviderMessageLimit` | `SoftwareProvider.Protect` | Per-key message bound reached. |
 | `ErrProviderNotConstructed` | Every `SoftwareProvider` method but `Destroy` | The provider was not built by `NewSoftwareProvider` (e.g. a zero value). |
 | `ErrPlaintextEscaped` | open | Defensive; unreachable while destination capacity is exact. |
-| `ErrCleanupFailed` (`*CleanupError`) | `OpenIn` into an `Importer`, seals and `Destroy` of a `WithBackend` sealer | A handle the operation no longer needed refused its `Destroy` and still holds its material; the sealer keeps it for `(*Sealer).Destroy` to retry ([invariant 13](#invariants)). `Failure` is the operation's own error, reachable with `errors.Is`, or nil when only the cleanup failed; `Cause` is what `Destroy` returned. |
+| `ErrCleanupFailed` (`*CleanupError`) | `OpenIn` into an `Importer`, seals and `Destroy` of a `WithBackend` sealer | A handle the operation no longer needed refused its `Destroy` and still holds its material; the sealer keeps it for `(*Sealer).Destroy` to retry ([invariant 13](#invariants)). `Failure` is the operation's own error, reachable with `errors.Is`, or nil when only the cleanup failed; `Causes` holds what each refused `Destroy` or release returned. It is also how any failure that came with a failed cleanup is reported. |
 
 ### Context error shapes
 

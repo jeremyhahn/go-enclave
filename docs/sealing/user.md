@@ -1,6 +1,6 @@
 # Sealing and the provider seam — user guide
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-09
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-10
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Choose the type by access pattern
@@ -130,21 +130,23 @@ The full order, including the resource refusals, is in
 
 ## Release a sealer you no longer need
 
-A `Sealer` you constructed holds locked memory (its wrapping key and current
-KEK) until you release it. Destroy it when its values are no longer needed;
-retired sealers otherwise accumulate locked pages until `RLIMIT_MEMLOCK` runs
-out:
+A default (`ModeRootKey`) `Sealer` you constructed holds locked memory (its
+wrapping key and current KEK) until you release it. Destroy it when its values
+are no longer needed; retired sealers otherwise accumulate locked pages until
+`RLIMIT_MEMLOCK` runs out. A `ModePerOperation` sealer holds no key of its own,
+so Destroy there only ends the sealer:
 
 ```go
 s, err := enclave.NewSealer()
 if err != nil {
 	return err
 }
-defer s.Destroy() // values it sealed are unrecoverable afterwards
+defer s.Destroy() // values it sealed cannot be opened afterwards
 ```
 
 Afterwards every seal, open and `Openable` through it reports
-`ErrSealerDestroyed`. The `SoftwareProvider` that `NewSealer` creates by
+`ErrSealerDestroyed`, and a value opens only through the sealer that sealed
+it. The `SoftwareProvider` that `NewSealer` creates by
 default releases its root as soon as the first unseal has derived the wrapping
 key; a provider you inject is never released by the sealer. Release that with
 its own lifecycle (`(*SoftwareProvider).Destroy` for the software one).

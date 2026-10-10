@@ -448,24 +448,27 @@ func (s *sealerState) destroyOrRetainLocked(failure error, h Handle) error {
 		return failure
 	}
 	s.retained = append(s.retained, h)
-	return &CleanupError{Failure: failure, Cause: cause}
+	return &CleanupError{Failure: failure, Causes: []error{cause}}
 }
 
 // releaseRetainedLocked retries the Destroy of every retained handle, keeps
-// the ones that refuse again, and returns a [CleanupError] for each. Called
-// with mu write-locked.
+// the ones that refuse again, and returns one [CleanupError] carrying every
+// refusal. Called with mu write-locked.
 func (s *sealerState) releaseRetainedLocked() error {
-	var errs error
+	var causes []error
 	kept := s.retained[:0]
 	for _, h := range s.retained {
 		if cause := h.Destroy(); cause != nil {
 			kept = append(kept, h)
-			errs = withCleanupFailure(errs, &CleanupError{Cause: cause})
+			causes = append(causes, cause)
 		}
 	}
 	clear(s.retained[len(kept):])
 	s.retained = kept
-	return errs
+	if len(causes) == 0 {
+		return nil
+	}
+	return &CleanupError{Causes: causes}
 }
 
 // Destroy releases every key this sealer holds, including any root or KEK an
@@ -473,8 +476,13 @@ func (s *sealerState) releaseRetainedLocked() error {
 // [NewSealer] created it by default. An injected provider is never destroyed.
 //
 // From then on every Seal, Open and [Sealed.Openable] through this
-// sealer reports [ErrSealerDestroyed]; values it sealed are unrecoverable.
-// Destroy waits for key wraps and unwraps in this process, but not for a
+// sealer reports [ErrSealerDestroyed], and a value it sealed opens only
+// through it, so this package cannot open that value again. What Destroy
+// releases depends on the mode. A [ModeRootKey] sealer releases its wrapping
+// key, current KEK, root and the root-wrapped KEK blobs it retains. A
+// [ModePerOperation] sealer holds no key of its own and never touches the
+// injected [KeyProtector], so the key that provider keeps outlives the
+// sealer. Destroy waits for key wraps and unwraps in this process, but not for a
 // provider call or a value's own encryption: a seal or open that straddles
 // Destroy fails with ErrSealerDestroyed when it finishes, releasing what it
 // produced, and an initialization blocked
@@ -490,7 +498,7 @@ func (s *Sealer) Destroy() error {
 
 	s.mu.Lock()
 	s.destroyed = true
-	errs := withCleanupFailure(destroyKeys(s.kek, s.root), s.releaseRetainedLocked())
+	refused := []error{destroyKeys(s.kek, s.root), s.releaseRetainedLocked()}
 	for _, b := range s.kekBlobs {
 		Wipe(b)
 	}
@@ -499,13 +507,13 @@ func (s *Sealer) Destroy() error {
 	// the pending state itself, under mu, after seeing destroyed.
 	select {
 	case s.initSlot <- struct{}{}:
-		errs = withCleanupFailure(errs, s.releasePending())
+		refused = append(refused, s.releasePending())
 		<-s.initSlot
 	default:
 	}
 	s.mu.Unlock()
 
-	return withCleanupFailure(errs, s.owned.Destroy())
+	return withCleanupFailure(nil, append(refused, s.owned.Destroy())...)
 }
 
 // Seal encrypts data and returns the sealed enclave holding it. It is
@@ -581,7 +589,7 @@ func (s *Sealer) seal(ctx context.Context, size int, read func(func([]byte) erro
 
 	// After the argument checks, so a malformed call is reported as malformed
 	// whatever the caller's deadline.
-	if err := contextFailure[sealFailed](ctx, nil); err != nil {
+	if err := contextFailure[SealError](ctx, nil); err != nil {
 		return nil, err
 	}
 	if err := s.usable(); err != nil {
@@ -682,7 +690,7 @@ func rewrite(b *byte, v byte) {
 // touches no key, and the unadmitted DEK page exists only behind a granted
 // reservation.
 func (s *Sealer) open(ctx context.Context, blob, sealed []byte, size int, dst func(int) (*Memory, error), freeze bool) (*Memory, error) {
-	if err := contextFailure[openFailed](ctx, nil); err != nil {
+	if err := contextFailure[OpenError](ctx, nil); err != nil {
 		return nil, err
 	}
 	if err := s.usable(); err != nil {
@@ -772,7 +780,7 @@ func (s *sealerState) protectPerOperation(ctx context.Context, dek *Memory) ([]b
 	var blob []byte
 	if err := dek.WithBytes(func(k []byte) error {
 		b, perr := s.kp.Protect(ctx, k)
-		if cerr := contextFailure[sealFailed](ctx, perr); cerr != nil {
+		if cerr := contextFailure[SealError](ctx, perr); cerr != nil {
 			return cerr
 		}
 		if perr != nil {
@@ -787,7 +795,7 @@ func (s *sealerState) protectPerOperation(ctx context.Context, dek *Memory) ([]b
 		blob = bytes.Clone(b)
 		return nil
 	}); err != nil {
-		return nil, providerFailure[sealFailed](err)
+		return nil, providerFailure[SealError](err)
 	}
 	return blob, nil
 }
@@ -798,9 +806,9 @@ func (s *sealerState) protectPerOperation(ctx context.Context, dek *Memory) ([]b
 // erased by a cancellation; see docs/sealing/engineering.md, Context error
 // shapes.
 func (s *sealerState) unprotectPerOperation(ctx context.Context, blob []byte, dek *Memory) error {
-	return providerFailure[openFailed](dek.WithBytes(func(k []byte) error {
+	return providerFailure[OpenError](dek.WithBytes(func(k []byte) error {
 		perr := s.kp.Unprotect(ctx, blob, k)
-		if cerr := contextFailure[openFailed](ctx, perr); cerr != nil {
+		if cerr := contextFailure[OpenError](ctx, perr); cerr != nil {
 			return cerr
 		}
 		return perr

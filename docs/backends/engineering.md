@@ -1,13 +1,13 @@
 # Backends — engineering contract
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-09
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-10
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
-This contract covers the declared seam, which ships now. What is decided but
-not yet built (the `WithBackend` options, `OpenIn`'s `Backend` parameter,
-`SealFrom`, `WithRequireKeyScheduleErasure`, and `backendtest`) is in
-[architecture.md](architecture.md#decisions) and joins this contract when T1
-builds it.
+This contract covers the seam and its wiring into sealing: `WithBackend`,
+`OpenIn`'s `Backend` parameter, `SealFrom` and `WithRequireKeyScheduleErasure`
+are contracted in [sealing](../sealing/engineering.md#exported-surface). The
+conformance suite `backendtest` is contracted in
+[architecture.md](architecture.md#conformance-backendtest).
 
 ## Exported surface
 
@@ -40,11 +40,11 @@ builds it.
 | `SweepError.Backends`, `BackendSweepFailure{Backend; Err}` | `WipeAll`'s backend phase: one entry per registered `Sweeper` that failed, in name order ([shutdown-sweep](../shutdown-sweep/engineering.md)). |
 | `ErrBackendNotRegistered`, `BackendNotRegisteredError{Name}` | `Lookup` found no backend under `Name`. |
 | `ErrBackendExists`, `BackendExistsError{Name}` | `Register` found `Name` taken. |
-| `ErrInvalidBackend` | `Register` got a nil or typed-nil backend, or an invalid name. |
+| `ErrInvalidBackend` | `Register` got a nil or typed-nil backend, or an invalid name; so did `WithBackend` and `OpenIn` for a nil or typed-nil one. |
 | `ErrCapabilityUnsupported`, `CapabilityError{Backend; Capability}` | An operation needs a capability the handle or backend lacks. |
 | `ErrInvalidImport` | `NewImportSpec` refused the options, or an `Importer` refused the material's length for the algorithm. |
 | `ErrInvalidNonce`, `ErrAEADAuthentication` | An `AEAD` got a nonce that is not `NonceSize` bytes, or `Open` could not authenticate. |
-| `ErrCleanupFailed`, `CleanupError{Failure; Cause}` | A handle the sealer no longer needed refused its `Destroy`; the sealer keeps it for retry ([sealing](../sealing/engineering.md#error-semantics)). |
+| `ErrCleanupFailed`, `CleanupError{Failure; Causes}` | A handle the sealer no longer needed refused its `Destroy`, or cleanup failed alongside another failure; the sealer keeps a refusing handle for retry ([sealing](../sealing/engineering.md#error-semantics)). |
 
 ## Invariants
 
@@ -90,7 +90,7 @@ builds it.
 | `*BackendNotRegisteredError` | `Lookup` | `ErrBackendNotRegistered`; `Name` is the name asked for. |
 | `*BackendExistsError` | `Register` | `ErrBackendExists`; `Name` is the taken name. |
 | `ErrInvalidBackend` | `Register` | Itself. Returned bare: the name may be the problem, so it is not echoed. |
-| `*CapabilityError` | **T1**: operations that need a capability | `ErrCapabilityUnsupported`; `Backend` and `Capability` name what was missing. |
+| `*CapabilityError` | `NewSealer` with `WithBackend`, `OpenIn` and `SealFrom`: operations that need a capability | `ErrCapabilityUnsupported`; `Backend` and `Capability` name what was missing. |
 
 Texts are the sentinel's, then the detail with every name quoted
 (`strconv.Quote`), so a hostile name cannot forge a log line. Match with
@@ -126,8 +126,16 @@ Tests that register a backend remove it in `t.Cleanup` by editing the registry
 map directly; that is the only place a name is ever unbound. There is no
 integration suite: the registry touches no kernel state.
 
-Out-of-tree backends will be held to the seam by `backendtest`
-([architecture](architecture.md#conformance-backendtest)).
+## Testing a backend
+
+A backend author calls `backendtest.TestBackend` from a package test with a
+`Config`: a factory for a fresh backend, the backend's exact capability list,
+and one `HandleCase` per kind of handle it makes. Run it under `-race`. What it
+checks and what it returns are in
+[What it checks](architecture.md#what-it-checks). The suite's own tests run with
+`make test-backendtest`, `make coverage-backendtest` (held to the coverage
+floor) and `make test-backends`. Each check has a deliberately
+broken fake in `backendtest/fake_test.go` that the check must catch.
 
 ## Observability
 

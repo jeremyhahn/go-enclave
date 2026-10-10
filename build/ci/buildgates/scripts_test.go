@@ -15,6 +15,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 
 	"github.com/goccy/go-yaml"
@@ -865,9 +866,7 @@ func fakeTool(t *testing.T, dir, name, output string) string {
 	}
 	p := filepath.Join(dir, name)
 	body := "#!/bin/sh\ncat <<'EOF'\n" + output + "\nEOF\n"
-	if err := os.WriteFile(p, []byte(body), 0o755); err != nil {
-		t.Fatalf("write %s: %v", p, err)
-	}
+	writeExecutable(t, p, []byte(body))
 	return p
 }
 
@@ -932,9 +931,7 @@ func toolEnv(t *testing.T, bin string, over map[string]string) map[string]string
 	goScript := "#!/bin/sh\n" +
 		"if [ \"$1\" = version ] && [ $# -eq 2 ]; then echo \"$2: go1.27.1\"; exit 0; fi\n" +
 		"exit 1\n"
-	if err := os.WriteFile(goCmd, []byte(goScript), 0o755); err != nil {
-		t.Fatalf("write fake go: %v", err)
-	}
+	writeExecutable(t, goCmd, []byte(goScript))
 	env := map[string]string{
 		"PATH":         bin + ":" + isolatedPath(t),
 		"TOOL_INSTALL": "0",
@@ -1060,9 +1057,7 @@ func TestScriptsToolResolve_ArchiveToolOnPathMustHashToThePin(t *testing.T) {
 			marker := filepath.Join(t.TempDir(), "ran")
 			planted := filepath.Join(bin, tc.tool)
 			body := "#!/bin/sh\n: > " + marker + "\ncat <<'EOF'\n" + tc.output + "\nEOF\n"
-			if err := os.WriteFile(planted, []byte(body), 0o755); err != nil {
-				t.Fatalf("write %s: %v", planted, err)
-			}
+			writeExecutable(t, planted, []byte(body))
 
 			// The pins (all "a"s) are not this binary's hash.
 			env := toolEnv(t, bin, nil)
@@ -1135,9 +1130,7 @@ func fakeGo(t *testing.T, log string) string {
 		"if [ \"$1\" = version ] && [ $# -eq 2 ]; then exec " + real + " version \"$2\"; fi\n" +
 		"echo \"GOTOOLCHAIN=$GOTOOLCHAIN $*\" >> " + log + "\n" +
 		"exit 1\n"
-	if err := os.WriteFile(p, []byte(script), 0o755); err != nil {
-		t.Fatalf("write fake go: %v", err)
-	}
+	writeExecutable(t, p, []byte(script))
 	return p
 }
 
@@ -1150,9 +1143,54 @@ func copyExec(t *testing.T, src, dst string) {
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	if err := os.WriteFile(dst, b, 0o755); err != nil {
-		t.Fatalf("write: %v", err)
+	writeExecutable(t, dst, b)
+}
+
+// writeExecutable installs an executable file at path without ever opening
+// path for writing: the body goes to a temporary file beside it, which is
+// renamed into place. A process still executing the old file keeps its inode,
+// so the write cannot fail with ETXTBSY. The write descriptor is open only
+// under syscall.ForkLock's read side, so a concurrent fork (a parallel
+// test's exec.Command) cannot inherit it and hold the new file busy until it
+// execs.
+func writeExecutable(t *testing.T, path string, body []byte) {
+	t.Helper()
+	if err := installExecutable(path, body); err != nil {
+		t.Fatalf("write %s: %v", path, err)
 	}
+}
+
+func installExecutable(path string, body []byte) error {
+	tmp, err := writeTempExecutable(filepath.Dir(path), body)
+	if err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
+func writeTempExecutable(dir string, body []byte) (string, error) {
+	syscall.ForkLock.RLock()
+	defer syscall.ForkLock.RUnlock()
+	f, err := os.CreateTemp(dir, ".stub-*")
+	if err != nil {
+		return "", err
+	}
+	_, err = f.Write(body)
+	if err == nil {
+		err = f.Chmod(0o755)
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		_ = os.Remove(f.Name())
+		return "", err
+	}
+	return f.Name(), nil
 }
 
 // TestScriptsToolResolve_ActionlintIgnoresToolInstallZero pins #145/#146:
@@ -1314,9 +1352,7 @@ func fakeCurlDir(t *testing.T, body, log string) string {
 		"echo \"$*\" >> " + log + "\n" +
 		"while [ $# -gt 0 ]; do if [ \"$1\" = -o ]; then out=$2; shift; fi; shift; done\n" +
 		"printf '%s' '" + body + "' > \"$out\"\n"
-	if err := os.WriteFile(filepath.Join(bin, "curl"), []byte(curl), 0o755); err != nil {
-		t.Fatalf("write curl: %v", err)
-	}
+	writeExecutable(t, filepath.Join(bin, "curl"), []byte(curl))
 	return bin
 }
 
@@ -1604,9 +1640,7 @@ func newReleaseRepo(t *testing.T) *releaseRepo {
 	})
 	wrapper := filepath.Join(t.TempDir(), "agent-git")
 	script := "#!/bin/sh\nprintf '%s\\n' \"$1\" >> \"$0.log\"\nshift\nexec git -c commit.gpgsign=false -c tag.gpgsign=false \"$@\"\n"
-	if err := os.WriteFile(wrapper, []byte(script), 0o755); err != nil {
-		t.Fatalf("write wrapper: %v", err)
-	}
+	writeExecutable(t, wrapper, []byte(script))
 	forge := newFakeForge()
 	forge.defaultState = "success"
 	r := &releaseRepo{t: t, dir: dir, bare: t.TempDir(), forge: forge, env: map[string]string{
@@ -1900,9 +1934,7 @@ func TestScriptsRelease_CandidatesFollowOneAnother(t *testing.T) {
 func TestScriptsRelease_ARejectedMainNeverLeavesTheTag(t *testing.T) {
 	r := newReleaseRepo(t)
 	hook := "#!/bin/sh\n[ \"$1\" = refs/heads/main ] && exit 1\nexit 0\n"
-	if err := os.WriteFile(filepath.Join(r.bare, "hooks", "update"), []byte(hook), 0o755); err != nil {
-		t.Fatalf("write hook: %v", err)
-	}
+	writeExecutable(t, filepath.Join(r.bare, "hooks", "update"), []byte(hook))
 	out, ok := r.run("candidate", "v1.5.0-rc.1")
 	if ok {
 		t.Fatalf("released although dev refused main:\n%s", out)
@@ -2157,9 +2189,7 @@ func operandLogger(t *testing.T, dir, name, log, extra string) {
 		t.Fatalf("mkdir: %v", err)
 	}
 	script := "#!/bin/sh\n{ printf '%s\\n' '--- " + name + "'; for a in \"$@\"; do printf '<%s>\\n' \"$a\"; done; } >> '" + log + "'\n" + extra
-	if err := os.WriteFile(filepath.Join(dir, name), []byte(script), 0o755); err != nil {
-		t.Fatalf("write %s: %v", name, err)
-	}
+	writeExecutable(t, filepath.Join(dir, name), []byte(script))
 }
 
 // requireNoPwned fails if any payload in hostileDirName ran anywhere under dir.

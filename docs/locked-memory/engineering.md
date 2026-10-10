@@ -33,9 +33,9 @@ alive, borrows fail with `ErrEnclaveDestroyed`, `Destroy` returns `nil`. Use
 `*Memory`. A copied `Memory` value is a second handle on the same state, so
 `Destroy` through either destroys both; `go vet` (copylocks) flags the copy.
 
-`Open`, `OpenString` and `NewMemoryFromString` were removed in v0.8: a
-slice handed out past the lock is unmapped under its reader by `Destroy` or
-`WipeAll`, and a string source cannot be wiped.
+There is no accessor that hands out a slice past the lock, and no string
+constructor: a string source cannot be wiped. Removed identifiers and their
+replacements are in [Upgrading](../README.md#upgrading).
 
 ## Invariants
 
@@ -80,7 +80,7 @@ slice handed out past the lock is unmapped under its reader by `Destroy` or
 | `ErrLockedMemoryUnavailable` (`*LockedMemoryError`) | constructors, `Freeze`, `Destroy` | Kernel refused `mmap`/`mlock`/`madvise`/`mprotect`/`munlock`/`munmap`. From `Destroy` it means the release was refused and the pages are held (retry by calling `Destroy` again) **only if the error does not also match `ErrReleasedWithoutWipe`** — see below. |
 | `ErrEnclaveDestroyed` | `WithBytes`, `EqualTo`, `Freeze` | Material gone (destroyed, swept, or wiped-but-held). |
 | `ErrNilFunc` | `WithBytes` | `fn` is nil on a live enclave; nothing is borrowed. |
-| `ErrReleasedWithoutWipe` (`*UnwipedReleaseError`) | `Destroy`; `NewMemory`/`NewMemoryCopy` (joined into a freeze failure's rollback); `Allocator.New` likewise | `mprotect` denied, pages handed back with a bare `munmap` and **released**. They were locked for their whole life (never swapped) and the kernel zeroes anonymous pages before reuse, but the in-process wipe did not run. |
+| `ErrReleasedWithoutWipe` (`*UnwipedReleaseError`) | `Destroy`; `NewMemory`/`NewMemoryCopy` (carried with a freeze failure in its rollback's `*CleanupError`); `Allocator.New` likewise | `mprotect` denied, pages handed back with a bare `munmap` and **released**. They were locked for their whole life (never swapped) and the kernel zeroes anonymous pages before reuse, but the in-process wipe did not run. |
 | `ErrEnclaveCorrupted` | `Destroy`; also counted by the next `WipeAll` | Canary or guard mismatch. See below. |
 | `ErrCoreDumpLimitUnsupported` | `CoreDumpsDisabled` | Windows: no process-wide core-dump limit exists. |
 | `ErrCoreDumpLimitNotApplied` | `CoreDumpsDisabled` | `HardenProcess` has not run; importing the package leaves `RLIMIT_CORE` alone. |
@@ -94,8 +94,9 @@ other cause-carrying types share one shape: a single `Cause error` field, a
 message of the sentinel's text followed by `": "` and the cause, `Is` matching
 that sentinel only, and `Unwrap` returning `Cause`. Where a failure and an
 independent cleanup failure happen together (a refused rollback, a refused
-unlock), the error is an `errors.Join` of the two, so it matches both; that is
-the only join the package builds.
+unlock), the error is a `*CleanupError` carrying the failure and each refusal,
+so it matches all of them and `ErrCleanupFailed`. The package builds no
+`errors.Join`.
 
 ### `ErrReleasedWithoutWipe` and `ErrLockedMemoryUnavailable` are disjoint on release
 
@@ -117,7 +118,7 @@ would leave the material resident for the process lifetime, so it is unmapped.
 
 A **constructor** failure is different: a refused freeze always matches
 `ErrLockedMemoryUnavailable` (the construction failed), and when its rollback
-took the unwiped path the rollback's `ErrReleasedWithoutWipe` is joined in, so
+took the unwiped path the rollback's `ErrReleasedWithoutWipe` is carried with it in a `*CleanupError`, so
 that one error matches both. Testing `ErrReleasedWithoutWipe` first classifies
 every case correctly:
 
@@ -150,13 +151,23 @@ should stop is the caller's decision.
 
 | GOOS | Lock primitive | Per-mapping dump exclusion (verified) | Fork exclusion (verified) | `CoreDumpsDisabled()` after `HardenProcess` | Notes |
 |---|---|---|---|---|---|
-| linux, android | `mlock` | `MADV_DONTDUMP` (refusal fails the allocation) | `MADV_DONTFORK` on the whole mapping (refusal fails the allocation) | `setrlimit(RLIMIT_CORE, 0/0)` result | Only OS the tests run on. |
+| linux, android | `mlock` | `MADV_DONTDUMP` (refusal fails the allocation) | `MADV_DONTFORK` on the whole mapping (refusal fails the allocation) | `setrlimit(RLIMIT_CORE, 0/0)` result | The only GOOS whose tests run ([test status](#test-status)). |
 | freebsd, dragonfly | `mlock` | `MAP_NOCORE` + `MADV_NOCORE` (madvise refusal fails the allocation) | none: x/sys exposes no `minherit` | setrlimit result | |
 | openbsd | `mlock` | `MAP_CONCEAL` on the `mmap` itself | none: x/sys exposes no `minherit`, and raw syscalls are refused | setrlimit result | |
 | darwin, ios, netbsd | `mlock` | none exposed by x/sys | none | setrlimit result | `RLIMIT_CORE` is the only control. |
 | aix, solaris, illumos | `mlock` | none exposed by x/sys | none | setrlimit result | `mlock` needs a privilege an ordinary process lacks: unprivileged processes get `ErrLockedMemoryUnavailable` from every allocation. |
 | windows | `VirtualLock` | none (WER API deliberately unused) | n/a (no fork) | `ErrCoreDumpLimitUnsupported` | Dump exposure must be governed by host policy (WER `LocalDumps`, who may open the process). |
 | anything else | — | — | — | — | Does not compile. |
+
+### Test status
+
+Linux is the only platform whose tests run. For v0.9.0-rc.1 the BSDs (freebsd,
+openbsd, netbsd, dragonfly) and Windows are **build-only**: `make cross-build`
+compiles and vets them and nothing executes, so their rows above describe what
+the code does, not behavior a test has observed. Test runners for them come in
+a later release. darwin, iOS, illumos, Solaris, AIX and Android are likewise
+compiled, not run (iOS is not in the matrix; it builds through the darwin
+files).
 
 **Why `MADV_DONTFORK`, not `MADV_WIPEONFORK`.** Both keep the material out of a
 forked child. `WIPEONFORK` leaves the range mapped and zero-filled in the child,

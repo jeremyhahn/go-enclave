@@ -88,8 +88,9 @@ case errors.Is(err, providertest.ErrNotMeasured):
 	// PublicKey without Forge). Measure it, or accept it via SkipResidueSweep
 	// or SkipForgery.
 case errors.As(err, &pe):
-	// At least one assertion failed; err joins one *PropertyError per failed
-	// assertion (several can share a Property). errors.As returns the first.
+	// At least one assertion failed; err is a *FindingsError holding one
+	// *PropertyError per failed assertion (several can share a Property).
+	// errors.As returns the first.
 	t.Fatalf("%s: %s", pe.Property, pe.Detail)
 }
 ```

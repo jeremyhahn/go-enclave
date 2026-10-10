@@ -120,9 +120,10 @@ CROSS_TARGETS := linux/amd64 linux/arm64 linux/386 linux/arm \
 
 # Per-package targets (test-, coverage-, bench-<pkg>). The root package is enclave;
 # memscan is internal/memscan, the process-memory sweep the Linux tests share.
-PACKAGES          := enclave providertest memscan
+PACKAGES          := enclave providertest backendtest memscan
 PKGDIR_enclave      := .
 PKGDIR_providertest := ./providertest
+PKGDIR_backendtest  := ./backendtest
 PKGDIR_memscan      := ./internal/memscan
 
 # FEATURE MAPPING (local-software-factory §7). A feature is a directory
@@ -295,7 +296,7 @@ TESTFLAGS    := -count=1 -cpu=1,2,8 $(TEST_TIMEOUT)
 TEST_TARGETS     := $(addprefix test-,$(PACKAGES))
 COVERAGE_TARGETS := $(addprefix coverage-,$(PACKAGES))
 PROFILE_TARGETS  := $(addprefix coverage-profile-,$(PACKAGES))
-# Only the root package has benchmarks; providertest and memscan have none, so
+# Only the root package has benchmarks; providertest, backendtest and memscan have none, so
 # a bench target for them ran zero benchmarks.
 BENCH_PACKAGES   := enclave
 BENCH_TARGETS    := $(addprefix bench-,$(BENCH_PACKAGES))
@@ -304,7 +305,7 @@ BENCH_TARGETS    := $(addprefix bench-,$(BENCH_PACKAGES))
 .PHONY: test
 test: $(TEST_TARGETS)
 
-## test-<pkg>, coverage-<pkg>: one package (enclave, providertest, memscan); coverage-<pkg> FAILS below COVERAGE_THRESHOLD; bench-enclave: the root package's benchmarks
+## test-<pkg>, coverage-<pkg>: one package (enclave, providertest, backendtest, memscan); coverage-<pkg> FAILS below COVERAGE_THRESHOLD; bench-enclave: the root package's benchmarks
 .PHONY: $(TEST_TARGETS) $(COVERAGE_TARGETS) $(PROFILE_TARGETS) $(BENCH_TARGETS)
 $(TEST_TARGETS): test-%:
 	"$$GOCMD" test $(TEST_RACE) $(TESTFLAGS) $(PKGDIR_$*)

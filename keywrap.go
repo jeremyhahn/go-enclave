@@ -105,7 +105,7 @@ func sealOnDevice(key AEAD, plaintext, aad []byte) ([]byte, error) {
 	}
 	sealed, err := key.Seal(out, nonce, plaintext, aad)
 	if err != nil {
-		return nil, deviceFailure[sealFailed](err)
+		return nil, deviceFailure[SealError](err)
 	}
 	return sealed, nil
 }
@@ -123,7 +123,7 @@ func openOnDeviceInto(key AEAD, sealed, aad, dst []byte) error {
 	}
 	got, err := key.Open(dst[:0:len(dst)], nonce, sealed[ns:], aad)
 	if err != nil {
-		return deviceFailure[openFailed](err)
+		return deviceFailure[OpenError](err)
 	}
 	if len(got) > 0 && &got[0] != &dst[0] {
 		Wipe(got)
@@ -137,13 +137,13 @@ func openOnDeviceInto(key AEAD, sealed, aad, dst []byte) error {
 
 // deviceFailure translates an AEAD handle's error: a failed authentication
 // is the envelope's, a destroyed handle is left for hierarchyFailure to
-// judge, and anything else is the device's own failure of kind K.
-func deviceFailure[K kind](err error) error {
+// judge, and anything else is the device's own failure, an E.
+func deviceFailure[E causeShape, P causeError[E]](err error) error {
 	switch {
 	case errors.Is(err, ErrAEADAuthentication):
 		return ErrSealedAuthentication
 	case errors.Is(err, ErrEnclaveDestroyed):
 		return err
 	}
-	return &causeError[K]{Cause: err}
+	return newCause[E, P](err)
 }
