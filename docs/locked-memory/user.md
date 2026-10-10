@@ -1,6 +1,6 @@
 # Locked-memory enclaves — user guide
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-04
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-09
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Prerequisites
@@ -16,7 +16,7 @@
 ## Bring existing material in
 
 ```go
-e, err := enclave.NewMemoryEnclave(keyPEM) // keyPEM is wiped, on every path
+e, err := enclave.NewMemory(keyPEM) // keyPEM is wiped, on every path
 if err != nil {
 	return err
 }
@@ -30,7 +30,7 @@ err = e.WithBytes(func(key []byte) error {
 ```
 
 If you must keep your buffer (you do not own it), use
-`NewMemoryEnclaveCopy(src)` and wipe `src` yourself as soon as you can — the
+`NewMemoryCopy(src)` and wipe `src` yourself as soon as you can — the
 heap copy is outside every protection this package gives.
 
 ## Generate material in place
@@ -38,7 +38,7 @@ heap copy is outside every protection this package gives.
 Material that is about to be created should never touch the heap:
 
 ```go
-e, err := enclave.NewMemoryEnclaveSized(32)
+e, err := enclave.NewMemorySized(32)
 if err != nil {
 	return err
 }
@@ -73,11 +73,13 @@ writing at once is a data race.
 
 There is no accessor that hands out a slice beyond a borrow: a slice that
 outlives the lock is unmapped under its reader by `Destroy` or `WipeAll`.
-String material comes in as `NewMemoryEnclave([]byte(s))`.
+String material comes in as `NewMemory([]byte(s))`.
 
 ## Release
 
-`defer e.Destroy()` is the right default. When you want to know what happened:
+`defer e.Destroy()` is the right default. Pass `*Memory` around; a copied
+`Memory` value is the same enclave, so `Destroy` through either ends both
+(`go vet` flags the copy). When you want to know what happened:
 
 ```go
 if err := e.Destroy(); err != nil {
@@ -97,31 +99,17 @@ a security incident: something wrote into memory it did not own, and every
 other key in the process is in its reach. A `defer e.Destroy()` that discards
 the error does not lose it: the next `WipeAll` reports it in its `SweepError`.
 
-## Check core-dump hardening
+## Fork children
 
-```go
-if err := enclave.CoreDumpsDisabled(); err != nil {
-	log.Printf("core dumps not disabled process-wide: %v", err)
-}
-```
-
-On Windows this always returns `ErrCoreDumpLimitUnsupported`; govern crash
-dumps with host policy. On Linux hosts whose `core_pattern` pipes to a
-collector, `RLIMIT_CORE` is ignored; enclave pages are still excluded per
-mapping.
-
-Importing the package lowers `RLIMIT_CORE` to 0, soft and hard, at init. Child
-processes inherit that limit, so a tool your binary runs will not write core
-files either, and cannot raise the limit back without privilege.
-
-On Linux, enclave pages are also excluded from `fork(2)` children
+On Linux, enclave pages are excluded from `fork(2)` children
 (`MADV_DONTFORK`): a forked child has no mapping there, so touching an enclave
 in the child faults rather than reading the material.
 
 ## Harden the process (opt-in)
 
-`HardenProcess` marks the process non-dumpable on Linux. It is never called by
-the package; call it from `main` if your deployment accepts the trade-offs.
+Importing the package changes no process state. `HardenProcess` applies the
+process-wide protections; it is never called by the package, so call it from
+`main` if your deployment accepts the trade-offs.
 
 ```go
 func main() {
@@ -132,26 +120,45 @@ func main() {
 }
 ```
 
-What it buys: no core dump of any kind (piped collectors included), and no
-`ptrace` attach or `/proc/<pid>/mem` read by other processes of the same uid.
+It does two things, and reports each one that took:
 
-What it costs: same-uid debuggers (`dlv attach`, `gdb -p`), profilers and crash
-collectors stop working, and `/proc/<pid>` entries become owned by root, so
-same-uid monitoring that reads `maps`, `fd` or `environ` loses access. The flag
-carries into `fork` children and is reset by `execve`.
+- **Lowers `RLIMIT_CORE` to 0, soft and hard** (every platform but Windows).
+  No core files are written, and child processes inherit the limit, so a tool
+  your binary runs will not write core files either, and cannot raise the
+  limit back without privilege. On Linux hosts whose `core_pattern` pipes to a
+  collector, `RLIMIT_CORE` is ignored; enclave pages are still excluded per
+  mapping.
+- **Marks the process non-dumpable** (Linux). That buys no core dump of any
+  kind (piped collectors included), and no `ptrace` attach or `/proc/<pid>/mem`
+  read by other processes of the same uid. It costs same-uid debuggers (`dlv
+  attach`, `gdb -p`), profilers and crash collectors, and `/proc/<pid>` entries
+  become owned by root, so same-uid monitoring that reads `maps`, `fd` or
+  `environ` loses access. The flag carries into `fork` children and is reset by
+  `execve`.
 
-On other platforms it returns `ErrProcessHardeningUnsupported`.
+On Windows it returns `ErrProcessHardeningUnsupported`; govern crash dumps with
+host policy. `CoreDumpsDisabled` reports what the last `HardenProcess` did to
+the core limit:
+
+```go
+if err := enclave.CoreDumpsDisabled(); err != nil {
+	log.Printf("core dumps not disabled process-wide: %v", err)
+}
+```
+
+Before `HardenProcess` it returns `ErrCoreDumpLimitNotApplied`; on Windows,
+always `ErrCoreDumpLimitUnsupported`.
 
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
 |---|---|---|
 | `ErrLockedMemoryUnavailable` from a constructor | `RLIMIT_MEMLOCK` reached (or no privilege on AIX/Solaris/illumos), or a sandbox denies `mlock`/`madvise` | Raise the limit; destroy enclaves you no longer need; budget them ([locked-memory-budget](../locked-memory-budget/user.md)). |
-| `ErrInvalidSize` | `NewMemoryEnclaveSized(n)` with `n <= 0` or absurdly large | Fix the size computation. |
+| `ErrInvalidSize` | `NewMemorySized(n)` with `n <= 0` or absurdly large | Fix the size computation. |
 | `ErrEnclaveDestroyed` on an enclave you did not destroy | A shutdown `WipeAll` ran, or the constructor raced one | Stop workers before the shutdown sweep. |
-| `ErrReleasedWithoutWipe` from `Destroy` | `mprotect` denied by seccomp or a sandbox | Allow `mprotect` on the process's own memory. The pages were released (never swapped; zeroed by the kernel before reuse), but the in-process wipe was skipped. It does not match `ErrLockedMemoryUnavailable`, which means the pages are still held. |
+| `ErrReleasedWithoutWipe` from `Destroy` | `mprotect` denied by seccomp or a sandbox, on a frozen enclave | Allow `mprotect` on the process's own memory. The pages were released (never swapped; zeroed by the kernel before reuse), but the in-process wipe was skipped. It does not match `ErrLockedMemoryUnavailable`, which means the pages are still held. |
 | Process crashes (SIGSEGV) reading a slice | A slice kept past `WithBytes` outlived the enclave | Use `WithBytes`; never retain borrowed slices. |
-| Process crashes writing through a slice | Writing to a frozen enclave — including one `SealedEnclave.Open` returned, which is always frozen | Writes are only for sized enclaves, inside `WithBytes`, before `Freeze`; to edit opened plaintext, copy it into your own sized enclave inside the borrow. |
+| Process crashes writing through a slice | Writing to a frozen enclave — including one `Sealed.Open` returned, which is always frozen | Writes are only for sized enclaves, inside `WithBytes`, before `Freeze`; to edit opened plaintext, copy it into your own sized enclave inside the borrow. |
 | `ErrEnclaveCorrupted` from `Destroy` or `WipeAll` | Buffer underflow or memory corruption elsewhere | Treat as a security incident; find the writer. |
 | Build error `undefined: go_enclave_does_not_support_this_GOOS` | Unsupported GOOS (js, wasip1, plan9) | Not supported by design. |
 

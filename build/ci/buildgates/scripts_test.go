@@ -957,6 +957,8 @@ func toolEnv(t *testing.T, bin string, over map[string]string) map[string]string
 
 // The version each tool really prints, including shapes that carry a second
 // version (the Go toolchain's) that a careless parse would read instead.
+// actionlint is not here: it is never taken from PATH
+// (TestScriptsToolResolve_ActionlintIgnoresToolInstallZero).
 var toolOutputs = []struct {
 	tool, version, output string
 }{
@@ -966,7 +968,6 @@ var toolOutputs = []struct {
 	{"gosec", "v2.29.0", "Version: v2.29.0\nGit tag: \nBuild date: "},
 	{"govulncheck", "v1.8.0", "Scanner: govulncheck@v1.8.0\nGo: go1.27.1\nDB: https://vuln.go.dev"},
 	{"govulncheck", "v1.8.0", "Go: go1.27.1\nScanner: govulncheck@v1.8.0\nDB: https://vuln.go.dev"},
-	{"actionlint", "v1.7.12", "v1.7.12\ninstalled by building from source\nbuilt with go1.26.7 compiler for linux/amd64"},
 	{"trivy", "v0.75.0", "Version: 0.75.0\nVulnerability DB:\n  Version: 2"},
 	{"shellcheck", "v0.11.0", "ShellCheck - shell script analysis tool\nversion: 0.11.0\nlicense: GNU General Public License, version 3\nwebsite: https://www.shellcheck.net"},
 }
@@ -1151,6 +1152,80 @@ func copyExec(t *testing.T, src, dst string) {
 	}
 	if err := os.WriteFile(dst, b, 0o755); err != nil {
 		t.Fatalf("write: %v", err)
+	}
+}
+
+// TestScriptsToolResolve_ActionlintIgnoresToolInstallZero pins #145/#146:
+// actionlint ignores TOOL_INSTALL=0 and is resolved as under TOOL_INSTALL=1. A
+// copy on PATH that reports exactly the pin (and was built by the module's Go)
+// is used; the CI image's copy, built from an untagged commit, reports a
+// pseudo-version and is not, so the pinned tag is built into TOOLS_DIR instead.
+// The version check still refuses an unversioned binary.
+func TestScriptsToolResolve_ActionlintIgnoresToolInstallZero(t *testing.T) {
+	requireLinuxInstallPath(t)
+	const pin = "v1.7.12"
+	pseudo := "v1.7.13-0.20260419144658-011a6d15e749\ninstalled by building from source\nbuilt with go1.27.1 compiler for linux/amd64"
+	genuine := pin + "\ninstalled by building from source\nbuilt with go1.27.1 compiler for linux/amd64"
+
+	for _, mode := range []string{"0", "1"} {
+		t.Run("TOOL_INSTALL="+mode, func(t *testing.T) {
+			image, toolchain := buildFakeGoTool(t, pseudo)
+			real, _ := buildFakeGoTool(t, genuine)
+			bin := t.TempDir()
+			onPath := filepath.Join(bin, "actionlint")
+			tools := t.TempDir()
+			cached := filepath.Join(tools, "actionlint-"+pin+"-"+toolchain, "actionlint")
+			log := filepath.Join(t.TempDir(), "go.log")
+			run := func() (string, bool, string) {
+				t.Helper()
+				_ = os.Remove(log)
+				env := toolEnv(t, bin, map[string]string{
+					"TOOL_INSTALL": mode, "TOOLS_DIR": tools, "TOOLCHAIN": toolchain, "GO": fakeGo(t, log),
+				})
+				out, ok := runScript(t, t.TempDir(), env, "tool.sh", "actionlint", pin)
+				calls, _ := os.ReadFile(log)
+				return out, ok, string(calls)
+			}
+
+			// A PATH copy reporting a pseudo-version is not used: the pinned
+			// tag is installed instead (the fake go fails it, so the run fails).
+			copyExec(t, image, onPath)
+			out, ok, calls := run()
+			if ok || !strings.Contains(calls, "GOTOOLCHAIN="+toolchain+" install github.com/rhysd/actionlint/cmd/actionlint@"+pin) {
+				t.Fatalf("did not build actionlint %s from source (ok=%v, go calls %q):\n%s", pin, ok, calls, out)
+			}
+			if !strings.Contains(out, "is not the pinned build") {
+				t.Fatalf("the PATH copy's refusal is not reported:\n%s", out)
+			}
+
+			// A PATH copy reporting exactly the pin is used, with no install.
+			copyExec(t, real, onPath)
+			if out, ok, calls = run(); !ok || strings.TrimSpace(out) != onPath || calls != "" {
+				t.Fatalf("did not use the PATH copy at the pin (ok=%v, go calls %q):\n%s", ok, calls, out)
+			}
+
+			// An unversioned binary in the project's own directory is refused
+			// as well, and reinstalled over.
+			copyExec(t, image, onPath)
+			copyExec(t, image, cached)
+			if out, ok, calls = run(); ok || !strings.Contains(calls, " install") {
+				t.Fatalf("trusted a project-built actionlint that reports a pseudo-version (ok=%v, go calls %q):\n%s", ok, calls, out)
+			}
+
+			// The genuine pinned build in the project's directory is used with
+			// no install, though PATH still carries the image's copy.
+			copyExec(t, real, cached)
+			// (out carries stderr too; the path is its last line.)
+			if out, ok, calls = run(); !ok || !strings.HasSuffix(strings.TrimSpace(out), "\n"+cached) || calls != "" {
+				t.Fatalf("did not use the project-built actionlint (ok=%v, go calls %q):\n%s", ok, calls, out)
+			}
+		})
+	}
+
+	// A value that is neither 0 nor 1 is still refused.
+	env := toolEnv(t, t.TempDir(), map[string]string{"TOOL_INSTALL": "yes", "TOOLS_DIR": t.TempDir()})
+	if out, ok := runScript(t, t.TempDir(), env, "tool.sh", "actionlint", pin); ok || !strings.Contains(out, "TOOL_INSTALL must be 0") {
+		t.Fatalf("accepted TOOL_INSTALL=yes for actionlint (ok=%v):\n%s", ok, out)
 	}
 }
 

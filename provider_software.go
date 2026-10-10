@@ -10,6 +10,7 @@ package enclave
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"sync"
 )
@@ -18,11 +19,16 @@ import (
 // key under NewGCMWithRandomNonce, the same margin as kekMessageLimit.
 const softwareProtectLimit = 1 << 31
 
+// softwareProtectKeyInfo is the HKDF info that binds the key Protect wraps
+// under to its one use, so it is never the root UnsealRoot exports.
+const softwareProtectKeyInfo = "go-enclave v1 SoftwareProvider Protect key"
+
 // SoftwareProvider is the pure-software provider, and the only one go-enclave
 // ships. It implements [RootUnsealer] (the default for [ModeRootKey]),
-// [KeyProtector] (AES-GCM under the same root, for tests and development of
-// [ModePerOperation]) and [HealthReporter]. Its root is generated into a
-// locked [MemoryEnclave] at first use.
+// [KeyProtector] (AES-GCM under a key derived from the root, for tests and
+// development of [ModePerOperation]) and [HealthReporter]. Its root is
+// generated into a locked [Memory] at first use, and the Protect key,
+// HKDF-SHA256 of the root under its own info, at the first Protect.
 //
 // Because the root lives in this process, a reader of this process's live
 // memory can recover it, and AES key schedules reach the heap as described on
@@ -35,14 +41,26 @@ const softwareProtectLimit = 1 << 31
 // a context already ended with ctx.Err() before the root is touched or
 // generated; no method blocks beyond a short critical section.
 //
-// The zero value is not usable; construct with [NewSoftwareProvider]. A
-// SoftwareProvider is safe for concurrent use.
+// The zero value is not usable: its methods report
+// [ErrProviderNotConstructed]; construct with [NewSoftwareProvider]. A
+// SoftwareProvider is safe for concurrent use, and a copy shares the
+// original's root and lock.
 type SoftwareProvider struct {
+	_ noCopy
+	s *softwareState
+}
+
+// softwareState is a [SoftwareProvider]'s mutable state, on the heap so that
+// copies of the provider share it.
+type softwareState struct {
 	mu sync.Mutex
 	// root is created on first use and retried on failure, since a
 	// RLIMIT_MEMLOCK refusal can lift. Non-nil but dead means a sweep
 	// destroyed it, and it must not be regenerated.
-	root *MemoryEnclave
+	root *Memory
+	// protectKey is derived from root at the first Protect, and is dead
+	// exactly when root is.
+	protectKey *Memory
 	// protects counts Protect attempts, charged before each so a failed one
 	// still counts; only encryptions count against the bound.
 	protects uint64
@@ -61,35 +79,91 @@ var (
 // is generated at first use so that merely constructing one — which
 // [NewSealer] does by default — costs no locked memory.
 func NewSoftwareProvider() *SoftwareProvider {
-	return &SoftwareProvider{}
+	return &SoftwareProvider{s: &softwareState{}}
+}
+
+// state returns the provider's shared state, or [ErrProviderNotConstructed]
+// for one [NewSoftwareProvider] did not build.
+func (p *SoftwareProvider) state() (*softwareState, error) {
+	if p == nil || p.s == nil {
+		return nil, ErrProviderNotConstructed
+	}
+	return p.s, nil
 }
 
 // rootLocked returns the root enclave, generating it on first use. The
-// caller holds p.mu.
-func (p *SoftwareProvider) rootLocked() (*MemoryEnclave, error) {
-	root, err := p.liveRootLocked()
+// caller holds s.mu.
+func (s *softwareState) rootLocked() (*Memory, error) {
+	root, err := s.liveRootLocked()
 	if err != nil || root != nil {
 		return root, err
 	}
 	if root, err = newKeyEnclave(RootKeyBytes); err != nil {
 		return nil, err
 	}
-	p.root = root
+	s.root = root
 	return root, nil
+}
+
+// protectKeyLocked returns the Protect key, deriving it, and the root, on
+// first use. The caller holds s.mu.
+func (s *softwareState) protectKeyLocked() (*Memory, error) {
+	root, err := s.rootLocked()
+	if err != nil || s.protectKey != nil {
+		return s.protectKey, err
+	}
+	k, err := deriveProtectKey(root)
+	if err != nil {
+		return nil, err
+	}
+	s.protectKey = k
+	return k, nil
+}
+
+// deriveProtectKey derives the Protect key from root into a fresh locked
+// enclave: HKDF-SHA256 under softwareProtectKeyInfo. The root is uniformly
+// random, so no salt is needed; the info alone separates the two keys. The
+// HKDF output and HMAC state are heap memory, wiped or erased as for an AES
+// key schedule.
+func deriveProtectKey(root *Memory) (*Memory, error) {
+	k, err := NewMemorySized(RootKeyBytes)
+	if err != nil {
+		return nil, err
+	}
+	if err := k.WithBytes(func(dst []byte) error {
+		return root.WithBytes(func(r []byte) error {
+			var herr error
+			secretDo(func() {
+				var b []byte
+				if b, herr = hkdfKey(sha256.New, r, nil, softwareProtectKeyInfo, len(dst)); herr == nil {
+					copy(dst, b)
+					Wipe(b)
+				}
+			})
+			if herr != nil {
+				return &SealError{Cause: herr}
+			}
+			return nil
+		})
+	}); err != nil {
+		return nil, destroyOnFailure(swept(err), k)
+	}
+	return k, nil
 }
 
 // liveRootLocked is the one statement of the provider's state: it reports
 // [ErrSealerDestroyed] after Destroy, [ErrSealerWiped] once a shutdown sweep
-// has destroyed the root, and otherwise the root, nil before first use. The
-// caller holds p.mu.
-func (p *SoftwareProvider) liveRootLocked() (*MemoryEnclave, error) {
+// has destroyed the root or the Protect key, and otherwise the root, nil
+// before first use. The caller holds s.mu.
+func (s *softwareState) liveRootLocked() (*Memory, error) {
 	switch {
-	case p.destroyed:
+	case s.destroyed:
 		return nil, ErrSealerDestroyed
-	case p.root != nil && !p.root.IsAlive():
+	case s.root != nil && !s.root.IsAlive(),
+		s.protectKey != nil && !s.protectKey.IsAlive():
 		return nil, ErrSealerWiped
 	default:
-		return p.root, nil
+		return s.root, nil
 	}
 }
 
@@ -98,10 +172,14 @@ func (p *SoftwareProvider) liveRootLocked() (*MemoryEnclave, error) {
 // provider's root, and nil otherwise, including when no root exists yet. It
 // never generates a root.
 func (p *SoftwareProvider) Health() error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	s, err := p.state()
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	_, err := p.liveRootLocked()
+	_, err = s.liveRootLocked()
 	return err
 }
 
@@ -115,31 +193,37 @@ func swept(err error) error {
 }
 
 // Protect implements [KeyProtector]: key is wrapped with AES-GCM under the
-// provider root, with the blob's frame bound as AAD.
+// Protect key derived from the provider root, with the blob's frame bound as
+// AAD.
 //
 // It returns ctx.Err() if ctx has already ended, [ErrProviderMessageLimit]
-// once the root's encryption budget is spent, [ErrSealerWiped] after a
-// shutdown sweep, and [ErrLockedMemoryUnavailable] if the root cannot be
-// created on first use. A refused call charges nothing to the budget.
+// once the key's encryption budget is spent, [ErrSealerWiped] after a
+// shutdown sweep, and [ErrLockedMemoryUnavailable] if the root or the Protect
+// key cannot be created on first use. A refused call charges nothing to the
+// budget.
 func (p *SoftwareProvider) Protect(ctx context.Context, key []byte) ([]byte, error) {
+	s, err := p.state()
+	if err != nil {
+		return nil, err
+	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	root, err := p.rootLocked()
+	pk, err := s.protectKeyLocked()
 	if err != nil {
 		return nil, err
 	}
-	if p.protects >= softwareProtectLimit {
+	if s.protects >= softwareProtectLimit {
 		return nil, ErrProviderMessageLimit
 	}
-	p.protects++
+	s.protects++
 
 	// The frame's generation field is zero: this provider has one root.
-	blob, err := wrapKey(root, key, blobKindProvider, 0)
+	blob, err := wrapKey(pk, key, blobKindProvider, 0)
 	if err != nil {
 		return nil, swept(err)
 	}
@@ -152,18 +236,21 @@ func (p *SoftwareProvider) Protect(ctx context.Context, key []byte) ([]byte, err
 // provider instance. A context already ended is refused with ctx.Err()
 // before the blob is examined.
 func (p *SoftwareProvider) Unprotect(ctx context.Context, blob, key []byte) error {
+	s, err := p.state()
+	if err != nil {
+		return err
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	root, err := p.liveRootLocked()
-	if err != nil {
+	if _, err := s.liveRootLocked(); err != nil {
 		return err
 	}
-	if root == nil {
+	if s.protectKey == nil {
 		// This provider has protected nothing, so no blob can be its own.
 		return ErrSealedAuthentication
 	}
@@ -173,7 +260,7 @@ func (p *SoftwareProvider) Unprotect(ctx context.Context, blob, key []byte) erro
 		return ErrSealedAuthentication
 	}
 
-	return swept(unwrapKey(root, blob, key))
+	return swept(unwrapKey(s.protectKey, blob, key))
 }
 
 // UnsealRoot implements [RootUnsealer]: it copies the provider root,
@@ -181,8 +268,12 @@ func (p *SoftwareProvider) Unprotect(ctx context.Context, blob, key []byte) erro
 // long; any other length is [ErrInvalidSize]. A context already ended is
 // refused with ctx.Err() before the root is generated or copied. The root
 // then exists in two locked enclaves, the provider's and the Sealer's, and a
-// shutdown sweep destroys both.
+// shutdown sweep destroys both. The root is never the key Protect uses.
 func (p *SoftwareProvider) UnsealRoot(ctx context.Context, dst []byte) error {
+	s, err := p.state()
+	if err != nil {
+		return err
+	}
 	if len(dst) != RootKeyBytes {
 		return ErrInvalidSize
 	}
@@ -190,10 +281,10 @@ func (p *SoftwareProvider) UnsealRoot(ctx context.Context, dst []byte) error {
 		return err
 	}
 
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	root, err := p.rootLocked()
+	root, err := s.rootLocked()
 	if err != nil {
 		return err
 	}
@@ -203,19 +294,21 @@ func (p *SoftwareProvider) UnsealRoot(ctx context.Context, dst []byte) error {
 	}))
 }
 
-// Destroy releases the provider's root. Every later call fails closed with
-// [ErrSealerDestroyed], so everything it protected — and every [Sealer] that
-// uses it — is unrecoverable. It waits for an operation in progress, which is
-// in-process and short. A release the kernel refuses is reported and stays
-// on the [WipeAll] ledger; calling Destroy again retries it. Destroy is
-// idempotent and safe on a nil provider.
+// Destroy releases the provider's root and Protect key. Every later call, on
+// it or any copy, fails closed with [ErrSealerDestroyed], so everything it
+// protected — and every [Sealer] that uses it — is unrecoverable. It waits
+// for an operation in progress, which is in-process and short. A release the
+// kernel refuses is reported and stays on the [WipeAll] ledger; calling
+// Destroy again retries it. Destroy is idempotent and safe on a nil or zero
+// provider.
 func (p *SoftwareProvider) Destroy() error {
-	if p == nil {
+	s, err := p.state()
+	if err != nil {
 		return nil
 	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	p.destroyed = true
-	return p.root.Destroy()
+	s.destroyed = true
+	return withCleanupFailure(s.protectKey.Destroy(), s.root.Destroy())
 }

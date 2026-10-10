@@ -154,7 +154,7 @@ func lockedVMAs(maps []vma) []vma {
 
 // dataAddr returns the address of an enclave's first data byte. Only the
 // address leaves the borrow.
-func dataAddr(t *testing.T, e *enclave.MemoryEnclave) uintptr {
+func dataAddr(t *testing.T, e *enclave.Memory) uintptr {
 	t.Helper()
 	var addr uintptr
 	if err := e.WithBytes(func(b []byte) error {
@@ -228,11 +228,11 @@ func (n needle) matchAt(buf []byte, i int) bool {
 func (n needle) equals(b []byte) bool { return len(b) == needleLen && n.matchAt(b, 0) }
 
 // enclaveFromNeedle fills a fresh enclave with the material.
-func enclaveFromNeedle(t *testing.T, n needle) *enclave.MemoryEnclave {
+func enclaveFromNeedle(t *testing.T, n needle) *enclave.Memory {
 	t.Helper()
-	e, err := enclave.NewMemoryEnclaveSized(needleLen)
+	e, err := enclave.NewMemorySized(needleLen)
 	if err != nil {
-		t.Fatalf("NewMemoryEnclaveSized: %v", err)
+		t.Fatalf("NewMemorySized: %v", err)
 	}
 	if err := e.WithBytes(func(b []byte) error { n.fill(b); return nil }); err != nil {
 		t.Fatalf("filling the enclave: %v", err)

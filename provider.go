@@ -27,7 +27,7 @@ const RootKeyBytes = 32
 // public key can use to wrap a key of their choosing, does not qualify. Any
 // other failure (device unreachable, session limit, ended context) is
 // returned as the provider's own error, never as ErrSealedAuthentication;
-// [SealedEnclave.Open] joins it under [ErrOpenFailed] with the provider's
+// [Sealed.Open] joins it under [ErrOpenFailed] with the provider's
 // error still reachable through errors.Is and errors.As.
 //
 // Protect encrypts and authenticates key (always [RootKeyBytes] long) and
@@ -88,7 +88,7 @@ type RootUnsealer interface {
 }
 
 // HealthReporter is an optional capability of a [KeyProtector], found by type
-// assertion and consulted by [SealedEnclave.Openable].
+// assertion and consulted by [Sealed.Openable].
 //
 // Health returns nil if the provider can still unprotect what it protected,
 // and an error matching [ErrSealerWiped] (or [ErrSealerDestroyed]) if a

@@ -20,13 +20,13 @@ import (
 	"github.com/jeremyhahn/go-enclave/internal/memscan"
 )
 
-// Where a MemoryEnclave's material lives, and that it is gone after Destroy,
+// Where a Memory's material lives, and that it is gone after Destroy,
 // measured by sweeping every readable mapping (procfs_test.go). Each absence
 // check is preceded by a control that finds the material where it is known to
 // be, so a blind sweep cannot pass.
 
 // TestLockedMemory_EnclaveMaterialLivesOnlyInItsEnclaveAndIsGoneAfterDestroy follows one
-// secret through every MemoryEnclave constructor a consumer has.
+// secret through every Memory constructor a consumer has.
 func TestLockedMemory_EnclaveMaterialLivesOnlyInItsEnclaveAndIsGoneAfterDestroy(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		alloc, err := enclave.NewAllocator(16 * enclave.LockedSize(1))
@@ -35,7 +35,7 @@ func TestLockedMemory_EnclaveMaterialLivesOnlyInItsEnclaveAndIsGoneAfterDestroy(
 		}
 
 		// Generated straight into locked pages: never anywhere but the enclave.
-		t.Run("NewMemoryEnclaveSized", func(t *testing.T) {
+		t.Run("NewMemorySized", func(t *testing.T) {
 			n := newNeedle(t)
 			e := enclaveFromNeedle(t, n)
 			if err := e.Freeze(); err != nil {
@@ -48,19 +48,19 @@ func TestLockedMemory_EnclaveMaterialLivesOnlyInItsEnclaveAndIsGoneAfterDestroy(
 
 		// The constructor wipes the caller's slice. The heap copy is also the
 		// sweep's control: it must be found before the constructor runs.
-		t.Run("NewMemoryEnclave", func(t *testing.T) {
+		t.Run("NewMemory", func(t *testing.T) {
 			n := newNeedle(t)
 			src := heapBytes(needleLen)
 			n.fill(src)
 			hits, scanned := sweep(t, n)
 			requireHitsExactly(t, "caller's heap slice, before the constructor", hits, scanned, addrOfSlice(src))
 
-			e, err := enclave.NewMemoryEnclave(src)
+			e, err := enclave.NewMemory(src)
 			if err != nil {
-				t.Fatalf("NewMemoryEnclave: %v", err)
+				t.Fatalf("NewMemory: %v", err)
 			}
 			if !memscan.AllZero(src) {
-				t.Fatalf("NewMemoryEnclave did not wipe the caller's slice")
+				t.Fatalf("NewMemory did not wipe the caller's slice")
 			}
 			hits, scanned = sweep(t, n)
 			requireHitsExactly(t, "live, after the constructor took ownership", hits, scanned, dataAddr(t, e))
@@ -69,13 +69,13 @@ func TestLockedMemory_EnclaveMaterialLivesOnlyInItsEnclaveAndIsGoneAfterDestroy(
 
 		// The copying constructor's documented cost: the source survives on
 		// the heap until its owner wipes it; Destroy cannot reach it.
-		t.Run("NewMemoryEnclaveCopy", func(t *testing.T) {
+		t.Run("NewMemoryCopy", func(t *testing.T) {
 			n := newNeedle(t)
 			src := heapBytes(needleLen)
 			n.fill(src)
-			e, err := enclave.NewMemoryEnclaveCopy(src)
+			e, err := enclave.NewMemoryCopy(src)
 			if err != nil {
-				t.Fatalf("NewMemoryEnclaveCopy: %v", err)
+				t.Fatalf("NewMemoryCopy: %v", err)
 			}
 			hits, scanned := sweep(t, n)
 			requireHitsExactly(t, "live, copy constructor (source intact by contract)", hits, scanned, addrOfSlice(src), dataAddr(t, e))
@@ -171,7 +171,7 @@ func TestLockedMemory_DestroyedEnclaveRefusesEveryAccess(t *testing.T) {
 
 // destroyAndRequireGone destroys e and requires the material to be absent
 // from every readable mapping of the process afterwards.
-func destroyAndRequireGone(t *testing.T, e *enclave.MemoryEnclave, n needle) {
+func destroyAndRequireGone(t *testing.T, e *enclave.Memory, n needle) {
 	t.Helper()
 	if err := e.Destroy(); err != nil {
 		t.Fatalf("Destroy: %v", err)
@@ -191,20 +191,20 @@ func TestLockedMemory_EnclaveAccessorsTellTheTruth(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		const secret = "accessor material, 32 bytes long"
 
-		moved, err := enclave.NewMemoryEnclave([]byte(secret))
+		moved, err := enclave.NewMemory([]byte(secret))
 		if err != nil {
-			t.Fatalf("NewMemoryEnclave: %v", err)
+			t.Fatalf("NewMemory: %v", err)
 		}
 		src := []byte(secret)
-		copied, err := enclave.NewMemoryEnclaveCopy(src)
+		copied, err := enclave.NewMemoryCopy(src)
 		if err != nil {
-			t.Fatalf("NewMemoryEnclaveCopy: %v", err)
+			t.Fatalf("NewMemoryCopy: %v", err)
 		}
 		if string(src) != secret {
-			t.Fatal("NewMemoryEnclaveCopy changed its source; it must leave the caller's buffer as it found it")
+			t.Fatal("NewMemoryCopy changed its source; it must leave the caller's buffer as it found it")
 		}
 
-		for name, e := range map[string]*enclave.MemoryEnclave{"Move": moved, "Copy": copied} {
+		for name, e := range map[string]*enclave.Memory{"Move": moved, "Copy": copied} {
 			if e.Size() != len(secret) {
 				t.Errorf("%s: Size = %d, want %d", name, e.Size(), len(secret))
 			}
@@ -248,14 +248,14 @@ func TestLockedMemory_EnclaveAccessorsTellTheTruth(t *testing.T) {
 
 		// Empty material is refused by every constructor, before any locked
 		// memory is requested.
-		if _, err := enclave.NewMemoryEnclave(nil); !errors.Is(err, enclave.ErrEmptyEnclave) {
-			t.Errorf("NewMemoryEnclave(nil) = %v, want ErrEmptyEnclave", err)
+		if _, err := enclave.NewMemory(nil); !errors.Is(err, enclave.ErrEmptyEnclave) {
+			t.Errorf("NewMemory(nil) = %v, want ErrEmptyEnclave", err)
 		}
-		if _, err := enclave.NewMemoryEnclaveCopy(nil); !errors.Is(err, enclave.ErrEmptyEnclave) {
-			t.Errorf("NewMemoryEnclaveCopy(nil) = %v, want ErrEmptyEnclave", err)
+		if _, err := enclave.NewMemoryCopy(nil); !errors.Is(err, enclave.ErrEmptyEnclave) {
+			t.Errorf("NewMemoryCopy(nil) = %v, want ErrEmptyEnclave", err)
 		}
-		if _, err := enclave.NewMemoryEnclaveSized(0); !errors.Is(err, enclave.ErrInvalidSize) {
-			t.Errorf("NewMemoryEnclaveSized(0) = %v, want ErrInvalidSize", err)
+		if _, err := enclave.NewMemorySized(0); !errors.Is(err, enclave.ErrInvalidSize) {
+			t.Errorf("NewMemorySized(0) = %v, want ErrInvalidSize", err)
 		}
 
 		if n, err := enclave.WipeAll(context.Background()); n != 0 || err != nil {
@@ -288,24 +288,24 @@ func TestLockedMemory_EnclaveErrorTypesRenderEveryValue(t *testing.T) {
 }
 
 // TestLockedMemory_DestroyedAndNilEnclavesAnswerSafely pins that every accessor of a
-// destroyed or nil MemoryEnclave returns its documented sentinel or zero value
+// destroyed or nil Memory returns its documented sentinel or zero value
 // without touching unmapped memory.
 func TestLockedMemory_DestroyedAndNilEnclavesAnswerSafely(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
-		var nilEnclave *enclave.MemoryEnclave
+		var nilEnclave *enclave.Memory
 		if nilEnclave.Size() != 0 || nilEnclave.IsAlive() || nilEnclave.Destroy() != nil {
-			t.Error("a nil *MemoryEnclave does not answer as an empty, dead, already-released enclave")
+			t.Error("a nil *Memory does not answer as an empty, dead, already-released enclave")
 		}
 		if err := nilEnclave.WithBytes(func([]byte) error { return nil }); !errors.Is(err, enclave.ErrEnclaveDestroyed) {
-			t.Errorf("WithBytes on a nil *MemoryEnclave = %v, want ErrEnclaveDestroyed", err)
+			t.Errorf("WithBytes on a nil *Memory = %v, want ErrEnclaveDestroyed", err)
 		}
 		if err := nilEnclave.Freeze(); !errors.Is(err, enclave.ErrEnclaveDestroyed) {
-			t.Errorf("Freeze on a nil *MemoryEnclave = %v, want ErrEnclaveDestroyed", err)
+			t.Errorf("Freeze on a nil *Memory = %v, want ErrEnclaveDestroyed", err)
 		}
 
-		e, err := enclave.NewMemoryEnclaveSized(32)
+		e, err := enclave.NewMemorySized(32)
 		if err != nil {
-			t.Fatalf("NewMemoryEnclaveSized: %v", err)
+			t.Fatalf("NewMemorySized: %v", err)
 		}
 		if err := e.Destroy(); err != nil {
 			t.Fatalf("Destroy: %v", err)

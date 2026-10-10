@@ -13,9 +13,9 @@ legacy documents to migrate. The generated API reference is on
 
 | Feature | What it covers |
 |---|---|
-| [locked-memory](locked-memory/user.md) | `MemoryEnclave`: constructors, borrowing, `Freeze`, `Destroy` and canary corruption, guard pages and canary, platform and core-dump matrix |
+| [locked-memory](locked-memory/user.md) | `Memory`: constructors, borrowing, `Freeze`, `Destroy` and canary corruption, guard pages and canary, platform and core-dump matrix |
 | [locked-memory-budget](locked-memory-budget/user.md) | `Allocator`, `RLIMIT_MEMLOCK` discovery, retuning, the process allocator, refunds for failed constructions |
-| [sealing](sealing/user.md) | `SealedEnclave`, `Sealer` modes, the `KeyProtector`/`RootUnsealer` seam, contexts, `Openable`, FIPS, the key-schedule heap exposure and its erasure under `runtime/secret` |
+| [sealing](sealing/user.md) | `Sealed`, `Sealer` modes, the `KeyProtector`/`RootUnsealer` seam, contexts, `Openable`, FIPS, the key-schedule heap exposure and its erasure under `runtime/secret` |
 | [shutdown-sweep](shutdown-sweep/user.md) | `WipeAll(ctx)`: admission, waiting for borrows, termination, the count and `SweepError` |
 | [provider-conformance](provider-conformance/user.md) | `providertest.TestProvider(ctx, cfg)` for TPM/HSM/KMS provider authors |
 | [backends](backends/user.md) | The seam for hardware enclaves: `Handle`, `Backend`, capabilities, the named registry, `As`, and the decided design of the wiring still to come |
@@ -26,6 +26,86 @@ This is the only place migration guidance is written; each feature's `user.md`
 and `api.md` link here. The module is pre-1.0 (`v0.y.z-alpha`): a breaking
 change lands in a MINOR bump under a `BREAKING` heading in
 [CHANGELOG.md](../CHANGELOG.md). Upgrade one release at a time.
+
+### v0.9.0-alpha (from v0.8)
+
+#### Renames
+
+The package name already says "enclave", so the types drop the suffix. There
+are no deprecated aliases; rename with a search and replace.
+
+| v0.8 | v0.9 |
+|---|---|
+| `MemoryEnclave` | `Memory` |
+| `NewMemoryEnclave`, `NewMemoryEnclaveCopy`, `NewMemoryEnclaveSized` | `NewMemory`, `NewMemoryCopy`, `NewMemorySized` |
+| `SealedEnclave` | `Sealed` |
+| `(*SealedEnclave).OpenWith(ctx, a)` | `(*Sealed).OpenIn(ctx, a)` |
+
+#### Locked memory
+
+**Importing the package no longer lowers `RLIMIT_CORE`; `HardenProcess` does**
+(#145). A library changing a process-wide limit at import was the binary's
+decision taken without it. Until `HardenProcess` runs, `CoreDumpsDisabled`
+returns `ErrCoreDumpLimitNotApplied`, so code that required it to be `nil`
+must call `HardenProcess` first:
+
+```go
+// v0.8: importing lowered the limit
+if err := enclave.CoreDumpsDisabled(); err != nil { return err }
+
+// v0.9
+if _, err := enclave.HardenProcess(); err != nil { return err }
+if err := enclave.CoreDumpsDisabled(); err != nil { return err }
+```
+
+`HardenProcess` now lowers the limit everywhere but Windows (it returned
+`ErrProcessHardeningUnsupported` off Linux) and also marks the process
+non-dumpable on Linux, as before; `ProcessHardening.CoreDumpsDisabled` reports
+the new step, and its failure is a `*ProcessHardeningError` whose `Cause` is a
+`*CoreDumpLimitError` (`ErrCoreDumpLimitFailed`). A binary that wants only the
+core limit, not the non-dumpable flag, must now weigh both.
+
+**`Memory` and `Allocator` values share their state.** A copied value was a
+second, independent handle: `Destroy` through one left the other reporting a
+live enclave over unmapped pages, and a copied `Allocator` could admit the same
+headroom twice. A copy now reaches the same enclave or budget, and `go vet`
+reports it. A zero `Allocator{}` returns `ErrAllocatorNotConstructed` instead
+of admitting against a zero budget; build one with `NewAllocator`. Always pass
+`*Memory` and `*Allocator`.
+
+**`Destroy` of a writable enclave whose `mprotect` is refused returns `nil`**,
+not `ErrReleasedWithoutWipe`: its data was wiped before the `mprotect`, so
+nothing was released unwiped. Only a frozen enclave reports it.
+
+#### Sealing
+
+**`OpenIn` takes a `Backend` and returns a `Handle`.** An `*Allocator` is a
+`Backend`, so a budgeted open keeps its argument; assert the result back to
+`*Memory`, or open with `DefaultBackend()` where you only wanted `Open`:
+
+```go
+// v0.8
+e, err := s.OpenWith(ctx, a)
+
+// v0.9
+h, err := s.OpenIn(ctx, a)
+if err != nil { return err }
+e := h.(*enclave.Memory)
+```
+
+**Re-sealing an opened value seals from the handle.** `NewSealed(ctx, b)`
+inside `e.WithBytes` used to crash on the read-only pages; it now fails with
+`ErrSealSourceReadOnly`. Use `NewSealedFrom(ctx, e)`, which leaves `e`
+intact.
+
+**`Sealer` and `Sealed` values share their state too**, as `Memory` and
+`Allocator` do above. Always pass `*Sealer` and `*Sealed`.
+
+**`SetSealer` refuses a zero-value or destroyed `Sealer`** with
+`ErrSealerNotConstructed` or `ErrSealerDestroyed`, and **`NewSealer` refuses a
+nil option** with `ErrInvalidSealerOption`.
+
+The sections below describe each release under the names it shipped.
 
 ### v0.8.0-alpha (from v0.7)
 

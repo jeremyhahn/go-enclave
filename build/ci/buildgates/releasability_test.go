@@ -22,7 +22,7 @@ import (
 // consumers hash is that same tree, so nothing can be scrubbed from what is
 // published: the scrub has to happen in the source, before tagging, and a gate
 // keeps the next commit from undoing it. The one exception is the set of agent
-// instruction files (CLAUDE.md, AGENTS.md, .claude/), which scaffold §7 has the
+// instruction files (CLAUDE.md, AGENTS.md, .claude/, .serena/project.yml), which scaffold §7 has the
 // publish step strip from the public tree. They are tracked, reported by this
 // gate as strip-at-publish, and their content is not scanned, because it is
 // not published.
@@ -41,7 +41,7 @@ import (
 //     and the retired `task-worker.yml` workflow.
 //
 // Reported, not refused: strip-at-publish files (CLAUDE.md, AGENTS.md,
-// .claude/), logged by the main test so the publish step's input is visible.
+// .claude/, .serena/project.yml), logged by the main test so the publish step's input is visible.
 //
 // To fix a finding, in order of preference:
 //
@@ -122,8 +122,10 @@ var leakPatterns = []leakPattern{
 // internalFileRule marks a tracked path that must not be published at all. A
 // rule matches the path's basename, or, for a directory, any path component.
 type internalFileRule struct {
-	name     string
-	dir      bool
+	name string
+	dir  bool
+	// path, when set, matches that one repository-relative path instead.
+	path     string
 	guidance string
 }
 
@@ -133,6 +135,7 @@ var stripAtPublishRules = []internalFileRule{
 	{name: "CLAUDE.md", guidance: "agent instructions: stripped from the public tree at publish (scaffold §7)"},
 	{name: "AGENTS.md", guidance: "agent instructions: stripped from the public tree at publish (scaffold §7)"},
 	{name: ".claude", dir: true, guidance: "agent configuration: stripped from the public tree at publish (scaffold §7)"},
+	{path: ".serena/project.yml", guidance: "Serena project file (#140): stripped from the public tree at publish, like CLAUDE.md"},
 }
 
 var internalFileRules = []internalFileRule{
@@ -295,6 +298,8 @@ func TestReleasability_WaiverNeedsAReasonAndAdjacency(t *testing.T) {
 func TestReleasability_InternalFilesAreRefused(t *testing.T) {
 	refused := []string{
 		".serena/memories/notes.md",
+		".serena/project.local.yml",
+		"sub/.serena/project.yml",
 		"local.mk",
 		".github/workflows/task-worker.yml",
 		".gitea/workflows/task-worker.yml",
@@ -323,7 +328,7 @@ func TestReleasability_InternalFilesAreRefused(t *testing.T) {
 
 // The agent-instruction files are reported for stripping, not refused.
 func TestReleasability_AgentInstructionsAreStrippedAtPublish(t *testing.T) {
-	for _, p := range []string{"CLAUDE.md", "providertest/CLAUDE.md", "AGENTS.md", ".claude/settings.json", ".claude/agents/x.md"} {
+	for _, p := range []string{"CLAUDE.md", "providertest/CLAUDE.md", "AGENTS.md", ".claude/settings.json", ".claude/agents/x.md", ".serena/project.yml"} {
 		if _, strip := stripAtPublish(p); !strip {
 			t.Errorf("%s is not reported as strip-at-publish", p)
 		}
@@ -491,6 +496,9 @@ func scanTree(root string, files []string) ([]leakFinding, error) {
 // internalFile reports whether a tracked path is one that must not be
 // published at all.
 func internalFile(name string) (leakFinding, bool) {
+	if _, stripped := stripAtPublish(name); stripped {
+		return leakFinding{}, false // .serena/project.yml inside the refused .serena/
+	}
 	return matchFileRule(name, internalFileRules)
 }
 
@@ -505,7 +513,10 @@ func matchFileRule(name string, rules []internalFileRule) (leakFinding, bool) {
 	base := path.Base(name)
 	for _, r := range rules {
 		hit := base == r.name
-		if r.dir {
+		switch {
+		case r.path != "":
+			hit = name == r.path
+		case r.dir:
 			hit = false
 			for _, s := range segments[:len(segments)-1] {
 				if s == r.name {
@@ -514,7 +525,7 @@ func matchFileRule(name string, rules []internalFileRule) (leakFinding, bool) {
 			}
 		}
 		if hit {
-			return leakFinding{path: name, class: classInternalFile, match: r.name, guidance: r.guidance}, true
+			return leakFinding{path: name, class: classInternalFile, match: r.name + r.path, guidance: r.guidance}, true
 		}
 	}
 	return leakFinding{}, false

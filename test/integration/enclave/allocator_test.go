@@ -106,7 +106,7 @@ func TestLockedMemoryBudget_AdmissionUnderRealMemlockCeiling(t *testing.T) {
 		}
 
 		// Fill to the ceiling, through the allocator.
-		var live []*enclave.MemoryEnclave
+		var live []*enclave.Memory
 		for i := int64(0); i < admissionPages; i++ {
 			e, err := a.NewSized(1)
 			if err != nil {
@@ -123,7 +123,7 @@ func TestLockedMemoryBudget_AdmissionUnderRealMemlockCeiling(t *testing.T) {
 		requireBudgetError(t, "Allocator.New past the budget", err, page, ceiling, ceiling)
 
 		// The ceiling is the kernel's, not only the allocator's.
-		_, err = enclave.NewMemoryEnclaveSized(1)
+		_, err = enclave.NewMemorySized(1)
 		var lme *enclave.LockedMemoryError
 		if !errors.Is(err, enclave.ErrLockedMemoryUnavailable) || !errors.As(err, &lme) {
 			t.Fatalf("unadmitted allocation at RLIMIT_MEMLOCK: err = %v, want a LockedMemoryError matching ErrLockedMemoryUnavailable", err)
@@ -303,7 +303,7 @@ func TestLockedMemoryBudget_AdmissionHoldsTheKernelCeilingUnderContention(t *tes
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				var held []*enclave.MemoryEnclave
+				var held []*enclave.Memory
 				for i := 0; i < iterations; i++ {
 					e, err := a.NewSized(1)
 					var be *enclave.BudgetError
@@ -383,7 +383,7 @@ func TestLockedMemoryBudget_ProcessAllocatorDefaultsToTheKernelCeiling(t *testin
 		if a.Limit() != ceiling {
 			t.Fatalf("default budget %d, want the discovered ceiling %d", a.Limit(), ceiling)
 		}
-		var live []*enclave.MemoryEnclave
+		var live []*enclave.Memory
 		for i := 0; i < pages; i++ {
 			e, err := a.NewSized(1)
 			if err != nil {
@@ -442,7 +442,7 @@ func TestLockedMemoryBudget_SetAllocatorIsTheBinarysOneShotDecision(t *testing.T
 		if err != nil || lib != budget {
 			t.Fatalf("ProcessAllocator = (%p, %v), want the installed allocator %p", lib, err, budget)
 		}
-		var live []*enclave.MemoryEnclave
+		var live []*enclave.Memory
 		for i := 0; i < 4; i++ {
 			e, err := lib.NewSized(1)
 			if err != nil {
@@ -489,8 +489,8 @@ func TestLockedMemoryBudget_ZeroMemlockCeilingFailsClosedEverywhere(t *testing.T
 		requireBudgetError(t, "default allocator under a zero ceiling", err, enclave.LockedSize(1), 0, 0)
 
 		for name, construct := range map[string]func() error{
-			"NewMemoryEnclaveSized": func() error { _, err := enclave.NewMemoryEnclaveSized(1); return err },
-			"NewMemoryEnclave":      func() error { _, err := enclave.NewMemoryEnclave([]byte{1}); return err },
+			"NewMemorySized": func() error { _, err := enclave.NewMemorySized(1); return err },
+			"NewMemory":      func() error { _, err := enclave.NewMemory([]byte{1}); return err },
 			"NewSealed": func() error {
 				_, err := enclave.NewSealed(context.Background(), []byte{1})
 				return err

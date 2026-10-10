@@ -160,7 +160,7 @@ func TestSealer_RefusesForeignProvider(t *testing.T) {
 			}
 			defer warm.Destroy()
 
-			foreign := &SealedEnclave{sealer: b, sealed: v.sealed, blob: v.blob, size: v.size}
+			foreign := &Sealed{sealedState: &sealedState{sealer: b, sealed: v.sealed, blob: v.blob, size: v.size}}
 			if e, err := foreign.Open(t.Context()); !errors.Is(err, ErrSealedAuthentication) {
 				t.Errorf("Open under a foreign provider = %v, want ErrSealedAuthentication", err)
 				if e != nil {
@@ -207,12 +207,12 @@ func TestSealer_EnvelopeBindsBlobToCiphertext(t *testing.T) {
 	// Setup sanity: the alias must recover the same DEK, or the refusal below
 	// would be a key mismatch. Compared inside locked borrows, never copied to
 	// the heap.
-	dekA, err := NewMemoryEnclaveSized(dekBytes)
+	dekA, err := NewMemorySized(dekBytes)
 	if err != nil {
 		t.Fatalf("allocating dekA: %v", err)
 	}
 	defer func() { _ = dekA.Destroy() }()
-	dekB, err := NewMemoryEnclaveSized(dekBytes)
+	dekB, err := NewMemorySized(dekBytes)
 	if err != nil {
 		t.Fatalf("allocating dekB: %v", err)
 	}
@@ -236,7 +236,7 @@ func TestSealer_EnvelopeBindsBlobToCiphertext(t *testing.T) {
 		t.Fatal("the alias blob recovers a different DEK; the test setup is broken")
 	}
 
-	repaired := &SealedEnclave{sealer: s, sealed: v.sealed, blob: aliasBlob, size: v.size}
+	repaired := &Sealed{sealedState: &sealedState{sealer: s, sealed: v.sealed, blob: aliasBlob, size: v.size}}
 	if e, err := repaired.Open(t.Context()); !errors.Is(err, ErrSealedAuthentication) {
 		t.Errorf("Open with a re-paired (valid, same-DEK) blob = %v, want ErrSealedAuthentication: "+
 			"the ciphertext is not bound to the exact blob it was sealed with", err)
@@ -502,12 +502,12 @@ func TestSealer_SweptTranslation(t *testing.T) {
 		t.Errorf("swept(unrelated) = %v, want it untouched", got)
 	}
 
-	alive, err := NewMemoryEnclaveSized(kekBytes)
+	alive, err := NewMemorySized(kekBytes)
 	if err != nil {
 		t.Fatalf("allocating a live key: %v", err)
 	}
 	defer func() { _ = alive.Destroy() }()
-	dead, err := NewMemoryEnclaveSized(kekBytes)
+	dead, err := NewMemorySized(kekBytes)
 	if err != nil {
 		t.Fatalf("allocating a key to kill: %v", err)
 	}
@@ -593,11 +593,11 @@ func TestSealer_WithKEKRotationLimitIsValidated(t *testing.T) {
 	}
 }
 
-// TestSealedEnclave_OpenReturnsAFrozenEnclave pins that Open returns a
+// TestSealed_OpenReturnsAFrozenEnclave pins that Open returns a
 // read-only enclave, and that a refused freeze fails the open closed with no
 // enclave and no reservation kept. It uses its own sealer, independent of the
 // process sealer's state.
-func TestSealedEnclave_OpenReturnsAFrozenEnclave(t *testing.T) {
+func TestSealed_OpenReturnsAFrozenEnclave(t *testing.T) {
 	ctx := t.Context()
 	s, err := NewSealer()
 	if err != nil {
@@ -634,28 +634,28 @@ func TestSealedEnclave_OpenReturnsAFrozenEnclave(t *testing.T) {
 		}
 		return prev(b, p)
 	})
-	got, err := v.OpenWith(ctx, a)
+	got, err := openInAllocator(ctx, v, a)
 	protectMemory = prev
 	if err == nil {
 		_ = got.Destroy()
-		t.Fatal("OpenWith succeeded although its freeze was refused: writable plaintext was returned")
+		t.Fatal("OpenIn succeeded although its freeze was refused: writable plaintext was returned")
 	}
 	if !errors.Is(err, ErrLockedMemoryUnavailable) {
-		t.Errorf("OpenWith with the freeze refused = %v, want ErrLockedMemoryUnavailable", err)
+		t.Errorf("OpenIn with the freeze refused = %v, want ErrLockedMemoryUnavailable", err)
 	}
 	if got != nil {
-		t.Error("OpenWith returned an enclave alongside its error")
+		t.Error("OpenIn returned an enclave alongside its error")
 	}
 	if used := a.InUse(); used != 0 {
 		t.Errorf("InUse = %d after the open failed closed, want 0: the reservation was kept", used)
 	}
 }
 
-// TestSealedEnclave_OpenWithKeepsTheChargeWhenARefusedFreezeCannotRelease
+// TestSealed_OpenInKeepsTheChargeWhenARefusedFreezeCannotRelease
 // pins that when both the freeze and the destination's release are refused,
-// the open fails closed and OpenWith's reservation stays charged until the
+// the open fails closed and OpenIn's reservation stays charged until the
 // WipeAll ledger reclaims the pages.
-func TestSealedEnclave_OpenWithKeepsTheChargeWhenARefusedFreezeCannotRelease(t *testing.T) {
+func TestSealed_OpenInKeepsTheChargeWhenARefusedFreezeCannotRelease(t *testing.T) {
 	ctx := t.Context()
 	s, err := NewSealer()
 	if err != nil {
@@ -684,17 +684,17 @@ func TestSealedEnclave_OpenWithKeepsTheChargeWhenARefusedFreezeCannotRelease(t *
 	})
 	swapSeam(t, &unmapMemory, func([]byte) error { return errors.New("munmap: cannot allocate memory") })
 
-	got, err := v.OpenWith(ctx, a)
+	got, err := openInAllocator(ctx, v, a)
 	protectMemory, unmapMemory = prevProtect, prevUnmap
 	if err == nil {
 		_ = got.Destroy()
-		t.Fatal("OpenWith succeeded although its freeze was refused")
+		t.Fatal("OpenIn succeeded although its freeze was refused")
 	}
 	if got != nil {
-		t.Error("OpenWith returned an enclave alongside its error")
+		t.Error("OpenIn returned an enclave alongside its error")
 	}
 	if !errors.Is(err, ErrLockedMemoryUnavailable) {
-		t.Errorf("OpenWith = %v, want ErrLockedMemoryUnavailable", err)
+		t.Errorf("OpenIn = %v, want ErrLockedMemoryUnavailable", err)
 	}
 	if used := a.InUse(); used == 0 {
 		t.Fatal("InUse = 0 although the destination's pages were never released: the charge was refunded early")
@@ -711,7 +711,7 @@ func TestSealedEnclave_OpenWithKeepsTheChargeWhenARefusedFreezeCannotRelease(t *
 }
 
 // The tests below pin context handling: every provider-reaching path honors
-// the caller's context, and no Sealer or SealedEnclave lock is held across a
+// the caller's context, and no Sealer or Sealed lock is held across a
 // provider call. Nothing sleeps or races a clock: providers block on channels
 // the test closes, and deadlines are manualContexts the test expires.
 
@@ -727,7 +727,7 @@ func requireSealCanceled(t *testing.T, err, want error) {
 }
 
 // requireOpenCanceled asserts the open-side shape of an abandoned call.
-func requireOpenCanceled(t *testing.T, e *MemoryEnclave, err, want error) {
+func requireOpenCanceled(t *testing.T, e *Memory, err, want error) {
 	t.Helper()
 	if e != nil {
 		e.Destroy()
@@ -780,10 +780,10 @@ func TestSealer_EndedContextIsRefusedBeforeAnyWork(t *testing.T) {
 				if err != nil {
 					t.Fatalf("NewAllocator: %v", err)
 				}
-				e, err = v.OpenWith(ec.ctx, a)
+				e, err = openInAllocator(ec.ctx, v, a)
 				requireOpenCanceled(t, e, err, ec.want)
 				if a.InUse() != 0 {
-					t.Errorf("an abandoned OpenWith charged %d bytes to the budget; it must cost nothing", a.InUse())
+					t.Errorf("an abandoned OpenIn charged %d bytes to the budget; it must cost nothing", a.InUse())
 				}
 				if got := p.callCount(); got != before {
 					t.Errorf("the provider was called by an Open whose context had already ended")
@@ -956,12 +956,12 @@ func TestSealer_ContextEndingDuringASuccessfulCallIsHonoured(t *testing.T) {
 	})
 }
 
-// TestSealedEnclave_DestroyDoesNotWaitForABlockedOpen pins the SealedEnclave
+// TestSealed_DestroyDoesNotWaitForABlockedOpen pins the Sealed
 // half of "no lock across a provider": Destroy has no context, so it must not
 // wait for an Open stuck in Unprotect. The in-flight open completes against
 // the envelope it pinned, the ciphertext is wiped by the last open out, and
 // opens after the Destroy are refused.
-func TestSealedEnclave_DestroyDoesNotWaitForABlockedOpen(t *testing.T) {
+func TestSealed_DestroyDoesNotWaitForABlockedOpen(t *testing.T) {
 	p := newBlockingProvider()
 	s, err := NewSealer(WithKeyProtector(p))
 	if err != nil {
@@ -978,7 +978,7 @@ func TestSealedEnclave_DestroyDoesNotWaitForABlockedOpen(t *testing.T) {
 	p.release = make(chan struct{})
 	p.mu.Unlock()
 
-	opened := make(chan *MemoryEnclave, 1)
+	opened := make(chan *Memory, 1)
 	openErr := make(chan error, 1)
 	go func() {
 		e, err := v.Open(t.Context())
@@ -1070,11 +1070,11 @@ func TestSealer_AuthenticationVerdictSurvivesCancellation(t *testing.T) {
 	}
 }
 
-// TestSealedEnclave_OnlyTheLastOpenOutWipes parks two opens, runs Destroy,
+// TestSealed_OnlyTheLastOpenOutWipes parks two opens, runs Destroy,
 // and releases them one at a time (the first succeeding, the second
 // canceled): the envelope must survive the first exit and be wiped by the
 // second.
-func TestSealedEnclave_OnlyTheLastOpenOutWipes(t *testing.T) {
+func TestSealed_OnlyTheLastOpenOutWipes(t *testing.T) {
 	p := &parkingProtector{inner: NewSoftwareProvider(), arrivals: make(chan chan error)}
 	s, err := NewSealer(WithKeyProtector(p))
 	if err != nil {
@@ -1088,7 +1088,7 @@ func TestSealedEnclave_OnlyTheLastOpenOutWipes(t *testing.T) {
 	zero := func(b []byte) bool { return bytes.Equal(b, make([]byte, len(b))) }
 
 	type result struct {
-		e   *MemoryEnclave
+		e   *Memory
 		err error
 	}
 	firstOut, secondOut := make(chan result, 1), make(chan result, 1)
@@ -1206,7 +1206,7 @@ func TestSealer_DestroyReleasesEverythingAndFailsClosed(t *testing.T) {
 			if err != nil {
 				t.Fatalf("NewSealer: %v", err)
 			}
-			var values []*SealedEnclave
+			var values []*Sealed
 			for i := range 3 {
 				v, err := s.Seal(ctx, fmt.Appendf(nil, "secret-%d", i))
 				if err != nil {
@@ -1279,9 +1279,9 @@ func TestSealer_RepeatedSealersDoNotAccumulateLockedMemory(t *testing.T) {
 		if err != nil {
 			t.Fatalf("iteration %d: Seal: %v", i, err)
 		}
-		e, err := v.OpenWith(ctx, a)
+		e, err := openInAllocator(ctx, v, a)
 		if err != nil {
-			t.Fatalf("iteration %d: OpenWith: %v", i, err)
+			t.Fatalf("iteration %d: OpenIn: %v", i, err)
 		}
 		if err := e.Destroy(); err != nil {
 			t.Fatalf("iteration %d: destroying the opened enclave: %v", i, err)
@@ -1513,7 +1513,7 @@ func TestSealer_ProviderBlobIsCopied(t *testing.T) {
 	held := bytes.Clone(p.buf)
 	a.Destroy()
 	if !bytes.Equal(p.buf, held) {
-		t.Fatal("SealedEnclave.Destroy wiped the provider's own blob slice")
+		t.Fatal("Sealed.Destroy wiped the provider's own blob slice")
 	}
 	e, err = b.Open(ctx)
 	if err != nil {
@@ -1532,7 +1532,7 @@ func TestSealer_ZeroValueFailsWithoutPanicking(t *testing.T) {
 	if !bytes.Equal(data, make([]byte, len(data))) {
 		t.Error("zero-value Seal did not wipe the caller's material")
 	}
-	if _, err := s.open(ctx, nil, []byte("blob"), []byte("sealed"), 4); !errors.Is(err, ErrSealerNotConstructed) {
+	if _, err := s.open(ctx, []byte("blob"), []byte("sealed"), 4, NewMemorySized, true); !errors.Is(err, ErrSealerNotConstructed) {
 		t.Errorf("zero-value open = %v, want ErrSealerNotConstructed", err)
 	}
 	if err := s.Destroy(); err != nil {

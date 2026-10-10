@@ -33,6 +33,15 @@
 #     so the same targets install the same pins into the workspace
 #     (TOOL_INSTALL=1).
 #
+#   * ACTIONLINT IS THE ONE EXCEPTION: scripts/tool.sh ignores TOOL_INSTALL=0
+#     for it and resolves it as under TOOL_INSTALL=1. An image copy at exactly
+#     the pin is used; anything else is built at the pinned tag into bin/tools.
+#     The runner image's copy is built from an untagged commit (a
+#     pseudo-version), which the version check rightly refuses, so it is built
+#     (#145, #146). `go install tool@tag` is verified by the Go checksum
+#     database like every other module download; never loosen the version check
+#     to accept the image's.
+#
 #   * gosec and govulncheck TRIAGE THEIR OWN EXIT CODES (in the Makefile). A
 #     shell reports a signal death as 128+N, so a scanner killed by the OOM
 #     killer exits 137 — indistinguishable, in a job summary, from a real

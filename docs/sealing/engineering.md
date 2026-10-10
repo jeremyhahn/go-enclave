@@ -7,25 +7,25 @@
 
 | Identifier | Contract |
 |---|---|
-| `NewSealed(ctx context.Context, data []byte) (*SealedEnclave, error)` | Seals under the process sealer (lazily the software default). Wipes `data` on every path. |
+| `NewSealed(ctx context.Context, data []byte) (*Sealed, error)` | Seals under the process sealer (lazily the software default). Wipes `data` on every path. |
 | `NewSealer(opts ...SealerOption) (*Sealer, error)` | No options: `SoftwareProvider`, `ModeRootKey`, cannot fail. Touches no provider and no locked memory until the first seal. |
 | `WithKeyProtector(kp KeyProtector) SealerOption` | Selects `ModePerOperation` over `kp`. Nil or typed-nil: `ErrInvalidProvider`. |
 | `WithRootUnsealer(ru RootUnsealer) SealerOption` | Selects `ModeRootKey` over `ru`. Nil or typed-nil: `ErrInvalidProvider`. Giving both provider options is `ErrInvalidProvider` too. |
 | `WithKEKRotationLimit(n uint64) SealerOption` | `ModeRootKey` only: DEK wraps per KEK generation before rotation, 1 to 2^31 (the default, half of crypto/cipher's 2^32 random-nonce bound). Out of range, or with `ModePerOperation`: `ErrInvalidRotationLimit`. |
 | `SetSealer(s *Sealer) error` | Installs the process sealer. One-shot. |
-| `(*Sealer).Seal(ctx, data) (*SealedEnclave, error)` / `Mode() Mode` | `NewSealed` for an explicit sealer. |
+| `(*Sealer).Seal(ctx, data) (*Sealed, error)` / `Mode() Mode` | `NewSealed` for an explicit sealer. |
 | `(*Sealer).Destroy() error` | Releases the wrapping key, current KEK, retained KEK blobs, any pending root/KEK, and the default `SoftwareProvider` it created (never an injected provider). Idempotent, nil-safe; later seals/opens/`Openable` report `ErrSealerDestroyed`. |
-| `(*SealedEnclave).Open(ctx) (*MemoryEnclave, error)` | Decrypts into a **new** enclave the caller owns and must `Destroy`. Unbudgeted. |
-| `(*SealedEnclave).OpenWith(ctx, a *Allocator) (*MemoryEnclave, error)` | As `Open`, destination admitted against `a`. |
-| `(*SealedEnclave).Openable() error` | Diagnostic snapshot; takes no context and calls no provider. |
-| `(*SealedEnclave).IsAlive() bool` | Ciphertext still held — **not** "can be opened". |
-| `(*SealedEnclave).Destroy() error` / `String()` / `GoString()` | Idempotent, nil-safe; does not wait for in-flight opens; the error is always `nil` today. `%v` and `%#v` print a redacted form. |
+| `(*Sealed).Open(ctx) (*Memory, error)` | Decrypts into a **new** enclave the caller owns and must `Destroy`. Unbudgeted. |
+| `(*Sealed).OpenIn(ctx, a *Allocator) (*Memory, error)` | As `Open`, destination admitted against `a`. |
+| `(*Sealed).Openable() error` | Diagnostic snapshot; takes no context and calls no provider. |
+| `(*Sealed).IsAlive() bool` | Ciphertext still held — **not** "can be opened". |
+| `(*Sealed).Destroy() error` / `String()` / `GoString()` | Idempotent, nil-safe; does not wait for in-flight opens; the error is always `nil` today. `%v` and `%#v` print a redacted form. |
 | `KeyProtector` | `Protect(ctx, key []byte) (blob []byte, err error)`; `Unprotect(ctx, blob, key []byte) error` |
 | `RootUnsealer` | `UnsealRoot(ctx, dst []byte) error` |
 | `HealthReporter` | `Health() error`: optional on a `KeyProtector`, found by type assertion. Non-blocking report of the provider's **in-process** sealing state: `nil` or `ErrSealerWiped`. Believed and terminal. Not consulted in `ModeRootKey`. |
 | `RootKeyBytes = 32` | Length of every root and of every key handed to a provider. |
-| `SoftwareProvider`, `NewSoftwareProvider()` | Implements `KeyProtector`, `RootUnsealer` and `HealthReporter`; root generated into a locked enclave at first use. |
-| `(*SoftwareProvider).Destroy() error` | Releases the root; later calls report `ErrSealerDestroyed`. Idempotent, nil-safe. |
+| `SoftwareProvider`, `NewSoftwareProvider()` | Implements `KeyProtector`, `RootUnsealer` and `HealthReporter`; root generated into a locked enclave at first use. `Protect` wraps under HKDF-SHA256 of the root (info `go-enclave v1 SoftwareProvider Protect key`), never the root `UnsealRoot` exports. State is behind a pointer: a copy shares the original's root and lock. |
+| `(*SoftwareProvider).Destroy() error` | Releases the root and Protect key; later calls, on it or a copy, report `ErrSealerDestroyed`. Idempotent, nil-safe. |
 | `KeyScheduleErasure() bool` | Whether this build erases AES key schedules (`GOEXPERIMENT=runtimesecret`, linux/amd64 or linux/arm64 (not Android)). See [Erasure under `runtime/secret`](#erasure-under-runtimesecret). |
 
 ## Provider contract
@@ -65,7 +65,7 @@
    with capacity exactly the plaintext length, and decrypts in place; a length
    mismatch is refused **before** decrypting. `ErrPlaintextEscaped` guards the
    (unreachable) case of the AEAD reallocating.
-2. **No `Sealer` or `SealedEnclave` mutex across a provider call.** Two
+2. **No `Sealer` or `Sealed` mutex across a provider call.** Two
    things do span one, by design: the init slot (a one-slot semaphore acquired
    in a `select` against `ctx.Done()`) spans `UnsealRoot`, and the read lock of
    the private, per-call enclave the provider reads from or writes into (the
@@ -114,9 +114,13 @@
    under the wrapping key (no provider call); at most 2^31 generations, then
    seals fail with `ErrSealerExhausted`. The retired KEK's
    enclave is destroyed; its root-wrapped blob is kept so older values still
-   open (one transient locked page per retired-generation open).
-7. **`SoftwareProvider` message bound.** In `ModePerOperation` its single root
-   protects at most 2^31 keys, then `Protect` returns `ErrProviderMessageLimit`.
+   open (one transient locked page per retired-generation open). A retired
+   KEK whose `Destroy` the backend refuses is never dropped: the sealer keeps
+   it until a `(*Sealer).Destroy` releases it, and the seal that rotated
+   fails with a `*CleanupError`; the new generation is published, so later
+   seals go on under it.
+7. **`SoftwareProvider` message bound.** In `ModePerOperation` its single
+   Protect key protects at most 2^31 keys, then `Protect` returns `ErrProviderMessageLimit`.
 8. **Context checks.** Every provider-reaching call checks `ctx` on entry,
    again after winning the init slot (before `UnsealRoot`), and after each
    provider call returns. An already-ended context on `NewSealed` is refused
@@ -125,14 +129,16 @@
 9. **Destroy fails closed.** `(*Sealer).Destroy` takes the hierarchy's write
    lock, so it waits for in-process seals and opens, but not for a provider: an
    initialization blocked in `UnsealRoot` sees the destroyed state when it
-   returns, publishes nothing and releases the root it produced. A sealer
-   never re-keys after `Destroy`.
+   returns, publishes nothing and releases the root it produced. An `OpenIn`
+   into a backend other than locked memory checks the sealer again after its
+   `Import` returns, so a plaintext handle imported while `Destroy` ran is
+   destroyed, not returned. A sealer never re-keys after `Destroy`.
 10. **Process sealer is one-shot.** `SetSealer` fails with `ErrSealerInstalled`
    after any install, including the lazy default from the first `NewSealed`.
-11. **`SealedEnclave.Destroy` does not wait for opens in flight.** They complete
+11. **`Sealed.Destroy` does not wait for opens in flight.** They complete
     against the envelope they pinned; the last one out wipes the ciphertext;
     opens starting afterwards return `ErrEnclaveDestroyed`.
-12. **`OpenWith` admits one reservation, first.** An open refused **before** the
+12. **`OpenIn` admits one reservation, first.** An open refused **before** the
     destination is allocated — destroyed value, nil allocator, context already
     ended, budget refused — allocates nothing. Once the destination is
     allocated, the DEK page (and, for a retired generation, a KEK page) follow
@@ -142,19 +148,25 @@
     unwrap) per open **in flight**. That bound assumes those destroys succeed: a
     transient whose release the kernel refuses stays mapped, on the `WipeAll`
     ledger, until a later retry reclaims it.
+13. **A refused handle `Destroy` is never dropped.** A key or plaintext
+    handle the sealer no longer needs (a retired KEK, an import that failed or
+    lacked a capability, an `OpenIn` result under a destroyed sealer) whose
+    `Destroy` fails still holds its material. The sealer keeps it, the
+    operation fails with a `*CleanupError`, and every `(*Sealer).Destroy`
+    retries it, keeping the ones that refuse again.
 
 ## Error semantics
 
 | Error | From | Meaning |
 |---|---|---|
 | `ErrSealFailed` (`*SealError`) | seal paths | AEAD, CSPRNG or provider failure (the `Cause`), or the context ended (`Cause` matches `ctx.Err()`). |
-| `ErrOpenFailed` (`*OpenError`) | `Open`, `OpenWith` | The context ended, or a `ModePerOperation` provider failed with its own error (the `Cause`, reachable). It says nothing about the value, which is intact, and nothing about whether the provider's failure is transient. It can **also match** a verdict the provider returned as the context ended — `ErrSealedAuthentication`, `ErrSealerWiped`, `ErrEnclaveDestroyed` — so test those first, then inspect the provider's cause before retrying (see [Classifying an open failure](#classifying-an-open-failure)). |
+| `ErrOpenFailed` (`*OpenError`) | `Open`, `OpenIn` | The context ended, or a `ModePerOperation` provider failed with its own error (the `Cause`, reachable). It says nothing about the value, which is intact, and nothing about whether the provider's failure is transient. It can **also match** a verdict the provider returned as the context ended — `ErrSealedAuthentication`, `ErrSealerWiped`, `ErrEnclaveDestroyed` — so test those first, then inspect the provider's cause before retrying (see [Classifying an open failure](#classifying-an-open-failure)). |
 | `ErrSealedAuthentication` | open paths, providers | Tampered, truncated, forged, re-paired or foreign. Deliberately indistinguishable between causes. |
 | `ErrSealerWiped` (bare, or `*SealerWipedError` carrying the failure that met the sweep) | all sealing paths, `Openable` | **This sealer could not serve this operation because an enclave it was using is gone** — not, on its own, proof that the sealer is dead. See [Where `ErrSealerWiped` comes from](#where-errsealerwiped-comes-from). |
 | `ErrOpenabilityUnknown` | `Openable` | A sweep ran since sealing (or during it), `ModePerOperation`, and the provider reports no health. Open the value to find out. |
-| `ErrEnclaveDestroyed` | `Open`, `OpenWith`, `Openable`; seal paths | From `Openable`, and from `Open`/`OpenWith` before any work: the `SealedEnclave` was destroyed (or is nil). From later in a seal or open: an enclave **this call** allocated was destroyed by a concurrent `WipeAll`, and the sealed value may be intact — the DEK while sealing the material under it (either mode), the open's destination or DEK while decrypting into it (either mode), or the DEK while a `ModePerOperation` provider uses it. A provider returning it is passed through too. In `ModeRootKey` the same holds for a per-call key destroyed during the wrap or unwrap under the KEK; only when a **hierarchy** key (the root or the current KEK) is dead does the failure become `ErrSealerWiped` (see below). |
+| `ErrEnclaveDestroyed` | `Open`, `OpenIn`, `Openable`; seal paths | From `Openable`, and from `Open`/`OpenIn` before any work: the `Sealed` was destroyed (or is nil). From later in a seal or open: an enclave **this call** allocated was destroyed by a concurrent `WipeAll`, and the sealed value may be intact — the DEK while sealing the material under it (either mode), the open's destination or DEK while decrypting into it (either mode), or the DEK while a `ModePerOperation` provider uses it. A provider returning it is passed through too. In `ModeRootKey` the same holds for a per-call key destroyed during the wrap or unwrap under the KEK; only when a **hierarchy** key (the root or the current KEK) is dead does the failure become `ErrSealerWiped` (see below). |
 | `ErrLockedMemoryUnavailable` | seal, open | Kernel refused a locked page; the sealed value survives an open failure. |
-| `ErrNilAllocator` / `ErrBudgetExhausted` | `OpenWith` | Nil allocator (never falls back) / over budget. Decided before any provider call. |
+| `ErrNilAllocator` / `ErrBudgetExhausted` | `OpenIn` | Nil allocator (never falls back) / over budget. Decided before any provider call. |
 | `ErrEmptyEnclave`, `ErrMaterialTooLarge` | seal | Empty input; input above AES-GCM's single-message limit, (2^32−2)·16 bytes, or whose sealed length would not fit in an `int` (about 2 GiB on 32-bit platforms). |
 | `ErrSealerDestroyed` | all sealing paths, `Openable`, `SoftwareProvider` | `Destroy` ran on the sealer (or on its software provider). Permanent. |
 | `ErrSealerNotConstructed` | `Seal`, `Open` | The `Sealer` was not built by `NewSealer` (e.g. a zero value). |
@@ -163,7 +175,9 @@
 | `ErrInvalidRotationLimit` | `NewSealer` | `WithKEKRotationLimit` of zero, above 2^31, or given for `ModePerOperation`. |
 | `ErrSealerInstalled`, `ErrNilSealer` | `SetSealer`, nil `(*Sealer).Seal` | One-shot install; nil sealer. |
 | `ErrProviderMessageLimit` | `SoftwareProvider.Protect` | Per-key message bound reached. |
+| `ErrProviderNotConstructed` | Every `SoftwareProvider` method but `Destroy` | The provider was not built by `NewSoftwareProvider` (e.g. a zero value). |
 | `ErrPlaintextEscaped` | open | Defensive; unreachable while destination capacity is exact. |
+| `ErrCleanupFailed` (`*CleanupError`) | `OpenIn` into an `Importer`, seals and `Destroy` of a `WithBackend` sealer | A handle the operation no longer needed refused its `Destroy` and still holds its material; the sealer keeps it for `(*Sealer).Destroy` to retry ([invariant 13](#invariants)). `Failure` is the operation's own error, reachable with `errors.Is`, or nil when only the cleanup failed; `Cause` is what `Destroy` returned. |
 
 ### Context error shapes
 
@@ -300,7 +314,8 @@ heap. Per key class, and when its schedule reaches the heap:
 | KEK (`ModeRootKey`) | Every DEK wrap (seal) and unwrap (open) under it | Every value of its generation |
 | Root (`ModeRootKey`) | Once, at initialization: the HMAC state of the wrapping-key derivation (`deriveWrappingKey`) | Everything this provider's root keys, in any sealer |
 | Wrapping key (`ModeRootKey`) | Every KEK mint — the first seal and each rotation (`newGeneration`) — and every open of a value under a retired generation | Everything this sealer sealed |
-| `SoftwareProvider` root (`ModePerOperation`) | Every `Protect` and `Unprotect` | Everything |
+| `SoftwareProvider` root (`ModePerOperation`) | Once, at the first `Protect`: the HMAC state of the Protect-key derivation (`deriveProtectKey`) | Everything |
+| `SoftwareProvider` Protect key (`ModePerOperation`) | Every `Protect` and `Unprotect` | Everything this provider protected |
 
 In `ModePerOperation` with a hardware provider, the long-lived key never enters
 the process, but DEK schedules still do: values sealed or opened recently remain
@@ -312,7 +327,7 @@ byte-exact on the hardware path, as eight big-endian `uint32` words on the
 generic path (`GODEBUG=cpu.aes=off`). Size and offset follow the block layout
 and nothing depends on them; the key's presence is what matters.
 `withAEAD` ([aead.go](../../aead.go)) is the only place a key leaves locked
-memory. `TestSealedEnclave_KeyScheduleReachesTheHeapAsDocumented` fails if the
+memory. `TestSealed_KeyScheduleReachesTheHeapAsDocumented` fails if the
 key stops appearing in the schedule in either form, or `NewCipher` stops
 allocating; either means this section must be re-measured. Core-dump
 suppression does not close the window everywhere: `RLIMIT_CORE` may be

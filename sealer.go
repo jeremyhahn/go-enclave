@@ -13,6 +13,8 @@ import (
 	"context"
 	"math"
 	"reflect"
+	"runtime"
+	"runtime/debug"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -74,7 +76,7 @@ func (m Mode) String() string {
 // dekBytes selects AES-256 for the per-value data key.
 const dekBytes = 32
 
-// Sealer produces and opens [SealedEnclave] values under an injected crypto
+// Sealer produces and opens [Sealed] values under an injected crypto
 // provider. Construct one with [NewSealer], or use the package-level
 // [NewSealed] and [SetSealer] for one sealer per process.
 //
@@ -88,7 +90,18 @@ const dekBytes = 32
 // [RootUnsealer.UnsealRoot] stalls only the callers that need that
 // initialization, each for no longer than its own context allows. Seals and
 // opens on an initialized Sealer, and on every other Sealer, proceed.
+//
+// A Sealer must not be copied; use the *Sealer. Its state sits behind one
+// pointer, so even a copy shares its lock, its message counters and its keys.
 type Sealer struct {
+	_ noCopy
+
+	*sealerState
+}
+
+// sealerState is everything a [Sealer] holds; nil in a Sealer not built by
+// [NewSealer].
+type sealerState struct {
 	mode Mode
 
 	// Exactly one of kp / ru is non-nil, fixed at construction with the
@@ -96,8 +109,8 @@ type Sealer struct {
 	kp KeyProtector
 	ru RootUnsealer
 
-	protect   func(ctx context.Context, dek *MemoryEnclave) ([]byte, error)
-	unprotect func(ctx context.Context, blob []byte, dek *MemoryEnclave) error
+	protect   func(ctx context.Context, dek *Memory) ([]byte, error)
+	unprotect func(ctx context.Context, blob []byte, dek *Memory) error
 
 	// mu guards the ModeRootKey hierarchy below and destroyed. It is
 	// read-locked to wrap and unwrap DEKs and write-locked only to publish
@@ -106,20 +119,37 @@ type Sealer struct {
 	mu sync.RWMutex
 	// root holds this sealer's wrapping key (deriveWrappingKey), not the
 	// provider's root. It is set once and never cleared, so a swept
-	// hierarchy stays detectable as dead enclaves.
-	root     *MemoryEnclave
-	kek      *MemoryEnclave
+	// hierarchy stays detectable as dead keys. root and kek are locked
+	// memory, or handles of the backend WithBackend named.
+	root     Handle
+	kek      Handle
 	kekGen   uint32
 	kekUsed  atomic.Uint64
 	kekLimit uint64
+	// kekBlobs holds every generation's root-wrapped KEK that a live value
+	// may still need, and kekRefs how many live values (each counted until
+	// its last open in flight ends) were sealed under it. A retired
+	// generation is dropped with its last value.
 	kekBlobs map[uint32][]byte
+	kekRefs  map[uint32]*atomic.Int64
 	// destroyed is set by Destroy and never cleared; every path checks it
 	// before the hierarchy state.
 	destroyed bool
+	// retained holds every handle that refused its Destroy after the sealer
+	// stopped needing it: an outgoing KEK, an imported key a failed seal
+	// dropped, a plaintext handle an open did not return. Each keeps its
+	// material until a retried Destroy releases it; see destroyOrRetain.
+	retained []Handle
 
-	// owned is the default provider NewSealer created, which Destroy
-	// releases; nil for an injected provider.
+	// owned is the default provider NewSealer created, which the first
+	// successful unseal and Destroy release; nil for an injected provider.
 	owned *SoftwareProvider
+
+	// backend is what WithBackend named, or nil. importer is it when keys are
+	// imported into it, and nil when they stay in this process's locked
+	// memory.
+	backend  Backend
+	importer Importer
 
 	// initSlot is a one-slot semaphore held by the goroutine running
 	// initHierarchy. A channel rather than a mutex so that acquiring it can
@@ -131,12 +161,18 @@ type Sealer struct {
 	// again after it succeeded. It is not root, because a non-nil root with
 	// no live KEK reads as wiped. A dead pendingRoot is the wiped state of a
 	// sealer whose hierarchy was never published. Guarded by initSlot.
-	pendingRoot *MemoryEnclave
+	pendingRoot *Memory
+
+	// pendingWrap is the wrapping key derived from pendingRoot, held where it
+	// will be published: pendingRoot itself, or its import into the backend.
+	// Kept across a failed mint, so a retry repeats only the mint. Guarded by
+	// initSlot.
+	pendingWrap Handle
 
 	// pendingKEK is the first KEK between mint and publication, and after a
 	// discard any such KEK whose release the kernel refused, kept so later
 	// attempts retry that release. Guarded by initSlot.
-	pendingKEK *MemoryEnclave
+	pendingKEK Handle
 
 	// pendingGen is the sweep sequence read before the unseal that produced
 	// pendingRoot. Guarded by initSlot.
@@ -151,6 +187,10 @@ type sealerConfig struct {
 	providers   int
 	kekLimit    uint64
 	kekLimitSet bool
+
+	backend        Backend
+	backendSet     bool
+	requireErasure bool
 }
 
 // SealerOption configures [NewSealer].
@@ -158,7 +198,7 @@ type SealerOption func(*sealerConfig)
 
 // WithKeyProtector selects [ModePerOperation] over kp: every seal and open
 // calls kp on the per-value data key. If kp implements [HealthReporter], the
-// sealer consults it from [SealedEnclave.Openable]. kp must be non-nil; see
+// sealer consults it from [Sealed.Openable]. kp must be non-nil; see
 // [ErrInvalidProvider].
 func WithKeyProtector(kp KeyProtector) SealerOption {
 	return func(c *sealerConfig) { c.kp, c.providers = kp, c.providers+1 }
@@ -189,13 +229,55 @@ func WithKEKRotationLimit(n uint64) SealerOption {
 	return func(c *sealerConfig) { c.kekLimit, c.kekLimitSet = n, true }
 }
 
+// WithBackend makes b hold the keys of a [ModeRootKey] sealer: its wrapping
+// key and every KEK are imported into b with [PurposeWrappingKey] and
+// [AlgorithmAES256GCM] instead of staying in this process's locked memory. A
+// key handle that implements [AEAD] wraps inside the device; one with only
+// [ByteAccess] wraps in this process. Data keys are generated per value in
+// this process whatever b is.
+//
+// [NewSealer] returns [ErrInvalidBackend] for a nil or typed-nil b, and a
+// [*CapabilityError] for [CapabilityImport] when b is not an [Importer];
+// [DefaultBackend] is accepted and keeps the keys in locked memory. A key
+// handle with neither AEAD nor ByteAccess is found only when the key is
+// imported, at the first unseal or a rotation, and fails that seal with
+// [CapabilityAEAD].
+//
+// In [ModePerOperation] the provider holds every key, and b only answers
+// whether it confines this process (see [WithRequireKeyScheduleErasure]).
+func WithBackend(b Backend) SealerOption {
+	return func(c *sealerConfig) { c.backend, c.backendSet = b, true }
+}
+
+// WithRequireKeyScheduleErasure makes [NewSealer] refuse a configuration in
+// which an AES key schedule of the sealer's would reach the heap and stay
+// there. Each key class is covered when the build erases schedules
+// ([KeyScheduleErasure]) or the sealer's backend confines this process (a
+// [Confiner] whose ConfinesProcess reports true). Offloading the wrapping key
+// and KEKs to an [AEAD] handle never suffices alone: data keys are generated
+// and used in this process.
+//
+// A refusal is a [*KeyScheduleExposedError] matching [ErrKeyScheduleExposed],
+// naming the first exposed class: "wrapping-key" for a [ModeRootKey] sealer
+// whose keys stay in locked memory, otherwise "dek". The check runs once, in
+// NewSealer; seals and opens are not rechecked.
+func WithRequireKeyScheduleErasure() SealerOption {
+	return func(c *sealerConfig) { c.requireErasure = true }
+}
+
+// erasesKeySchedules is keyScheduleErasure, a variable so tests can drive
+// strict mode on both builds.
+var erasesKeySchedules = keyScheduleErasure
+
 // NewSealer returns a Sealer over the provider its options name; the option
 // chosen fixes the [Mode].
 //
 // With no options it is the pure-software default ([SoftwareProvider],
 // [ModeRootKey]) and cannot fail. It returns [ErrInvalidProvider] for a nil
-// provider or for two providers, and [ErrInvalidRotationLimit] for a rotation
-// limit it cannot honor.
+// provider or for two providers, [ErrInvalidRotationLimit] for a rotation
+// limit it cannot honor, [ErrInvalidSealerOption] for a nil option, the
+// refusals [WithBackend] lists, and a [*KeyScheduleExposedError] under
+// [WithRequireKeyScheduleErasure].
 //
 // The returned Sealer performs no crypto, touches no locked memory and does
 // not consult its provider until its first Seal, so a device problem surfaces
@@ -203,10 +285,13 @@ func WithKEKRotationLimit(n uint64) SealerOption {
 func NewSealer(opts ...SealerOption) (*Sealer, error) {
 	var cfg sealerConfig
 	for _, opt := range opts {
+		if opt == nil {
+			return nil, ErrInvalidSealerOption
+		}
 		opt(&cfg)
 	}
 
-	s := &Sealer{initSlot: make(chan struct{}, 1), kekLimit: kekMessageLimit}
+	s := &sealerState{initSlot: make(chan struct{}, 1), kekLimit: kekMessageLimit}
 	switch {
 	case cfg.providers > 1:
 		return nil, ErrInvalidProvider
@@ -225,8 +310,7 @@ func NewSealer(opts ...SealerOption) (*Sealer, error) {
 	case cfg.providers == 1:
 		return nil, ErrInvalidProvider
 	default:
-		s.owned = NewSoftwareProvider()
-		s.mode, s.ru = ModeRootKey, s.owned
+		s.mode = ModeRootKey
 		s.protect, s.unprotect = s.protectRootKey, s.unprotectRootKey
 	}
 
@@ -236,7 +320,55 @@ func NewSealer(opts ...SealerOption) (*Sealer, error) {
 		}
 		s.kekLimit = cfg.kekLimit
 	}
-	return s, nil
+
+	if cfg.backendSet {
+		if err := s.useBackend(cfg.backend); err != nil {
+			return nil, err
+		}
+	}
+	if cfg.requireErasure {
+		if err := s.keySchedulesCovered(); err != nil {
+			return nil, err
+		}
+	}
+
+	// Created last, so a refused configuration leaves no root behind.
+	if s.mode == ModeRootKey && s.ru == nil {
+		s.owned = NewSoftwareProvider()
+		s.ru = s.owned
+	}
+	return &Sealer{sealerState: s}, nil
+}
+
+// useBackend validates b for WithBackend and records where the keys go.
+func (s *sealerState) useBackend(b Backend) error {
+	if isNilInterface(b) {
+		return ErrInvalidBackend
+	}
+	s.backend = b
+	if _, ok := b.(lockedMemory); ok || s.mode != ModeRootKey {
+		return nil
+	}
+	imp, ok := b.(Importer)
+	if !ok {
+		return &CapabilityError{Backend: b.Name(), Capability: CapabilityImport}
+	}
+	s.importer = imp
+	return nil
+}
+
+// keySchedulesCovered is WithRequireKeyScheduleErasure's check.
+func (s *sealerState) keySchedulesCovered() error {
+	if erasesKeySchedules {
+		return nil
+	}
+	if c, ok := s.backend.(Confiner); ok && c.ConfinesProcess() {
+		return nil
+	}
+	if s.mode == ModeRootKey && s.importer == nil {
+		return &KeyScheduleExposedError{Name: "wrapping-key"}
+	}
+	return &KeyScheduleExposedError{Name: "dek"}
 }
 
 // isNilInterface reports whether v is the untyped nil or an interface
@@ -257,55 +389,112 @@ func isNilInterface(v any) bool {
 	}
 }
 
-// Mode reports the mode this sealer was constructed with.
+// Mode reports the mode this sealer was constructed with. A nil Sealer, or
+// one not built by [NewSealer], reports the zero Mode, [ModeRootKey], and
+// does not panic; it cannot seal (see [ErrNilSealer] and
+// [ErrSealerNotConstructed]).
 func (s *Sealer) Mode() Mode {
+	if s == nil || s.sealerState == nil {
+		return 0
+	}
 	return s.mode
 }
 
-// whileUsable runs fn, which must be in-process work, under the read lock
-// unless the sealer is destroyed, so a concurrent Destroy orders entirely
-// before or after it. A nil fn only checks. A zero Sealer, which has no
-// provider, is refused as [ErrSealerNotConstructed].
-func (s *Sealer) whileUsable(fn func() error) error {
-	if s.protect == nil || s.unprotect == nil {
+// usable reports, under the read lock, whether the sealer may still be used:
+// [ErrSealerDestroyed] once Destroy ran, and [ErrSealerNotConstructed] for a
+// zero Sealer, which has no provider.
+func (s *Sealer) usable() error {
+	if s.sealerState == nil {
 		return ErrSealerNotConstructed
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	switch {
-	case s.destroyed:
+	if s.destroyed {
 		return ErrSealerDestroyed
-	case fn == nil:
-		return nil
-	default:
-		return fn()
 	}
+	return nil
+}
+
+// releaseBlob is sealerState.releaseBlob, a no-op on a sealer without state.
+func (s *Sealer) releaseBlob(blob []byte) {
+	if s == nil || s.sealerState == nil {
+		return
+	}
+	s.sealerState.releaseBlob(blob)
+}
+
+// destroyOrRetain destroys h, which the operation that failed with failure no
+// longer needs; it is destroyOrRetainLocked taking mu. The caller must not
+// hold s.mu.
+func (s *sealerState) destroyOrRetain(failure error, h Handle) error {
+	if isNilInterface(h) {
+		return failure
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.destroyOrRetainLocked(failure, h)
+}
+
+// destroyOrRetainLocked destroys h and returns failure, which may be nil. If
+// h refuses, it still holds its material: it is kept in retained, for every
+// Destroy to retry, and the refusal is returned with failure as a
+// [CleanupError]. A nil h returns failure. Called with mu write-locked.
+func (s *sealerState) destroyOrRetainLocked(failure error, h Handle) error {
+	if isNilInterface(h) {
+		return failure
+	}
+	cause := h.Destroy()
+	if cause == nil {
+		return failure
+	}
+	s.retained = append(s.retained, h)
+	return &CleanupError{Failure: failure, Cause: cause}
+}
+
+// releaseRetainedLocked retries the Destroy of every retained handle, keeps
+// the ones that refuse again, and returns a [CleanupError] for each. Called
+// with mu write-locked.
+func (s *sealerState) releaseRetainedLocked() error {
+	var errs error
+	kept := s.retained[:0]
+	for _, h := range s.retained {
+		if cause := h.Destroy(); cause != nil {
+			kept = append(kept, h)
+			errs = withCleanupFailure(errs, &CleanupError{Cause: cause})
+		}
+	}
+	clear(s.retained[len(kept):])
+	s.retained = kept
+	return errs
 }
 
 // Destroy releases every key this sealer holds, including any root or KEK an
 // unfinished initialization left pending, and the [SoftwareProvider] if
 // [NewSealer] created it by default. An injected provider is never destroyed.
 //
-// From then on every Seal, Open and [SealedEnclave.Openable] through this
+// From then on every Seal, Open and [Sealed.Openable] through this
 // sealer reports [ErrSealerDestroyed]; values it sealed are unrecoverable.
-// Destroy waits for in-process seals and opens, but not for a provider call:
-// a seal or open whose provider call straddles Destroy fails with
-// ErrSealerDestroyed when the provider returns, and an initialization blocked
+// Destroy waits for key wraps and unwraps in this process, but not for a
+// provider call or a value's own encryption: a seal or open that straddles
+// Destroy fails with ErrSealerDestroyed when it finishes, releasing what it
+// produced, and an initialization blocked
 // in [RootUnsealer.UnsealRoot] releases what it produced. A release the kernel
 // refuses is returned and stays on the [WipeAll] ledger; calling Destroy again
-// retries it. Destroy is idempotent and safe on a nil Sealer.
+// retries it. So does every handle a [CleanupError] reported for this sealer:
+// Destroy retries each, and keeps the ones that refuse again. Destroy is
+// idempotent and safe on a nil Sealer.
 func (s *Sealer) Destroy() error {
-	if s == nil {
+	if s == nil || s.sealerState == nil {
 		return nil
 	}
 
 	s.mu.Lock()
 	s.destroyed = true
-	errs := destroyAll(s.kek, s.root)
+	errs := withCleanupFailure(destroyKeys(s.kek, s.root), s.releaseRetainedLocked())
 	for _, b := range s.kekBlobs {
 		Wipe(b)
 	}
-	s.kekBlobs = nil
+	s.kekBlobs, s.kekRefs = nil, nil
 	// Non-blocking: a slot holder may be inside a provider call. It releases
 	// the pending state itself, under mu, after seeing destroyed.
 	select {
@@ -322,21 +511,71 @@ func (s *Sealer) Destroy() error {
 // Seal encrypts data and returns the sealed enclave holding it. It is
 // [NewSealed] for an explicitly constructed Sealer; the ownership contract,
 // the envelope, the context contract and the failure surface are documented
-// there and on [SealedEnclave]. It returns [ErrNilSealer] on a nil receiver.
-func (s *Sealer) Seal(ctx context.Context, data []byte) (*SealedEnclave, error) {
+// there and on [Sealed]. It returns [ErrNilSealer] on a nil receiver, and
+// [ErrSealSourceReadOnly], wiping nothing, for data this process cannot
+// write.
+func (s *Sealer) Seal(ctx context.Context, data []byte) (*Sealed, error) {
+	// First: every path below wipes data, and wiping a frozen view faults.
+	if readOnly(data) {
+		return nil, ErrSealSourceReadOnly
+	}
 	if s == nil {
 		Wipe(data)
 		return nil, ErrNilSealer
 	}
-	if len(data) == 0 {
-		Wipe(data)
-		return nil, ErrEmptyEnclave
-	}
-
 	defer Wipe(data)
 
-	// Before any key is touched, so an oversized input costs nothing.
-	if err := sealableWithin(uint64(len(data)), math.MaxInt); err != nil {
+	return s.seal(ctx, len(data), func(fn func([]byte) error) error { return fn(data) })
+}
+
+// SealFrom encrypts the material src holds and returns the sealed enclave
+// holding it. It is [Sealer.Seal] for material already in an enclave, such as
+// a frozen [Memory] that Seal would refuse with [ErrSealSourceReadOnly]: src
+// is read under its own borrow and left as it was, neither wiped nor
+// destroyed. The caller still owns src.
+//
+// src needs [ByteAccess]; one without it is a [*CapabilityError] naming
+// [CapabilityBytes], since material that never leaves its device cannot be
+// sealed here. A nil or destroyed src returns [ErrEnclaveDestroyed]. It
+// returns [ErrNilSealer] on a nil receiver, and otherwise what Seal returns.
+func (s *Sealer) SealFrom(ctx context.Context, src Handle) (*Sealed, error) {
+	if s == nil {
+		return nil, ErrNilSealer
+	}
+	if isNilInterface(src) {
+		return nil, ErrEnclaveDestroyed
+	}
+	ba, ok := src.(ByteAccess)
+	if !ok {
+		return nil, &CapabilityError{Backend: backendName(src), Capability: CapabilityBytes}
+	}
+	size := ba.Size()
+	if size <= 0 && !ba.IsAlive() {
+		return nil, ErrEnclaveDestroyed
+	}
+	return s.seal(ctx, size, ba.WithBytes)
+}
+
+// backendName is the name of the backend that made h, guarded against a
+// backend breaking Handle's never-nil contract.
+func backendName(h Handle) string {
+	b := h.Backend()
+	if isNilInterface(b) {
+		return ""
+	}
+	return b.Name()
+}
+
+// seal is the shared body of Seal and SealFrom. read lends the size bytes of
+// material to its argument for one call.
+func (s *Sealer) seal(ctx context.Context, size int, read func(func([]byte) error) error) (*Sealed, error) {
+	// Before any key is touched, so an empty or oversized input costs nothing.
+	// SealFrom's size comes from a ByteAccess, so a negative one is refused
+	// as empty too.
+	if size <= 0 {
+		return nil, ErrEmptyEnclave
+	}
+	if err := sealableWithin(uint64(size), math.MaxInt); err != nil {
 		return nil, err
 	}
 
@@ -345,7 +584,7 @@ func (s *Sealer) Seal(ctx context.Context, data []byte) (*SealedEnclave, error) 
 	if err := contextFailure[sealFailed](ctx, nil); err != nil {
 		return nil, err
 	}
-	if err := s.whileUsable(nil); err != nil {
+	if err := s.usable(); err != nil {
 		return nil, err
 	}
 
@@ -364,25 +603,77 @@ func (s *Sealer) Seal(ctx context.Context, data []byte) (*SealedEnclave, error) 
 	if err != nil {
 		return nil, err
 	}
-	// The blob is the AAD. Under whileUsable because Destroy does not wait for
-	// the provider call above.
+
+	// The blob is the AAD. The data AEAD runs with mu released, so a long
+	// value never holds off Destroy or a rotation. That is safe because it
+	// uses only dek, which this call made and destroys, never a key of the
+	// hierarchy: those are used only under mu or by the initSlot holder. What
+	// Destroy must prevent is a value sealed under a destroyed sealer
+	// escaping, so destroyed is re-checked after the AEAD, and a seal it
+	// overlapped fails closed and releases its generation's reference.
 	var sealed []byte
-	if err := s.whileUsable(func() error {
+	err = read(func(p []byte) error {
 		var serr error
-		sealed, serr = sealWithKey(dek, data, blob)
+		sealed, serr = sealWithKey(dek, p, blob)
+		size = len(p)
 		return serr
-	}); err != nil {
+	})
+	if err == nil {
+		err = s.usable()
+	}
+	if err != nil {
+		s.releaseBlob(blob)
 		return nil, err
 	}
 
-	return &SealedEnclave{
-		sealer: s, sealed: sealed, blob: blob, size: len(data),
+	return &Sealed{sealedState: &sealedState{
+		sealer: s, sealed: sealed, blob: blob, size: size,
 		sealedAtGen: sealedAtGen,
-	}, nil
+	}}, nil
+}
+
+// readOnly reports whether p, or any part of it, is memory this process
+// cannot write, such as a view into a frozen [Memory]. It probes by writing
+// one byte of every page p spans back unchanged, with a fault turned into a
+// recoverable panic for the probe's length. Those are the pages the wipe
+// that follows a seal writes, so a mapping of mixed protection is refused
+// rather than faulting in the wipe. Material p is only ever handed to
+// sealing, which owns and wipes it, so the probe writes nothing a caller
+// could observe.
+func readOnly(p []byte) (ro bool) {
+	if len(p) == 0 {
+		return false
+	}
+	defer debug.SetPanicOnFault(debug.SetPanicOnFault(true))
+	defer func() {
+		r := recover()
+		if r == nil {
+			return
+		}
+		if _, ok := r.(runtime.Error); !ok {
+			panic(r)
+		}
+		ro = true
+	}()
+	// A stride of one page from the first byte lands in each page p spans in
+	// turn, short of the last one at most, which the last byte is in.
+	for i := 0; i < len(p); i += int(pageSize) {
+		rewrite(&p[i], p[i])
+	}
+	rewrite(&p[len(p)-1], p[len(p)-1])
+	return false
+}
+
+// rewrite stores v into b. Not inlined, so the compiler cannot see that v
+// was loaded from b and drop the store as a no-op.
+//
+//go:noinline
+func rewrite(b *byte, v byte) {
+	*b = v
 }
 
 // open recovers an envelope this sealer produced into a frozen enclave; a is
-// nil for [SealedEnclave.Open]. It runs with no lock held: the envelope is
+// nil for [Sealed.Open]. It runs with no lock held: the envelope is
 // pinned by the value's in-flight count, so a value's Destroy never waits on
 // a provider call here.
 //
@@ -390,51 +681,49 @@ func (s *Sealer) Seal(ctx context.Context, data []byte) (*SealedEnclave, error) 
 // allocation: an open the budget refuses allocates no locked memory and
 // touches no key, and the unadmitted DEK page exists only behind a granted
 // reservation.
-func (s *Sealer) open(ctx context.Context, a *Allocator, blob, sealed []byte, size int) (*MemoryEnclave, error) {
+func (s *Sealer) open(ctx context.Context, blob, sealed []byte, size int, dst func(int) (*Memory, error), freeze bool) (*Memory, error) {
 	if err := contextFailure[openFailed](ctx, nil); err != nil {
 		return nil, err
 	}
-	if err := s.whileUsable(nil); err != nil {
+	if err := s.usable(); err != nil {
 		return nil, err
 	}
 
-	// A nil allocator leaves the open unbudgeted, as [SealedEnclave.Open] is.
-	var out *MemoryEnclave
-	var err error
-	if a == nil {
-		out, err = NewMemoryEnclaveSized(size)
-	} else {
-		out, err = a.NewSized(size)
-	}
+	out, err := dst(size)
 	if err != nil {
 		return nil, err
 	}
 
 	// Locked before the provider fills it, so a capable provider writes the
-	// key straight into locked pages. Not admitted; see [SealedEnclave.OpenWith].
-	dek, err := NewMemoryEnclaveSized(dekBytes)
+	// key straight into locked pages. Not admitted; see [Sealed.OpenIn].
+	dek, err := NewMemorySized(dekBytes)
 	if err != nil {
-		_ = out.Destroy()
-		return nil, err
+		return nil, destroyOnFailure(err, out)
 	}
 	defer func() { _ = dek.Destroy() }()
 
 	if err := s.unprotect(ctx, blob, dek); err != nil {
-		_ = out.Destroy()
-		return nil, err
+		return nil, destroyOnFailure(err, out)
 	}
-	if err := s.whileUsable(func() error {
-		return out.WithBytes(func(pt []byte) error {
-			// The blob is verified as AAD even though the DEK unwrap already
-			// authenticated it: this refuses two individually authentic halves
-			// that were never sealed together.
-			return openWithKeyInto(dek, sealed, blob, pt)
-		})
-	}); err != nil {
-		_ = out.Destroy()
-		return nil, err
+	// With mu released, as in seal: the AEAD uses only this call's dek.
+	// destroyed is re-checked after it, so nothing opened under a sealer
+	// destroyed meanwhile is returned.
+	err = out.WithBytes(func(pt []byte) error {
+		// The blob is verified as AAD even though the DEK unwrap already
+		// authenticated it: this refuses two individually authentic halves
+		// that were never sealed together.
+		return openWithKeyInto(dek, sealed, blob, pt)
+	})
+	if err == nil {
+		err = s.usable()
+	}
+	if err != nil {
+		return nil, destroyOnFailure(err, out)
 	}
 
+	if !freeze {
+		return out, nil
+	}
 	// Returned read-only, so a stray write through a retained slice faults. A
 	// refused freeze fails the open closed.
 	if err := out.Freeze(); err != nil {
@@ -444,7 +733,7 @@ func (s *Sealer) open(ctx context.Context, a *Allocator, blob, sealed []byte, si
 }
 
 // openable reports whether the in-process key material this sealer depends on
-// is still there (see [SealedEnclave.Openable]). It performs no crypto and
+// is still there (see [Sealed.Openable]). It performs no crypto and
 // initializes nothing. It dispatches on state rather than [Mode], so a future
 // mode cannot fall into a default arm that checks nothing.
 func (s *Sealer) openable(sealedAtGen uint64) error {
@@ -479,7 +768,7 @@ func (s *Sealer) openable(sealedAtGen uint64) error {
 // provider reads the key from locked pages. The context is checked again
 // after the provider returns, discarding a blob the caller stopped waiting
 // for.
-func (s *Sealer) protectPerOperation(ctx context.Context, dek *MemoryEnclave) ([]byte, error) {
+func (s *sealerState) protectPerOperation(ctx context.Context, dek *Memory) ([]byte, error) {
 	var blob []byte
 	if err := dek.WithBytes(func(k []byte) error {
 		b, perr := s.kp.Protect(ctx, k)
@@ -508,7 +797,7 @@ func (s *Sealer) protectPerOperation(ctx context.Context, dek *MemoryEnclave) ([
 // context has also ended, the error keeps both, so a forgery verdict is not
 // erased by a cancellation; see docs/sealing/engineering.md, Context error
 // shapes.
-func (s *Sealer) unprotectPerOperation(ctx context.Context, blob []byte, dek *MemoryEnclave) error {
+func (s *sealerState) unprotectPerOperation(ctx context.Context, blob []byte, dek *Memory) error {
 	return providerFailure[openFailed](dek.WithBytes(func(k []byte) error {
 		perr := s.kp.Unprotect(ctx, blob, k)
 		if cerr := contextFailure[openFailed](ctx, perr); cerr != nil {
@@ -533,8 +822,18 @@ var processSealerSlot = processSingleton[Sealer]{
 // It is one-shot: it returns [ErrSealerInstalled] once any process sealer
 // exists, including the software default the first [NewSealed] installs
 // lazily, because replacing it would strand every live sealed value. Install
-// before anything can seal. It returns [ErrNilSealer] for a nil sealer.
+// before anything can seal. It returns [ErrNilSealer] for a nil sealer,
+// [ErrSealerNotConstructed] for one not built by [NewSealer], and
+// [ErrSealerDestroyed] for one already destroyed.
 func SetSealer(s *Sealer) error {
+	if s == nil {
+		return ErrNilSealer
+	}
+	// Refused here rather than at the first seal, where the configuration
+	// could no longer be corrected.
+	if err := s.usable(); err != nil {
+		return err
+	}
 	return processSealerSlot.install(s)
 }
 

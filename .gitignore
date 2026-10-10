@@ -39,7 +39,9 @@ trivy-results.sarif
 *.swo
 
 # AI assistant / local tooling — never commit
-.serena/
+.serena/*
+# ...except the shared Serena project file (#140); caches and memories stay local
+!.serena/project.yml
 local.mk
 
 # Agent instruction files (CLAUDE.md, AGENTS.md, .claude/) are tracked: the

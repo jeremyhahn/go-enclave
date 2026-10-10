@@ -14,14 +14,26 @@ import (
 	"sync/atomic"
 )
 
-// MemoryEnclave is a region of locked, guarded memory holding sensitive
-// material. Construct one with [NewMemoryEnclave], [NewMemoryEnclaveCopy] or
-// [NewMemoryEnclaveSized]. A nil *MemoryEnclave is a valid receiver: not
-// alive, borrows fail with [ErrEnclaveDestroyed], and Destroy returns nil.
+// Memory is a region of locked, guarded memory holding sensitive
+// material. Construct one with [NewMemory], [NewMemoryCopy] or
+// [NewMemorySized]. A nil *Memory is a valid receiver: not
+// alive, borrows fail with [ErrEnclaveDestroyed], and Destroy returns nil. The
+// zero Memory behaves as a nil one.
 //
 // Every method holds the enclave's lock for the whole access, so Destroy and
-// Freeze wait out in-flight borrows.
-type MemoryEnclave struct {
+// Freeze wait out in-flight borrows. A Memory holds only a pointer to its
+// state, so every copy of one is the same enclave and one Destroy reaches all
+// of them; go vet's copylocks check reports a copy all the same, since a
+// *Memory is the handle to pass around.
+type Memory struct {
+	_ noCopy
+	*memoryState
+}
+
+// memoryState is the enclave itself, shared by every copy of its Memory. The
+// shutdown ledger is keyed by it, so a Destroy through any copy settles the
+// one entry.
+type memoryState struct {
 	mu sync.RWMutex
 
 	// holders counts goroutines holding or waiting for mu; the release that
@@ -34,9 +46,15 @@ type MemoryEnclave struct {
 	// release, when non-nil, returns this enclave's Allocator reservation.
 	release     func()
 	releaseOnce sync.Once
+
+	// admitter is the Allocator that admitted the enclave, or nil.
+	admitter *Allocator
 }
 
-// NewMemoryEnclave moves data into a new locked, read-only enclave. The
+// unset reports whether e is nil or the zero Memory: no enclave at all.
+func (e *Memory) unset() bool { return e == nil || e.memoryState == nil }
+
+// NewMemory moves data into a new locked, read-only enclave. The
 // caller's slice is wiped on every return path, including failure.
 //
 // It returns [ErrEmptyEnclave] for empty data and [ErrLockedMemoryUnavailable]
@@ -44,31 +62,31 @@ type MemoryEnclave struct {
 // the rollback had to unmap unwiped); a failure touches no other enclave. A
 // concurrent [WipeAll] can make a successful return an already-destroyed
 // enclave, so callers constructing during shutdown must check IsAlive.
-func NewMemoryEnclave(data []byte) (*MemoryEnclave, error) {
+func NewMemory(data []byte) (*Memory, error) {
 	defer Wipe(data)
 	if len(data) == 0 {
 		return nil, ErrEmptyEnclave
 	}
 	m, err := newFrozenCopy(data)
-	return publish(m, err, nil)
+	return publish(m, err, nil, nil)
 }
 
-// NewMemoryEnclaveCopy is [NewMemoryEnclave] without the wipe: src is left
-// untouched on every path. Prefer NewMemoryEnclave; the src kept here is an
+// NewMemoryCopy is [NewMemory] without the wipe: src is left
+// untouched on every path. Prefer NewMemory; the src kept here is an
 // unprotected heap copy the caller must [Wipe] when done. The result is frozen
-// and the errors are NewMemoryEnclave's.
-func NewMemoryEnclaveCopy(src []byte) (*MemoryEnclave, error) {
+// and the errors are NewMemory's.
+func NewMemoryCopy(src []byte) (*Memory, error) {
 	if len(src) == 0 {
 		return nil, ErrEmptyEnclave
 	}
 	m, err := newFrozenCopy(src)
-	return publish(m, err, nil)
+	return publish(m, err, nil, nil)
 }
 
-// NewMemoryEnclaveSized returns an enclave over n zeroed, WRITABLE bytes, so
+// NewMemorySized returns an enclave over n zeroed, WRITABLE bytes, so
 // generated material is produced in locked memory and never on the heap:
 //
-//	e, err := enclave.NewMemoryEnclaveSized(32)
+//	e, err := enclave.NewMemorySized(32)
 //	if err != nil {
 //	    return err
 //	}
@@ -86,11 +104,11 @@ func NewMemoryEnclaveCopy(src []byte) (*MemoryEnclave, error) {
 // Until Freeze succeeds, finish the fill before sharing the enclave, and know
 // that a retained slice silently corrupts the material instead of faulting.
 // It returns [ErrInvalidSize] or [ErrLockedMemoryUnavailable], otherwise as
-// [NewMemoryEnclave].
-func NewMemoryEnclaveSized(n int) (*MemoryEnclave, error) {
+// [NewMemory].
+func NewMemorySized(n int) (*Memory, error) {
 	// newMapping is the size check: it refuses n with ErrInvalidSize.
 	m, err := newMapping(n)
-	return publish(m, err, nil)
+	return publish(m, err, nil, nil)
 }
 
 // newFrozenCopy maps len(src) bytes, copies src in and freezes them. It never
@@ -127,8 +145,9 @@ func (m *mapping) loadFrozen(src []byte) (*mapping, error) {
 // it registers m as an enclave whose release runs once its pages go back. On
 // failure it hands any pages err left mapped to the orphan ledger with
 // release, so release must be nil unless those pages are still locked: an
-// admitted caller refunds a charge nothing holds itself, at once.
-func publish(m *mapping, err error, release func()) (*MemoryEnclave, error) {
+// admitted caller refunds a charge nothing holds itself, at once. admitter is
+// the Allocator that admitted it, nil for an unbudgeted constructor.
+func publish(m *mapping, err error, release func(), admitter *Allocator) (*Memory, error) {
 	if err != nil {
 		adoptOrphan(err, release)
 		return nil, err
@@ -136,17 +155,21 @@ func publish(m *mapping, err error, release func()) (*MemoryEnclave, error) {
 	// register publishes the enclave to a concurrent WipeAll, so release is set
 	// first: otherwise a sweep could unmap the pages while the budget kept the
 	// charge.
-	return register(&MemoryEnclave{m: m, release: release}), nil
+	return register(&memoryState{m: m, release: release, admitter: admitter}), nil
 }
 
 // WithBytes calls fn with a view of the locked pages and returns fn's error,
 // or [ErrEnclaveDestroyed]. The read lock is held across fn, so Destroy,
 // Freeze and [WipeAll] wait for it. fn must not retain the view or call any
 // method on the same enclave (deadlock); it may use other enclaves. A write
-// through the view fills a sized enclave before Freeze and faults after.
-func (e *MemoryEnclave) WithBytes(fn func([]byte) error) error {
-	if e == nil {
+// through the view fills a sized enclave before Freeze and faults after. A nil
+// fn is [ErrNilFunc] on an enclave that exists, and calls nothing.
+func (e *Memory) WithBytes(fn func([]byte) error) error {
+	if e.unset() {
 		return ErrEnclaveDestroyed
+	}
+	if fn == nil {
+		return ErrNilFunc
 	}
 
 	e.rlock()
@@ -162,7 +185,7 @@ func (e *MemoryEnclave) WithBytes(fn func([]byte) error) error {
 // holdsMaterial reports whether the material is still there. It is false once
 // the pages are released, and once they are wiped but held for a retried
 // release, whose guard pages are already read-write. The caller holds e.mu.
-func (e *MemoryEnclave) holdsMaterial() bool {
+func (e *memoryState) holdsMaterial() bool {
 	return e.m != nil && !e.m.wiped
 }
 
@@ -172,8 +195,8 @@ func (e *MemoryEnclave) holdsMaterial() bool {
 // [ErrLockedMemoryUnavailable] if mprotect is refused, leaving the enclave
 // alive and writable. A frozen enclave whose later unprotect is denied is
 // released unwiped ([ErrReleasedWithoutWipe] from Destroy).
-func (e *MemoryEnclave) Freeze() error {
-	if e == nil {
+func (e *Memory) Freeze() error {
+	if e.unset() {
 		return ErrEnclaveDestroyed
 	}
 
@@ -190,7 +213,7 @@ func (e *MemoryEnclave) Freeze() error {
 }
 
 // Size reports the number of bytes held, or 0 once destroyed.
-func (e *MemoryEnclave) Size() int {
+func (e *Memory) Size() int {
 	n := 0
 	_ = e.WithBytes(func(b []byte) error {
 		n = len(b)
@@ -200,14 +223,14 @@ func (e *MemoryEnclave) Size() int {
 }
 
 // IsAlive reports whether the locked region still holds material.
-func (e *MemoryEnclave) IsAlive() bool {
+func (e *Memory) IsAlive() bool {
 	return e.WithBytes(func([]byte) error { return nil }) == nil
 }
 
 // EqualTo reports whether the enclave holds exactly other, or
 // [ErrEnclaveDestroyed]. Its timing reveals whether the lengths differ but not
 // the contents.
-func (e *MemoryEnclave) EqualTo(other []byte) (bool, error) {
+func (e *Memory) EqualTo(other []byte) (bool, error) {
 	equal := false
 	if err := e.WithBytes(func(b []byte) error {
 		equal = equalConstantTime(b, other)
@@ -233,8 +256,8 @@ func (e *MemoryEnclave) EqualTo(other []byte) (bool, error) {
 //
 // Test ErrReleasedWithoutWipe first. A discarded error loses nothing: the next
 // WipeAll retries held pages and reports every detected corruption.
-func (e *MemoryEnclave) Destroy() error {
-	if e == nil {
+func (e *Memory) Destroy() error {
+	if e.unset() {
 		return nil
 	}
 
@@ -242,7 +265,7 @@ func (e *MemoryEnclave) Destroy() error {
 	err := e.releaseLocked()
 	e.unlock()
 
-	settleRelease(e, err)
+	settleRelease(e.memoryState, err)
 	return err
 }
 
@@ -273,7 +296,7 @@ func lockedPagesHeld(err error) bool {
 // releaseLocked is the memory half of every release: Destroy's and the
 // sweep's. The caller holds e.mu, or is the sweep releasing an orphan no one
 // else can reach.
-func (e *MemoryEnclave) releaseLocked() error {
+func (e *memoryState) releaseLocked() error {
 	if e.m == nil {
 		return nil
 	}
@@ -288,21 +311,27 @@ func (e *MemoryEnclave) releaseLocked() error {
 }
 
 // String masks the contents.
-func (e *MemoryEnclave) String() string {
+func (e *Memory) String() string {
 	if !e.IsAlive() {
-		return "MemoryEnclave(destroyed)"
+		return "Memory(destroyed)"
 	}
-	return "MemoryEnclave(redacted)"
+	return "Memory(redacted)"
 }
 
 // GoString masks the contents under %#v.
-func (e *MemoryEnclave) GoString() string {
+func (e *Memory) GoString() string {
 	return e.String()
 }
 
-// Backend returns the locked-memory backend, [DefaultBackend], which made
-// every MemoryEnclave. It is nil-safe, and the same once destroyed.
-func (e *MemoryEnclave) Backend() Backend { return lockedMemory{} }
+// Backend returns the backend that made the enclave: the [*Allocator] that
+// admitted it, or [DefaultBackend] for an unbudgeted one. It is nil-safe, and
+// the same once destroyed.
+func (e *Memory) Backend() Backend {
+	if e.unset() || e.admitter == nil {
+		return lockedMemory{}
+	}
+	return e.admitter
+}
 
 // KeyScheduleErasure reports whether AES key schedules and HKDF temporaries
 // are erased after use. It is true only with GOEXPERIMENT=runtimesecret on

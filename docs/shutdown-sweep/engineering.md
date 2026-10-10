@@ -1,14 +1,15 @@
 # Shutdown sweep — engineering contract
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-07
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-09
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Exported surface
 
 | Identifier | Contract |
 |---|---|
-| `WipeAll(ctx context.Context) (int, error)` | Destroy every enclave on the ledger and retry every orphaned mapping; report what is still held and what was found. Never panics. |
-| `SweepError{Corrupt int; Unwiped int}` | Findings of an admitted sweep. `errors.Is(err, ErrEnclaveCorrupted)` iff `Corrupt > 0`; `errors.Is(err, ErrReleasedWithoutWipe)` iff `Unwiped > 0`. |
+| `WipeAll(ctx context.Context) (int, error)` | Phase one: destroy every enclave on the ledger and retry every orphaned mapping. Phase two: call `Sweep(ctx)` on every registered non-default `Sweeper`, in name order. Report what is still held and what was found. Never panics on its own account. |
+| `SweepError{Corrupt int; Unwiped int; Backends []BackendSweepFailure}` | Findings of an admitted sweep. `errors.Is(err, ErrEnclaveCorrupted)` iff `Corrupt > 0`; `errors.Is(err, ErrReleasedWithoutWipe)` iff `Unwiped > 0`. `Unwrap() []error` returns each failed backend's error, so `errors.Is`/`errors.As` reach them. |
+| `BackendSweepFailure{Backend string; Err error}` | One `Sweeper` that returned an error: its registered name and that error, unchanged. |
 | `ErrSweepInProgress` | This call was never admitted; it swept nothing. |
 
 ## Invariants
@@ -61,7 +62,7 @@
    `ModePerOperation` is wiped only if its root was destroyed. Sealed values
    stay openable where the needed in-process keys survived, or where the
    wrapping key is held outside the process (a device-held `ModePerOperation`
-   key). `SealedEnclave` values are not swept: they own no locked pages (so
+   key). `Sealed` values are not swept: they own no locked pages (so
    including them would corrupt the count), destroying them under
    `ModePerOperation` would destroy data the device can still open, and a
    swept value would report `ErrEnclaveDestroyed` instead of the more accurate
@@ -72,6 +73,16 @@
    process, including those of subsystems a library cannot know about. It is a
    cooperative teardown step, not a fault handler: it never panics, and a
    corrupt enclave is reported and the sweep continues.
+10. **Backends are swept second, outside the registry lock.** Phase two runs
+    only after phase one has finished, still holding the sweep slot and with
+    the generation still odd, so a backend's `Sweep` never races the
+    locked-memory sweep or another `WipeAll`. It takes a snapshot of the registered `Sweeper`s
+    (the default `"locked-memory"` backend excluded: phase one is its sweep)
+    under the registry's read lock, releases the lock, sorts the snapshot by
+    name and calls each once with the caller's `ctx`, unchanged (nil and done
+    included). A `Sweep` may therefore `Register`; a backend registered after
+    the snapshot waits for the next `WipeAll`. A panic in a `Sweep` is not
+    recovered.
 
 ## Return values
 
@@ -84,7 +95,8 @@ locks its pages before it registers them (registration is its last step), so a
 construction in flight when the count is read is not in it. It is a snapshot,
 not a diagnosis; a non-zero count is most often workers that outlived the
 shutdown. Calling again at once does not help: a live borrow is waited for
-again, and an unchanged refusal is refused again.
+again, and an unchanged refusal is refused again. Each `Sweeper`'s held count
+is added to it (a negative count counts as 0), read after its `Sweep` returns.
 
 The **error**:
 
@@ -92,7 +104,7 @@ The **error**:
 |---|---|
 | `nil` | Admitted, and found nothing to report. A `ctx` ending during an admitted sweep is not an error. |
 | `ErrSweepInProgress` | Not admitted. The count is still current; the running sweep reports its own findings to its own caller. |
-| `*SweepError` | Admitted, and found canary corruption (`Corrupt`, counted once per entry per sweep, including every enclave whose `Destroy` reported corruption since the previous admitted sweep) and/or releases that fell back to an unwiped unmap (`Unwiped`). Never a nil `*SweepError` behind a non-nil error. |
+| `*SweepError` | Admitted, and found canary corruption (`Corrupt`, counted once per entry per sweep, including every enclave whose `Destroy` reported corruption since the previous admitted sweep) and/or releases that fell back to an unwiped unmap (`Unwiped`), and/or registered backends whose `Sweep` failed (`Backends`, in name order). `Error()` is one line per non-zero count, then one line per failed backend: `enclave: backend "<name>" failed its sweep: <err>`. Never a nil `*SweepError` behind a non-nil error. |
 
 Corruption is tallied by entry during the sweep, not read from the ledger: a
 reclaimed corrupt entry is no longer on it, and one whose release was refused
@@ -134,6 +146,8 @@ the generation bump, before destroying), `sweepAdmissionWaitForTest` (about to
 block for the slot). Release refusals and corruption are injected through the
 memory seams described in
 [locked-memory/engineering.md](../locked-memory/engineering.md#test-strategy).
+Phase two is driven by registered fake `Sweeper`s that record their call order
+and `ctx`, and one that calls `Register` from inside `Sweep`.
 Borrow-path cost is measured by the borrow benchmarks (`make bench`).
 
 ## Observability

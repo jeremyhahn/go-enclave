@@ -56,12 +56,12 @@ func TestLockedMemory_EnclaveMappingsAreLockedUndumpableAndGuarded(t *testing.T)
 
 		type subject struct {
 			name     string
-			e        *enclave.MemoryEnclave
+			e        *enclave.Memory
 			size     int
 			writable bool
 		}
 		var subjects []subject
-		add := func(name string, size int, writable bool, e *enclave.MemoryEnclave, err error) {
+		add := func(name string, size int, writable bool, e *enclave.Memory, err error) {
 			t.Helper()
 			if err != nil {
 				t.Fatalf("%s: %v", name, err)
@@ -70,20 +70,20 @@ func TestLockedMemory_EnclaveMappingsAreLockedUndumpableAndGuarded(t *testing.T)
 		}
 
 		material := func(n int) []byte { b := make([]byte, n); b[0] = 1; return b }
-		e, err := enclave.NewMemoryEnclave(material(32))
-		add("NewMemoryEnclave", 32, false, e, err)
-		e, err = enclave.NewMemoryEnclaveCopy(material(48))
-		add("NewMemoryEnclaveCopy", 48, false, e, err)
-		e, err = enclave.NewMemoryEnclaveSized(64)
-		add("NewMemoryEnclaveSized (unfrozen)", 64, true, e, err)
-		e, err = enclave.NewMemoryEnclaveSized(64)
+		e, err := enclave.NewMemory(material(32))
+		add("NewMemory", 32, false, e, err)
+		e, err = enclave.NewMemoryCopy(material(48))
+		add("NewMemoryCopy", 48, false, e, err)
+		e, err = enclave.NewMemorySized(64)
+		add("NewMemorySized (unfrozen)", 64, true, e, err)
+		e, err = enclave.NewMemorySized(64)
 		if err == nil {
 			err = e.Freeze()
 		}
-		add("NewMemoryEnclaveSized + Freeze", 64, false, e, err)
+		add("NewMemorySized + Freeze", 64, false, e, err)
 		large := 3*page + 1
-		e, err = enclave.NewMemoryEnclave(material(large))
-		add("NewMemoryEnclave (multi-page)", large, false, e, err)
+		e, err = enclave.NewMemory(material(large))
+		add("NewMemory (multi-page)", large, false, e, err)
 		e, err = alloc.New(material(16))
 		add("Allocator.New", 16, false, e, err)
 		e, err = alloc.NewSized(16)
@@ -95,9 +95,9 @@ func TestLockedMemory_EnclaveMappingsAreLockedUndumpableAndGuarded(t *testing.T)
 		}
 		// Open's plaintext is final, so it is frozen read-only before Open returns.
 		e, err = sealed.Open(ctx)
-		add("SealedEnclave.Open", 40, false, e, err)
-		e, err = sealed.OpenWith(ctx, alloc)
-		add("SealedEnclave.OpenWith", 40, false, e, err)
+		add("Sealed.Open", 40, false, e, err)
+		e, err = openInAllocator(t, ctx, sealed, alloc)
+		add("Sealed.OpenIn", 40, false, e, err)
 
 		maps := readSmaps(t)
 		var accounted int64
@@ -196,14 +196,15 @@ func TestLockedMemory_EnclaveMappingsAreLockedUndumpableAndGuarded(t *testing.T)
 	})
 }
 
-// TestLockedMemory_CoreDumpLimitLoweredOnImport pins that importing go-enclave lowers
-// RLIMIT_CORE to 0 soft and hard, CoreDumpsDisabled reports it, and the
-// process cannot raise it again.
+// TestLockedMemory_CoreDumpLimitUnchangedByImport pins that importing go-enclave
+// leaves RLIMIT_CORE where the parent set it, and that CoreDumpsDisabled says
+// nothing was applied; lowering the limit is HardenProcess's
+// (TestLockedMemory_HardenProcess_KernelReportsNotDumpable).
 //
 // It runs in the top-level process so its parent is the `go` command, which
 // does not import go-enclave; the test requires that parent's limit to be the
-// non-zero figure compose.yaml declares, or "lowered" would be unfalsifiable.
-func TestLockedMemory_CoreDumpLimitLoweredOnImport(t *testing.T) {
+// non-zero figure compose.yaml declares, or "unchanged" would be unfalsifiable.
+func TestLockedMemory_CoreDumpLimitUnchangedByImport(t *testing.T) {
 	if isChild() {
 		t.Fatalf("must run in the top-level test process, whose parent is the go command")
 	}
@@ -215,8 +216,8 @@ func TestLockedMemory_CoreDumpLimitLoweredOnImport(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reading the parent's core limit: %v", err)
 	}
-	if soft != strconv.FormatInt(want, 10) || hard != strconv.FormatInt(want, 10) {
-		t.Fatalf("the parent process (pid %d, the go command) has core limit %s/%s, want %d/%d from compose.yaml: without a non-zero starting limit this test cannot tell whether go-enclave lowered anything",
+	if soft != strconv.FormatInt(want, 10) || hard != strconv.FormatInt(want, 10) || want == 0 {
+		t.Fatalf("the parent process (pid %d, the go command) has core limit %s/%s, want a non-zero %d/%d from compose.yaml: without it this test cannot tell whether go-enclave lowered anything",
 			os.Getppid(), soft, hard, want, want)
 	}
 
@@ -224,18 +225,13 @@ func TestLockedMemory_CoreDumpLimitLoweredOnImport(t *testing.T) {
 	if err := unix.Getrlimit(unix.RLIMIT_CORE, &rl); err != nil {
 		t.Fatalf("getrlimit(RLIMIT_CORE): %v", err)
 	}
-	if rl.Cur != 0 || rl.Max != 0 {
-		t.Errorf("RLIMIT_CORE = %d/%d after importing go-enclave, want 0/0 (parent started at %d)", rl.Cur, rl.Max, want)
+	if rl.Cur != uint64(want) || rl.Max != uint64(want) {
+		t.Errorf("RLIMIT_CORE = %d/%d after importing go-enclave, want the parent's %d/%d: importing must change no process state", rl.Cur, rl.Max, want, want)
 	}
-	if err := enclave.CoreDumpsDisabled(); err != nil {
-		t.Errorf("CoreDumpsDisabled() = %v, want nil: the lowering is in place, so the report must say so", err)
+	if err := enclave.CoreDumpsDisabled(); !errors.Is(err, enclave.ErrCoreDumpLimitNotApplied) {
+		t.Errorf("CoreDumpsDisabled() = %v before HardenProcess, want ErrCoreDumpLimitNotApplied", err)
 	}
-	// Hard limit 0 without CAP_SYS_RESOURCE: cannot be raised.
-	err = unix.Setrlimit(unix.RLIMIT_CORE, &unix.Rlimit{Cur: uint64(want), Max: uint64(want)})
-	if !errors.Is(err, unix.EPERM) {
-		t.Errorf("raising RLIMIT_CORE back to %d: err = %v, want EPERM", want, err)
-	}
-	t.Logf("core limit: parent (go command) %s/%s, this process %d/%d; raise refused: %v", soft, hard, rl.Cur, rl.Max, err)
+	t.Logf("core limit: parent (go command) %s/%s, this process %d/%d", soft, hard, rl.Cur, rl.Max)
 }
 
 // procLimit returns the soft and hard columns of one /proc/<pid>/limits row.
@@ -268,8 +264,8 @@ func TestLockedMemory_RefusedMlockRollsBackConstruction(t *testing.T) {
 		}
 
 		f.refuse(unix.SYS_MLOCK, unix.ENOMEM, 0)
-		if _, err := enclave.NewMemoryEnclave([]byte("refused")); !errors.Is(err, enclave.ErrLockedMemoryUnavailable) {
-			t.Errorf("NewMemoryEnclave with mlock refused = %v, want ErrLockedMemoryUnavailable", err)
+		if _, err := enclave.NewMemory([]byte("refused")); !errors.Is(err, enclave.ErrLockedMemoryUnavailable) {
+			t.Errorf("NewMemory with mlock refused = %v, want ErrLockedMemoryUnavailable", err)
 		}
 		if _, err := a.NewSized(32); !errors.Is(err, enclave.ErrLockedMemoryUnavailable) {
 			t.Errorf("Allocator.NewSized with mlock refused = %v, want ErrLockedMemoryUnavailable", err)
@@ -306,9 +302,9 @@ func TestLockedMemory_RefusedUnmapKeepsTheEnclaveForARetry(t *testing.T) {
 	const n = 48
 	isolated(t, childOpts{}, func(t *testing.T) {
 		f := installFaultInjector(t, mappingLen(n))
-		e, err := enclave.NewMemoryEnclaveSized(n)
+		e, err := enclave.NewMemorySized(n)
 		if err != nil {
-			t.Fatalf("NewMemoryEnclaveSized: %v", err)
+			t.Fatalf("NewMemorySized: %v", err)
 		}
 
 		f.refuse(unix.SYS_MUNMAP, unix.ENOMEM, 0)
@@ -340,13 +336,13 @@ func TestLockedMemory_RefusedUnmapKeepsTheEnclaveForARetry(t *testing.T) {
 func TestLockedMemory_DeniedMprotectReleasesUnwiped(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		f := installFaultInjector(t, 0)
-		viaDestroy, err := enclave.NewMemoryEnclave([]byte("frozen at construction"))
+		viaDestroy, err := enclave.NewMemory([]byte("frozen at construction"))
 		if err != nil {
-			t.Fatalf("NewMemoryEnclave: %v", err)
+			t.Fatalf("NewMemory: %v", err)
 		}
-		viaSweep, err := enclave.NewMemoryEnclave([]byte("frozen, reclaimed by the sweep"))
+		viaSweep, err := enclave.NewMemory([]byte("frozen, reclaimed by the sweep"))
 		if err != nil {
-			t.Fatalf("NewMemoryEnclave: %v", err)
+			t.Fatalf("NewMemory: %v", err)
 		}
 
 		f.refuseProt(unix.SYS_MPROTECT, unix.EPERM, unix.PROT_READ|unix.PROT_WRITE)
@@ -436,9 +432,9 @@ func TestLockedMemory_ConstructionFailsClosedWhenAnExclusionIsRefused(t *testing
 			isolated(t, childOpts{}, func(t *testing.T) {
 				installErrnoFilter(t, unix.SYS_MADVISE, 2, tc.advice, unix.EPERM)
 
-				e, err := enclave.NewMemoryEnclave([]byte("refused-exclusion"))
+				e, err := enclave.NewMemory([]byte("refused-exclusion"))
 				if e != nil || !errors.Is(err, enclave.ErrLockedMemoryUnavailable) || !errors.Is(err, unix.EPERM) {
-					t.Fatalf("NewMemoryEnclave with %s refused = %v, %v; want ErrLockedMemoryUnavailable wrapping EPERM", tc.name, e, err)
+					t.Fatalf("NewMemory with %s refused = %v, %v; want ErrLockedMemoryUnavailable wrapping EPERM", tc.name, e, err)
 				}
 				var se *os.SyscallError
 				if !errors.As(err, &se) || se.Syscall != "madvise" {

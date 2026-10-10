@@ -41,10 +41,10 @@ func freshProcessSealer(t *testing.T) {
 	t.Cleanup(resetProcessSealerForTest)
 }
 
-// TestSealedEnclave_RoundTrip covers the contract in one pass: the material
+// TestSealed_RoundTrip covers the contract in one pass: the material
 // survives sealing and opening, the caller's slice is wiped on the way in, and
 // the opened enclave is an independent one the caller owns.
-func TestSealedEnclave_RoundTrip(t *testing.T) {
+func TestSealed_RoundTrip(t *testing.T) {
 	freshProcessSealer(t)
 	src := append([]byte(nil), sealedMaterial...)
 
@@ -62,7 +62,7 @@ func TestSealedEnclave_RoundTrip(t *testing.T) {
 	if !s.IsAlive() {
 		t.Error("IsAlive = false on a fresh sealed enclave")
 	}
-	if got := s.String(); got != "SealedEnclave(sealed)" {
+	if got := s.String(); got != "Sealed(sealed)" {
 		t.Errorf("String = %q", got)
 	}
 
@@ -80,10 +80,10 @@ func TestSealedEnclave_RoundTrip(t *testing.T) {
 	}
 }
 
-// TestSealedEnclave_NoPlaintextAtRest pins that between Opens the material is
+// TestSealed_NoPlaintextAtRest pins that between Opens the material is
 // not readable: neither envelope half contains the plaintext or any long
 // prefix of it.
-func TestSealedEnclave_NoPlaintextAtRest(t *testing.T) {
+func TestSealed_NoPlaintextAtRest(t *testing.T) {
 	freshProcessSealer(t)
 	src := append([]byte(nil), sealedMaterial...)
 	s, err := NewSealed(t.Context(), src)
@@ -112,10 +112,10 @@ func TestSealedEnclave_NoPlaintextAtRest(t *testing.T) {
 	}
 }
 
-// TestSealedEnclave_SealIsNonDeterministic pins the nonce: sealing the same
+// TestSealed_SealIsNonDeterministic pins the nonce: sealing the same
 // material twice must produce different bytes, since a repeated GCM nonce is a
 // break. A zeroed-nonce mutant passes every other test in this file.
-func TestSealedEnclave_SealIsNonDeterministic(t *testing.T) {
+func TestSealed_SealIsNonDeterministic(t *testing.T) {
 	freshProcessSealer(t)
 	first, err := NewSealed(t.Context(), append([]byte(nil), sealedMaterial...))
 	if err != nil {
@@ -139,7 +139,7 @@ func TestSealedEnclave_SealIsNonDeterministic(t *testing.T) {
 	}
 
 	// Both must still open to the same material — different bytes, same value.
-	for _, s := range []*SealedEnclave{first, second} {
+	for _, s := range []*Sealed{first, second} {
 		e, err := s.Open(t.Context())
 		if err != nil {
 			t.Fatalf("Open: %v", err)
@@ -151,14 +151,14 @@ func TestSealedEnclave_SealIsNonDeterministic(t *testing.T) {
 	}
 }
 
-// TestSealedEnclave_DetectsTampering covers the A in AEAD, on BOTH envelope
+// TestSealed_DetectsTampering covers the A in AEAD, on BOTH envelope
 // halves. Every region is covered — the nonce at the front of the sealed
 // bytes, the ciphertext body, the tag at the end, and the blob's frame, body
 // and tail — so a mutation that authenticated only part of the envelope would
 // show up as a position that opens successfully after being altered.
-func TestSealedEnclave_DetectsTampering(t *testing.T) {
+func TestSealed_DetectsTampering(t *testing.T) {
 	freshProcessSealer(t)
-	half := func(s *SealedEnclave, sealed bool) []byte {
+	half := func(s *Sealed, sealed bool) []byte {
 		if sealed {
 			return s.sealed
 		}
@@ -214,11 +214,11 @@ func TestSealedEnclave_DetectsTampering(t *testing.T) {
 	}
 }
 
-// TestSealedEnclave_TruncationIsRejected covers the lengths the tamper test
+// TestSealed_TruncationIsRejected covers the lengths the tamper test
 // cannot reach: a sealed half shorter than the nonce has no nonce to read,
 // one shorter than the tag cannot authenticate, and a blob shorter than its
 // frame cannot even be parsed. All must be refused rather than indexed into.
-func TestSealedEnclave_TruncationIsRejected(t *testing.T) {
+func TestSealed_TruncationIsRejected(t *testing.T) {
 	freshProcessSealer(t)
 	s, err := NewSealed(t.Context(), append([]byte(nil), sealedMaterial...))
 	if err != nil {
@@ -264,10 +264,10 @@ func TestSealedEnclave_TruncationIsRejected(t *testing.T) {
 	e.Destroy()
 }
 
-// TestSealedEnclave_OpensAreIndependent pins the ownership contract on Open's
+// TestSealed_OpensAreIndependent pins the ownership contract on Open's
 // result: each call yields a separate enclave the caller owns, and destroying
 // one affects neither the other nor the sealed value it came from.
-func TestSealedEnclave_OpensAreIndependent(t *testing.T) {
+func TestSealed_OpensAreIndependent(t *testing.T) {
 	freshProcessSealer(t)
 	s, err := NewSealed(t.Context(), append([]byte(nil), sealedMaterial...))
 	if err != nil {
@@ -312,10 +312,10 @@ func TestSealedEnclave_OpensAreIndependent(t *testing.T) {
 	second.Destroy()
 }
 
-// TestSealedEnclave_Lifecycle covers the destroyed contract, idempotence, and
+// TestSealed_Lifecycle covers the destroyed contract, idempotence, and
 // the nil receiver — the three things a caller relies on to write
 // `defer s.Destroy()` without thinking about it.
-func TestSealedEnclave_Lifecycle(t *testing.T) {
+func TestSealed_Lifecycle(t *testing.T) {
 	freshProcessSealer(t)
 	s, err := NewSealed(t.Context(), append([]byte(nil), sealedMaterial...))
 	if err != nil {
@@ -345,11 +345,11 @@ func TestSealedEnclave_Lifecycle(t *testing.T) {
 			e.Destroy()
 		}
 	}
-	if got := s.String(); got != "SealedEnclave(destroyed)" {
+	if got := s.String(); got != "Sealed(destroyed)" {
 		t.Errorf("String = %q after Destroy", got)
 	}
 
-	var nilSealed *SealedEnclave
+	var nilSealed *Sealed
 	nilSealed.Destroy() // must not panic
 	if nilSealed.IsAlive() {
 		t.Error("IsAlive = true on a nil sealed enclave")
@@ -363,7 +363,7 @@ func TestSealedEnclave_Lifecycle(t *testing.T) {
 	}
 }
 
-func TestSealedEnclave_Empty(t *testing.T) {
+func TestSealed_Empty(t *testing.T) {
 	for name, in := range map[string][]byte{"nil": nil, "empty": {}} {
 		t.Run(name, func(t *testing.T) {
 			s, err := NewSealed(t.Context(), in)
@@ -377,11 +377,11 @@ func TestSealedEnclave_Empty(t *testing.T) {
 	}
 }
 
-// TestSealedEnclave_Sizes seals a spread of lengths, including ones that
+// TestSealed_Sizes seals a spread of lengths, including ones that
 // straddle the AEAD's block and the page boundary Open's destination is
 // rounded to. A length that happened to match the block size exactly is where
 // an off-by-one in the in-place decryption would show.
-func TestSealedEnclave_Sizes(t *testing.T) {
+func TestSealed_Sizes(t *testing.T) {
 	freshProcessSealer(t)
 	page := int(pageSize)
 	for _, n := range []int{1, 15, 16, 17, 31, 32, 64, page - 1, page, page + 1} {
@@ -407,7 +407,7 @@ func TestSealedEnclave_Sizes(t *testing.T) {
 				t.Errorf("round trip failed at %d bytes", n)
 			}
 			// Skip needles short enough to occur by chance in the 28 bytes of nonce
-			// and tag; TestSealedEnclave_NoPlaintextAtRest covers residency.
+			// and tag; TestSealed_NoPlaintextAtRest covers residency.
 			if n >= 8 && bytes.Contains(s.sealed, want) {
 				t.Errorf("plaintext of %d bytes found in the sealed value", n)
 			}
@@ -415,11 +415,11 @@ func TestSealedEnclave_Sizes(t *testing.T) {
 	}
 }
 
-// TestSealedEnclave_Concurrent runs Opens, reads and Destroys against one
+// TestSealed_Concurrent runs Opens, reads and Destroys against one
 // sealed value from many goroutines. Under -race it catches an access that
 // escapes the lock; without it, an Open that reads a cleared envelope. It also
 // exercises nested borrows under contention.
-func TestSealedEnclave_Concurrent(t *testing.T) {
+func TestSealed_Concurrent(t *testing.T) {
 	freshProcessSealer(t)
 	const goroutines, iterations = 16, 50
 
@@ -463,10 +463,10 @@ func TestSealedEnclave_Concurrent(t *testing.T) {
 	}
 }
 
-// TestSealedEnclave_SizeMismatchIsRejected pins the guard between the
+// TestSealed_SizeMismatchIsRejected pins the guard between the
 // recorded plaintext length and what the AEAD produces. The two cannot diverge
 // in normal use, so the test corrupts the field directly.
-func TestSealedEnclave_SizeMismatchIsRejected(t *testing.T) {
+func TestSealed_SizeMismatchIsRejected(t *testing.T) {
 	freshProcessSealer(t)
 	for _, delta := range []int{+1, +64, -1} {
 		s, err := NewSealed(t.Context(), append([]byte(nil), sealedMaterial...))
@@ -489,11 +489,11 @@ func TestSealedEnclave_SizeMismatchIsRejected(t *testing.T) {
 	}
 }
 
-// TestSealedEnclave_OversizedMaterialIsRefusedNotPanicked pins that AES-GCM's
+// TestSealed_OversizedMaterialIsRefusedNotPanicked pins that AES-GCM's
 // per-message bound, which crypto/cipher enforces by panicking, arrives as
 // ErrMaterialTooLarge. It passes lengths to sealableLength rather than
 // allocating 64 GiB.
-func TestSealedEnclave_OversizedMaterialIsRefusedNotPanicked(t *testing.T) {
+func TestSealed_OversizedMaterialIsRefusedNotPanicked(t *testing.T) {
 	if maxSealedPlaintext != (1<<32-2)*16 {
 		t.Fatalf("maxSealedPlaintext = %d, want (2^32-2)*16 = %d: the guard no longer matches the bound "+
 			"crypto/internal/fips140/aes/gcm panics on", maxSealedPlaintext, uint64((1<<32-2)*16))
@@ -532,28 +532,28 @@ func TestEnclaves_GoStringIsRedacted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
-	if got := fmt.Sprintf("%#v", v); got != "SealedEnclave(sealed)" {
-		t.Errorf("%%#v of a SealedEnclave = %q, want the redacted form", got)
+	if got := fmt.Sprintf("%#v", v); got != "Sealed(sealed)" {
+		t.Errorf("%%#v of a Sealed = %q, want the redacted form", got)
 	}
 	e, err := v.Open(ctx)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	if got := fmt.Sprintf("%#v", e); got != "MemoryEnclave(redacted)" {
-		t.Errorf("%%#v of a MemoryEnclave = %q, want the redacted form", got)
+	if got := fmt.Sprintf("%#v", e); got != "Memory(redacted)" {
+		t.Errorf("%%#v of a Memory = %q, want the redacted form", got)
 	}
 	_ = e.Destroy()
 	v.Destroy()
-	if got := fmt.Sprintf("%#v", v); got != "SealedEnclave(destroyed)" {
-		t.Errorf("%%#v of a destroyed SealedEnclave = %q", got)
+	if got := fmt.Sprintf("%#v", v); got != "Sealed(destroyed)" {
+		t.Errorf("%%#v of a destroyed Sealed = %q", got)
 	}
 }
 
-// TestSealedEnclave_WipeAllFailsClosed pins the post-sweep contract: a
+// TestSealed_WipeAllFailsClosed pins the post-sweep contract: a
 // shutdown sweep destroys the process sealer's keys, and from then on the
 // sealer fails with the distinct ErrSealerWiped. It never re-keys, which would
 // let new seals succeed while old values failed as ErrSealedAuthentication.
-func TestSealedEnclave_WipeAllFailsClosed(t *testing.T) {
+func TestSealed_WipeAllFailsClosed(t *testing.T) {
 	freshProcessSealer(t)
 
 	s, err := NewSealed(t.Context(), append([]byte(nil), sealedMaterial...))
@@ -580,8 +580,8 @@ func TestSealedEnclave_WipeAllFailsClosed(t *testing.T) {
 	// The sweep does not touch sealed values, so IsAlive (which reports on the
 	// ciphertext) stays true; Openable reports the sweep instead.
 	if !s.IsAlive() {
-		t.Error("WipeAll destroyed the SealedEnclave; the ledger holds MemoryEnclaves and this type is not one. " +
-			"If that changed deliberately, WipeAll's contract, SealedEnclave's documentation and the decision not to sweep sealed values all need updating")
+		t.Error("WipeAll destroyed the Sealed; the ledger holds Memorys and this type is not one. " +
+			"If that changed deliberately, WipeAll's contract, Sealed's documentation and the decision not to sweep sealed values all need updating")
 	}
 	if err := s.Openable(); !errors.Is(err, ErrSealerWiped) {
 		t.Errorf("Openable after the sweep = %v, want ErrSealerWiped: the openability question is "+
@@ -639,10 +639,10 @@ func sweepForOpenableTest(t *testing.T) {
 	sweep(t)
 }
 
-// TestSealedEnclave_OpenableReportsTheSweep pins that a sweep leaves a sealed
+// TestSealed_OpenableReportsTheSweep pins that a sweep leaves a sealed
 // value reporting IsAlive (its ciphertext is untouched) while Openable reports
 // ErrSealerWiped, in agreement with Open.
-func TestSealedEnclave_OpenableReportsTheSweep(t *testing.T) {
+func TestSealed_OpenableReportsTheSweep(t *testing.T) {
 	s, err := NewSealer() // software provider, ModeRootKey
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
@@ -668,8 +668,8 @@ func TestSealedEnclave_OpenableReportsTheSweep(t *testing.T) {
 
 	// IsAlive is unchanged: it reports on the ciphertext, which is still here.
 	if !v.IsAlive() {
-		t.Error("the sweep destroyed the SealedEnclave; the ledger holds MemoryEnclaves and this " +
-			"type is not one. If that changed deliberately, WipeAll's contract, SealedEnclave's " +
+		t.Error("the sweep destroyed the Sealed; the ledger holds Memorys and this " +
+			"type is not one. If that changed deliberately, WipeAll's contract, Sealed's " +
 			"documentation and the decision not to sweep sealed values all need updating")
 	}
 
@@ -686,10 +686,10 @@ func TestSealedEnclave_OpenableReportsTheSweep(t *testing.T) {
 	}
 }
 
-// TestSealedEnclave_OpenableSeparatesASweepFromADestroy pins that a swept
+// TestSealed_OpenableSeparatesASweepFromADestroy pins that a swept
 // value reports ErrSealerWiped, distinguishable from a destroyed value's
 // ErrEnclaveDestroyed.
-func TestSealedEnclave_OpenableSeparatesASweepFromADestroy(t *testing.T) {
+func TestSealed_OpenableSeparatesASweepFromADestroy(t *testing.T) {
 	s, err := NewSealer()
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
@@ -720,9 +720,9 @@ func TestSealedEnclave_OpenableSeparatesASweepFromADestroy(t *testing.T) {
 	}
 }
 
-// TestSealedEnclave_OpenableOnDestroyedAndNilValues covers the lifecycle
+// TestSealed_OpenableOnDestroyedAndNilValues covers the lifecycle
 // answers, including the nil receiver every method on this type accepts.
-func TestSealedEnclave_OpenableOnDestroyedAndNilValues(t *testing.T) {
+func TestSealed_OpenableOnDestroyedAndNilValues(t *testing.T) {
 	s, err := NewSealer()
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
@@ -746,17 +746,17 @@ func TestSealedEnclave_OpenableOnDestroyedAndNilValues(t *testing.T) {
 		t.Errorf("Openable after a second Destroy = %v, want ErrEnclaveDestroyed", err)
 	}
 
-	var nilValue *SealedEnclave
+	var nilValue *Sealed
 	if err := nilValue.Openable(); !errors.Is(err, ErrEnclaveDestroyed) {
-		t.Errorf("(*SealedEnclave)(nil).Openable() = %v, want ErrEnclaveDestroyed", err)
+		t.Errorf("(*Sealed)(nil).Openable() = %v, want ErrEnclaveDestroyed", err)
 	}
 }
 
-// TestSealedEnclave_OpenableSplitsByMode pins Openable in ModePerOperation
+// TestSealed_OpenableSplitsByMode pins Openable in ModePerOperation
 // after a sweep: nil for a provider whose key lives outside the process (the
 // value really opens), ErrSealerWiped for the software provider, whose root is
 // an in-process enclave.
-func TestSealedEnclave_OpenableSplitsByMode(t *testing.T) {
+func TestSealed_OpenableSplitsByMode(t *testing.T) {
 	t.Run("deviceHeldKeySurvivesTheSweep", func(t *testing.T) {
 		// The provider reports its health, so its answer overrides the
 		// sweep-generation fallback; compare reportsNothingAfterASweep below.
@@ -820,16 +820,16 @@ func TestSealedEnclave_OpenableSplitsByMode(t *testing.T) {
 	})
 }
 
-// TestWipeAll_DoesNotSweepSealedEnclaves pins that WipeAll's count excludes
+// TestWipeAll_DoesNotSweepSealeds pins that WipeAll's count excludes
 // sealed values: they hold no locked memory; the sealer's keys do.
-func TestWipeAll_DoesNotSweepSealedEnclaves(t *testing.T) {
+func TestWipeAll_DoesNotSweepSealeds(t *testing.T) {
 	s, err := NewSealer()
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
 
 	const n = 5
-	values := make([]*SealedEnclave, 0, n)
+	values := make([]*Sealed, 0, n)
 	for i := 0; i < n; i++ {
 		v, err := s.Seal(t.Context(), append([]byte(nil), sealedMaterial...))
 		if err != nil {
@@ -851,7 +851,7 @@ func TestWipeAll_DoesNotSweepSealedEnclaves(t *testing.T) {
 	// A second sweep with sealed values still live reports zero.
 	if remaining := sweep(t); remaining != 0 {
 		t.Errorf("with %d live sealed values the sweep counts %d, want 0: the count means "+
-			"'still holding locked memory' and a SealedEnclave holds none", n, remaining)
+			"'still holding locked memory' and a Sealed holds none", n, remaining)
 	}
 	if got := liveCount(); got != 0 {
 		t.Errorf("the ledger holds %d entries after the sweep, want 0", got)
@@ -867,10 +867,10 @@ func TestWipeAll_DoesNotSweepSealedEnclaves(t *testing.T) {
 	}
 }
 
-// TestSealedEnclave_OpenableClosesTheExternalProviderFailOpen pins that a
+// TestSealed_OpenableClosesTheExternalProviderFailOpen pins that a
 // provider without HealthReporter, whose in-process key a sweep destroyed,
 // gets ErrOpenabilityUnknown from Openable rather than nil.
-func TestSealedEnclave_OpenableClosesTheExternalProviderFailOpen(t *testing.T) {
+func TestSealed_OpenableClosesTheExternalProviderFailOpen(t *testing.T) {
 	p := newEnclaveBackedProtector(t)
 
 	// Premise: this provider reports no health.
@@ -914,10 +914,10 @@ func TestSealedEnclave_OpenableClosesTheExternalProviderFailOpen(t *testing.T) {
 	}
 }
 
-// TestSealedEnclave_OpenableBelievesAProviderThatReports pins that a
+// TestSealed_OpenableBelievesAProviderThatReports pins that a
 // HealthReporter answer is terminal: the sweep-generation fallback does not
 // override it, so a provider can still report nil after a sweep.
-func TestSealedEnclave_OpenableBelievesAProviderThatReports(t *testing.T) {
+func TestSealed_OpenableBelievesAProviderThatReports(t *testing.T) {
 	t.Run("reportsHealthyAfterASweep", func(t *testing.T) {
 		s, err := NewSealer(
 			WithKeyProtector(healthyProtector{newMapKeyProtector(t)}),
@@ -979,10 +979,10 @@ func TestSealedEnclave_OpenableBelievesAProviderThatReports(t *testing.T) {
 	})
 }
 
-// TestSealedEnclave_OpenableUnknownOnlyAfterASweep pins that
+// TestSealed_OpenableUnknownOnlyAfterASweep pins that
 // ErrOpenabilityUnknown appears only after a sweep; before one, Openable
 // returns nil.
-func TestSealedEnclave_OpenableUnknownOnlyAfterASweep(t *testing.T) {
+func TestSealed_OpenableUnknownOnlyAfterASweep(t *testing.T) {
 	p := newEnclaveBackedProtector(t)
 	s, err := NewSealer(WithKeyProtector(p))
 	if err != nil {
@@ -1015,13 +1015,13 @@ func TestSealedEnclave_OpenableUnknownOnlyAfterASweep(t *testing.T) {
 	}
 }
 
-// TestSealedEnclave_OpenableGenerationDoesNotAffectModeRootKey pins that the
+// TestSealed_OpenableGenerationDoesNotAffectModeRootKey pins that the
 // fallback is scoped to the mode that needs it.
 //
 // In ModeRootKey the hierarchy is this package's own enclaves and it inspects
 // them directly, so a nil there is KNOWLEDGE, not ignorance, and a sweep that
 // provably did not take them must not downgrade it.
-func TestSealedEnclave_OpenableGenerationDoesNotAffectModeRootKey(t *testing.T) {
+func TestSealed_OpenableGenerationDoesNotAffectModeRootKey(t *testing.T) {
 	// Bump the generation before sealing so a value exists that was sealed
 	// under an older generation than the current one — the precondition the
 	// fallback triggers on — without wiping this sealer's own hierarchy.
@@ -1057,9 +1057,9 @@ func TestSealedEnclave_OpenableGenerationDoesNotAffectModeRootKey(t *testing.T) 
 func TestWipeAll_BumpsTheGenerationBeforeDestroying(t *testing.T) {
 	freshProcessSealer(t)
 
-	e, err := NewMemoryEnclaveCopy([]byte("material that the sweep will destroy"))
+	e, err := NewMemoryCopy([]byte("material that the sweep will destroy"))
 	if err != nil {
-		t.Fatalf("NewMemoryEnclaveCopy: %v", err)
+		t.Fatalf("NewMemoryCopy: %v", err)
 	}
 
 	before := sweepGeneration()
@@ -1123,11 +1123,11 @@ func TestWipeAll_GenerationIsMonotonicAcrossSweeps(t *testing.T) {
 	}
 }
 
-// TestSealedEnclave_OpenableSuspectsASealThatOverlappedASweep pins that a
+// TestSealed_OpenableSuspectsASealThatOverlappedASweep pins that a
 // seal made while WipeAll is between its bump and its destruction is reported
 // as unknown. The odd sequence parity records the sweep in flight, which a
 // plain count cannot.
-func TestSealedEnclave_OpenableSuspectsASealThatOverlappedASweep(t *testing.T) {
+func TestSealed_OpenableSuspectsASealThatOverlappedASweep(t *testing.T) {
 	freshProcessSealer(t)
 
 	p := newEnclaveBackedProtector(t)
@@ -1138,7 +1138,7 @@ func TestSealedEnclave_OpenableSuspectsASealThatOverlappedASweep(t *testing.T) {
 
 	var (
 		mu               sync.Mutex
-		v                *SealedEnclave
+		v                *Sealed
 		sealErr          error
 		parked           bool
 		genAtSeal        uint64
@@ -1294,9 +1294,19 @@ func openBudget(pages int64) int64 {
 	return LockedSize(1) * pages
 }
 
+// openInAllocator is v.OpenIn(ctx, a), as the *Memory it returns for an
+// *Allocator.
+func openInAllocator(ctx context.Context, v *Sealed, a *Allocator) (*Memory, error) {
+	h, err := v.OpenIn(ctx, a)
+	if err != nil {
+		return nil, err
+	}
+	return h.(*Memory), nil
+}
+
 // sealForBudgetTest returns a sealed value under a private ModeRootKey sealer,
 // so nothing here depends on (or disturbs) the process sealer.
-func sealForBudgetTest(t *testing.T) *SealedEnclave {
+func sealForBudgetTest(t *testing.T) *Sealed {
 	t.Helper()
 	s, err := NewSealer()
 	if err != nil {
@@ -1310,10 +1320,10 @@ func sealForBudgetTest(t *testing.T) *SealedEnclave {
 	return v
 }
 
-// TestSealedEnclave_OpenWithAdmitsTheDestination pins that OpenWith's result
+// TestSealed_OpenInAdmitsTheDestination pins that OpenIn's result
 // is reserved from the supplied Allocator. The assertion is on InUse: an
-// OpenWith that ignored the Allocator would pass every correctness check.
-func TestSealedEnclave_OpenWithAdmitsTheDestination(t *testing.T) {
+// OpenIn that ignored the Allocator would pass every correctness check.
+func TestSealed_OpenInAdmitsTheDestination(t *testing.T) {
 	v := sealForBudgetTest(t)
 
 	a, err := NewAllocator(openBudget(8))
@@ -1324,30 +1334,30 @@ func TestSealedEnclave_OpenWithAdmitsTheDestination(t *testing.T) {
 		t.Fatalf("a fresh Allocator reports %d bytes in use; this test attributes everything below to the open", before)
 	}
 
-	e, err := v.OpenWith(t.Context(), a)
+	e, err := openInAllocator(t.Context(), v, a)
 	if err != nil {
-		t.Fatalf("OpenWith: %v", err)
+		t.Fatalf("OpenIn: %v", err)
 	}
 	defer e.Destroy()
 
 	// The material is right — an admitted open is still an open.
 	if !holds(e, sealedMaterial) {
-		t.Error("OpenWith returned the wrong material")
+		t.Error("OpenIn returned the wrong material")
 	}
 
 	// Exactly the destination: zero would mean the unadmitted constructor was
 	// used; more would mean a transient reservation was never returned.
 	want := LockedSize(len(sealedMaterial))
 	if got := a.InUse(); got != want {
-		t.Errorf("after OpenWith the Allocator reports %d bytes in use, want %d "+
+		t.Errorf("after OpenIn the Allocator reports %d bytes in use, want %d "+
 			"(the page-rounded destination, and nothing else still held)", got, want)
 	}
 }
 
-// TestSealedEnclave_OpenWithReturnsTheReservationOnDestroy pins that
+// TestSealed_OpenInReturnsTheReservationOnDestroy pins that
 // destroying the result returns its reservation, so repeated opens do not leak
 // budget.
-func TestSealedEnclave_OpenWithReturnsTheReservationOnDestroy(t *testing.T) {
+func TestSealed_OpenInReturnsTheReservationOnDestroy(t *testing.T) {
 	v := sealForBudgetTest(t)
 
 	a, err := NewAllocator(openBudget(8))
@@ -1359,9 +1369,9 @@ func TestSealedEnclave_OpenWithReturnsTheReservationOnDestroy(t *testing.T) {
 	// reservation per open would be exhausted well before the last of these.
 	const rounds = 6
 	for i := 0; i < rounds; i++ {
-		e, err := v.OpenWith(t.Context(), a)
+		e, err := openInAllocator(t.Context(), v, a)
 		if err != nil {
-			t.Fatalf("OpenWith on round %d of %d: %v (a budget sized for one open cannot "+
+			t.Fatalf("OpenIn on round %d of %d: %v (a budget sized for one open cannot "+
 				"serve the next unless Destroy returns the reservation)", i+1, rounds, err)
 		}
 		if !holds(e, sealedMaterial) {
@@ -1375,18 +1385,18 @@ func TestSealedEnclave_OpenWithReturnsTheReservationOnDestroy(t *testing.T) {
 	}
 }
 
-// TestSealedEnclave_OpenWithRefusesANilAllocator pins that a nil Allocator
+// TestSealed_OpenInRefusesANilAllocator pins that a nil Allocator
 // is refused with ErrNilAllocator rather than treated as no budget.
-func TestSealedEnclave_OpenWithRefusesANilAllocator(t *testing.T) {
+func TestSealed_OpenInRefusesANilAllocator(t *testing.T) {
 	v := sealForBudgetTest(t)
 
-	e, err := v.OpenWith(t.Context(), nil)
+	e, err := openInAllocator(t.Context(), v, nil)
 	if !errors.Is(err, ErrNilAllocator) {
-		t.Errorf("OpenWith(nil) = %v, want ErrNilAllocator: a nil Allocator must not silently "+
+		t.Errorf("OpenIn(nil) = %v, want ErrNilAllocator: a nil Allocator must not silently "+
 			"fall back to an unadmitted allocation", err)
 	}
 	if e != nil {
-		t.Error("OpenWith(nil) returned an enclave; it must allocate nothing")
+		t.Error("OpenIn(nil) returned an enclave; it must allocate nothing")
 		e.Destroy()
 	}
 
@@ -1395,28 +1405,28 @@ func TestSealedEnclave_OpenWithRefusesANilAllocator(t *testing.T) {
 	// a caller sees for a lost allocator would depend on lifecycle timing.
 	d := sealForBudgetTest(t)
 	d.Destroy()
-	if _, err := d.OpenWith(t.Context(), nil); !errors.Is(err, ErrNilAllocator) {
-		t.Errorf("OpenWith(nil) on a destroyed value = %v, want ErrNilAllocator", err)
+	if _, err := openInAllocator(t.Context(), d, nil); !errors.Is(err, ErrNilAllocator) {
+		t.Errorf("OpenIn(nil) on a destroyed value = %v, want ErrNilAllocator", err)
 	}
 
 	// A nil RECEIVER is a different mistake and keeps its own answer.
-	var nilValue *SealedEnclave
-	if _, err := nilValue.OpenWith(t.Context(), nil); !errors.Is(err, ErrEnclaveDestroyed) {
-		t.Errorf("(*SealedEnclave)(nil).OpenWith(t.Context(), nil) = %v, want ErrEnclaveDestroyed", err)
+	var nilValue *Sealed
+	if _, err := openInAllocator(t.Context(), nilValue, nil); !errors.Is(err, ErrEnclaveDestroyed) {
+		t.Errorf("(*Sealed)(nil).OpenIn(ctx, (*Allocator)(nil)) = %v, want ErrEnclaveDestroyed", err)
 	}
 
 	// And Open — the unbudgeted path — is unaffected: it has nothing to
 	// refuse, so it never reports this error.
 	o, err := v.Open(t.Context())
 	if err != nil {
-		t.Fatalf("Open after a refused OpenWith: %v", err)
+		t.Fatalf("Open after a refused OpenIn: %v", err)
 	}
 	o.Destroy()
 }
 
-// TestSealedEnclave_OpenAllocatesOutsideAnyBudget pins that Open allocates
+// TestSealed_OpenAllocatesOutsideAnyBudget pins that Open allocates
 // unadmitted, as documented, for callers that do not budget.
-func TestSealedEnclave_OpenAllocatesOutsideAnyBudget(t *testing.T) {
+func TestSealed_OpenAllocatesOutsideAnyBudget(t *testing.T) {
 	v := sealForBudgetTest(t)
 
 	a, err := NewAllocator(openBudget(8))
@@ -1435,11 +1445,11 @@ func TestSealedEnclave_OpenAllocatesOutsideAnyBudget(t *testing.T) {
 	}
 }
 
-// TestSealedEnclave_OpenWithRefusesWhatTheBudgetCannotCover pins the refusal
+// TestSealed_OpenInRefusesWhatTheBudgetCannotCover pins the refusal
 // path and, more importantly, what a refusal COSTS: nothing. The sealed value
 // survives a budget refusal intact and opens afterwards, so a tight budget is
 // backpressure rather than a lost credential.
-func TestSealedEnclave_OpenWithRefusesWhatTheBudgetCannotCover(t *testing.T) {
+func TestSealed_OpenInRefusesWhatTheBudgetCannotCover(t *testing.T) {
 	v := sealForBudgetTest(t)
 
 	// A sub-page budget constructs but admits nothing, reaching the refusal
@@ -1449,12 +1459,12 @@ func TestSealedEnclave_OpenWithRefusesWhatTheBudgetCannotCover(t *testing.T) {
 		t.Fatalf("NewAllocator: %v", err)
 	}
 
-	e, err := v.OpenWith(t.Context(), a)
+	e, err := openInAllocator(t.Context(), v, a)
 	if !errors.Is(err, ErrBudgetExhausted) {
-		t.Fatalf("OpenWith under a sub-page budget = %v, want ErrBudgetExhausted", err)
+		t.Fatalf("OpenIn under a sub-page budget = %v, want ErrBudgetExhausted", err)
 	}
 	if e != nil {
-		t.Error("a refused OpenWith returned an enclave")
+		t.Error("a refused OpenIn returned an enclave")
 		e.Destroy()
 	}
 
@@ -1474,7 +1484,7 @@ func TestSealedEnclave_OpenWithRefusesWhatTheBudgetCannotCover(t *testing.T) {
 
 	// Nothing was left reserved by the refusal.
 	if got := a.InUse(); got != 0 {
-		t.Errorf("a refused OpenWith left %d bytes reserved, want 0", got)
+		t.Errorf("a refused OpenIn left %d bytes reserved, want 0", got)
 	}
 
 	// The value is untouched: the refusal was about the budget, not about it.
@@ -1493,19 +1503,19 @@ func TestSealedEnclave_OpenWithRefusesWhatTheBudgetCannotCover(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
-	e2, err := v.OpenWith(t.Context(), roomy)
+	e2, err := openInAllocator(t.Context(), v, roomy)
 	if err != nil {
-		t.Fatalf("OpenWith under a four-page budget: %v", err)
+		t.Fatalf("OpenIn under a four-page budget: %v", err)
 	}
 	e2.Destroy()
 }
 
-// TestSealedEnclave_OpenWithGatesOnTheDestination pins that the destination
+// TestSealed_OpenInGatesOnTheDestination pins that the destination
 // is reserved before any other work, so a refused open allocates no locked
 // memory and touches no key. The instrument is the provider's Unprotect count:
 // the DEK is allocated immediately before Unprotect, so zero calls means the
 // refusal came first.
-func TestSealedEnclave_OpenWithGatesOnTheDestination(t *testing.T) {
+func TestSealed_OpenInGatesOnTheDestination(t *testing.T) {
 	kp := newMapKeyProtector(t)
 	s, err := NewSealer(WithKeyProtector(kp))
 	if err != nil {
@@ -1528,10 +1538,10 @@ func TestSealedEnclave_OpenWithGatesOnTheDestination(t *testing.T) {
 
 	beforeUnprotects, beforeLedger := kp.unprotectCount(), liveCount()
 
-	e, err := v.OpenWith(t.Context(), tooSmall)
+	e, err := openInAllocator(t.Context(), v, tooSmall)
 	var be *BudgetError
 	if !errors.As(err, &be) {
-		t.Fatalf("OpenWith under a one-page budget = %v, want a *BudgetError", err)
+		t.Fatalf("OpenIn under a one-page budget = %v, want a *BudgetError", err)
 	}
 	if e != nil {
 		e.Destroy()
@@ -1562,9 +1572,9 @@ func TestSealedEnclave_OpenWithGatesOnTheDestination(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
-	admitted, err := v.OpenWith(t.Context(), exact)
+	admitted, err := openInAllocator(t.Context(), v, exact)
 	if err != nil {
-		t.Fatalf("OpenWith under a budget of exactly one destination = %v, want success: an open "+
+		t.Fatalf("OpenIn under a budget of exactly one destination = %v, want success: an open "+
 			"takes ONE reservation, so this is the smallest budget that serves it", err)
 	}
 	if !holds(admitted, material) {
@@ -1580,11 +1590,11 @@ func TestSealedEnclave_OpenWithGatesOnTheDestination(t *testing.T) {
 	admitted.Destroy()
 }
 
-// TestSealedEnclave_OpenWithConcurrentCallersDoNotStarveEachOther pins that
+// TestSealed_OpenInConcurrentCallersDoNotStarveEachOther pins that
 // goroutines sharing a budget sized for one open let exactly one succeed.
 // Charging the transient key page as a second reservation would let callers
 // fragment the budget so none succeeds.
-func TestSealedEnclave_OpenWithConcurrentCallersDoNotStarveEachOther(t *testing.T) {
+func TestSealed_OpenInConcurrentCallersDoNotStarveEachOther(t *testing.T) {
 	v := sealForBudgetTest(t)
 
 	// Exactly one destination: every open but one must be refused, and one
@@ -1597,7 +1607,7 @@ func TestSealedEnclave_OpenWithConcurrentCallersDoNotStarveEachOther(t *testing.
 	const rounds, goroutines = 20, 8
 	for round := 0; round < rounds; round++ {
 		var wg sync.WaitGroup
-		opened := make(chan *MemoryEnclave, goroutines)
+		opened := make(chan *Memory, goroutines)
 		refused := make(chan error, goroutines)
 		start := make(chan struct{})
 
@@ -1606,7 +1616,7 @@ func TestSealedEnclave_OpenWithConcurrentCallersDoNotStarveEachOther(t *testing.
 			go func() {
 				defer wg.Done()
 				<-start
-				e, err := v.OpenWith(t.Context(), a)
+				e, err := openInAllocator(t.Context(), v, a)
 				if err != nil {
 					refused <- err
 					return
@@ -1643,15 +1653,15 @@ func TestSealedEnclave_OpenWithConcurrentCallersDoNotStarveEachOther(t *testing.
 	}
 }
 
-// TestSealedEnclave_OpenWithOnARetiredGeneration covers the open path with the
+// TestSealed_OpenInOnARetiredGeneration covers the open path with the
 // most locked memory in flight: a value sealed under a retired KEK generation
 // materializes that generation's key for a single unwrap, on top of the DEK.
 //
 // Both are transient and neither is charged, so the budget the caller needs is
 // still one destination — which is the claim being pinned. What the caller
-// gives up for that is stated on OpenWith: the process peak exceeds the budget
+// gives up for that is stated on OpenIn: the process peak exceeds the budget
 // by up to two pages while this open is in flight.
-func TestSealedEnclave_OpenWithOnARetiredGeneration(t *testing.T) {
+func TestSealed_OpenInOnARetiredGeneration(t *testing.T) {
 	short := []byte("short-credential")
 
 	s, err := NewSealer() // software provider, ModeRootKey
@@ -1691,9 +1701,9 @@ func TestSealedEnclave_OpenWithOnARetiredGeneration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
-	e, err := v.OpenWith(t.Context(), a)
+	e, err := openInAllocator(t.Context(), v, a)
 	if err != nil {
-		t.Fatalf("OpenWith on a retired-generation value under a one-destination budget: %v", err)
+		t.Fatalf("OpenIn on a retired-generation value under a one-destination budget: %v", err)
 	}
 	if !holds(e, short) {
 		t.Error("the retired-generation value opened to the wrong material")
@@ -1707,10 +1717,10 @@ func TestSealedEnclave_OpenWithOnARetiredGeneration(t *testing.T) {
 	}
 }
 
-// TestSealedEnclave_OpenWithIsConcurrencySafe runs admitted opens from many
+// TestSealed_OpenInIsConcurrencySafe runs admitted opens from many
 // goroutines against one budget: under -race it checks the open path, and the
 // budget returns to zero afterwards.
-func TestSealedEnclave_OpenWithIsConcurrencySafe(t *testing.T) {
+func TestSealed_OpenInIsConcurrencySafe(t *testing.T) {
 	v := sealForBudgetTest(t)
 
 	const goroutines = 16
@@ -1725,13 +1735,13 @@ func TestSealedEnclave_OpenWithIsConcurrencySafe(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			e, err := v.OpenWith(t.Context(), a)
+			e, err := openInAllocator(t.Context(), v, a)
 			if err != nil {
 				errs <- err
 				return
 			}
 			if !holds(e, sealedMaterial) {
-				errs <- errors.New("concurrent OpenWith returned the wrong material")
+				errs <- errors.New("concurrent OpenIn returned the wrong material")
 			}
 			e.Destroy()
 		}()
@@ -1747,10 +1757,10 @@ func TestSealedEnclave_OpenWithIsConcurrencySafe(t *testing.T) {
 	}
 }
 
-// TestSealedEnclave_OpenWithOnADestroyedValue keeps the lifecycle answer the
+// TestSealed_OpenInOnADestroyedValue keeps the lifecycle answer the
 // same on both entry points: a destroyed value is destroyed whichever way it
 // is opened, and the refusal costs the budget nothing.
-func TestSealedEnclave_OpenWithOnADestroyedValue(t *testing.T) {
+func TestSealed_OpenInOnADestroyedValue(t *testing.T) {
 	v := sealForBudgetTest(t)
 	v.Destroy()
 
@@ -1758,24 +1768,24 @@ func TestSealedEnclave_OpenWithOnADestroyedValue(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
-	if _, err := v.OpenWith(t.Context(), a); !errors.Is(err, ErrEnclaveDestroyed) {
-		t.Errorf("OpenWith on a destroyed value = %v, want ErrEnclaveDestroyed", err)
+	if _, err := openInAllocator(t.Context(), v, a); !errors.Is(err, ErrEnclaveDestroyed) {
+		t.Errorf("OpenIn on a destroyed value = %v, want ErrEnclaveDestroyed", err)
 	}
 	if got := a.InUse(); got != 0 {
-		t.Errorf("a refused OpenWith reserved %d bytes, want 0", got)
+		t.Errorf("a refused OpenIn reserved %d bytes, want 0", got)
 	}
 
-	var nilValue *SealedEnclave
-	if _, err := nilValue.OpenWith(t.Context(), a); !errors.Is(err, ErrEnclaveDestroyed) {
-		t.Errorf("(*SealedEnclave)(nil).OpenWith = %v, want ErrEnclaveDestroyed", err)
+	var nilValue *Sealed
+	if _, err := openInAllocator(t.Context(), nilValue, a); !errors.Is(err, ErrEnclaveDestroyed) {
+		t.Errorf("(*Sealed)(nil).OpenIn = %v, want ErrEnclaveDestroyed", err)
 	}
 }
 
-// TestSealedEnclave_OpenWithPerOperationMode pins that the budget reaches the
+// TestSealed_OpenInPerOperationMode pins that the budget reaches the
 // other mode too. ModePerOperation's unprotect allocates nothing itself, so
 // what this proves is that the DEK and the destination are still admitted when
 // a device — not an in-process hierarchy — supplies the key.
-func TestSealedEnclave_OpenWithPerOperationMode(t *testing.T) {
+func TestSealed_OpenInPerOperationMode(t *testing.T) {
 	s, err := NewSealer(WithKeyProtector(newMapKeyProtector(t)))
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
@@ -1790,15 +1800,15 @@ func TestSealedEnclave_OpenWithPerOperationMode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
-	e, err := v.OpenWith(t.Context(), a)
+	e, err := openInAllocator(t.Context(), v, a)
 	if err != nil {
-		t.Fatalf("OpenWith in ModePerOperation: %v", err)
+		t.Fatalf("OpenIn in ModePerOperation: %v", err)
 	}
 	if !holds(e, sealedMaterial) {
 		t.Error("opened to the wrong material")
 	}
 	if got, want := a.InUse(), LockedSize(len(sealedMaterial)); got != want {
-		t.Errorf("after OpenWith the Allocator holds %d bytes, want %d", got, want)
+		t.Errorf("after OpenIn the Allocator holds %d bytes, want %d", got, want)
 	}
 	e.Destroy()
 	if got := a.InUse(); got != 0 {
@@ -1806,16 +1816,16 @@ func TestSealedEnclave_OpenWithPerOperationMode(t *testing.T) {
 	}
 }
 
-// TestSealedEnclave_NoForeignBytesConstructor pins that no exported API turns
-// caller-supplied bytes into an openable *SealedEnclave besides the plaintext
+// TestSealed_NoForeignBytesConstructor pins that no exported API turns
+// caller-supplied bytes into an openable *Sealed besides the plaintext
 // constructors. The envelope format is internal, unversioned and keyed to a
 // process-lifetime Sealer; an unmarshaller would make it accidentally
 // permanent. If persistence is ever designed, amend this test as part of that
 // design.
-func TestSealedEnclave_NoForeignBytesConstructor(t *testing.T) {
+func TestSealed_NoForeignBytesConstructor(t *testing.T) {
 	// The sanctioned constructors: both take PLAINTEXT and produce a sealed
 	// value, which is the direction the contract permits. Nothing else may
-	// combine bytes-in with *SealedEnclave-out.
+	// combine bytes-in with *Sealed-out.
 	allowed := map[string]bool{
 		"NewSealed": true, // package-level, process sealer
 		"Seal":      true, // (*Sealer), explicit sealer
@@ -1849,7 +1859,7 @@ func TestSealedEnclave_NoForeignBytesConstructor(t *testing.T) {
 			// whatever their signature: these are the interfaces (encoding,
 			// gob, json) through which foreign bytes arrive implicitly, where
 			// no reviewer sees a call site at all.
-			if recv := receiverTypeName(fn); recv == "SealedEnclave" || recv == "Sealer" {
+			if recv := receiverTypeName(fn); recv == "Sealed" || recv == "Sealer" {
 				switch fn.Name.Name {
 				case "UnmarshalBinary", "UnmarshalText", "UnmarshalJSON", "GobDecode", "DecodeMsgpack", "UnmarshalCBOR":
 					flagged++
@@ -1858,14 +1868,14 @@ func TestSealedEnclave_NoForeignBytesConstructor(t *testing.T) {
 				}
 			}
 
-			if !returnsSealedEnclave(fn) || !takesForeignBytes(fn) {
+			if !returnsSealed(fn) || !takesForeignBytes(fn) {
 				continue
 			}
 			if allowed[fn.Name.Name] {
 				continue
 			}
 			flagged++
-			t.Errorf("%s: exported %s takes caller bytes and returns a *SealedEnclave. "+
+			t.Errorf("%s: exported %s takes caller bytes and returns a *Sealed. "+
 				"If those bytes are PLAINTEXT, add it to this test's allowlist with a comment. "+
 				"If they are SEALED bytes, stop: sealed values have no persistence contract — no "+
 				"stable format, no versioning, keys that die with the process — and this "+
@@ -1905,9 +1915,9 @@ func receiverTypeName(fn *ast.FuncDecl) string {
 	return ""
 }
 
-// returnsSealedEnclave reports whether any result is *SealedEnclave or
-// SealedEnclave.
-func returnsSealedEnclave(fn *ast.FuncDecl) bool {
+// returnsSealed reports whether any result is *Sealed or
+// Sealed.
+func returnsSealed(fn *ast.FuncDecl) bool {
 	if fn.Type.Results == nil {
 		return false
 	}
@@ -1916,7 +1926,7 @@ func returnsSealedEnclave(fn *ast.FuncDecl) bool {
 		if star, ok := expr.(*ast.StarExpr); ok {
 			expr = star.X
 		}
-		if ident, ok := expr.(*ast.Ident); ok && ident.Name == "SealedEnclave" {
+		if ident, ok := expr.(*ast.Ident); ok && ident.Name == "Sealed" {
 			return true
 		}
 	}

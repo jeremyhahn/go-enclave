@@ -23,18 +23,18 @@ import (
 	"time"
 )
 
-// TestMemoryEnclave_AllocateInsideBorrow pins that allocating, borrowing and
+// TestMemory_AllocateInsideBorrow pins that allocating, borrowing and
 // destroying a second enclave inside a live borrow of the first does not block:
 // allocation and borrows share no lock.
 //
 // The wait is bounded around the call so a deadlock fails with a named reason
 // instead of the suite timeout.
-func TestMemoryEnclave_AllocateInsideBorrow(t *testing.T) {
+func TestMemory_AllocateInsideBorrow(t *testing.T) {
 	const outerMaterial = "outer-private-key-material"
 
-	outer, err := NewMemoryEnclave([]byte(outerMaterial))
+	outer, err := NewMemory([]byte(outerMaterial))
 	if err != nil {
-		t.Fatalf("NewMemoryEnclave: %v", err)
+		t.Fatalf("NewMemory: %v", err)
 	}
 
 	// Conditional: Destroy waits on the borrow, so an unconditional deferred
@@ -50,7 +50,7 @@ func TestMemoryEnclave_AllocateInsideBorrow(t *testing.T) {
 	go func() {
 		done <- outer.WithBytes(func(b []byte) error {
 			// Everything below runs while the outer borrow is live.
-			inner, ierr := NewMemoryEnclaveSized(32)
+			inner, ierr := NewMemorySized(32)
 			if ierr != nil {
 				return ierr
 			}
@@ -82,21 +82,21 @@ func TestMemoryEnclave_AllocateInsideBorrow(t *testing.T) {
 	}
 }
 
-// TestMemoryEnclave_ConcurrentAllocationDuringBorrows is the same property under
+// TestMemory_ConcurrentAllocationDuringBorrows is the same property under
 // load: many goroutines allocate and destroy an enclave inside borrows of a
 // shared one. The work is a fixed iteration count; the only clock bounds the wait.
-func TestMemoryEnclave_ConcurrentAllocationDuringBorrows(t *testing.T) {
+func TestMemory_ConcurrentAllocationDuringBorrows(t *testing.T) {
 	const (
 		material   = "shared-key-material"
 		goroutines = 8
 		iterations = 200
 	)
 
-	held, err := NewMemoryEnclave([]byte(material))
+	held, err := NewMemory([]byte(material))
 	if err != nil {
-		t.Fatalf("NewMemoryEnclave: %v", err)
+		t.Fatalf("NewMemory: %v", err)
 	}
-	// Conditional for the reason TestMemoryEnclave_AllocateInsideBorrow gives.
+	// Conditional for the reason TestMemory_AllocateInsideBorrow gives.
 	drained := false
 	defer func() {
 		if drained {
@@ -111,7 +111,7 @@ func TestMemoryEnclave_ConcurrentAllocationDuringBorrows(t *testing.T) {
 			defer wg.Done()
 			for i := 0; i < iterations; i++ {
 				if err := held.WithBytes(func(b []byte) error {
-					e, aerr := NewMemoryEnclaveSized(64)
+					e, aerr := NewMemorySized(64)
 					if aerr != nil {
 						return aerr
 					}
@@ -344,7 +344,7 @@ func TestMapping_FreezeIsIdempotent(t *testing.T) {
 
 // TestMapping_FrozenRegionIsStillWiped pins that a frozen mapping is melted and
 // fully zeroed by wipeAndVerify. The refused-mprotect path for a frozen enclave is
-// covered by TestMemoryEnclave_FrozenDestroyFallsBackToUnmap.
+// covered by TestMemory_FrozenDestroyFallsBackToUnmap.
 func TestMapping_FrozenRegionIsStillWiped(t *testing.T) {
 	m, err := newMapping(64)
 	if err != nil {
@@ -439,11 +439,11 @@ func TestMapping_ReleaseKeepsStateWhenUnmapFails(t *testing.T) {
 	}
 }
 
-// TestMemoryEnclave_FailedReleaseKeepsTheReservation pins that a refused release
+// TestMemory_FailedReleaseKeepsTheReservation pins that a refused release
 // returns ErrLockedMemoryUnavailable without panicking, keeps the Allocator
 // reservation while the kernel holds the pages, and that a retried Destroy
 // refunds it exactly once.
-func TestMemoryEnclave_FailedReleaseKeepsTheReservation(t *testing.T) {
+func TestMemory_FailedReleaseKeepsTheReservation(t *testing.T) {
 	a, err := NewAllocator(4 * pageSize)
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
@@ -491,20 +491,6 @@ func TestMemoryEnclave_FailedReleaseKeepsTheReservation(t *testing.T) {
 	}
 	if e.IsAlive() {
 		t.Error("IsAlive = true after a successful Destroy")
-	}
-}
-
-// TestCoreDumpsDisabled pins that CoreDumpsDisabled is stable. Its value depends
-// on the environment (a sandbox may deny setrlimit), so only the result is logged.
-func TestCoreDumpsDisabled(t *testing.T) {
-	first := CoreDumpsDisabled()
-	if second := CoreDumpsDisabled(); !errors.Is(second, first) && second != first {
-		t.Errorf("CoreDumpsDisabled is not stable: %v then %v", first, second)
-	}
-	if first == nil {
-		t.Log("core dumps disabled process-wide")
-	} else {
-		t.Logf("core dumps NOT disabled: %v", first)
 	}
 }
 
@@ -973,11 +959,11 @@ func TestNewMapping_EveryConstructionStepRollsBack(t *testing.T) {
 					return saved.unmap(b)
 				})
 
-				e, err := NewMemoryEnclaveSized(64)
+				e, err := NewMemorySized(64)
 				restore()
 
 				if e != nil {
-					t.Fatalf("NewMemoryEnclaveSized returned an enclave although %s failed", step.name)
+					t.Fatalf("NewMemorySized returned an enclave although %s failed", step.name)
 				}
 				if !errors.Is(err, cause) || !errors.Is(err, ErrLockedMemoryUnavailable) {
 					t.Errorf("err = %v, want the failed step as ErrLockedMemoryUnavailable", err)

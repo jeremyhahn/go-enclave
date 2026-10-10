@@ -1,10 +1,10 @@
 # go-enclave
 
-A locked-memory primitive for Go. `MemoryEnclave` is a region of locked,
+A locked-memory primitive for Go. `Memory` is a region of locked,
 zeroized memory for holding sensitive material — private keys, credentials,
-passphrases, tokens — for its whole lifetime in the process. `SealedEnclave`
+passphrases, tokens — for its whole lifetime in the process. `Sealed`
 holds the same kind of material encrypted at rest and decrypts it into a fresh
-`MemoryEnclave` only while a caller has it open.
+`Memory` only while a caller has it open.
 
 It is built to sit at the bottom of a dependency graph so libraries that handle
 key material can share one implementation. Each enclave is `mlock`'d, fenced by
@@ -29,7 +29,7 @@ Requires Go 1.27.2 or later. The only dependency is `golang.org/x/sys`.
 import "github.com/jeremyhahn/go-enclave"
 
 // Bring existing material in. keyPEM is wiped on every path.
-e, err := enclave.NewMemoryEnclave(keyPEM)
+e, err := enclave.NewMemory(keyPEM)
 if err != nil {
 	return err
 }
@@ -45,7 +45,7 @@ err = e.WithBytes(func(key []byte) error {
 Generate new material straight into locked memory, then make it read-only:
 
 ```go
-k, err := enclave.NewMemoryEnclaveSized(32)
+k, err := enclave.NewMemorySized(32)
 if err != nil {
 	return err
 }

@@ -60,6 +60,10 @@ func sysUnmap(b []byte) error {
 // process-wide dump limit a process can set for itself.
 func sysDisableCoreDumps() error { return ErrCoreDumpLimitUnsupported }
 
+// coreDumpsBeforeHardening is what CoreDumpsDisabled reports until
+// HardenProcess has run, and after: there is no limit to lower.
+var coreDumpsBeforeHardening = ErrCoreDumpLimitUnsupported
+
 // windowsProtection translates a protection to a PAGE_* constant.
 // windowsProtections translates a protection to a PAGE_* constant.
 var windowsProtections = protectionTable[uint32]{

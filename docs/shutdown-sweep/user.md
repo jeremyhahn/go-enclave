@@ -1,6 +1,6 @@
 # Shutdown sweep — user guide
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-01
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-09
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Who calls it
@@ -28,8 +28,8 @@ func wipeAtExit() {
 	var sweep *enclave.SweepError
 	switch {
 	case errors.As(err, &sweep):
-		log.Printf("enclave: sweep found %d corrupted, %d unwiped; %d still held",
-			sweep.Corrupt, sweep.Unwiped, n)
+		log.Printf("enclave: sweep found %d corrupted, %d unwiped, %d failed backends; %d still held",
+			sweep.Corrupt, sweep.Unwiped, len(sweep.Backends), n)
 	case errors.Is(err, enclave.ErrSweepInProgress):
 		log.Printf("enclave: another sweep was running; %d still held", n)
 	case n != 0:
@@ -51,6 +51,7 @@ already destroyed.
 | `n > 0, nil` | `n` enclaves or mappings still held: workers outlived the shutdown (still reading or constructing), or the kernel is refusing releases. Calling again immediately rarely helps — fix the shutdown ordering. |
 | `*SweepError` with `Corrupt > 0` | Something wrote into memory it did not own. Treat as a security incident. |
 | `*SweepError` with `Unwiped > 0` | `mprotect` is denied in this environment; those pages were unmapped without the in-process wipe. They were locked for their whole life (never swapped), and the kernel zeroes anonymous pages before reusing them. |
+| `*SweepError` with `Backends` | A registered backend's `Sweep` failed; each entry names the backend and carries its error, which `errors.Is`/`errors.As` on the `SweepError` reach. Its held count is in `n`. |
 | `ErrSweepInProgress` | This call swept nothing because another sweep was running and this call's context ended (or was nil). The count is current. |
 
 ## Effects on sealing

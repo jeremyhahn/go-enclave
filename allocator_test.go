@@ -1045,25 +1045,26 @@ func TestAllocator_TransferTo_NeverInBoth(t *testing.T) {
 	t.Logf("samples=%d", samples.Load())
 }
 
-// TestAllocator_StaysWithinItsCachelineBudget pins Allocator at no more than 64
-// bytes, with free and limit in the same line. 64 is a fixed budget, not a
-// discovered line size. If it fails, ask whether the new field belongs on the
-// hot type at all; see docs/locked-memory-budget/engineering.md, Test strategy.
+// TestAllocator_StaysWithinItsCachelineBudget pins the budget an Allocator
+// shares (allocatorState) at no more than 64 bytes, with free and limit in the
+// same line. 64 is a fixed budget, not a discovered line size. If it fails, ask
+// whether the new field belongs on the hot type at all; see
+// docs/locked-memory-budget/engineering.md, Test strategy.
 func TestAllocator_StaysWithinItsCachelineBudget(t *testing.T) {
 	const line = 64
 
-	got := unsafe.Sizeof(Allocator{})
+	got := unsafe.Sizeof(allocatorState{})
 	if got > line {
-		t.Errorf("Allocator is %d bytes, over the %d-byte cacheline budget: the field just added pushed the type into a second line — see this test's comment before widening the budget",
+		t.Errorf("allocatorState is %d bytes, over the %d-byte cacheline budget: the field just added pushed the type into a second line — see this test's comment before widening the budget",
 			got, line)
 	}
 	// free and limit must share a line; the lock-free paths read them together.
-	free, limit := unsafe.Offsetof(Allocator{}.free), unsafe.Offsetof(Allocator{}.limit)
+	free, limit := unsafe.Offsetof(allocatorState{}.free), unsafe.Offsetof(allocatorState{}.limit)
 	if free/line != limit/line {
 		t.Errorf("free is at offset %d and limit at %d, in different %d-byte lines: the two words admission and refusal read together are now split",
 			free, limit, line)
 	}
-	t.Logf("Allocator size=%d budget=%d free@%d limit@%d", got, line, free, limit)
+	t.Logf("allocatorState size=%d budget=%d free@%d limit@%d", got, line, free, limit)
 }
 
 // retuneActors is the goroutines contending for pages in each round of
@@ -1111,8 +1112,8 @@ func (sh retuneShape) granted() int64 {
 type retuneRound struct {
 	shape retuneShape
 	a     *Allocator
-	held  []*MemoryEnclave // one per draining actor; destroyed inside the window
-	got   []*MemoryEnclave // one per admitting actor; nil where it was refused
+	held  []*Memory // one per draining actor; destroyed inside the window
+	got   []*Memory // one per admitting actor; nil where it was refused
 
 	wg      sync.WaitGroup
 	arrived atomic.Int32
@@ -1327,8 +1328,8 @@ func runRetuneShape(t *testing.T, sh retuneShape, tally *retuneTally) {
 		rd := &retuneRound{
 			shape: sh,
 			a:     a,
-			held:  make([]*MemoryEnclave, sh.drain),
-			got:   make([]*MemoryEnclave, sh.admit),
+			held:  make([]*Memory, sh.drain),
+			got:   make([]*Memory, sh.admit),
 		}
 		bad := false
 		for i := range rd.held {

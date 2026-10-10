@@ -20,6 +20,7 @@ var (
 	sysLock, sysUnlock, sysUnmap func(b []byte) error
 	sysProtect                   func(b []byte, p protection) error
 	sysDisableCoreDumps          func() error
+	coreDumpsBeforeHardening     error
 )
 
 const _ = go_enclave_does_not_support_this_GOOS

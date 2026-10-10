@@ -15,10 +15,6 @@ import (
 	"os"
 )
 
-// coreDumpErr records whether the process-wide core-dump hardening took. It is
-// written once, from init, before any goroutine can observe it.
-var coreDumpErr = sysDisableCoreDumps()
-
 // Fault-injection seams: each is one system call or construction step with no
 // side effects of its own, reassigned only by this package's tests.
 var (
@@ -36,14 +32,6 @@ func randomCanary(b []byte) error {
 	_, err := rand.Read(b)
 	return err
 }
-
-// CoreDumpsDisabled reports the result of lowering RLIMIT_CORE (soft and hard)
-// to zero at import, or [ErrCoreDumpLimitUnsupported] on Windows. The limit is
-// best effort and does not bind a piped Linux core_pattern (core(5)); where the
-// platform has one, the verified per-mapping exclusion (MADV_DONTDUMP,
-// MAP_NOCORE, MAP_CONCEAL) is what keeps enclave pages out of dumps.
-// Constructors do not consult this result.
-func CoreDumpsDisabled() error { return coreDumpErr }
 
 // pageSize is the mapping granularity and the RLIMIT_MEMLOCK accounting unit.
 var pageSize = int64(os.Getpagesize())
@@ -278,7 +266,8 @@ func (m *mapping) wipeAndVerify() error {
 
 // release wipes and verifies, munlocks (at most once) and munmaps. A refused
 // munlock or munmap keeps the mapping intact behind a pagesHeldError so a
-// retry resumes; a refused mprotect unmaps anyway as an UnwipedReleaseError.
+// retry resumes; a refused mprotect unmaps anyway, as an UnwipedReleaseError
+// unless the data was already wiped.
 func (m *mapping) release() error {
 	// Step 1. Corruption falls through and is reported once the pages are
 	// gone; any other error is the refused mprotect.
@@ -296,7 +285,14 @@ func (m *mapping) release() error {
 			}
 		}
 
+		wiped := m.wiped
 		m.forget()
+		if wiped {
+			// A writable region was wiped before the refusal: the material
+			// is gone and so are the pages. Only the canary check was
+			// skipped, and the canary holds no material.
+			return nil
+		}
 		// The raw OS error, not a LockedMemoryError, so this matches only
 		// ErrReleasedWithoutWipe and never reads as "pages still held".
 		return &UnwipedReleaseError{Cause: err}
@@ -337,7 +333,7 @@ func (m *mapping) forget() {
 	m.memory, m.data, m.inner = nil, nil, nil
 	m.preguard, m.postguard, m.canary = nil, nil, nil
 	m.mutable, m.corrupted, m.verified, m.unlocked = false, false, false, false
-	m.abandoned = false
+	m.wiped, m.abandoned = false, false
 }
 
 // held wraps a refused unlock or unmap as a pagesHeldError, reported with any

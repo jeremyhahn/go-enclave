@@ -61,7 +61,7 @@ func TestSealing_SealerRoundTripsManyValuesInBothModes(t *testing.T) {
 
 				const values, workers = 1024, 8
 				needles := make([]needle, values)
-				sealed := make([]*enclave.SealedEnclave, values)
+				sealed := make([]*enclave.Sealed, values)
 				for i := range needles {
 					needles[i] = newNeedle(t)
 				}
@@ -191,7 +191,7 @@ func TestSealing_SealerRoundTripsManyValuesInBothModes(t *testing.T) {
 //   - a DEADLINE reaches a stalled provider: the seal and the open return
 //     ErrSealFailed/ErrOpenFailed matching context.DeadlineExceeded, and the
 //     value is intact;
-//   - no Sealer or SealedEnclave lock is held across a provider call:
+//   - no Sealer or Sealed lock is held across a provider call:
 //     while one seal and one open are stalled inside the provider, a second
 //     seal and open on the SAME sealer complete, and Destroy of the value
 //     being opened returns without waiting for that open.
@@ -451,7 +451,7 @@ func TestSealing_SealerRotatesKEKGenerationsUnderRealLockedMemory(t *testing.T) 
 
 		const values, workers = 96, 8
 		needles := make([]needle, values)
-		sealed := make([]*enclave.SealedEnclave, values)
+		sealed := make([]*enclave.Sealed, values)
 		for i := range needles {
 			needles[i] = newNeedle(t)
 		}
@@ -523,7 +523,7 @@ func TestShutdownSweep_SealerIsWipedForGoodAfterASweep(t *testing.T) {
 				t.Errorf("Seal %d after the sweep = %v, want ErrSealerWiped", i, err)
 			}
 		}
-		for name, sv := range map[string]*enclave.SealedEnclave{"retired-generation value": v, "current-generation value": retired} {
+		for name, sv := range map[string]*enclave.Sealed{"retired-generation value": v, "current-generation value": retired} {
 			if _, err := sv.Open(ctx); !errors.Is(err, enclave.ErrSealerWiped) {
 				t.Errorf("Open of the %s after the sweep = %v, want ErrSealerWiped", name, err)
 			}
@@ -630,7 +630,7 @@ func TestSealing_SealerFailsCleanlyWhenLockedMemoryRunsOutMidHierarchy(t *testin
 
 // TestSealing_OpenFailsClosedWhenTheFreezeIsRefused: the plaintext an open returns
 // is frozen before it is handed back, so a kernel that refuses that mprotect
-// fails the open — no enclave, the destination wiped and released, OpenWith's
+// fails the open — no enclave, the destination wiped and released, OpenIn's
 // reservation returned — rather than returning writable plaintext; the value
 // opens normally once the refusal lifts.
 func TestSealing_OpenFailsClosedWhenTheFreezeIsRefused(t *testing.T) {
@@ -649,14 +649,14 @@ func TestSealing_OpenFailsClosedWhenTheFreezeIsRefused(t *testing.T) {
 		}
 		f := installFaultInjector(t, 0)
 		f.refuseProt(unix.SYS_MPROTECT, unix.EPERM, unix.PROT_READ)
-		e, err := v.OpenWith(ctx, a)
+		e, err := openInAllocator(t, ctx, v, a)
 		f.allow(unix.SYS_MPROTECT)
 		requireRefused(t, f, unix.SYS_MPROTECT)
 		if err == nil || e != nil {
-			t.Fatalf("OpenWith with the freeze refused = (%v, %v), want (nil, an error)", e, err)
+			t.Fatalf("OpenIn with the freeze refused = (%v, %v), want (nil, an error)", e, err)
 		}
 		if !errors.Is(err, enclave.ErrLockedMemoryUnavailable) {
-			t.Errorf("OpenWith with the freeze refused = %v, want ErrLockedMemoryUnavailable", err)
+			t.Errorf("OpenIn with the freeze refused = %v, want ErrLockedMemoryUnavailable", err)
 		}
 		if used := a.InUse(); used != 0 {
 			t.Errorf("InUse = %d after the open failed closed, want 0", used)
@@ -748,28 +748,28 @@ func TestSealing_SealerKeyUseOverlappingASweepIsWiped(t *testing.T) {
 		prior       int
 		skip        uint64
 		refuseUnmap bool
-		op          func(ctx context.Context, s *enclave.Sealer, prior []*enclave.SealedEnclave) error
+		op          func(ctx context.Context, s *enclave.Sealer, prior []*enclave.Sealed) error
 	}{
 		// DEK, root destination, the provider's root, then the first KEK.
-		{"first KEK mint", 0, 3, false, func(ctx context.Context, s *enclave.Sealer, _ []*enclave.SealedEnclave) error {
+		{"first KEK mint", 0, 3, false, func(ctx context.Context, s *enclave.Sealer, _ []*enclave.Sealed) error {
 			_, err := s.Seal(ctx, heapBytes(needleLen))
 			return err
 		}},
 		// DEK, then the rotated KEK.
-		{"rotated KEK mint", 1, 1, false, func(ctx context.Context, s *enclave.Sealer, _ []*enclave.SealedEnclave) error {
+		{"rotated KEK mint", 1, 1, false, func(ctx context.Context, s *enclave.Sealer, _ []*enclave.Sealed) error {
 			_, err := s.Seal(ctx, heapBytes(needleLen))
 			return err
 		}},
-		{"first KEK mint, releases refused", 0, 3, true, func(ctx context.Context, s *enclave.Sealer, _ []*enclave.SealedEnclave) error {
+		{"first KEK mint, releases refused", 0, 3, true, func(ctx context.Context, s *enclave.Sealer, _ []*enclave.Sealed) error {
 			_, err := s.Seal(ctx, heapBytes(needleLen))
 			return err
 		}},
-		{"rotated KEK mint, releases refused", 1, 1, true, func(ctx context.Context, s *enclave.Sealer, _ []*enclave.SealedEnclave) error {
+		{"rotated KEK mint, releases refused", 1, 1, true, func(ctx context.Context, s *enclave.Sealer, _ []*enclave.Sealed) error {
 			_, err := s.Seal(ctx, heapBytes(needleLen))
 			return err
 		}},
 		// Destination, DEK, then the retired KEK for the unwrap.
-		{"retired KEK unwrap", 2, 2, false, func(ctx context.Context, _ *enclave.Sealer, prior []*enclave.SealedEnclave) error {
+		{"retired KEK unwrap", 2, 2, false, func(ctx context.Context, _ *enclave.Sealer, prior []*enclave.Sealed) error {
 			_, err := prior[0].Open(ctx)
 			return err
 		}},
@@ -784,7 +784,7 @@ func TestSealing_SealerKeyUseOverlappingASweepIsWiped(t *testing.T) {
 				if err != nil {
 					t.Fatalf("NewSealer: %v", err)
 				}
-				var prior []*enclave.SealedEnclave
+				var prior []*enclave.Sealed
 				for range tc.prior {
 					v := sealNeedle(t, ctx, s, newNeedle(t))
 					defer v.Destroy()
@@ -842,7 +842,7 @@ func TestSealing_SealerQueuedFirstSealUsesThePublishedRoot(t *testing.T) {
 			t.Fatalf("NewSealer: %v", err)
 		}
 		type sealed struct {
-			v   *enclave.SealedEnclave
+			v   *enclave.Sealed
 			err error
 		}
 		seal := func(ctx context.Context, n needle, done chan<- sealed) {
@@ -921,7 +921,7 @@ func TestSealing_SealerAbandonedInitReportsBothCauses(t *testing.T) {
 }
 
 // sealNeedle seals the material through s from a heap slice that Seal wipes.
-func sealNeedle(t *testing.T, ctx context.Context, s *enclave.Sealer, n needle) *enclave.SealedEnclave {
+func sealNeedle(t *testing.T, ctx context.Context, s *enclave.Sealer, n needle) *enclave.Sealed {
 	t.Helper()
 	buf := heapBytes(needleLen)
 	n.fill(buf)
@@ -936,7 +936,7 @@ func sealNeedle(t *testing.T, ctx context.Context, s *enclave.Sealer, n needle) 
 }
 
 // requireOpensTo opens v and requires exactly the material, compared in place.
-func requireOpensTo(t *testing.T, ctx context.Context, v *enclave.SealedEnclave, n needle) {
+func requireOpensTo(t *testing.T, ctx context.Context, v *enclave.Sealed, n needle) {
 	t.Helper()
 	o, err := v.Open(ctx)
 	if err != nil {
@@ -949,6 +949,21 @@ func requireOpensTo(t *testing.T, ctx context.Context, v *enclave.SealedEnclave,
 	if err := o.Destroy(); err != nil {
 		t.Fatalf("Destroy: %v", err)
 	}
+}
+
+// openInAllocator is v.OpenIn(ctx, a), as the *enclave.Memory it returns for
+// an *enclave.Allocator.
+func openInAllocator(t *testing.T, ctx context.Context, v *enclave.Sealed, a *enclave.Allocator) (*enclave.Memory, error) {
+	t.Helper()
+	h, err := v.OpenIn(ctx, a)
+	if err != nil {
+		return nil, err
+	}
+	m, ok := h.(*enclave.Memory)
+	if !ok {
+		t.Fatalf("OpenIn into an *Allocator returned a %T, want *enclave.Memory", h)
+	}
+	return m, nil
 }
 
 // requireContextFailure asserts err is the documented shape of a call whose
@@ -1063,7 +1078,7 @@ func TestSealing_SealerReportsItsConfiguration(t *testing.T) {
 		v := sealNeedle(t, ctx, s, n)
 		defer v.Destroy()
 		if str := v.String(); str == "" {
-			t.Error("SealedEnclave.String() is empty")
+			t.Error("Sealed.String() is empty")
 		}
 
 		// After a sweep the sealer asks the provider; it believes the answer.

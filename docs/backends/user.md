@@ -4,7 +4,7 @@
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 A backend is what holds an enclave's material. Locked memory, the
-[`MemoryEnclave`](../locked-memory/user.md), is the default and the only one in
+[`Memory`](../locked-memory/user.md), is the default and the only one in
 this module; hardware backends (TEEs, secure elements, TPMs, GPU confidential
 computing) ship as their own modules. This release declares the seam; using a
 backend other than locked memory for sealing and allocation arrives with its

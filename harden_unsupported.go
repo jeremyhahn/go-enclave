@@ -10,10 +10,7 @@
 
 package enclave
 
-// HardenProcess applies the process-wide protections that are the binary's
-// choice, not a library's, and reports which took effect. It is implemented on
-// Linux only (harden_linux.go); on every other GOOS it applies nothing and
-// returns [ErrProcessHardeningUnsupported].
-func HardenProcess() (ProcessHardening, error) {
-	return ProcessHardening{}, ErrProcessHardeningUnsupported
-}
+// markNotDumpable is [HardenProcess]'s non-dumpable step, which exists on
+// Linux only (harden_linux.go): every other GOOS returns
+// [ErrProcessHardeningUnsupported] and the step applies nothing.
+func markNotDumpable() error { return ErrProcessHardeningUnsupported }

@@ -1,6 +1,6 @@
 # Locked-memory budget and admission — API
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-07
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-09
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Transports
@@ -14,7 +14,8 @@ why a bottom-layer library has none).
 | Create a budget | `enclave.NewAllocator(maxBytes)` | N/A |
 | Create a budget checked against `RLIMIT_MEMLOCK` | `enclave.NewAllocatorWithinRLimit(maxBytes)` | N/A |
 | Admitted allocation (move / generate) | `(*Allocator).New(data)`, `(*Allocator).NewSized(n)` | N/A |
-| Admitted open of a sealed value | `(*SealedEnclave).OpenWith(ctx, a)` ([sealing](../sealing/api.md)) | N/A |
+| Admitted open of a sealed value | `(*Sealed).OpenIn(ctx, a)` ([sealing](../sealing/api.md)) | N/A |
+| Admitted import as the locked-memory backend | `(*Allocator).Import(ctx, material, opts...)` ([backends](../backends/api.md)) | N/A |
 | Retune | `(*Allocator).SetLimit(n)`, `(*Allocator).ForceLimit(n)` | N/A |
 | Rebalance | `(*Allocator).TransferTo(dst, n)` | N/A |
 | Observe | `(*Allocator).InUse()`, `Limit()`, `Available()` | N/A |

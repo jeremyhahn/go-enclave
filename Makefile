@@ -46,7 +46,9 @@ include scripts/tool-pins.sh
 
 # TOOL_INSTALL=1 installs missing pins into TOOLS_DIR (inside the repo, keyed by
 # version and toolchain). TOOL_INSTALL=0 (CI) installs nothing: a missing or
-# mismatched tool fails closed, with no fallback install.
+# mismatched tool fails closed, with no fallback install. actionlint alone
+# ignores TOOL_INSTALL=0: a verified PATH copy is used, else it is built into
+# TOOLS_DIR at its pin (#146).
 TOOL_INSTALL ?= 1
 TOOLS_DIR    := $(CURDIR)/bin/tools
 # TOOLS_DIR derives from the checkout path, so it is raw-bound.

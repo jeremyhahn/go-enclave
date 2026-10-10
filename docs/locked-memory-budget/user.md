@@ -1,6 +1,6 @@
 # Locked-memory budget and admission — user guide
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-04
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-09
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Who does what
@@ -29,7 +29,7 @@ Install before any library calls `ProcessAllocator` — the first such call that
 succeeds installs a default and locks the configuration (a call whose limit
 discovery fails installs nothing and leaves `SetAllocator` available). Leave headroom below the
 ceiling for locked memory taken outside the budget (unbudgeted constructors,
-`SealedEnclave.Open`, sealing keys).
+`Sealed.Open`, sealing keys).
 
 If you install nothing, the default budget equals the discovered ceiling, or is
 unbounded when no ceiling binds. It leaves no headroom.
@@ -104,6 +104,7 @@ refused there and authenticated work keeps its headroom.
 | `ErrAllocatorInstalled` | `SetAllocator` after a library's `ProcessAllocator` call succeeded and installed the default | Install earlier in `main`. |
 | `Available()` is 0, `InUse() > Limit()` | `ForceLimit` over-subscribed the allocator | Wait for enclaves to be destroyed, or raise the budget. |
 | `ErrNilAllocator` from `New`, `NewSized` or a retune | The `*Allocator` is nil: an unset field or a skipped configuration step | Construct the allocator, or use `ProcessAllocator()`. `New` has already wiped the data. |
+| `ErrAllocatorNotConstructed` from any call | An `enclave.Allocator{}` declared by value instead of built by a constructor | Use `NewAllocator`, `NewAllocatorWithinRLimit` or `ProcessAllocator()`, and pass the `*Allocator` around; a copied value shares the original's budget. |
 | Budget not returned after a failed allocation | The kernel refused to unlock the rolled-back pages; the charge is kept until a `WipeAll` reclaims them | Expected; the shutdown sweep refunds it. |
 
 ## Upgrading

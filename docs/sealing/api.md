@@ -12,13 +12,13 @@ transport itself, behind the `KeyProtector`/`RootUnsealer` interfaces.
 
 | Capability | Embedded Go call | REST / gRPC / QUIC / MCP / Unix socket |
 |---|---|---|
-| Seal under the process sealer | `enclave.NewSealed(ctx, data)` | N/A |
-| Configure a sealer | `enclave.NewSealer(enclave.WithKeyProtector(kp))` or `enclave.NewSealer(enclave.WithRootUnsealer(ru), enclave.WithKEKRotationLimit(n))` | N/A |
+| Seal under the process sealer | `enclave.NewSealed(ctx, data)`, or from an enclave `enclave.NewSealedFrom(ctx, src)` | N/A |
+| Configure a sealer | `enclave.NewSealer(enclave.WithKeyProtector(kp))` or `enclave.NewSealer(enclave.WithRootUnsealer(ru), enclave.WithKEKRotationLimit(n))`; `enclave.WithBackend(b)` for where its keys live, `enclave.WithRequireKeyScheduleErasure()` for strict mode | N/A |
 | Install the process sealer | `enclave.SetSealer(s)` | N/A |
-| Seal under an explicit sealer | `(*Sealer).Seal(ctx, data)` | N/A |
-| Open (unbudgeted / budgeted) | `(*SealedEnclave).Open(ctx)`, `(*SealedEnclave).OpenWith(ctx, a)` | N/A |
-| Probe openability | `(*SealedEnclave).Openable()` | N/A |
-| Release ciphertext | `(*SealedEnclave).Destroy() error` | N/A |
+| Seal under an explicit sealer | `(*Sealer).Seal(ctx, data)`, `(*Sealer).SealFrom(ctx, src)` | N/A |
+| Open (locked memory / another backend) | `(*Sealed).Open(ctx)`, `(*Sealed).OpenIn(ctx, b)` | N/A |
+| Probe openability | `(*Sealed).Openable()` | N/A |
+| Release ciphertext | `(*Sealed).Destroy() error` | N/A |
 | Release a sealer's keys | `(*Sealer).Destroy() error` | N/A |
 | Release the software provider's root | `(*SoftwareProvider).Destroy() error` | N/A |
 | Implement a provider | `KeyProtector`, `RootUnsealer`, optional `HealthReporter`, `RootKeyBytes` | N/A |

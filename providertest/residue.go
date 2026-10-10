@@ -45,7 +45,7 @@ func checkNoResidueAfterUnprotect(r *report, cfg Config) {
 	}
 
 	// Generated in locked pages: a heap copy would be found by the sweep.
-	needle, err := enclave.NewMemoryEnclaveSized(keyBytes)
+	needle, err := enclave.NewMemorySized(keyBytes)
 	if err != nil {
 		r.unmeasured(property, "residue sweep not run: locked memory is unavailable (%v). Retention by copy "+
 			"is unmeasured", err)
@@ -83,7 +83,7 @@ func checkNoResidueAfterUnprotect(r *report, cfg Config) {
 
 	// The destination is a second locked mapping, as a real caller's is; while
 	// populated it is the control below.
-	dst, err := enclave.NewMemoryEnclaveSized(keyBytes)
+	dst, err := enclave.NewMemorySized(keyBytes)
 	if err != nil {
 		r.unmeasured(property, "residue sweep not run: a second locked allocation failed (%v). Retention "+
 			"by copy is unmeasured", err)
@@ -166,7 +166,7 @@ var sweepProcess = memscan.Find
 
 // sweepOutsideHome returns the mappings, other than the one containing home,
 // in which the material held in probe is byte-exact resident.
-func sweepOutsideHome(probe *enclave.MemoryEnclave, home uintptr) ([]string, error) {
+func sweepOutsideHome(probe *enclave.Memory, home uintptr) ([]string, error) {
 	var hits []string
 	var scanErr error
 	if err := probe.WithBytes(func(needle []byte) error {
@@ -195,7 +195,7 @@ func equalBytes(a, b []byte) bool {
 // release destroys a locked mapping the residue check made for itself. A
 // refusal is the environment's doing, not the provider's, so it is noted
 // rather than failed.
-func release(r *report, what string, e *enclave.MemoryEnclave) {
+func release(r *report, what string, e *enclave.Memory) {
 	if err := e.Destroy(); err != nil {
 		r.note("providertest: releasing the residue check's %s was refused: %v", what, err)
 	}

@@ -1064,7 +1064,7 @@ type halfWritingUnsealer struct{ inner *enclave.SoftwareProvider }
 func (p *halfWritingUnsealer) UnsealRoot(ctx context.Context, dst []byte) error {
 	// The full root comes from a locked scratch enclave, so a partial write is
 	// the only thing this fixture gets wrong.
-	scratch, err := enclave.NewMemoryEnclaveSized(enclave.RootKeyBytes)
+	scratch, err := enclave.NewMemorySized(enclave.RootKeyBytes)
 	if err != nil {
 		return err
 	}

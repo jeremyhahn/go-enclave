@@ -44,14 +44,14 @@ func lifecycle() error {
 	marker := []byte("go-enclave consumer check")
 	material := bytes.Clone(marker)
 
-	e, err := enclave.NewMemoryEnclave(material)
+	e, err := enclave.NewMemory(material)
 	if err != nil {
-		return fmt.Errorf("NewMemoryEnclave: %w", err)
+		return fmt.Errorf("NewMemory: %w", err)
 	}
 	defer func() { _ = e.Destroy() }() // second call after the explicit one: idempotent
 
 	if !bytes.Equal(material, make([]byte, len(marker))) {
-		return errors.New("NewMemoryEnclave left the caller's buffer unwiped")
+		return errors.New("NewMemory left the caller's buffer unwiped")
 	}
 	if !e.IsAlive() {
 		return errors.New("a new enclave reports itself not alive")
@@ -116,7 +116,7 @@ func sealing() error {
 		return fmt.Errorf("opened EqualTo(marker) = (%t, %v), want (true, nil)", ok, err)
 	}
 	if err := v.Destroy(); err != nil {
-		return fmt.Errorf("SealedEnclave.Destroy: %w", err)
+		return fmt.Errorf("Sealed.Destroy: %w", err)
 	}
 	return nil
 }

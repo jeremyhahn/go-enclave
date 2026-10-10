@@ -42,12 +42,12 @@ func fillRandom(b []byte) error {
 	return err
 }
 
-// newKeyEnclave returns a [MemoryEnclave] holding n bytes from the CSPRNG,
+// newKeyEnclave returns a [Memory] holding n bytes from the CSPRNG,
 // generated directly into locked memory.
 //
 //nolint:unparam // n is always 32 today because dekBytes, kekBytes and RootKeyBytes are three independent decisions that happen to agree; folding them into one constant here would couple them.
-func newKeyEnclave(n int) (*MemoryEnclave, error) {
-	e, err := NewMemoryEnclaveSized(n)
+func newKeyEnclave(n int) (*Memory, error) {
+	e, err := NewMemorySized(n)
 	if err != nil {
 		return nil, err
 	}
@@ -66,7 +66,7 @@ func newKeyEnclave(n int) (*MemoryEnclave, error) {
 // erased once unreachable ([KeyScheduleErasure]); no cipher.Block or
 // cipher.AEAD outlives the call. See docs/sealing/engineering.md,
 // "Key-schedule heap exposure".
-func withAEAD(key *MemoryEnclave, fn func(cipher.AEAD) error) error {
+func withAEAD(key ByteAccess, fn func(cipher.AEAD) error) error {
 	var err error
 	secretDo(func() {
 		err = key.WithBytes(func(k []byte) error {
@@ -90,7 +90,7 @@ func withAEAD(key *MemoryEnclave, fn func(cipher.AEAD) error) error {
 
 // sealWithKey encrypts plaintext under the key in ke, binding aad, and
 // returns nonce || ciphertext || tag as an ordinary heap slice.
-func sealWithKey(ke *MemoryEnclave, plaintext, aad []byte) ([]byte, error) {
+func sealWithKey(ke ByteAccess, plaintext, aad []byte) ([]byte, error) {
 	if err := sealableWithin(uint64(len(plaintext)), math.MaxInt); err != nil {
 		return nil, err
 	}
@@ -99,7 +99,7 @@ func sealWithKey(ke *MemoryEnclave, plaintext, aad []byte) ([]byte, error) {
 	if err := withAEAD(ke, func(gcm cipher.AEAD) error {
 		// A nil nonce is legal only for an AEAD with NonceSize 0; cipher.NewGCM
 		// panics on it, so a change of AEAD fails loudly.
-		// TestSealedEnclave_SealIsNonDeterministic catches an explicit fixed nonce.
+		// TestSealed_SealIsNonDeterministic catches an explicit fixed nonce.
 		/* #nosec G407 -- nil is required by NewGCMWithRandomNonce, which generates the nonce itself; see above */
 		sealed = gcm.Seal(nil, nil, plaintext, aad)
 		return nil
@@ -113,7 +113,7 @@ func sealWithKey(ke *MemoryEnclave, plaintext, aad []byte) ([]byte, error) {
 // dst and nowhere else. A plaintext whose length is not exactly len(dst) is
 // refused as an authentication failure before decrypting, because a longer
 // one would make the AEAD's append reallocate onto the heap.
-func openWithKeyInto(ke *MemoryEnclave, sealed, aad, dst []byte) error {
+func openWithKeyInto(ke ByteAccess, sealed, aad, dst []byte) error {
 	return withAEAD(ke, func(gcm cipher.AEAD) error {
 		return openInto(gcm, sealed, aad, dst)
 	})

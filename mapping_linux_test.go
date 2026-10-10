@@ -121,7 +121,7 @@ func allocLeakChild(t *testing.T) {
 	const attempts = 256
 	failures := 0
 	for i := 0; i < attempts; i++ {
-		e, err := NewMemoryEnclaveSized(64)
+		e, err := NewMemorySized(64)
 		if err == nil {
 			e.Destroy()
 			continue
@@ -160,6 +160,110 @@ func allocLeakChild(t *testing.T) {
 	t.Log(leakNone)
 }
 
+const (
+	// rollbackMarker selects the child half of the copy-constructor rollback test.
+	rollbackMarker = "GO_ENCLAVE_COPY_ROLLBACK"
+
+	rollbackNone = "failed copy constructors returned locked memory to its baseline"
+)
+
+// TestNewFrozenCopy_FailedConstructionReturnsToBaseline pins the rollback of
+// every copying constructor (NewMemory, NewMemoryCopy, Allocator.New) on both
+// of its failure paths: a refused mlock, from a real RLIMIT_MEMLOCK ceiling,
+// and a refused freeze of pages already mapped and locked. Afterwards VmLck,
+// the allocator's InUse and the shutdown ledger are back where they started.
+// It runs in a subprocess because it lowers the process's memlock ceiling.
+func TestNewFrozenCopy_FailedConstructionReturnsToBaseline(t *testing.T) {
+	if os.Getenv(rollbackMarker) == "1" {
+		copyRollbackChild(t)
+		return
+	}
+
+	out, err := runTestChild(t, "TestNewFrozenCopy_FailedConstructionReturnsToBaseline", rollbackMarker, "1")
+	if err != nil {
+		t.Fatalf("subprocess failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, rollbackNone) {
+		t.Fatalf("subprocess did not confirm %q:\n%s", rollbackNone, out)
+	}
+}
+
+func copyRollbackChild(t *testing.T) {
+	t.Helper()
+	requireCleanLedger(t)
+
+	// A budget large enough that only the OS can refuse.
+	a, err := NewAllocator(1 << 20)
+	if err != nil {
+		t.Fatalf("NewAllocator: %v", err)
+	}
+	constructors := []struct {
+		name  string
+		build func([]byte) (*Memory, error)
+	}{
+		{"NewMemory", NewMemory},
+		{"NewMemoryCopy", NewMemoryCopy},
+		{"Allocator.New", a.New},
+	}
+
+	setCeiling, original := injectMemlockCeiling(t)
+	failures := []struct {
+		name string
+		arm  func() (lift func())
+	}{
+		// mmap succeeds and mlock is refused, so the pages are unmapped unlocked.
+		{"mlock refused", func() func() {
+			setCeiling(0)
+			return func() { setCeiling(original.Cur) }
+		}},
+		// The pages are mapped and locked; only the freeze is refused.
+		{"freeze refused", func() func() { return denyProtect(t) }},
+	}
+
+	lockedBefore, err := vmLckBytes()
+	if err != nil {
+		t.Fatalf("cannot read VmLck: %v", err)
+	}
+
+	const attempts = 64
+	for _, f := range failures {
+		for _, c := range constructors {
+			lift := f.arm()
+			for i := 0; i < attempts; i++ {
+				e, err := c.build([]byte(fmt.Sprintf("rollback-material-%d", i)))
+				if e != nil {
+					t.Fatalf("%s/%s: returned an enclave although construction failed", f.name, c.name)
+				}
+				if !errors.Is(err, ErrLockedMemoryUnavailable) {
+					t.Fatalf("%s/%s: err = %v, want ErrLockedMemoryUnavailable", f.name, c.name, err)
+				}
+				if errors.Is(err, ErrReleasedWithoutWipe) {
+					t.Fatalf("%s/%s: err = %v; the rollback could not wipe and release", f.name, c.name, err)
+				}
+			}
+			lift()
+
+			lockedAfter, err := vmLckBytes()
+			if err != nil {
+				t.Fatalf("cannot read VmLck: %v", err)
+			}
+			if lockedAfter != lockedBefore {
+				t.Fatalf("%s/%s: VmLck = %d after %d failures, want the starting %d (locked pages leaked)",
+					f.name, c.name, lockedAfter, attempts, lockedBefore)
+			}
+			if a.InUse() != 0 {
+				t.Fatalf("%s/%s: InUse = %d after the failures, want 0 (a reservation leaked)",
+					f.name, c.name, a.InUse())
+			}
+			if remaining := sweep(t); remaining != 0 {
+				t.Fatalf("%s/%s: WipeAll found %d held entries, want 0 (the ledger leaked)",
+					f.name, c.name, remaining)
+			}
+		}
+	}
+	t.Log(rollbackNone)
+}
+
 // vmaCount reports how many mappings the process currently holds.
 func vmaCount() (int, error) {
 	b, err := os.ReadFile("/proc/self/maps")
@@ -181,19 +285,19 @@ const (
 	frozenSurvived = "wrote through a move-constructed enclave and lived"
 )
 
-// TestMemoryEnclave_MoveConstructedPagesAreReadOnly pins both halves of the
+// TestMemory_MoveConstructedPagesAreReadOnly pins both halves of the
 // constructor difference: a sized enclave is writable in-process, and a write
 // through a move-constructed enclave's view faults (in a subprocess). Either half
 // alone would pass against a build that froze everything or nothing.
-func TestMemoryEnclave_MoveConstructedPagesAreReadOnly(t *testing.T) {
+func TestMemory_MoveConstructedPagesAreReadOnly(t *testing.T) {
 	if os.Getenv(frozenMarker) == "1" {
 		frozenWriteChild(t)
 		return
 	}
 
-	sized, err := NewMemoryEnclaveSized(32)
+	sized, err := NewMemorySized(32)
 	if err != nil {
-		t.Fatalf("NewMemoryEnclaveSized: %v", err)
+		t.Fatalf("NewMemorySized: %v", err)
 	}
 	if err := sized.WithBytes(func(b []byte) error {
 		b[0] = 0xFF // must not fault: this is the fill path
@@ -206,7 +310,7 @@ func TestMemoryEnclave_MoveConstructedPagesAreReadOnly(t *testing.T) {
 	}
 	sized.Destroy()
 
-	out, cerr := runTestChild(t, "TestMemoryEnclave_MoveConstructedPagesAreReadOnly", frozenMarker, "1")
+	out, cerr := runTestChild(t, "TestMemory_MoveConstructedPagesAreReadOnly", frozenMarker, "1")
 	requireChildFaulted(t, out, cerr, frozenArmed, frozenSurvived,
 		"a write through a move-constructed enclave (its pages are not frozen)")
 }
@@ -214,9 +318,9 @@ func TestMemoryEnclave_MoveConstructedPagesAreReadOnly(t *testing.T) {
 func frozenWriteChild(t *testing.T) {
 	t.Helper()
 
-	e, err := NewMemoryEnclave([]byte("private-key-material"))
+	e, err := NewMemory([]byte("private-key-material"))
 	if err != nil {
-		t.Fatalf("NewMemoryEnclave: %v", err)
+		t.Fatalf("NewMemory: %v", err)
 	}
 
 	view := e.m.data // a slice no lock covers, as a careless caller would keep
@@ -241,17 +345,17 @@ const (
 	copyFrozenSurvived = "wrote through a copy-constructed enclave and lived"
 )
 
-// TestMemoryEnclave_CopyConstructedPagesAreReadOnly pins that the copy
+// TestMemory_CopyConstructedPagesAreReadOnly pins that the copy
 // constructor's pages are read-only as enforced by the MMU, not only as recorded
-// by the mapping's flag (TestNewMemoryEnclaveCopy_PagesAreFrozen). The write runs
+// by the mapping's flag (TestNewMemoryCopy_PagesAreFrozen). The write runs
 // in a subprocess because succeeding at it kills the process.
-func TestMemoryEnclave_CopyConstructedPagesAreReadOnly(t *testing.T) {
+func TestMemory_CopyConstructedPagesAreReadOnly(t *testing.T) {
 	if os.Getenv(copyFrozenMarker) == "1" {
 		copyFrozenWriteChild(t)
 		return
 	}
 
-	out, cerr := runTestChild(t, "TestMemoryEnclave_CopyConstructedPagesAreReadOnly", copyFrozenMarker, "1")
+	out, cerr := runTestChild(t, "TestMemory_CopyConstructedPagesAreReadOnly", copyFrozenMarker, "1")
 	requireChildFaulted(t, out, cerr, copyFrozenArmed, copyFrozenSurvived,
 		"a write through a copy-constructed enclave (its pages are not frozen)")
 }
@@ -260,9 +364,9 @@ func copyFrozenWriteChild(t *testing.T) {
 	t.Helper()
 
 	src := []byte("private-key-material")
-	e, err := NewMemoryEnclaveCopy(src)
+	e, err := NewMemoryCopy(src)
 	if err != nil {
-		t.Fatalf("NewMemoryEnclaveCopy: %v", err)
+		t.Fatalf("NewMemoryCopy: %v", err)
 	}
 
 	// The caller's source stays writable; only the enclave's view may fault.
@@ -446,7 +550,7 @@ func TestFrozenReleaseUnmapsWhenMprotectIsDenied(t *testing.T) {
 	// every WipeAll test.
 	e, err := unpublishedCopy(append([]byte(nil), secret...))
 	if err != nil {
-		t.Fatalf("newMemoryEnclave: %v", err)
+		t.Fatalf("newMemory: %v", err)
 	}
 
 	if e.m.mutable {
@@ -492,7 +596,7 @@ func TestFrozenReleaseUnmapsWhenMprotectIsDenied(t *testing.T) {
 func TestFrozenReleaseKeepsTheMappingWhenTheBypassAlsoFails(t *testing.T) {
 	e, err := unpublishedCopy([]byte("material"))
 	if err != nil {
-		t.Fatalf("newMemoryEnclave: %v", err)
+		t.Fatalf("newMemory: %v", err)
 	}
 	t.Cleanup(func() {
 		if e.m != nil {
@@ -523,7 +627,7 @@ func TestFrozenReleaseKeepsTheMappingWhenTheBypassAlsoFails(t *testing.T) {
 func TestKeptMappingReadsAsDestroyedOnceWiped(t *testing.T) {
 	e, err := unpublishedCopy([]byte("material that is about to be wiped"))
 	if err != nil {
-		t.Fatalf("newMemoryEnclave: %v", err)
+		t.Fatalf("newMemory: %v", err)
 	}
 	t.Cleanup(func() {
 		if e.m != nil {
@@ -567,7 +671,7 @@ func TestKeptMappingReadsAsDestroyedOnceWiped(t *testing.T) {
 func TestReleaseNeverUnmapsMaterialItCouldNotWipe(t *testing.T) {
 	e, err := unpublishedCopy([]byte("material that must not be handed back unwiped"))
 	if err != nil {
-		t.Fatalf("newMemoryEnclave: %v", err)
+		t.Fatalf("newMemory: %v", err)
 	}
 	t.Cleanup(func() {
 		if e.m != nil {
@@ -621,7 +725,7 @@ func TestReleaseNeverUnmapsMaterialItCouldNotWipe(t *testing.T) {
 func TestKeptMutableMappingReadsAsDestroyedOnceWiped(t *testing.T) {
 	e, err := unpublishedSized(32)
 	if err != nil {
-		t.Fatalf("newMemoryEnclaveSized: %v", err)
+		t.Fatalf("newMemorySized: %v", err)
 	}
 	t.Cleanup(func() {
 		if e.m != nil {

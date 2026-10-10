@@ -1,6 +1,6 @@
 # Shutdown sweep — architecture
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-04
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-09
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Problem
@@ -37,6 +37,11 @@ ledger:
 - **A sweep generation** (`sweepGen`) is bumped before anything is destroyed
   and again on return, so it is odd exactly while a sweep runs. Sealing uses it
   to answer `Openable` and to detect a sweep overlapping its first root unseal.
+- **Backends second.** After the locked-memory phase, the sweep snapshots the
+  registered non-default `Sweeper`s under the registry's read lock, releases
+  it, and calls each in name order with the caller's `ctx`. Their held counts
+  join the count and their errors join `SweepError.Backends`
+  ([backends](../backends/architecture.md)).
 
 ```mermaid
 stateDiagram-v2
@@ -51,7 +56,8 @@ stateDiagram-v2
   Waiting --> Pass: a holder released it (wake-up)
   Waiting --> Done: ctx ended
   Pass --> Done: ledgers empty, or nothing owed is held/contended, or ctx nil/ended
-  Done --> [*]: count = ledger size; generation even; return count, nil or *SweepError
+  Done --> Backends: slot still held, generation still odd
+  Backends --> [*]: Sweep(ctx) each registered Sweeper in name order; count = ledger size + held counts; generation even; return count, nil or *SweepError
 ```
 
 ### Termination
@@ -77,7 +83,7 @@ only the owed borrows bound the call.
 | Remember enclaves seen in earlier passes and skip them | A momentary reader (`IsAlive`, `Size`) turned into permanent abandonment at exit. Every pass retries everything still registered. |
 | Tally the count while sweeping | Misses enclaves registered mid-sweep — a fail-open zero. The count is read from the ledgers under their lock. |
 | Panic on corruption | A sweep that stopped at the first corrupt enclave would leave every later one mapped at exit. Reported as `*SweepError`. |
-| Sweep `SealedEnclave` values | They hold no locked pages, and in `ModePerOperation` they stay legitimately openable. `Openable` reports the effect instead. |
+| Sweep `Sealed` values | They hold no locked pages, and in `ModePerOperation` they stay legitimately openable. `Openable` reports the effect instead. |
 | Treat a nil `ctx` as `context.Background()` | A programming error in a shutdown path would become a shutdown that never ends. Nil never waits. |
 
 ## Component boundaries
@@ -99,5 +105,5 @@ retained past `WithBytes` faults if read after a sweep.
 ## Scope fence
 
 Not a garbage collector, not a fault handler, not automatic: nothing calls it
-for you. It does not destroy `SealedEnclave` values, does not wait for
+for you. It does not destroy `Sealed` values, does not wait for
 constructors, and does not retry beyond what its context allows.

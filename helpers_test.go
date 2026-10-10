@@ -24,6 +24,22 @@ func swapSeam[T any](t testing.TB, seam *T, value T) (prev T) {
 	return prev
 }
 
+// swapCoreDumpSeam replaces the RLIMIT_CORE step with step for the rest of the
+// test, and restores what CoreDumpsDisabled reports when it ends, so a test
+// can run HardenProcess without changing its own process or the next test's.
+func swapCoreDumpSeam(t testing.TB, step func() error) {
+	t.Helper()
+	coreDumpLimit.mu.Lock()
+	set, err := coreDumpLimit.set, coreDumpLimit.err
+	coreDumpLimit.mu.Unlock()
+	t.Cleanup(func() {
+		coreDumpLimit.mu.Lock()
+		coreDumpLimit.set, coreDumpLimit.err = set, err
+		coreDumpLimit.mu.Unlock()
+	})
+	swapSeam(t, &disableCoreDumps, step)
+}
+
 // mapPagesForTest maps n bytes straight from the platform layer and unmaps
 // them when the test ends.
 func mapPagesForTest(t testing.TB, n int) []byte {
@@ -52,24 +68,24 @@ func resetProcessSealerForTest() {
 	processSealerSlot.reset()
 }
 
-// unpublishedCopy is NewMemoryEnclave without the WipeAll ledger, for a test
+// unpublishedCopy is NewMemory without the WipeAll ledger, for a test
 // that leaves the pages held on purpose: a ledger entry would leak into every
 // WipeAll test. data is wiped.
-func unpublishedCopy(data []byte) (*MemoryEnclave, error) {
+func unpublishedCopy(data []byte) (*Memory, error) {
 	defer Wipe(data)
 	return unpublished(newFrozenCopy(data))
 }
 
-// unpublishedSized is NewMemoryEnclaveSized without the ledger, as above.
-func unpublishedSized(n int) (*MemoryEnclave, error) {
+// unpublishedSized is NewMemorySized without the ledger, as above.
+func unpublishedSized(n int) (*Memory, error) {
 	return unpublished(newMapping(n))
 }
 
-func unpublished(m *mapping, err error) (*MemoryEnclave, error) {
+func unpublished(m *mapping, err error) (*Memory, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &MemoryEnclave{m: m}, nil
+	return &Memory{memoryState: &memoryState{m: m}}, nil
 }
 
 // reset clears the slot; only tests may, because replacing a live value

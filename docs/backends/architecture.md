@@ -1,18 +1,18 @@
 # Backends — architecture
 
-> **Status: ACCEPTED** (coordinator, 2026-10-08, #135) · Scope: go-enclave · Last verified: 2026-10-08
+> **Status: ACCEPTED** (coordinator, 2026-10-08, #135) · Scope: go-enclave · Last verified: 2026-10-09
 > The backend seam. The declarations in [backend.go](../../backend.go) and [errors.go](../../errors.go) ship now and are canonical; every item marked **T1** is decided here and built by the hardening train (T1) in v0.9.0-alpha. Conflicts with this document are defects.
 
 ## Problem
 
 go-enclave will hold material in hardware enclaves: TEEs (Intel TDX and SGX,
 AMD SEV-SNP), secure elements and TPMs, and NVIDIA Blackwell confidential
-computing. Locked, guarded, zeroized memory (`MemoryEnclave`) is the strategy
+computing. Locked, guarded, zeroized memory (`Memory`) is the strategy
 for a node that has none of them, and stands in as its enclave. The API must
 not freeze, at v0.9.0-rc.1, around that one memory-backed implementation. It
 needs a seam that:
 
-- lets another backend's enclave stand where a `MemoryEnclave` stands (sealing
+- lets another backend's enclave stand where a `Memory` stands (sealing
   into it, opening into it, sweeping it at shutdown);
 - lets a caller reach a backend's own, richer interface;
 - keeps the core module at one dependency (`golang.org/x/sys`), with every
@@ -81,8 +81,8 @@ classDiagram
   Backend <|-- Sweeper
   Backend <|-- Confiner
   Handle --> Backend : made by
-  MemoryEnclave ..|> ByteAccess
-  MemoryEnclave ..|> Freezer
+  Memory ..|> ByteAccess
+  Memory ..|> Freezer
 ```
 
 - **Handle** is the core every enclave provides: size, liveness, destroy, and
@@ -97,7 +97,7 @@ classDiagram
   package that needs it: never a panic, never a fallback to another backend.
 - **The registry** maps a name to a backend. The locked-memory backend is in it
   from the start, as a value; anything else is added by an explicit
-  `Register(b)`. Injection (`WithBackend(b)`, **T1**) needs no registration;
+  `Register(b)`. Injection (`WithBackend(b)`, **T1**, done) needs no registration;
   the registry exists so configuration can select a backend by name. A
   name is a configuration label, not an instance identity
   ([registry semantics](#registry-semantics)).
@@ -122,18 +122,17 @@ contents (no `Secret`, `SecureBytes`).
 | `BackendNames`, `DefaultBackend`, `LockedMemoryBackendName` | Nouns need the qualifier: `enclave.Names()` would not say whose. | |
 | `Capability`, `CapabilityError`, `Evidence` | Named for what they carry. | |
 
-### Renames (T1)
+### Renames
 
-T1 renames these in v0.9.0-alpha as a clean break under
-`### Changed — BREAKING:`, with **no deprecated aliases**: the pre-release
-policy forbids them. Until T1 the existing names stand.
+The types dropped their `Enclave` suffix in v0.9.0-alpha as a clean break, with
+**no deprecated aliases**: the pre-release policy forbids them. The old and new
+names are in [Upgrading](../README.md#v090-alpha-from-v08).
 
-| Today | After T1 | Why |
-|---|---|---|
-| `MemoryEnclave` | `Memory` | `enclave.MemoryEnclave` repeats the package; `enclave.Memory` is the locked-memory backend's handle. |
-| `NewMemoryEnclave`, `NewMemoryEnclaveCopy`, `NewMemoryEnclaveSized` | `NewMemory`, `NewMemoryCopy`, `NewMemorySized` | Follow the type. |
-| `SealedEnclave` | `Sealed` | `NewSealed` already returns it; `enclave.Sealed` matches. |
-| `(*SealedEnclave).OpenWith(ctx, a)` | `(*Sealed).OpenIn(ctx, a)` | An `*Allocator` is a backend ([decision 8](#decisions)). |
+| Name | Why |
+|---|---|
+| `Memory`, `NewMemory`, `NewMemoryCopy`, `NewMemorySized` | `enclave.MemoryEnclave` repeated the package; `enclave.Memory` is the locked-memory backend's handle, and the constructors follow the type. |
+| `Sealed` | `NewSealed` already returned it; `enclave.Sealed` matches. |
+| `(*Sealed).OpenIn(ctx, a)` | `OpenIn` names the destination; an `*Allocator` is a backend ([decision 8](#decisions)), and T1 widened the parameter to `Backend`. |
 
 ## Interfaces
 
@@ -242,11 +241,12 @@ type CapabilityError struct {
 type Capability string // "bytes", "freeze", "sign", "decrypt", "aead", "derive", "attest", "import", "sweep", "confine"
 ```
 
-`*MemoryEnclave` satisfies `Handle`, `ByteAccess` and `Freezer`, asserted at
-compile time; its new `Backend()` returns `DefaultBackend()`. The default
+`*Memory` satisfies `Handle`, `ByteAccess` and `Freezer`, asserted at
+compile time; its new `Backend()` returns the admitting `*Allocator`, else
+`DefaultBackend()`. The default
 backend's type stays unexported: callers name it by `DefaultBackend()` or
 `LockedMemoryBackendName`, and the exported locked-memory backend type is
-`*Allocator` (**T1**, [Allocator](#allocator-a-locked-memory-budget)).
+`*Allocator` (**T1**, done; [Allocator](#allocator-a-locked-memory-budget)).
 
 ### What each backend class provides
 
@@ -257,7 +257,7 @@ backend's type stays unexported: callers name it by `DefaultBackend()` or
 | `AEAD`, `crypto.Signer`, `crypto.Decrypter` | handle | no | no (byte access suffices) | per key type |
 | `Deriver` | handle | no | no | where the device has a KDF |
 | `Attester` | handle or backend | no | backend: platform evidence | handle: key attestation |
-| `Importer` | backend | yes (**T1**: `*Allocator`) | yes | where policy allows import, per purpose |
+| `Importer` | backend | yes (**T1**, done: `*Allocator`) | yes | where policy allows import, per purpose |
 | `Sweeper` | backend | no: `WipeAll`'s first phase sweeps every locked-memory enclave, an `*Allocator`'s included | yes | releases sessions and transient objects |
 | `Confiner` | backend | no | yes, when this process runs inside the TEE | no: the process is outside the device |
 
@@ -315,8 +315,8 @@ purpose fixes the contract of the handle `Import` returns:
 
 | Purpose | Algorithm | Who imports it | The handle |
 |---|---|---|---|
-| `PurposeMaterial` (`"material"`) | none | `OpenIn` (**T1**), for arbitrary opened material | `ByteAccess`; the view holds exactly the material; `Size` is its length. |
-| `PurposeWrappingKey` (`"wrapping-key"`) | required, e.g. `AlgorithmAES256GCM` | `NewSealer(…, WithBackend(b))` (**T1**), for the wrapping key and each KEK | `AEAD` for that algorithm (wraps in the device), or `ByteAccess` (wraps in this process), or both; `Size` is the key length; a device that enforces usage limits it to wrapping. |
+| `PurposeMaterial` (`"material"`) | none | `OpenIn` (**T1**, done), for arbitrary opened material | `ByteAccess`; the view holds exactly the material; `Size` is its length. |
+| `PurposeWrappingKey` (`"wrapping-key"`) | required, e.g. `AlgorithmAES256GCM` | `NewSealer(…, WithBackend(b))` (**T1**, done), for the wrapping key and each KEK | `AEAD` for that algorithm (wraps in the device), or `ByteAccess` (wraps in this process), or both; `Size` is the key length; a device that enforces usage limits it to wrapping. |
 | `PurposeDataKey` (`"data-key"`) | required | a caller holding a DEK in a backend | As `PurposeWrappingKey`, with usage limited to encrypting data. |
 
 - **Refusals.** A backend that cannot hold a purpose and algorithm refuses
@@ -347,7 +347,7 @@ purpose fixes the contract of the handle `Import` returns:
 | Unregister | None, so a configuration binding is stable: once `main` registers a backend, every `Lookup` of that name, from any subsystem and at any time, resolves to the same instance, and a component that read `backend: tdx` at startup cannot later be handed a different backend under it. A backend's lifetime is its owner's: closing it is the module's own API, after which its handles report destroyed; the registry keeps only the reference. Tests use injection, or a unique name. |
 | Cost | A map read under a read lock. Selection happens at configuration time, never on a borrow. |
 
-Registration is optional. A backend passed by `WithBackend(b)` (**T1**) is used
+Registration is optional. A backend passed by `WithBackend(b)` (**T1**, done) is used
 without being registered; the registry is for selecting by name, as a
 configuration file does (`backend: tdx`). An injected backend's name may
 equal a registered one's; nothing compares them.
@@ -356,12 +356,12 @@ equal a registered one's; nothing compares them.
 
 | Type | Role in the seam |
 |---|---|
-| `MemoryEnclave` | The locked-memory backend's handle: `Handle`, `ByteAccess`, `Freezer`. |
-| `Allocator` | The locked-memory backend's budget, and in **T1** the locked-memory backend type itself (below). |
-| `Sealer`, `SealedEnclave` | Open into a chosen backend; seal from any handle with byte access. |
+| `Memory` | The locked-memory backend's handle: `Handle`, `ByteAccess`, `Freezer`. |
+| `Allocator` | The locked-memory backend's budget, and the locked-memory backend type itself (**T1**, done; below). |
+| `Sealer`, `Sealed` | Open into a chosen backend; seal from any handle with byte access. |
 | `KeyProtector`, `RootUnsealer`, `HealthReporter` | Unchanged; a separate seam a hardware module may also implement. |
 | `WipeAll` | Sweeps locked memory, then a snapshot of the registered `Sweeper`s other than the default ([below](#wipeall-and-the-shutdown-sweep)). |
-| `HardenProcess` | The locked-memory backend's process hardening; takes over the import-time `RLIMIT_CORE` change. |
+| `HardenProcess` | The locked-memory backend's process hardening; took over the former import-time `RLIMIT_CORE` change (**T1**, done). |
 
 ### `Allocator`: a locked-memory budget
 
@@ -374,24 +374,24 @@ or need a per-backend cost function, and its `NewAllocatorWithinRLimit` would
 mean nothing outside locked memory. A backend with a scarce resource budgets
 it in its own module, in its own unit.
 
-**T1:** `*Allocator` becomes the locked-memory backend: it implements `Backend`
+**T1, done:** `*Allocator` is the locked-memory backend: it implements `Backend`
 (name `"locked-memory"`) and `Importer`, so a budgeted locked memory is
-injected like any other backend, `WithBackend(a)`. `(*MemoryEnclave).Backend()`
+injected like any other backend, `WithBackend(a)`. `(*Memory).Backend()`
 then returns the admitting `*Allocator`, or `DefaultBackend()` for an
 unbudgeted enclave. An `*Allocator` is not registered: the registered
 `"locked-memory"` stays the unbudgeted default, so `Lookup("locked-memory")`
 for a budgeted enclave returns the default, not its `*Allocator`; the name is
 a label ([registry semantics](#registry-semantics)).
 
-### `Sealer` and `SealedEnclave`
+### `Sealer` and `Sealed`
 
-**T1:**
+**T1**, done:
 
-- **Open into a backend.** `(*SealedEnclave).Open(ctx)` keeps returning a
+- **Open into a backend.** `(*Sealed).Open(ctx)` keeps returning a
   locked-memory enclave, the common case, statically typed. Beside it,
-  `OpenIn(ctx, b Backend) (Handle, error)` opens into any backend and replaces
-  `OpenWith(ctx, a)`, since `*Allocator` is a backend. For locked memory
-  (`DefaultBackend()` or an `*Allocator`) it decrypts in place, as today. For
+  `OpenIn(ctx, b Backend) (Handle, error)` opens into any backend; it replaced
+  `OpenIn(ctx, a *Allocator)`, since `*Allocator` is a backend. For locked memory
+  (`DefaultBackend()` or an `*Allocator`) it decrypts in place, as `Open` does. For
   any other backend that implements `Importer` it decrypts into a locked
   scratch enclave, left writable (never frozen) because the importer wipes
   it, and imports from inside a borrow of it:
@@ -432,9 +432,10 @@ a label ([registry semantics](#registry-semantics)).
 - **B1, `ErrSealSourceReadOnly`.** `Seal` and `NewSealed` wipe `data` on every
   path. A `data` that is a view into a frozen enclave (passed from inside
   `WithBytes`) makes that wipe fault, and a fault on a protected page kills the
-  process; it is not a recoverable panic. `Seal` will check `data` against the
-  frozen mappings in the ledger and refuse it with the new sentinel
-  `ErrSealSourceReadOnly`, wiping nothing, before any key is touched. The
+  process. `Seal` first probes `data`: it writes each end back unchanged with
+  `debug.SetPanicOnFault` set, so a read-only page panics recoverably instead,
+  and refuses it with `ErrSealSourceReadOnly`, wiping nothing, before any key
+  is touched. Any read-only memory is caught, not only an enclave's. The
   remedy it names is `SealFrom`.
 
 ### `KeyProtector`, `RootUnsealer` and `HealthReporter`
@@ -452,10 +453,10 @@ on, which is a sealing question.
 
 ### `WipeAll` and the shutdown sweep
 
-**T1:** `WipeAll(ctx)` runs in two phases, inside the one sweep slot it
+**T1, done:** `WipeAll(ctx)` runs in two phases, inside the one sweep slot it
 already takes:
 
-1. **Locked memory**, as today: every `MemoryEnclave` in the ledger, an
+1. **Locked memory**, as today: every `Memory` in the ledger, an
    `*Allocator`'s included. The built-in backend does not implement
    `Sweeper`, so it is never swept twice and `WipeAll` never recurses.
 2. **Registered sweepers.** Under the registry's read lock, `WipeAll`
@@ -480,7 +481,7 @@ type, so one `errors.As(err, &se)` covers the whole sweep:
 type SweepError struct {
 	Corrupt  int                   // unchanged
 	Unwiped  int                   // unchanged
-	Backends []BackendSweepFailure // T1: one entry per backend whose Sweep failed, in name order
+	Backends []BackendSweepFailure // T1, done: one entry per backend whose Sweep failed, in name order
 }
 
 // BackendSweepFailure is a record, not an error type.
@@ -489,7 +490,7 @@ type BackendSweepFailure struct {
 	Err     error  // what its Sweep returned
 }
 
-func (e *SweepError) Unwrap() []error // T1: every Backends[i].Err
+func (e *SweepError) Unwrap() []error // T1, done: every Backends[i].Err
 ```
 
 `Is` keeps matching `ErrEnclaveCorrupted` and `ErrReleasedWithoutWipe` from the
@@ -506,10 +507,10 @@ owner's to sweep, by calling its `Sweep` directly.
 
 ### `HardenProcess` (M1)
 
-**T1:** the import-time `RLIMIT_CORE` change moves into `HardenProcess`, so
+**T1, done:** the import-time `RLIMIT_CORE` change moved into `HardenProcess`, so
 importing the package changes no process state (BREAKING: `CoreDumpsDisabled`
-then reports what `HardenProcess` did, and `ProcessHardening` gains a field for
-the limit). Hardening stays a package function specific to locked memory, not
+reports what `HardenProcess` did, `ErrCoreDumpLimitNotApplied` before it runs,
+and `ProcessHardening.CoreDumpsDisabled` reports the limit). Hardening stays a package function specific to locked memory, not
 a backend capability. That backend's protection is relative to the process, so
 dumps and same-uid readers are its threat. A TEE's protection holds without
 it, because the host is outside the boundary; hardening still limits readers
@@ -521,11 +522,11 @@ which `main` also calls explicitly.
 
 | Item | How it fits the seam |
 |---|---|
-| **B1** | `SealFrom`/`NewSealedFrom` take the core `Handle` and require `ByteAccess`; `ErrSealSourceReadOnly` refuses a frozen view passed to `Seal`. See [Sealer](#sealer-and-sealedenclave). |
-| **B3** | Every handle's dynamic type is a pointer to shared state, so every copy of a `Handle` is the same enclave and one `Destroy` reaches all. Handle structs carry a `noCopy` field, so `go vet`'s copylocks check reports a dereferenced copy, in this module and in backend modules alike. `backendtest` checks the pointer kind. The refactor itself is **T1**. |
+| **B1** | `SealFrom`/`NewSealedFrom` take the core `Handle` and require `ByteAccess`; `ErrSealSourceReadOnly` refuses a frozen view passed to `Seal`. See [Sealer](#sealer-and-sealed). |
+| **B3** | Every handle's dynamic type is a pointer to shared state, so every copy of a `Handle` is the same enclave and one `Destroy` reaches all. Handle structs carry a `noCopy` field, so `go vet`'s copylocks check reports a dereferenced copy, in this module and in backend modules alike. `backendtest` checks the pointer kind. The refactor itself is **T1**, done for `Memory`, `Allocator`, `Sealer` and `Sealed`. |
 | **B4** | Below. |
 | **M1** | See [`HardenProcess`](#hardenprocess-m1). |
-| **L6** | No function or method of the seam panics on the inputs its contract covers: live and destroyed handles, a nil or typed-nil backend, an invalid name, a nil or typed-nil `As` value, a bad `As` target, invalid import options and a missing capability all return typed errors or `false`. A nil receiver is outside the `Handle` contract; `*MemoryEnclave` accepts one as its own guarantee. A panic raised by a backend's own `As` method is the backend's defect and is not recovered. Out-of-tree backends are held to it by `backendtest`. |
+| **L6** | No function or method of the seam panics on the inputs its contract covers: live and destroyed handles, a nil or typed-nil backend, an invalid name, a nil or typed-nil `As` value, a bad `As` target, invalid import options and a missing capability all return typed errors or `false`. A nil receiver is outside the `Handle` contract; `*Memory` accepts one as its own guarantee. A panic raised by a backend's own `As` method is the backend's defect and is not recovered. Out-of-tree backends are held to it by `backendtest`. |
 
 ### B4: generalising `KeyScheduleErasure`
 
@@ -539,8 +540,8 @@ Three things close that exposure, and a backend can supply two of them:
 | **Confine** | The process runs inside a TEE whose boundary includes its heap (TDX, SEV-SNP, a GPU CC VM, SGX under a library OS): a schedule left there is unreadable from outside. | The sealer's backend implements `Confiner` and `ConfinesProcess()` reports true (`CapabilityConfine`). |
 | **Offload** | The AEAD runs in the device: the key handle implements `AEAD` and its key never enters the process. | The handle's type (`CapabilityAEAD`). |
 
-`KeyScheduleErasure()` keeps its meaning. **T1** adds the approved opt-in
-strict mode:
+`KeyScheduleErasure()` keeps its meaning. **T1** added (done) the approved
+opt-in strict mode:
 
 | Name | Declaration |
 |---|---|
@@ -579,9 +580,9 @@ and open path changes.
   key from `Public()`), and `Backend()` is unchanged.
 - **Nil receivers** are outside the `Handle` contract: a handle is bound to
   the backend instance that made it, which a nil pointer cannot recover.
-  A type that supports one documents it, as `*MemoryEnclave` does (every
+  A type that supports one documents it, as `*Memory` does (every
   method, `Destroy` included). A backend documents which errors
-  leave material held and whether `Destroy` again resumes, as `MemoryEnclave`
+  leave material held and whether `Destroy` again resumes, as `Memory`
   does; held material stays in the backend's `Sweep`.
 - **What Destroy deletes.** What the handle owns. A handle over persistent
   device material it did not create (a loaded, provisioned key) releases its
@@ -629,7 +630,7 @@ func (b *Backend) Import(ctx context.Context, material []byte, opts ...enclave.I
 		enclave.Wipe(material)
 		return nil, err
 	}
-	m, err := enclave.NewMemoryEnclave(material)
+	m, err := enclave.NewMemory(material)
 	if err != nil {
 		return nil, err
 	}
@@ -647,7 +648,7 @@ func (b *Backend) Report(reportData [64]byte) (*Report, error) { /* … */ }
 // contract.
 type Handle struct {
 	noCopy noCopy
-	m      *enclave.MemoryEnclave
+	m      *enclave.Memory
 	b      *Backend
 }
 
@@ -659,7 +660,7 @@ func (h *Handle) WithBytes(fn func([]byte) error) error { return h.m.WithBytes(f
 func (h *Handle) EqualTo(o []byte) (bool, error)        { return h.m.EqualTo(o) }
 func (h *Handle) Freeze() error                         { return h.m.Freeze() }
 
-// As exposes the wrapped enclave, so enclave.As reaches *enclave.MemoryEnclave.
+// As exposes the wrapped enclave, so enclave.As reaches *enclave.Memory.
 func (h *Handle) As(target any) bool { return enclave.As(h.m, target) }
 
 var (
@@ -784,11 +785,12 @@ What it checks:
 Settled by the coordinator, 2026-10-08 (#135).
 
 1. **Allocator:** the budget stays specific to locked memory and `*Allocator`
-   becomes the locked-memory backend (**T1**), because scarce resources differ
+   becomes the locked-memory backend (**T1**, done), because scarce resources differ
    in unit from backend to backend.
 2. **Renames:** `MemoryEnclave` → `Memory`, `SealedEnclave` → `Sealed`, their
-   constructors and `OpenWith` → `OpenIn` land in T1 as a clean break with no
-   deprecated aliases, because the pre-release policy forbids aliases.
+   constructors and `OpenWith` → `OpenIn` landed as a clean break with no
+   deprecated aliases, because the pre-release policy forbids aliases
+   ([Renames](#renames)).
 3. **Opaque operations:** the seam names the standard `crypto.Signer` and
    `crypto.Decrypter`, because they plug into existing callers, and its own
    `AEAD`, because `cipher.AEAD`'s `Seal` cannot return an error; a hardware
@@ -797,18 +799,18 @@ Settled by the coordinator, 2026-10-08 (#135).
    name resolves to one instance for the process's life. A name is a label,
    not an instance identity.
 5. **Sweep failures:** `*SweepError` gains `Backends []BackendSweepFailure` and
-   `Unwrap() []error` (**T1**), with no second error type, so one `errors.As`
+   `Unwrap() []error` (**T1**, done), with no second error type, so one `errors.As`
    covers the sweep.
 6. **Hardening:** `HardenProcess` stays specific to locked memory, because
    only that backend's protection depends on process state.
 7. **B4 strict mode:** `WithRequireKeyScheduleErasure()`, `ErrKeyScheduleExposed`
-   and `KeyScheduleExposedError` (**T1**); confinement is the `Confiner`
+   and `KeyScheduleExposedError` (**T1**, done); confinement is the `Confiner`
    capability (`CapabilityConfine`, declared now) and offload is `AEAD`
    (`CapabilityAEAD`), because each names the mechanism that removes the
    exposure. Offload alone never satisfies the option, because DEKs stay
    in-process.
-8. **Opening:** `OpenIn(ctx, b)` beside `Open(ctx)` (**T1**), because the common
-   case keeps its static locked-memory type.
+8. **Opening:** `OpenIn(ctx, b)` takes a `Backend` (**T1**, done), beside `Open(ctx)`,
+   because the common case keeps its static locked-memory type.
 9. **Smaller points:**
    - `Evidence` is a backend-documented `Format` plus raw `Data`, with a 1 to
      64-byte nonce, because that is the report-data size of TDX and SEV-SNP and
@@ -825,7 +827,7 @@ Settled by the coordinator, 2026-10-08 (#135).
       rule covers methods that return an error, because the others cannot
       report one.
     - **Nil receivers:** not part of the `Handle` contract, because a nil
-      pointer cannot name the instance that made it; `*MemoryEnclave` keeps
+      pointer cannot name the instance that made it; `*Memory` keeps
       its own nil safety.
     - **Import:** `Import` takes an `ImportOption` set naming a purpose and an
       algorithm, and each purpose fixes the handle's contract, because a raw
@@ -848,7 +850,7 @@ Settled by the coordinator, 2026-10-08 (#135).
 |---|---|
 | Interfaces, capabilities, `Evidence`, import intent (`Purpose`, `Algorithm`, `ImportSpec`, its options), registry, `As`, the locked-memory backend value | [backend.go](../../backend.go) |
 | Sentinels (`ErrInvalidImport`, `ErrInvalidNonce`, `ErrAEADAuthentication` among them), `BackendNotRegisteredError`, `BackendExistsError`, `CapabilityError` | [errors.go](../../errors.go) |
-| `(*MemoryEnclave).Backend` | [enclave.go](../../enclave.go) |
+| `(*Memory).Backend` | [enclave.go](../../enclave.go) |
 | Hardware backends | their own modules, never this one |
 
 ## Rejected alternatives
@@ -881,7 +883,9 @@ Settled by the coordinator, 2026-10-08 (#135).
 
 No hardware backend, no hardware-specific code, and no new dependency in this
 module. This issue declares the seam and changes no behaviour; the
-`WithBackend` options, the `Allocator`, `Sealer` and `SealedEnclave` wiring,
-`OpenIn`, `SealFrom`, strict mode, the `SweepError` extension, the B3 handle
-refactor and the renames are T1's, and `backendtest` is T2's or a
+`WithBackend` options, the `Allocator`, `Sealer` and `Sealed` wiring,
+`OpenIn`'s `Backend` parameter, `SealFrom`, strict mode, the `SweepError`
+extension and the B3 handle refactor are T1's (the renames, the `Allocator`
+backend, the `SweepError` extension, `HardenProcess` and B3 for `Memory` and
+`Allocator` are done), and `backendtest` is T2's or a
 follow-up's.

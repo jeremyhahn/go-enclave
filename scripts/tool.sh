@@ -21,7 +21,10 @@
 #                 image bakes the tools at its own pinned versions and a
 #                 network install over them is the substitution that image
 #                 exists to prevent. Any other value is refused rather than
-#                 read as either.
+#                 read as either. actionlint ignores TOOL_INSTALL=0 and is
+#                 otherwise resolved like TOOL_INSTALL=1 (see projectbuilt
+#                 below): a PATH copy that verifies at the pin is used, and
+#                 anything else is built at the pin into TOOLS_DIR.
 #   TOOLS_DIR     where TOOL_INSTALL=1 installs (absolute path).
 #   TOOLCHAIN     the Go toolchain to build Go tools with, e.g. go1.27.2 — this
 #                 module's own, resolved inside the module when unset (#83):
@@ -71,13 +74,22 @@ matches "$want" '^v[0-9]+\.[0-9]+\.[0-9]+$' || die "$tool: '$want' is not a pinn
 # states a fact rather than asserting one.
 ldflags=
 kind=go
+# projectbuilt: TOOL_INSTALL=0 is ignored and the tool is resolved as under
+# TOOL_INSTALL=1: a copy on PATH that verifies at the pin (version and build
+# toolchain) is used, anything else is built here, at the pin, into TOOLS_DIR.
+# For a tool whose runner-image copy may not carry a release version: the CI
+# image's actionlint is built from an untagged commit and reports a
+# pseudo-version, which version_of rightly refuses, so it is built instead
+# (#145, #146). The offline gate and the devcontainer bake it at the pin.
+projectbuilt=0
 case $tool in
   golangci-lint) pkg=github.com/golangci/golangci-lint/v2/cmd/golangci-lint ;;
   staticcheck)   pkg=honnef.co/go/tools/cmd/staticcheck ;;
   gosec)         pkg=github.com/securego/gosec/v2/cmd/gosec
                  ldflags="-X main.Version=$want" ;;
   govulncheck)   pkg=golang.org/x/vuln/cmd/govulncheck ;;
-  actionlint)    pkg=github.com/rhysd/actionlint/cmd/actionlint ;;
+  actionlint)    pkg=github.com/rhysd/actionlint/cmd/actionlint
+                 projectbuilt=1 ;;
   trivy|shellcheck) kind=archive ;;
   *) die "unknown tool '$tool' (known: golangci-lint staticcheck gosec govulncheck actionlint trivy shellcheck)" ;;
 esac
@@ -198,7 +210,12 @@ verified() {
   fi
 }
 
-case ${TOOL_INSTALL-} in
+# A project-built tool is resolved as under TOOL_INSTALL=1 whichever of the two
+# valid values is set; any other value is still refused below.
+mode=${TOOL_INSTALL-}
+if [ "$projectbuilt" = 1 ] && matches "$mode" '^[01]$'; then mode=1; fi
+
+case $mode in
   0)
     bin=$(command -v "$tool" 2>/dev/null) ||
       die "$tool is not on PATH and TOOL_INSTALL=0 forbids installing it. CI expects it baked into the runner image at $want; locally, run without TOOL_INSTALL=0 to install the pinned version into the repository."

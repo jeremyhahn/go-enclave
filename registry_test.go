@@ -56,11 +56,11 @@ func TestWipeAll_DestroysEveryLiveEnclave(t *testing.T) {
 
 	before := liveCount()
 
-	held := make([]*MemoryEnclave, 0, n)
+	held := make([]*Memory, 0, n)
 	for i := 0; i < n; i++ {
-		e, err := NewMemoryEnclave(append([]byte(nil), material...))
+		e, err := NewMemory(append([]byte(nil), material...))
 		if err != nil {
-			t.Fatalf("NewMemoryEnclave: %v", err)
+			t.Fatalf("NewMemory: %v", err)
 		}
 		held = append(held, e)
 	}
@@ -96,9 +96,9 @@ func TestWipeAll_IsIdempotentAndEmptySafe(t *testing.T) {
 		t.Errorf("WipeAll on an empty ledger = %d, want 0", remaining)
 	}
 
-	e, err := NewMemoryEnclaveSized(32)
+	e, err := NewMemorySized(32)
 	if err != nil {
-		t.Fatalf("NewMemoryEnclaveSized: %v", err)
+		t.Fatalf("NewMemorySized: %v", err)
 	}
 	if remaining := sweep(t); remaining != 0 {
 		t.Errorf("first WipeAll = %d, want 0", remaining)
@@ -121,9 +121,9 @@ func TestWipeAll_IsIdempotentAndEmptySafe(t *testing.T) {
 func TestWipeAll_AlreadyDestroyedIsANoOp(t *testing.T) {
 	before := liveCount()
 
-	e, err := NewMemoryEnclaveSized(32)
+	e, err := NewMemorySized(32)
 	if err != nil {
-		t.Fatalf("NewMemoryEnclaveSized: %v", err)
+		t.Fatalf("NewMemorySized: %v", err)
 	}
 	if got := liveCount(); got != before+1 {
 		t.Fatalf("ledger holds %d after construction, want %d", got, before+1)
@@ -146,13 +146,13 @@ func TestWipeAll_AlreadyDestroyedIsANoOp(t *testing.T) {
 func TestWipeAll_ABorrowThatOutlastsCtxIsCountedNotUnmapped(t *testing.T) {
 	material := bytes.Repeat([]byte{0x3C}, 40)
 
-	borrowed, err := NewMemoryEnclave(append([]byte(nil), material...))
+	borrowed, err := NewMemory(append([]byte(nil), material...))
 	if err != nil {
-		t.Fatalf("NewMemoryEnclave: %v", err)
+		t.Fatalf("NewMemory: %v", err)
 	}
-	other, err := NewMemoryEnclaveSized(32)
+	other, err := NewMemorySized(32)
 	if err != nil {
-		t.Fatalf("NewMemoryEnclaveSized: %v", err)
+		t.Fatalf("NewMemorySized: %v", err)
 	}
 
 	inBorrow := make(chan struct{})
@@ -266,9 +266,9 @@ func TestWipeAll_ConcurrentWithConstructionAndDestruction(t *testing.T) {
 		go func() {
 			defer workers.Done()
 			for i := 0; i < iterations; i++ {
-				e, err := NewMemoryEnclaveSized(64)
+				e, err := NewMemorySized(64)
 				if err != nil {
-					t.Errorf("NewMemoryEnclaveSized: %v", err)
+					t.Errorf("NewMemorySized: %v", err)
 					return
 				}
 				// A sweep may already have destroyed it; either outcome is
@@ -329,18 +329,18 @@ func TestWipeAll_ConcurrentWithConstructionAndDestruction(t *testing.T) {
 func TestWipeAll_DoesNotReturnZeroWhileAnEnclaveIsAlive(t *testing.T) {
 	requireCleanLedger(t)
 
-	trigger, err := NewMemoryEnclaveSized(32)
+	trigger, err := NewMemorySized(32)
 	if err != nil {
-		t.Fatalf("NewMemoryEnclaveSized: %v", err)
+		t.Fatalf("NewMemorySized: %v", err)
 	}
 
 	var (
 		lateMu sync.Mutex
-		late   *MemoryEnclave
+		late   *Memory
 	)
 	// Runs inside WipeAll, after the snapshot that will never contain `late`.
 	trigger.release = func() {
-		e, cerr := NewMemoryEnclaveSized(32)
+		e, cerr := NewMemorySized(32)
 		lateMu.Lock()
 		late = e
 		lateMu.Unlock()
@@ -563,9 +563,9 @@ func TestWipeAll_RetriesAReaderRatherThanAbandoningIt(t *testing.T) {
 		}
 
 		// held is the enclave a reader is touching when the sweep arrives.
-		held, err := NewMemoryEnclaveSized(64)
+		held, err := NewMemorySized(64)
 		if err != nil {
-			t.Fatalf("trial %d: NewMemoryEnclaveSized: %v", trial, err)
+			t.Fatalf("trial %d: NewMemorySized: %v", trial, err)
 		}
 		// gate runs code INSIDE the sweep, after the batch has been taken.
 		gate, err := a.NewSized(64)
@@ -644,7 +644,7 @@ func TestWipeAll_DoesNotPanicOnACorruptCanaryAndFinishesTheSweep(t *testing.T) {
 		t.Fatalf("NewAllocator: %v", err)
 	}
 
-	held := make([]*MemoryEnclave, 0, count)
+	held := make([]*Memory, 0, count)
 	for i := 0; i < count; i++ {
 		// Sized, so the pages stay writable; a frozen enclave would fault on the
 		// canary write below.
@@ -734,9 +734,9 @@ func TestWipeAll_ReportsHowManyEnclavesWereCorrupt(t *testing.T) {
 	const total, corruptCount = 5, 3
 
 	for i := 0; i < total; i++ {
-		e, err := NewMemoryEnclaveSized(64)
+		e, err := NewMemorySized(64)
 		if err != nil {
-			t.Fatalf("NewMemoryEnclaveSized: %v", err)
+			t.Fatalf("NewMemorySized: %v", err)
 		}
 		if i < corruptCount {
 			if len(e.m.canary) == 0 {
@@ -766,17 +766,17 @@ func TestWipeAll_ReportsHowManyEnclavesWereCorrupt(t *testing.T) {
 func TestWipeAll_ReportsCorruptionWhoseReleaseWasRefused(t *testing.T) {
 	requireCleanLedger(t)
 
-	e, err := NewMemoryEnclaveSized(64)
+	e, err := NewMemorySized(64)
 	if err != nil {
-		t.Fatalf("NewMemoryEnclaveSized: %v", err)
+		t.Fatalf("NewMemorySized: %v", err)
 	}
 	if len(e.m.canary) == 0 {
 		t.Fatal("no canary slack at this size; the test would be vacuous")
 	}
 	e.m.canary[0] ^= 0xFF
-	companion, err := NewMemoryEnclaveSized(64)
+	companion, err := NewMemorySized(64)
 	if err != nil {
-		t.Fatalf("NewMemoryEnclaveSized: %v", err)
+		t.Fatalf("NewMemorySized: %v", err)
 	}
 
 	// Registered first, the sweep runs after the seams are restored.
@@ -828,8 +828,8 @@ func TestWipeAll_ReportsNoErrorWhenNothingIsCorrupt(t *testing.T) {
 	requireCleanLedger(t)
 
 	for i := 0; i < 4; i++ {
-		if _, err := NewMemoryEnclaveSized(64); err != nil {
-			t.Fatalf("NewMemoryEnclaveSized: %v", err)
+		if _, err := NewMemorySized(64); err != nil {
+			t.Fatalf("NewMemorySized: %v", err)
 		}
 	}
 
@@ -917,9 +917,9 @@ func TestWipeAll_ABorrowEndingWakesTheSweep(t *testing.T) {
 		t.Fatalf("this test needs a clean ledger; WipeAll = %d", remaining)
 	}
 
-	e, err := NewMemoryEnclaveSized(64)
+	e, err := NewMemorySized(64)
 	if err != nil {
-		t.Fatalf("NewMemoryEnclaveSized: %v", err)
+		t.Fatalf("NewMemorySized: %v", err)
 	}
 
 	inBorrow := make(chan struct{})
@@ -987,7 +987,7 @@ func TestWipeAll_ABorrowEndingWakesTheSweep(t *testing.T) {
 // once it is inside the borrow. end finishes the borrow and waits for it to
 // return; it is idempotent and also registered as cleanup, so a failing test
 // never leaves the borrow parked.
-func holdBorrow(t *testing.T, e *MemoryEnclave) (end func()) {
+func holdBorrow(t *testing.T, e *Memory) (end func()) {
 	t.Helper()
 	inBorrow := make(chan struct{})
 	release := make(chan struct{})
@@ -1042,13 +1042,13 @@ func sweepAsync(t *testing.T, ctx context.Context, hang string) sweepResult {
 func TestWipeAll_ACanceledCtxStillSweepsWhatIsFree(t *testing.T) {
 	requireCleanLedger(t)
 
-	free, err := NewMemoryEnclaveSized(32)
+	free, err := NewMemorySized(32)
 	if err != nil {
-		t.Fatalf("NewMemoryEnclaveSized: %v", err)
+		t.Fatalf("NewMemorySized: %v", err)
 	}
-	held, err := NewMemoryEnclaveSized(32)
+	held, err := NewMemorySized(32)
 	if err != nil {
-		t.Fatalf("NewMemoryEnclaveSized: %v", err)
+		t.Fatalf("NewMemorySized: %v", err)
 	}
 	end := holdBorrow(t, held)
 
@@ -1088,13 +1088,13 @@ func TestWipeAll_ACanceledCtxStillSweepsWhatIsFree(t *testing.T) {
 func TestWipeAll_ANilCtxNeverWaitsAndNeverPanics(t *testing.T) {
 	requireCleanLedger(t)
 
-	free, err := NewMemoryEnclaveSized(32)
+	free, err := NewMemorySized(32)
 	if err != nil {
-		t.Fatalf("NewMemoryEnclaveSized: %v", err)
+		t.Fatalf("NewMemorySized: %v", err)
 	}
-	held, err := NewMemoryEnclaveSized(32)
+	held, err := NewMemorySized(32)
 	if err != nil {
-		t.Fatalf("NewMemoryEnclaveSized: %v", err)
+		t.Fatalf("NewMemorySized: %v", err)
 	}
 	end := holdBorrow(t, held)
 
@@ -1134,9 +1134,9 @@ func TestWipeAll_AConstructorThatNeverStopsCannotKeepTheSweepRunning(t *testing.
 		made  atomic.Int32
 		cerrs = make(chan error, 1)
 	)
-	var link func() *MemoryEnclave
-	link = func() *MemoryEnclave {
-		e, err := NewMemoryEnclaveSized(32)
+	var link func() *Memory
+	link = func() *Memory {
+		e, err := NewMemorySized(32)
 		if err != nil {
 			select {
 			case cerrs <- err:
@@ -1200,7 +1200,7 @@ func TestWipeAll_TerminatesAgainstALiveConstructorUnderBackground(t *testing.T) 
 	// want carries a request for one construction; the goroutine answers on
 	// the request's channel once that enclave is REGISTERED (the constructor
 	// has returned), before it is borrowed.
-	want := make(chan chan *MemoryEnclave)
+	want := make(chan chan *Memory)
 	cerr := make(chan error, 1)
 	stop := make(chan struct{})
 	started := make(chan struct{})
@@ -1209,20 +1209,20 @@ func TestWipeAll_TerminatesAgainstALiveConstructorUnderBackground(t *testing.T) 
 		defer close(done)
 		var once sync.Once
 		for {
-			var ack chan *MemoryEnclave
+			var ack chan *Memory
 			select {
 			case <-stop:
 				return
 			case ack = <-want:
 			default:
 			}
-			e, err := NewMemoryEnclaveSized(32)
+			e, err := NewMemorySized(32)
 			if err != nil {
 				cerr <- err
 				return
 			}
 			if ack != nil {
-				ack <- e // registered: NewMemoryEnclaveSized publishes before returning
+				ack <- e // registered: NewMemorySized publishes before returning
 			}
 			_ = e.WithBytes(func(b []byte) error {
 				b[0] = 0x5A
@@ -1253,16 +1253,16 @@ func TestWipeAll_TerminatesAgainstALiveConstructorUnderBackground(t *testing.T) 
 		t.Fatalf("the constructor failed before the sweep began: %v", err)
 	}
 
-	trigger, err := NewMemoryEnclaveSized(32)
+	trigger, err := NewMemorySized(32)
 	if err != nil {
-		t.Fatalf("NewMemoryEnclaveSized: %v", err)
+		t.Fatalf("NewMemorySized: %v", err)
 	}
 	var lateRegistrations atomic.Int64
 	trigger.release = func() {
 		// Inside the sweep, after its first snapshot: ask the live goroutine
 		// for a construction and wait until it is registered. A constructor
 		// failure releases the sweep and is reported below.
-		ack := make(chan *MemoryEnclave, 1)
+		ack := make(chan *Memory, 1)
 		select {
 		case want <- ack:
 		case err := <-cerr:
@@ -1309,18 +1309,18 @@ func TestWipeAll_TerminatesAgainstALiveConstructorUnderBackground(t *testing.T) 
 func TestWipeAll_ALateBorrowIsNeverWaitedFor(t *testing.T) {
 	requireCleanLedger(t)
 
-	trigger, err := NewMemoryEnclaveSized(32)
+	trigger, err := NewMemorySized(32)
 	if err != nil {
-		t.Fatalf("NewMemoryEnclaveSized: %v", err)
+		t.Fatalf("NewMemorySized: %v", err)
 	}
 	var (
-		late   *MemoryEnclave
+		late   *Memory
 		endMu  sync.Mutex
 		endFn  func()
 		lateOK = make(chan error, 1)
 	)
 	trigger.release = func() {
-		e, cerr := NewMemoryEnclaveSized(32)
+		e, cerr := NewMemorySized(32)
 		if cerr != nil {
 			lateOK <- cerr
 			return
@@ -1367,9 +1367,9 @@ func TestWipeAll_ALateBorrowIsNeverWaitedFor(t *testing.T) {
 func TestWipeAll_RetriesAContendedLockAtOnce(t *testing.T) {
 	requireCleanLedger(t)
 
-	e, err := NewMemoryEnclaveSized(32)
+	e, err := NewMemorySized(32)
 	if err != nil {
-		t.Fatalf("NewMemoryEnclaveSized: %v", err)
+		t.Fatalf("NewMemorySized: %v", err)
 	}
 	e.mu.RLock() // uncounted on purpose: see the comment above
 	var unlockOnce sync.Once
@@ -1404,11 +1404,11 @@ func TestWipeAll_RetriesAContendedLockAtOnce(t *testing.T) {
 // TestTryReleaseMapping_ClassifiesTheLock pins the three outcomes the sweep
 // acts on, each against the lock state that produces it.
 func TestTryReleaseMapping_ClassifiesTheLock(t *testing.T) {
-	newEnclave := func(t *testing.T) *MemoryEnclave {
+	newEnclave := func(t *testing.T) *Memory {
 		t.Helper()
-		e, err := NewMemoryEnclaveSized(32)
+		e, err := NewMemorySized(32)
 		if err != nil {
-			t.Fatalf("NewMemoryEnclaveSized: %v", err)
+			t.Fatalf("NewMemorySized: %v", err)
 		}
 		t.Cleanup(func() { _ = e.Destroy() })
 		return e
@@ -1468,9 +1468,9 @@ func drainWake() bool {
 // release that takes the count to zero does, and wake-ups coalesce in the
 // one-slot channel rather than blocking a releaser.
 func TestHolders_TheLastReleaseWakesOnlyAnArmedSweep(t *testing.T) {
-	e, err := NewMemoryEnclaveSized(32)
+	e, err := NewMemorySized(32)
 	if err != nil {
-		t.Fatalf("NewMemoryEnclaveSized: %v", err)
+		t.Fatalf("NewMemorySized: %v", err)
 	}
 	t.Cleanup(func() {
 		sweepWaiting.Store(false)
@@ -1512,13 +1512,13 @@ func TestHolders_TheLastReleaseWakesOnlyAnArmedSweep(t *testing.T) {
 }
 
 // TestHolders_EveryMethodLeavesTheCountBalanced pins that every acquisition on
-// MemoryEnclave is bracketed, including a borrow whose callback panics: a count
+// Memory is bracketed, including a borrow whose callback panics: a count
 // stuck above zero makes a Background sweep wait forever, one below zero lets
 // it wait with no holder to wake it.
 func TestHolders_EveryMethodLeavesTheCountBalanced(t *testing.T) {
-	e, err := NewMemoryEnclaveSized(32)
+	e, err := NewMemorySized(32)
 	if err != nil {
-		t.Fatalf("NewMemoryEnclaveSized: %v", err)
+		t.Fatalf("NewMemorySized: %v", err)
 	}
 	errBoom := errors.New("callback failed")
 
@@ -1549,14 +1549,14 @@ func TestHolders_EveryMethodLeavesTheCountBalanced(t *testing.T) {
 // contract: a nil enclave and an already-destroyed one have nothing to
 // release, and report nothing.
 func TestDestroy_NilAndRepeatedReturnNil(t *testing.T) {
-	var nilEnclave *MemoryEnclave
+	var nilEnclave *Memory
 	if err := nilEnclave.Destroy(); err != nil {
 		t.Errorf("Destroy on a nil enclave = %v, want nil", err)
 	}
 
-	e, err := NewMemoryEnclaveSized(32)
+	e, err := NewMemorySized(32)
 	if err != nil {
-		t.Fatalf("NewMemoryEnclaveSized: %v", err)
+		t.Fatalf("NewMemorySized: %v", err)
 	}
 	if err := e.Destroy(); err != nil {
 		t.Fatalf("Destroy = %v, want nil", err)
@@ -1641,9 +1641,9 @@ func TestWipeAll_SweepErrorCountsAreReadableWithErrorsAs(t *testing.T) {
 
 	const total, corrupt = 4, 2
 	for i := 0; i < total; i++ {
-		e, err := NewMemoryEnclaveSized(64)
+		e, err := NewMemorySized(64)
 		if err != nil {
-			t.Fatalf("NewMemoryEnclaveSized: %v", err)
+			t.Fatalf("NewMemorySized: %v", err)
 		}
 		if i < corrupt {
 			if len(e.m.canary) == 0 {
@@ -1672,7 +1672,7 @@ func TestWipeAll_SweepErrorCountsAreReadableWithErrorsAs(t *testing.T) {
 // parkSweepOnABorrow starts a context.Background sweep that parks waiting for
 // a borrow on e that never ends until the returned end is called. It returns
 // once the sweep is inside its wait, and a channel carrying the sweep's result.
-func parkSweepOnABorrow(t *testing.T, e *MemoryEnclave) (end func(), result <-chan sweepResult) {
+func parkSweepOnABorrow(t *testing.T, e *Memory) (end func(), result <-chan sweepResult) {
 	t.Helper()
 	end = holdBorrow(t, e)
 	parked := make(chan struct{})
@@ -1703,9 +1703,9 @@ func parkSweepOnABorrow(t *testing.T, e *MemoryEnclave) (end func(), result <-ch
 func TestWipeAll_AParkedSweepDoesNotHoldASecondCallerHostage(t *testing.T) {
 	requireCleanLedger(t)
 
-	e, err := NewMemoryEnclaveSized(32)
+	e, err := NewMemorySized(32)
 	if err != nil {
-		t.Fatalf("NewMemoryEnclaveSized: %v", err)
+		t.Fatalf("NewMemorySized: %v", err)
 	}
 	end, aResult := parkSweepOnABorrow(t, e)
 
@@ -1770,9 +1770,9 @@ func TestWipeAll_AParkedSweepDoesNotHoldASecondCallerHostage(t *testing.T) {
 func TestWipeAll_ContentionRetriesHonorCtx(t *testing.T) {
 	requireCleanLedger(t)
 
-	e, err := NewMemoryEnclaveSized(32)
+	e, err := NewMemorySized(32)
 	if err != nil {
-		t.Fatalf("NewMemoryEnclaveSized: %v", err)
+		t.Fatalf("NewMemorySized: %v", err)
 	}
 	e.mu.RLock() // uncounted: every TryLock fails with holders at zero
 	var unlockOnce sync.Once
@@ -1963,15 +1963,15 @@ func TestAllocator_NewSized_UnlockedOrphanIsReclaimedWithoutASecondRefund(t *tes
 	}
 }
 
-// TestNewMemoryEnclaveCopy_FailedConstructionIsReclaimedByWipeAll pins orphan
+// TestNewMemoryCopy_FailedConstructionIsReclaimedByWipeAll pins orphan
 // reclamation for the unadmitted constructors, where no budget is involved.
-func TestNewMemoryEnclaveCopy_FailedConstructionIsReclaimedByWipeAll(t *testing.T) {
+func TestNewMemoryCopy_FailedConstructionIsReclaimedByWipeAll(t *testing.T) {
 	requireCleanLedger(t)
 	t.Cleanup(func() { _, _ = WipeAll(context.Background()) })
 	restore := denyProtectAndUnmap(t)
 
-	if _, err := NewMemoryEnclaveCopy(material()); !lockedPagesHeld(err) {
-		t.Fatalf("NewMemoryEnclaveCopy = %v, want locked pages held", err)
+	if _, err := NewMemoryCopy(material()); !lockedPagesHeld(err) {
+		t.Fatalf("NewMemoryCopy = %v, want locked pages held", err)
 	}
 	if got := orphanCount(); got != 1 {
 		t.Fatalf("orphan ledger holds %d, want 1", got)

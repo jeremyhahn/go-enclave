@@ -1,6 +1,6 @@
 # Locked-memory budget and admission — engineering contract
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-07
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-09
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Exported surface
@@ -9,12 +9,13 @@
 |---|---|
 | `NewAllocator(maxBytes int64) (*Allocator, error)` | Budget in locked bytes. Never checks a ceiling, on any path. |
 | `NewAllocatorWithinRLimit(maxBytes int64) (*Allocator, error)` | As `NewAllocator`, but refuses a budget above a **bounded** ceiling, and keeps that check for life on every raise. |
-| `(*Allocator).New(data []byte) (*MemoryEnclave, error)` | Admitted `NewMemoryEnclave`; wipes `data` on every path, including refusal. |
-| `(*Allocator).NewSized(n int) (*MemoryEnclave, error)` | Admitted `NewMemoryEnclaveSized`. |
+| `(*Allocator).New(data []byte) (*Memory, error)` | Admitted `NewMemory`; wipes `data` on every path, including refusal. |
+| `(*Allocator).NewSized(n int) (*Memory, error)` | Admitted `NewMemorySized`. |
 | `(*Allocator).SetLimit(newLimit int64) error` | Raise, or lower without going below reservations. All-or-nothing. |
 | `(*Allocator).ForceLimit(newLimit int64) (int64, error)` | Accepts any non-negative budget; returns the over-subscription in bytes. |
 | `(*Allocator).TransferTo(dst *Allocator, n int64) error` | Moves `n` bytes of headroom to `dst` in one operation. |
-| `(*Allocator).InUse() int64` / `Limit() int64` / `Available() int64` | Observability snapshots; never an admission gate. `Available` clamps at 0. A nil `*Allocator` reports 0. |
+| `(*Allocator).InUse() int64` / `Limit() int64` / `Available() int64` | Observability snapshots; never an admission gate. `Available` clamps at 0. A nil or zero `Allocator` reports 0. |
+| `(*Allocator).Name() string` / `Import(ctx, material, opts...) (Handle, error)` | The locked-memory `Backend` (name `"locked-memory"`) and `Importer`: `Import` is an admitted `New` under the [backends](../backends/engineering.md) contract. An `*Allocator` is never registered; `(*Memory).Backend()` returns the one that admitted the enclave. |
 | `SetAllocator(a *Allocator) error` | Installs the process allocator. One-shot. Binary only. |
 | `ProcessAllocator() (*Allocator, error)` | Returns the installed allocator, lazily installing the default. Libraries call this. |
 | `DiscoverLockedMemoryLimit() (LockedMemoryLimit, error)` | Snapshot of the ceiling and its source. |
@@ -90,18 +91,24 @@
    gives `free > limit`. `budgetSnapshot` rejects any negative difference and
    re-reads under the read lock, so `BudgetError.InUse` is never negative while
    the ordinary refusal stays lock-free.
+10. **A copy is the same allocator.** `Allocator` is a handle on one
+    unexported state; a copied value admits against the same budget, so it
+    can never admit the same headroom twice (`go vet` flags the copy). A zero
+    `Allocator{}` has no state and refuses every call with
+    `ErrAllocatorNotConstructed`.
 
 ## Error semantics
 
 | Error | When | Fail-closed? |
 |---|---|---|
-| `ErrBudgetExhausted` (`*BudgetError`) | `New`/`NewSized`/`OpenWith` would exceed the budget | Yes — refused before any locked memory is requested. |
+| `ErrBudgetExhausted` (`*BudgetError`) | `New`/`NewSized`/`OpenIn` would exceed the budget | Yes — refused before any locked memory is requested. |
 | `ErrInvalidBudget` | `maxBytes <= 0` at construction; negative `SetLimit`/`ForceLimit`; a transfer that would overflow `dst`'s `int64` budget | Yes |
 | `ErrBudgetInUse` (`*BudgetInUseError`) | Lowering (or transferring away) below current reservations | Yes — nothing changed. |
-| `ErrInvalidTransfer` | `n <= 0`, `dst == nil`, or `dst` is the source | Yes |
+| `ErrInvalidTransfer` | `n <= 0`, `dst == nil`, or `dst` is the source or a copy of it | Yes |
 | `ErrBudgetExceedsRLimit` (`*RLimitError`) | Budget or raise above a bounded ceiling (opted-in allocators) | Yes |
 | `ErrLimitDiscoveryFailed` (`*LimitDiscoveryError`) | `getrlimit` failed: construction, an opted-in raise, or the lazy default | Yes — nothing was compared, so nothing passed. |
-| `ErrNilAllocator` | `SetAllocator(nil)`; `OpenWith(ctx, nil)`; `New`, `NewSized`, `SetLimit`, `ForceLimit`, `TransferTo` on a nil `*Allocator` (`New` still wipes `data`) | Yes — never falls back to unbudgeted. |
+| `ErrNilAllocator` | `SetAllocator(nil)`; `OpenIn(ctx, nil)`; `New`, `NewSized`, `SetLimit`, `ForceLimit`, `TransferTo` on a nil `*Allocator` (`New` still wipes `data`) | Yes — never falls back to unbudgeted. |
+| `ErrAllocatorNotConstructed` | The same calls (and `Import`) on a zero `Allocator{}`, which no constructor returned; `New` and `Import` still wipe their input | Yes — a zero value has no budget to admit against. |
 | `ErrAllocatorInstalled` | Second `SetAllocator`, or `SetAllocator` after a `ProcessAllocator` call that installed the lazy default (a discovery failure installs nothing) | Yes |
 | `ErrLockedMemoryUnavailable` | Admitted, but the kernel refused | Reservation refunded unless locked pages were left behind (invariant 4). |
 

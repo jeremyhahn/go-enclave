@@ -1,6 +1,6 @@
 # Shutdown sweep — API
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-07
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-09
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Transports
@@ -13,7 +13,7 @@ every key in the process; it is deliberately absent.
 | Capability | Embedded Go call | REST / gRPC / QUIC / MCP / Unix socket |
 |---|---|---|
 | Reclaim all locked memory at shutdown | `enclave.WipeAll(ctx) (int, error)` | N/A |
-| Inspect findings | `var se *enclave.SweepError; errors.As(err, &se)` → `se.Corrupt`, `se.Unwiped` | N/A |
+| Inspect findings | `var se *enclave.SweepError; errors.As(err, &se)` → `se.Corrupt`, `se.Unwiped`, `se.Backends` | N/A |
 | Detect a non-admitted call | `errors.Is(err, enclave.ErrSweepInProgress)` | N/A |
 
 Schemas and error mapping: [engineering.md](engineering.md#return-values).

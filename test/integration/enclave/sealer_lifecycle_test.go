@@ -56,9 +56,9 @@ func TestSealing_DestroyedSealersReturnTheirLockedMemory(t *testing.T) {
 				n := newNeedle(t)
 				v := sealNeedle(t, ctx, s, n)
 				w := sealNeedle(t, ctx, s, newNeedle(t))
-				o, err := v.OpenWith(ctx, a)
+				o, err := openInAllocator(t, ctx, v, a)
 				if err != nil {
-					t.Fatalf("%s %d: OpenWith: %v", name, i, err)
+					t.Fatalf("%s %d: OpenIn: %v", name, i, err)
 				}
 				_ = o.Destroy()
 				if err := s.Destroy(); err != nil {
@@ -78,7 +78,7 @@ func TestSealing_DestroyedSealersReturnTheirLockedMemory(t *testing.T) {
 					t.Errorf("%s: second Destroy = %v", name, err)
 				}
 				if err := v.Destroy(); err != nil {
-					t.Errorf("%s: SealedEnclave.Destroy = %v", name, err)
+					t.Errorf("%s: Sealed.Destroy = %v", name, err)
 				}
 				_ = w.Destroy()
 				if release != nil {
@@ -212,8 +212,8 @@ func TestSealing_UnconstructedSealerAndRedactedFormatting(t *testing.T) {
 			t.Fatalf("Open: %v", err)
 		}
 		for what, got := range map[string]string{
-			"SealedEnclave": fmt.Sprintf("%#v", v),
-			"MemoryEnclave": fmt.Sprintf("%#v", o),
+			"Sealed": fmt.Sprintf("%#v", v),
+			"Memory": fmt.Sprintf("%#v", o),
 		} {
 			if got != what+"(sealed)" && got != what+"(redacted)" {
 				t.Errorf("%%#v of a %s = %q, want its redacted form", what, got)
@@ -221,8 +221,8 @@ func TestSealing_UnconstructedSealerAndRedactedFormatting(t *testing.T) {
 		}
 		_ = o.Destroy()
 		v.Destroy()
-		if got := fmt.Sprintf("%#v", v); got != "SealedEnclave(destroyed)" {
-			t.Errorf("%%#v of a destroyed SealedEnclave = %q", got)
+		if got := fmt.Sprintf("%#v", v); got != "Sealed(destroyed)" {
+			t.Errorf("%%#v of a destroyed Sealed = %q", got)
 		}
 	})
 }

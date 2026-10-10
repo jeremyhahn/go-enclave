@@ -1,6 +1,6 @@
 # Locked-memory budget and admission — architecture
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-07
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-09
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Problem
@@ -20,7 +20,7 @@ flowchart LR
   main["binary main()"] -- "SetAllocator(a), once" --> PA[(process allocator)]
   lib1["library A"] -- "ProcessAllocator()" --> PA
   lib2["library B"] -- "ProcessAllocator()" --> PA
-  PA -- "New / NewSized: CAS on free" --> E["MemoryEnclave (reservation)"]
+  PA -- "New / NewSized: CAS on free" --> E["Memory (reservation)"]
   E -- "Destroy: free += charge" --> PA
   K["kernel RLIMIT_MEMLOCK"] -. "DiscoverLockedMemoryLimit<br/>(construction, and every non-negative<br/>SetLimit on an allocator that opted in)" .-> PA
 ```
@@ -102,7 +102,7 @@ sequenceDiagram
 
 | Concern | File |
 |---|---|
-| `Allocator`, its constructors (`NewAllocatorWithinRLimit` included), admission (`admit`, one refund decision for `New` and `NewSized`), retune, transfer, the process allocator | [allocator.go](../../allocator.go) |
+| `Allocator` (a handle on shared `allocatorState`), its constructors (`NewAllocatorWithinRLimit` included), admission (`admit`, one refund decision for `New` and `NewSized`), retune, transfer, the process allocator, and its role as the locked-memory `Backend` and `Importer` | [allocator.go](../../allocator.go) |
 | The install-once, lazily defaulted process slot the process allocator lives in | [singleton.go](../../singleton.go) |
 | Ceiling discovery (`DiscoverLockedMemoryLimit` is the platform function itself) | [memlock.go](../../memlock.go), [memlock_linux.go](../../memlock_linux.go), [memlock_unix.go](../../memlock_unix.go), [memlock_bsd.go](../../memlock_bsd.go), [memlock_unsupported.go](../../memlock_unsupported.go) |
 | Orphan ledger the refund rides on | [registry.go](../../registry.go) |
@@ -111,7 +111,7 @@ sequenceDiagram
 
 An `Allocator` is a **policy**, not a kernel guarantee. It bounds the enclaves
 it creates; it cannot bound locked memory taken elsewhere — the unbudgeted
-constructors, `SealedEnclave.Open`, sealing's key pages, another library's
+constructors, `Sealed.Open`, sealing's key pages, another library's
 `mlock`. Admitted is not allocated: callers must handle
 `ErrLockedMemoryUnavailable` as well as `ErrBudgetExhausted`.
 
@@ -122,4 +122,4 @@ constructors, `SealedEnclave.Open`, sealing's key pages, another library's
 - No forced reclamation: an allocator never destroys a live enclave to make a
   budget fit (`ForceLimit` over-subscribes instead).
 - The seal path is not budgeted (there is no `SealWith`); opens are, through
-  `OpenWith` ([sealing](../sealing/engineering.md)).
+  `OpenIn` ([sealing](../sealing/engineering.md)).

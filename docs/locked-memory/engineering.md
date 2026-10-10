@@ -1,6 +1,6 @@
 # Locked-memory enclaves — engineering contract
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-07
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-09
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Exported surface
@@ -9,27 +9,31 @@ All in package `enclave` (import path `github.com/jeremyhahn/go-enclave`).
 
 | Identifier | Contract |
 |---|---|
-| `NewMemoryEnclave(data []byte) (*MemoryEnclave, error)` | Moves `data` in and **wipes the caller's slice on every return path**. Result is frozen read-only. |
-| `NewMemoryEnclaveCopy(src []byte) (*MemoryEnclave, error)` | Copies `src` in and leaves it **untouched on every path**. Result is frozen. The heap copy in `src` is the caller's to wipe. |
-| `NewMemoryEnclaveSized(n int) (*MemoryEnclave, error)` | `n` zeroed, **writable** bytes to fill through `WithBytes`; call `Freeze` when the fill is done. |
-| `(*MemoryEnclave).WithBytes(fn func([]byte) error) error` | The only access. Holds the read lock across `fn`; returns `fn`'s error. |
-| `(*MemoryEnclave).EqualTo(other []byte) (bool, error)` | Compare under the read lock; a destroyed or nil enclave returns `ErrEnclaveDestroyed`. Time does not depend on the contents but does reveal whether the lengths differ. |
-| `(*MemoryEnclave).Size() int` / `IsAlive() bool` / `String() string` | Locked accessors; `String` never prints the material. |
-| `(*MemoryEnclave).Freeze() error` | `mprotect` the data read-only. Idempotent, irreversible, waits out borrows. |
-| `(*MemoryEnclave).Destroy() error` | Wipe, verify, unlock, unmap; idempotent, nil-safe. See below. |
+| `NewMemory(data []byte) (*Memory, error)` | Moves `data` in and **wipes the caller's slice on every return path**. Result is frozen read-only. |
+| `NewMemoryCopy(src []byte) (*Memory, error)` | Copies `src` in and leaves it **untouched on every path**. Result is frozen. The heap copy in `src` is the caller's to wipe. |
+| `NewMemorySized(n int) (*Memory, error)` | `n` zeroed, **writable** bytes to fill through `WithBytes`; call `Freeze` when the fill is done. |
+| `(*Memory).WithBytes(fn func([]byte) error) error` | The only access. Holds the read lock across `fn`; returns `fn`'s error. A nil `fn` is `ErrNilFunc`. |
+| `(*Memory).EqualTo(other []byte) (bool, error)` | Compare under the read lock; a destroyed or nil enclave returns `ErrEnclaveDestroyed`. Time does not depend on the contents but does reveal whether the lengths differ. |
+| `(*Memory).Size() int` / `IsAlive() bool` / `String() string` | Locked accessors; `String` never prints the material. |
+| `(*Memory).Freeze() error` | `mprotect` the data read-only. Idempotent, irreversible, waits out borrows. |
+| `(*Memory).Destroy() error` | Wipe, verify, unlock, unmap; idempotent, nil-safe. See below. |
+| `(*Memory).Backend() Backend` | The `*Allocator` that admitted the enclave, else `DefaultBackend()` ([backends](../backends/engineering.md)). |
 | `LockedSize(n int) int64` | Locked bytes an `n`-byte enclave costs (page-rounded); `0` for an impossible size. |
-| `CoreDumpsDisabled() error` | Result of lowering `RLIMIT_CORE` (soft and hard) to zero at package init. |
-| `HardenProcess() (ProcessHardening, error)` | Opt-in, never called by the package. Linux: `prctl(PR_SET_DUMPABLE, 0)`, read back. Elsewhere `ErrProcessHardeningUnsupported`. |
-| `ProcessHardening{NotDumpable bool}` | What `HardenProcess` verified in effect. |
-| `ProcessHardeningError{Cause error}` | A refused or ineffective hardening step. Matches `ErrProcessHardeningFailed`; `Unwrap` reaches the `prctl` error. |
+| `CoreDumpsDisabled() error` | What the last `HardenProcess` did to `RLIMIT_CORE`: `nil` when lowered to zero (soft and hard), else a `*CoreDumpLimitError`; `ErrCoreDumpLimitNotApplied` before one has run. |
+| `HardenProcess() (ProcessHardening, error)` | Opt-in, never called by the package. Lowers `RLIMIT_CORE` to 0/0 where it exists (all but Windows) and, on Linux, sets `prctl(PR_SET_DUMPABLE, 0)`; each read back. Windows: `ErrProcessHardeningUnsupported`. |
+| `ProcessHardening{NotDumpable, CoreDumpsDisabled bool}` | What `HardenProcess` verified in effect. |
+| `ProcessHardeningError{Cause error}` | A refused or ineffective hardening step, the first that failed. Matches `ErrProcessHardeningFailed`; `Unwrap` reaches the `prctl` error or a `*CoreDumpLimitError`. |
+| `CoreDumpLimitError{Cause error}` | A refused `setrlimit`, or a read-back that is not 0/0. Matches `ErrCoreDumpLimitFailed`. |
 | `Wipe(b []byte)` | Best-effort zeroing of an ordinary heap slice. |
 | `LockedMemoryError{Cause error}` | Matches `ErrLockedMemoryUnavailable`; `Unwrap` reaches the syscall error. |
 | `UnwipedReleaseError{Cause error}` | Matches `ErrReleasedWithoutWipe`; `Unwrap` reaches the `mprotect` refusal. |
 
-A nil `*MemoryEnclave` is a valid receiver for every method: not alive, borrows
-fail with `ErrEnclaveDestroyed`, `Destroy` returns `nil`.
+A nil `*Memory`, or a zero `Memory`, is a valid receiver for every method: not
+alive, borrows fail with `ErrEnclaveDestroyed`, `Destroy` returns `nil`. Use
+`*Memory`. A copied `Memory` value is a second handle on the same state, so
+`Destroy` through either destroys both; `go vet` (copylocks) flags the copy.
 
-`Open`, `OpenString` and `NewMemoryEnclaveFromString` were removed in v0.8: a
+`Open`, `OpenString` and `NewMemoryFromString` were removed in v0.8: a
 slice handed out past the lock is unmapped under its reader by `Destroy` or
 `WipeAll`, and a string source cannot be wiped.
 
@@ -41,7 +45,7 @@ slice handed out past the lock is unmapped under its reader by `Destroy` or
    rather than being dropped. No failure path unmaps or wipes any other
    enclave — only that enclave's `Destroy`, or an explicit `WipeAll`, does.
 2. **Constructors wipe or preserve their source exactly as documented** —
-   `NewMemoryEnclave` wipes on every path including refusal; `NewMemoryEnclaveCopy`
+   `NewMemory` wipes on every path including refusal; `NewMemoryCopy`
    never writes `src`.
 3. **Borrows are safe against `Destroy`, `Freeze` and `WipeAll`.** Each of those
    needs the write lock (the sweep only `TryLock`s it), so pages are never
@@ -71,15 +75,18 @@ slice handed out past the lock is unmapped under its reader by `Destroy` or
 
 | Error | Returned by | Meaning / fail-closed behavior |
 |---|---|---|
-| `ErrEmptyEnclave` | `NewMemoryEnclave`, `NewMemoryEnclaveCopy` | Zero-length material; nothing mapped. |
-| `ErrInvalidSize` | `NewMemoryEnclaveSized` | `n <= 0` or too large to map (data + two guard pages overflow `int`); decided before `mmap`. |
+| `ErrEmptyEnclave` | `NewMemory`, `NewMemoryCopy` | Zero-length material; nothing mapped. |
+| `ErrInvalidSize` | `NewMemorySized` | `n <= 0` or too large to map (data + two guard pages overflow `int`); decided before `mmap`. |
 | `ErrLockedMemoryUnavailable` (`*LockedMemoryError`) | constructors, `Freeze`, `Destroy` | Kernel refused `mmap`/`mlock`/`madvise`/`mprotect`/`munlock`/`munmap`. From `Destroy` it means the release was refused and the pages are held (retry by calling `Destroy` again) **only if the error does not also match `ErrReleasedWithoutWipe`** — see below. |
 | `ErrEnclaveDestroyed` | `WithBytes`, `EqualTo`, `Freeze` | Material gone (destroyed, swept, or wiped-but-held). |
-| `ErrReleasedWithoutWipe` (`*UnwipedReleaseError`) | `Destroy`; `NewMemoryEnclave`/`NewMemoryEnclaveCopy` (joined into a freeze failure's rollback); `Allocator.New` likewise | `mprotect` denied, pages handed back with a bare `munmap` and **released**. They were locked for their whole life (never swapped) and the kernel zeroes anonymous pages before reuse, but the in-process wipe did not run. |
+| `ErrNilFunc` | `WithBytes` | `fn` is nil on a live enclave; nothing is borrowed. |
+| `ErrReleasedWithoutWipe` (`*UnwipedReleaseError`) | `Destroy`; `NewMemory`/`NewMemoryCopy` (joined into a freeze failure's rollback); `Allocator.New` likewise | `mprotect` denied, pages handed back with a bare `munmap` and **released**. They were locked for their whole life (never swapped) and the kernel zeroes anonymous pages before reuse, but the in-process wipe did not run. |
 | `ErrEnclaveCorrupted` | `Destroy`; also counted by the next `WipeAll` | Canary or guard mismatch. See below. |
 | `ErrCoreDumpLimitUnsupported` | `CoreDumpsDisabled` | Windows: no process-wide core-dump limit exists. |
-| `ErrProcessHardeningUnsupported` | `HardenProcess` | Not Linux: nothing applied. |
-| `ErrProcessHardeningFailed` (`*ProcessHardeningError`) | `HardenProcess` | `PR_SET_DUMPABLE` refused, or the read-back still shows the process dumpable. |
+| `ErrCoreDumpLimitNotApplied` | `CoreDumpsDisabled` | `HardenProcess` has not run; importing the package leaves `RLIMIT_CORE` alone. |
+| `ErrCoreDumpLimitFailed` (`*CoreDumpLimitError`) | `CoreDumpsDisabled`; `HardenProcess` (as its `Cause`) | `setrlimit(RLIMIT_CORE)` refused, or the read-back is not 0/0. |
+| `ErrProcessHardeningUnsupported` | `HardenProcess` | Windows: neither step exists, nothing applied. |
+| `ErrProcessHardeningFailed` (`*ProcessHardeningError`) | `HardenProcess` | `PR_SET_DUMPABLE` or the `RLIMIT_CORE` step refused, or its read-back disagrees; the steps that took are still reported. |
 
 Every sentinel and error type is declared in [errors.go](../../errors.go).
 `LockedMemoryError`, `UnwipedReleaseError`, `ProcessHardeningError` and the
@@ -104,7 +111,8 @@ A release has two failure outcomes, and each matches exactly one sentinel:
 Only a **frozen** enclave reaches the unwiped path with its material intact:
 release wipes a writable data region before the `mprotect`, with no syscall
 that can be refused, while a read-only region cannot be overwritten without
-the denied `mprotect`. Under a permanent denial (seccomp), keeping the mapping
+the denied `mprotect`. A writable enclave whose `mprotect` is refused was
+already wiped, so it is released and `Destroy` returns `nil`. Under a permanent denial (seccomp), keeping the mapping
 would leave the material resident for the process lifetime, so it is unmapped.
 
 A **constructor** failure is different: a refused freeze always matches
@@ -140,7 +148,7 @@ should stop is the caller's decision.
 
 ## Platform contract
 
-| GOOS | Lock primitive | Per-mapping dump exclusion (verified) | Fork exclusion (verified) | `CoreDumpsDisabled()` | Notes |
+| GOOS | Lock primitive | Per-mapping dump exclusion (verified) | Fork exclusion (verified) | `CoreDumpsDisabled()` after `HardenProcess` | Notes |
 |---|---|---|---|---|---|
 | linux, android | `mlock` | `MADV_DONTDUMP` (refusal fails the allocation) | `MADV_DONTFORK` on the whole mapping (refusal fails the allocation) | `setrlimit(RLIMIT_CORE, 0/0)` result | Only OS the tests run on. |
 | freebsd, dragonfly | `mlock` | `MAP_NOCORE` + `MADV_NOCORE` (madvise refusal fails the allocation) | none: x/sys exposes no `minherit` | setrlimit result | |
@@ -167,8 +175,8 @@ writing core *files*. On Linux a `core_pattern` beginning with `|`
 `MADV_DONTDUMP` — applied by the kernel's dump writer whatever the destination —
 is what keeps enclave pages out. Heap copies (see
 [sealing](../sealing/engineering.md#key-schedule-heap-exposure)) are not covered.
-`RLIMIT_CORE` is lowered soft *and* hard, so no other code in an unprivileged
-process can raise it back.
+`HardenProcess` lowers `RLIMIT_CORE` soft *and* hard, so no other code in an
+unprivileged process can raise it back.
 
 **A missing control is dropped, not fatal.** Where a platform lacks a
 per-mapping dump or fork exclusion, that step is a no-op reporting success:
@@ -205,7 +213,7 @@ exactly one implementation of each:
 | `osmem`: mmap, mlock, mprotect primitives and the protection table | `_unix` (aix, darwin, dragonfly, freebsd, linux, netbsd, openbsd, solaris), `_windows` | `_unsupported`: fails to compile |
 | `madvise`: dump and fork exclusion, `coreDumpMapFlags` | `_linux`, `_bsd` (dragonfly, freebsd), `_openbsd` | `_unsupported`: darwin, netbsd, aix, solaris, windows; the hooks are no-ops |
 | `memlock`: ceiling discovery | `_linux`, `_bsd` (darwin, dragonfly, freebsd, netbsd, openbsd) | `_unsupported`: aix, solaris, windows; reports `LimitUnsupported` |
-| `harden`: `HardenProcess` | `_linux` | `_unsupported`: `ErrProcessHardeningUnsupported` |
+| `harden`: the non-dumpable step of `HardenProcess` (`harden.go` runs the steps; the `RLIMIT_CORE` step is `osmem`'s) | `_linux` | `_unsupported`: the step is `ErrProcessHardeningUnsupported` |
 | `secret`: key-schedule erasure | `secret_erase.go` (linux, amd64 or arm64, `GOEXPERIMENT=runtimesecret`) | `secret_noerase.go` |
 
 `_unsupported` is the only catch-all; its build constraint is the exact
@@ -221,17 +229,17 @@ every concern to this for every GOOS, and `make cross-build` compiles each one.
 
 ## Configuration
 
-None. No environment variables or options. Package initialization lowers
-`RLIMIT_CORE` to zero (soft and hard) once; constructors do not consult the
-result. Resource limits are inherited across `fork` and `execve`, so every child
-process the binary starts, go-enclave user or not, also starts with
-`RLIMIT_CORE` 0 and, the hard limit being 0 too, cannot raise it without
-privilege.
+None. No environment variables or options, and importing the package changes
+no process state.
 
-`HardenProcess` is the one process-wide step that is the binary's choice and
-is never run at import: marking the process non-dumpable breaks same-uid
-debuggers, profilers and crash collectors, and makes `/proc/<pid>` files
-root-owned, which a library cannot decide for the program that imports it.
+`HardenProcess` holds the process-wide steps, which are the binary's choice and
+never run at import. Lowering `RLIMIT_CORE` to zero, soft and hard, is
+inherited across `fork` and `execve`, so every child process the binary starts,
+go-enclave user or not, also starts with `RLIMIT_CORE` 0 and cannot raise it
+without privilege. Marking the process non-dumpable breaks same-uid debuggers,
+profilers and crash collectors, and makes `/proc/<pid>` files root-owned.
+Neither is a library's to decide for the program that imports it. Constructors
+do not consult the result.
 
 ## Persistence
 
@@ -281,9 +289,14 @@ None. Enclaves live and die with the process.
   `integration-test-enclave` and of `integration-test-locked-memory-budget`)
   runs it in the `userns` compose service, whose profile permits
   `CLONE_NEWUSER`.
-- **`HardenProcess`** runs in a subprocess, read back with `PR_GET_DUMPABLE`;
-  a parent-side test pins that importing the package leaves the process
-  dumpable.
+- **`HardenProcess`** runs in a subprocess, read back with `PR_GET_DUMPABLE`
+  and `getrlimit(RLIMIT_CORE)`; each step is also refused through a seam.
+  Subprocess and parent-side tests pin that importing the package leaves the
+  process dumpable and its `RLIMIT_CORE` unchanged.
+- **Construction rollback** is measured against the kernel: in a subprocess,
+  `NewMemory`, `NewMemoryCopy` and `Allocator.New` fail at `mlock` (a real
+  `RLIMIT_MEMLOCK` ceiling) and at the freeze, and `VmLck`, `InUse` and the
+  shutdown ledger must return to their starting values.
 - **Cross-compilation** of the `CROSS_TARGETS` matrix in the Makefile
   (`make cross-build`; Android and iOS, which build through the linux and
   darwin files, are not in it);
@@ -296,9 +309,9 @@ None. Enclaves live and die with the process.
   passes, when either is absent. That stage shares its `base` stage (Go,
   gcc/musl-dev, module and build caches) with the `toolchain` stage
   (`build/docker/devcontainer/Dockerfile`), the image every other gate passes
-  in (`make docker-run CMD='make coverage'`), and ships none of its tools. The import-time `RLIMIT_CORE` test is meaningful there because the
-  devcontainer starts with a non-zero core limit and the test's parent (`go`)
-  does not import go-enclave.
+  in (`make docker-run CMD='make coverage'`), and ships none of its tools. The test that importing leaves `RLIMIT_CORE` unchanged is meaningful
+  there because the devcontainer starts with a non-zero core limit and the
+  test's parent (`go`) does not import go-enclave.
 - **Borrow benchmarks** (`BenchmarkBorrow*`, `BenchmarkIsAliveParallel`) are
   compared with `benchstat` around changes to the borrow path; there is no CI
   threshold.

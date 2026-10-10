@@ -143,22 +143,22 @@ const (
 	sourceWipeConfirmed = "source slice wiped on the allocation-failure path"
 
 	// copySourceIntactConfirmed is logged once the child has observed
-	// NewMemoryEnclaveCopy leave its source intact on the same failing path.
+	// NewMemoryCopy leave its source intact on the same failing path.
 	copySourceIntactConfirmed = "source slice left intact on the allocation-failure path"
 )
 
-// TestNewMemoryEnclave_LockedMemoryExhausted injects an RLIMIT_MEMLOCK fault
+// TestNewMemory_LockedMemoryExhausted injects an RLIMIT_MEMLOCK fault
 // and pins that an enclave that cannot be locked reports
 // ErrLockedMemoryUnavailable instead of aborting, with the source wiped (and,
-// for NewMemoryEnclaveCopy, left intact). It runs in a subprocess because the
+// for NewMemoryCopy, left intact). It runs in a subprocess because the
 // fault is process-wide.
-func TestNewMemoryEnclave_LockedMemoryExhausted(t *testing.T) {
+func TestNewMemory_LockedMemoryExhausted(t *testing.T) {
 	if os.Getenv(subprocessMarker) == "1" {
 		lockedMemoryExhaustionChild(t)
 		return
 	}
 
-	out, err := runTestChild(t, "TestNewMemoryEnclave_LockedMemoryExhausted", subprocessMarker, "1")
+	out, err := runTestChild(t, "TestNewMemory_LockedMemoryExhausted", subprocessMarker, "1")
 	if err != nil {
 		t.Fatalf("subprocess failed: %v\n%s", err, out)
 	}
@@ -185,7 +185,7 @@ func lockedMemoryExhaustionChild(t *testing.T) {
 	var failedSource []byte
 	for i := 0; i < 64; i++ {
 		source := []byte(fmt.Sprintf("key-material-%d", i))
-		e, err := NewMemoryEnclave(source)
+		e, err := NewMemory(source)
 		if err != nil {
 			lastErr = err
 			failedSource = source
@@ -211,16 +211,16 @@ func lockedMemoryExhaustionChild(t *testing.T) {
 	}
 	t.Log(sourceWipeConfirmed)
 
-	// The mirror image: NewMemoryEnclaveCopy leaves its source intact on every
+	// The mirror image: NewMemoryCopy leaves its source intact on every
 	// path, this one included.
 	copySrc := []byte("copy-material-under-a-ceiling")
 	want := append([]byte(nil), copySrc...)
 
-	if _, err := NewMemoryEnclaveCopy(copySrc); !errors.Is(err, ErrLockedMemoryUnavailable) {
-		t.Fatalf("NewMemoryEnclaveCopy err = %v, want ErrLockedMemoryUnavailable under the injected ceiling", err)
+	if _, err := NewMemoryCopy(copySrc); !errors.Is(err, ErrLockedMemoryUnavailable) {
+		t.Fatalf("NewMemoryCopy err = %v, want ErrLockedMemoryUnavailable under the injected ceiling", err)
 	}
 	if !bytes.Equal(copySrc, want) {
-		t.Fatalf("source = %q after a failed NewMemoryEnclaveCopy, want it untouched (%q)", copySrc, want)
+		t.Fatalf("source = %q after a failed NewMemoryCopy, want it untouched (%q)", copySrc, want)
 	}
 	t.Log(copySourceIntactConfirmed)
 }
@@ -242,18 +242,18 @@ const (
 	enclaveSurvived = "the unrelated enclave survived intact"
 )
 
-// TestMemoryEnclave_UnaffectedByForeignAllocationFailure pins that an
+// TestMemory_UnaffectedByForeignAllocationFailure pins that an
 // allocation failure elsewhere in the process returns a typed error to its own
 // caller and touches nothing else: an unrelated enclave stays alive and intact,
 // and the failing allocation completes while a borrow is in flight. It runs in
 // a subprocess because the fault is process-wide.
-func TestMemoryEnclave_UnaffectedByForeignAllocationFailure(t *testing.T) {
+func TestMemory_UnaffectedByForeignAllocationFailure(t *testing.T) {
 	if os.Getenv(foreignMarker) == "1" {
 		foreignFailureChild(t)
 		return
 	}
 
-	out, err := runTestChild(t, "TestMemoryEnclave_UnaffectedByForeignAllocationFailure", foreignMarker, "1")
+	out, err := runTestChild(t, "TestMemory_UnaffectedByForeignAllocationFailure", foreignMarker, "1")
 	if err != nil {
 		t.Fatalf("subprocess failed: %v\n%s", err, out)
 	}
@@ -270,7 +270,7 @@ func foreignFailureChild(t *testing.T) {
 	const material = "server-private-key-material"
 
 	// Allocated before the ceiling; nothing below touches it.
-	a, err := NewMemoryEnclave([]byte(material))
+	a, err := NewMemory([]byte(material))
 	if err != nil {
 		t.Fatalf("could not allocate the enclave under test before any ceiling was injected: %v", err)
 	}
@@ -300,7 +300,7 @@ func foreignFailureChild(t *testing.T) {
 	// The borrow is parked; the failing allocation must complete on its own.
 	var lastErr error
 	for i := 0; i < 64; i++ {
-		e, ferr := NewMemoryEnclave([]byte(fmt.Sprintf("foreign-material-%d", i)))
+		e, ferr := NewMemory([]byte(fmt.Sprintf("foreign-material-%d", i)))
 		if ferr != nil {
 			lastErr = ferr
 			break
@@ -382,7 +382,7 @@ func allocReleaseChild(t *testing.T) {
 
 	// Allocations that succeed before the ceiling hold legitimate reservations
 	// until Destroy; only the failed one's must be returned by the constructor.
-	var survivors []*MemoryEnclave
+	var survivors []*Memory
 	var lastErr error
 	for i := 0; i < 64; i++ {
 		e, err := a.New([]byte(fmt.Sprintf("key-material-%d", i)))
@@ -411,12 +411,12 @@ func allocReleaseChild(t *testing.T) {
 	t.Log(allocReleaseConfirmed)
 }
 
-// TestNewMemoryEnclaveSized_MemoryIsLocked asks the kernel, via
+// TestNewMemorySized_MemoryIsLocked asks the kernel, via
 // /proc/self/smaps, whether the region a sized enclave lends its filler is
 // mlocked. An ordinary heap page is the control and must read 0 kB locked, so
 // an mlockall'd process or a kernel without per-mapping Locked: figures fails
 // rather than passing for the wrong reason.
-func TestNewMemoryEnclaveSized_MemoryIsLocked(t *testing.T) {
+func TestNewMemorySized_MemoryIsLocked(t *testing.T) {
 	heap := make([]byte, os.Getpagesize())
 	for i := range heap {
 		heap[i] = 1 // fault the page in so it has a mapping to find
@@ -439,9 +439,9 @@ func TestNewMemoryEnclaveSized_MemoryIsLocked(t *testing.T) {
 	}
 	runtime.KeepAlive(heap)
 
-	e, err := NewMemoryEnclaveSized(64)
+	e, err := NewMemorySized(64)
 	if err != nil {
-		t.Fatalf("NewMemoryEnclaveSized: %v", err)
+		t.Fatalf("NewMemorySized: %v", err)
 	}
 	defer e.Destroy()
 
@@ -550,7 +550,7 @@ func sizedAdmissionChild(t *testing.T) {
 	const material = "canary-key-material"
 
 	// Allocated before the ceiling.
-	canary, err := NewMemoryEnclave([]byte(material))
+	canary, err := NewMemory([]byte(material))
 	if err != nil {
 		t.Fatalf("could not allocate the canary enclave before any ceiling was injected: %v", err)
 	}
@@ -584,8 +584,8 @@ func sizedAdmissionChild(t *testing.T) {
 
 	// Non-vacuity: the same allocation without admission must be refused by
 	// the kernel, showing the ceiling was live.
-	if _, err := NewMemoryEnclaveSized(request); !errors.Is(err, ErrLockedMemoryUnavailable) {
-		t.Fatalf("unadmitted NewMemoryEnclaveSized err = %v, want ErrLockedMemoryUnavailable; "+
+	if _, err := NewMemorySized(request); !errors.Is(err, ErrLockedMemoryUnavailable) {
+		t.Fatalf("unadmitted NewMemorySized err = %v, want ErrLockedMemoryUnavailable; "+
 			"the ceiling was not live and the refusal above proves nothing", err)
 	}
 	t.Log(sizedFaultArmed)
@@ -627,21 +627,21 @@ const (
 	sealedSurvived = "wrote through a frozen sized enclave and lived"
 )
 
-// TestMemoryEnclave_FrozenSizedPagesFault pins by execution that a write
+// TestMemory_FrozenSizedPagesFault pins by execution that a write
 // through a retained slice faults after Freeze. The unfrozen write runs
 // in-process as the control and must succeed; the frozen write runs in a child,
 // which must die of an unrecoverable fault since the page is read-only and
 // outside the Go heap.
-func TestMemoryEnclave_FrozenSizedPagesFault(t *testing.T) {
+func TestMemory_FrozenSizedPagesFault(t *testing.T) {
 	if os.Getenv(sealedMarker) == "1" {
 		sealedWriteChild(t)
 		return
 	}
 
 	// Control: unfrozen, the same write succeeds. This is the fill path.
-	unfrozen, err := NewMemoryEnclaveSized(32)
+	unfrozen, err := NewMemorySized(32)
 	if err != nil {
-		t.Fatalf("NewMemoryEnclaveSized: %v", err)
+		t.Fatalf("NewMemorySized: %v", err)
 	}
 	view := unfrozen.m.data // a slice no lock covers, as a careless caller would keep
 	view[0] = 0xFF          // must not fault: nothing has frozen these pages
@@ -650,7 +650,7 @@ func TestMemoryEnclave_FrozenSizedPagesFault(t *testing.T) {
 	}
 	unfrozen.Destroy()
 
-	out, cerr := runTestChild(t, "TestMemoryEnclave_FrozenSizedPagesFault", sealedMarker, "1")
+	out, cerr := runTestChild(t, "TestMemory_FrozenSizedPagesFault", sealedMarker, "1")
 	requireChildFaulted(t, out, cerr, sealedFroze, sealedSurvived,
 		"a write through a frozen sized enclave (Freeze did not protect the pages)")
 }
@@ -658,9 +658,9 @@ func TestMemoryEnclave_FrozenSizedPagesFault(t *testing.T) {
 func sealedWriteChild(t *testing.T) {
 	t.Helper()
 
-	e, err := NewMemoryEnclaveSized(32)
+	e, err := NewMemorySized(32)
 	if err != nil {
-		t.Fatalf("NewMemoryEnclaveSized: %v", err)
+		t.Fatalf("NewMemorySized: %v", err)
 	}
 
 	// Retain the slice past the fill, the mistake Freeze makes loud.
@@ -679,11 +679,11 @@ func sealedWriteChild(t *testing.T) {
 	e.Destroy()
 }
 
-// TestMemoryEnclave_FrozenDestroyFallsBackToUnmap pins the unmap fallback for a
+// TestMemory_FrozenDestroyFallsBackToUnmap pins the unmap fallback for a
 // frozen sized enclave whose release mprotect is denied: Destroy returns
 // ErrReleasedWithoutWipe, the pages leave the process's mappings, the Allocator
 // reservation is returned, and the kernel's VmLck does not grow.
-func TestMemoryEnclave_FrozenDestroyFallsBackToUnmap(t *testing.T) {
+func TestMemory_FrozenDestroyFallsBackToUnmap(t *testing.T) {
 	a, err := NewAllocator(8 * pageSize)
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
@@ -754,11 +754,12 @@ func TestMemoryEnclave_FrozenDestroyFallsBackToUnmap(t *testing.T) {
 	}
 }
 
-// TestMemoryEnclave_FreezeIsWhatPutsMaterialOnTheFallbackPath pins the cost of
+// TestMemory_FreezeIsWhatPutsMaterialOnTheFallbackPath pins the cost of
 // freezing: under a denied mprotect an unfrozen enclave reaches the unmap
-// fallback already zeroed, while a frozen one reaches it with the material
-// still resident. Both arms are observed from inside the unmap seam.
-func TestMemoryEnclave_FreezeIsWhatPutsMaterialOnTheFallbackPath(t *testing.T) {
+// fallback already zeroed, and so releases cleanly, while a frozen one reaches
+// it with the material still resident and reports ErrReleasedWithoutWipe.
+// Both arms are observed from inside the unmap seam.
+func TestMemory_FreezeIsWhatPutsMaterialOnTheFallbackPath(t *testing.T) {
 	material := bytes.Repeat([]byte{0x9D}, 64)
 
 	for _, tc := range []struct {
@@ -774,7 +775,7 @@ func TestMemoryEnclave_FreezeIsWhatPutsMaterialOnTheFallbackPath(t *testing.T) {
 			// exported one would leak a ledger entry into every WipeAll test.
 			e, err := unpublishedSized(len(material))
 			if err != nil {
-				t.Fatalf("newMemoryEnclaveSized: %v", err)
+				t.Fatalf("newMemorySized: %v", err)
 			}
 			copy(e.m.data, material)
 			if tc.freeze {
@@ -802,8 +803,13 @@ func TestMemoryEnclave_FreezeIsWhatPutsMaterialOnTheFallbackPath(t *testing.T) {
 				return prevUnmap(b)
 			})
 
-			if rerr := e.m.release(); !errors.Is(rerr, ErrReleasedWithoutWipe) {
-				t.Fatalf("release = %v, want ErrReleasedWithoutWipe", rerr)
+			// L1: only the frozen arm skipped the wipe, so only it reports one.
+			rerr := e.m.release()
+			if got := errors.Is(rerr, ErrReleasedWithoutWipe); got != tc.wantResidual {
+				t.Fatalf("release = %v: matches ErrReleasedWithoutWipe = %v, want %v", rerr, got, tc.wantResidual)
+			}
+			if !tc.wantResidual && rerr != nil {
+				t.Fatalf("release of a wiped region = %v, want nil: the pages are gone and so is the material", rerr)
 			}
 			if !unmapRan {
 				t.Fatal("the unmap fallback never ran, so nothing was measured")
@@ -824,9 +830,9 @@ func TestMemoryEnclave_FreezeIsWhatPutsMaterialOnTheFallbackPath(t *testing.T) {
 // *UnwipedReleaseError carrying the raw refusal, disjoint from
 // ErrLockedMemoryUnavailable.
 func TestDestroyReportsTheDeniedMprotect(t *testing.T) {
-	e, err := NewMemoryEnclave([]byte("material for the public teardown path"))
+	e, err := NewMemory([]byte("material for the public teardown path"))
 	if err != nil {
-		t.Fatalf("NewMemoryEnclave: %v", err)
+		t.Fatalf("NewMemory: %v", err)
 	}
 
 	denied := errors.New("mprotect denied by policy")
@@ -860,9 +866,9 @@ func TestDestroyReportsTheDeniedMprotect(t *testing.T) {
 
 // TestDestroyIsNilOnAnOrdinaryTeardown is the control for the test above.
 func TestDestroyIsNilOnAnOrdinaryTeardown(t *testing.T) {
-	e, err := NewMemoryEnclave([]byte("material"))
+	e, err := NewMemory([]byte("material"))
 	if err != nil {
-		t.Fatalf("NewMemoryEnclave: %v", err)
+		t.Fatalf("NewMemory: %v", err)
 	}
 	if derr := e.Destroy(); derr != nil {
 		t.Fatalf("Destroy on a clean teardown = %v, want nil", derr)

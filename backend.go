@@ -12,12 +12,13 @@ import (
 	"context"
 	"reflect"
 	"slices"
+	"strings"
 	"sync"
 )
 
 // The backend seam: what a hardware enclave module (a TEE, a secure element,
 // a TPM, GPU confidential computing) implements so its enclaves stand where a
-// [MemoryEnclave] stands. Locked memory is the default backend; every other
+// [Memory] stands. Locked memory is the default backend; every other
 // backend ships as its own module. The design is docs/backends/architecture.md.
 
 // Handle is the core every backend's enclave provides: a reference to
@@ -31,7 +32,7 @@ import (
 // handle refers to the same material and one Destroy reaches all of them.
 // Every method, the capabilities' included, is safe for concurrent use and
 // never panics on a live or destroyed handle. A nil receiver is outside the
-// contract: a backend whose type supports one, as [*MemoryEnclave] does,
+// contract: a backend whose type supports one, as [*Memory] does,
 // documents it.
 //
 // After Destroy, every capability method that returns an error returns
@@ -82,7 +83,7 @@ type Backend interface {
 
 // ByteAccess is the capability of a handle whose material this process may
 // read: locked memory, and the memory of a TEE the process runs inside.
-// [MemoryEnclave] documents the contract each method follows.
+// [Memory] documents the contract each method follows.
 type ByteAccess interface {
 	Handle
 
@@ -186,7 +187,7 @@ type Importer interface {
 
 	// Import moves material into a new handle for the purpose and algorithm
 	// opts name, and wipes the caller's slice on every return path, as
-	// [NewMemoryEnclave] does. The backend resolves opts with [NewImportSpec]
+	// [NewMemory] does. The backend resolves opts with [NewImportSpec]
 	// and returns its error; the handle then follows the contract of the
 	// spec's [Purpose]. A backend that cannot hold that purpose and algorithm
 	// refuses with a [*CapabilityError] naming [CapabilityImport], and a
@@ -204,7 +205,7 @@ type Purpose string
 // The purposes an import may name.
 const (
 	// PurposeMaterial is arbitrary material the caller reads back, such as
-	// what [SealedEnclave] opens into a backend. It takes no algorithm. The
+	// what [Sealed] opens into a backend. It takes no algorithm. The
 	// handle implements [ByteAccess], its view holds exactly the material,
 	// and its Size is the material's length.
 	PurposeMaterial Purpose = "material"
@@ -333,7 +334,7 @@ const (
 )
 
 // LockedMemoryBackendName is the name of the locked-memory backend, the
-// default: what [DefaultBackend] returns and every [MemoryEnclave] reports. It
+// default: what [DefaultBackend] returns and every [Memory] reports. It
 // is always registered and cannot be registered again.
 const LockedMemoryBackendName = "locked-memory"
 
@@ -354,10 +355,11 @@ var (
 )
 
 var (
-	_ Handle     = (*MemoryEnclave)(nil)
-	_ ByteAccess = (*MemoryEnclave)(nil)
-	_ Freezer    = (*MemoryEnclave)(nil)
+	_ Handle     = (*Memory)(nil)
+	_ ByteAccess = (*Memory)(nil)
+	_ Freezer    = (*Memory)(nil)
 	_ Backend    = lockedMemory{}
+	_ Importer   = (*Allocator)(nil)
 )
 
 // DefaultBackend returns the locked-memory backend, the one every constructor
@@ -419,6 +421,28 @@ func BackendNames() []string {
 	backendsMu.RUnlock()
 	slices.Sort(names)
 	return names
+}
+
+// namedSweeper is one entry of a [WipeAll] second-phase snapshot.
+type namedSweeper struct {
+	name    string
+	sweeper Sweeper
+}
+
+// registeredSweepers snapshots, sorted by name, every registered backend other
+// than the default that implements [Sweeper]. It holds the registry's read lock
+// only for the copy, so the caller runs backend code without it.
+func registeredSweepers() []namedSweeper {
+	backendsMu.RLock()
+	var snapshot []namedSweeper
+	for name, b := range backends {
+		if s, ok := b.(Sweeper); ok && name != LockedMemoryBackendName {
+			snapshot = append(snapshot, namedSweeper{name: name, sweeper: s})
+		}
+	}
+	backendsMu.RUnlock()
+	slices.SortFunc(snapshot, func(a, b namedSweeper) int { return strings.Compare(a.name, b.name) })
+	return snapshot
 }
 
 // validName reports whether name follows the rule on [Backend.Name], which

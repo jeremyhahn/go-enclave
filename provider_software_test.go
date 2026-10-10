@@ -10,7 +10,10 @@ package enclave
 
 import (
 	"bytes"
+	"crypto/hkdf"
+	"crypto/sha256"
 	"errors"
+	"reflect"
 	"testing"
 
 	"github.com/jeremyhahn/go-enclave/internal/memscan"
@@ -91,9 +94,9 @@ func TestSoftwareProvider_MessageLimit(t *testing.T) {
 		t.Fatalf("Protect: %v", err)
 	}
 
-	p.mu.Lock()
-	p.protects = softwareProtectLimit
-	p.mu.Unlock()
+	p.s.mu.Lock()
+	p.s.protects = softwareProtectLimit
+	p.s.mu.Unlock()
 
 	if _, err := p.Protect(t.Context(), append([]byte(nil), key...)); !errors.Is(err, ErrProviderMessageLimit) {
 		t.Errorf("Protect at the limit = %v, want ErrProviderMessageLimit", err)
@@ -123,12 +126,12 @@ func TestSoftwareProvider_UnsealRoot(t *testing.T) {
 
 	// Generated key material: unsealed into locked destinations and compared
 	// inside their borrows, never copied onto the heap.
-	a, err := NewMemoryEnclaveSized(RootKeyBytes)
+	a, err := NewMemorySized(RootKeyBytes)
 	if err != nil {
 		t.Fatalf("allocating a: %v", err)
 	}
 	defer func() { _ = a.Destroy() }()
-	b, err := NewMemoryEnclaveSized(RootKeyBytes)
+	b, err := NewMemorySized(RootKeyBytes)
 	if err != nil {
 		t.Fatalf("allocating b: %v", err)
 	}
@@ -174,9 +177,9 @@ func TestSoftwareProvider_RefusesAnEndedContext(t *testing.T) {
 			if err := p.UnsealRoot(ec.ctx, dst); !errors.Is(err, ec.want) {
 				t.Errorf("UnsealRoot = %v, want %v", err, ec.want)
 			}
-			p.mu.Lock()
-			root, protects := p.root, p.protects
-			p.mu.Unlock()
+			p.s.mu.Lock()
+			root, protects := p.s.root, p.s.protects
+			p.s.mu.Unlock()
 			if root != nil {
 				t.Error("a refused call generated the provider root")
 			}
@@ -243,7 +246,7 @@ func TestSoftwareProvider_Destroy(t *testing.T) {
 	if err := fresh.UnsealRoot(ctx, make([]byte, RootKeyBytes)); !errors.Is(err, ErrSealerDestroyed) {
 		t.Errorf("UnsealRoot on a provider destroyed unused = %v, want ErrSealerDestroyed", err)
 	}
-	if fresh.root != nil {
+	if fresh.s.root != nil {
 		t.Error("a destroyed provider generated a root")
 	}
 
@@ -264,11 +267,99 @@ func TestSoftwareProvider_OpenableDoesNotGenerateARoot(t *testing.T) {
 			"so nothing it holds is unopenable", err)
 	}
 
-	p.mu.Lock()
-	root := p.root
-	p.mu.Unlock()
+	p.s.mu.Lock()
+	root := p.s.root
+	p.s.mu.Unlock()
 	if root != nil {
 		t.Error("asking whether a provider can open generated its root; a diagnostic must not " +
 			"allocate locked memory or draw from the CSPRNG")
+	}
+}
+
+// TestSoftwareProvider_ProtectKeyIsNotTheRoot pins the key separation: Protect
+// wraps under HKDF-SHA256 of the root under softwareProtectKeyInfo, never under
+// the root UnsealRoot exports.
+func TestSoftwareProvider_ProtectKeyIsNotTheRoot(t *testing.T) {
+	p := NewSoftwareProvider()
+	t.Cleanup(func() { _ = p.Destroy() })
+
+	if _, err := p.Protect(t.Context(), make([]byte, RootKeyBytes)); err != nil {
+		t.Fatalf("Protect: %v", err)
+	}
+	root := make([]byte, RootKeyBytes)
+	if err := p.UnsealRoot(t.Context(), root); err != nil {
+		t.Fatalf("UnsealRoot: %v", err)
+	}
+
+	var pk []byte
+	if err := p.s.protectKey.WithBytes(func(b []byte) error {
+		pk = append([]byte(nil), b...)
+		return nil
+	}); err != nil {
+		t.Fatalf("reading the Protect key: %v", err)
+	}
+	if bytes.Equal(pk, root) {
+		t.Fatal("Protect wraps under the root UnsealRoot exports")
+	}
+	want, err := hkdf.Key(sha256.New, root, nil, softwareProtectKeyInfo, RootKeyBytes)
+	if err != nil {
+		t.Fatalf("hkdf.Key: %v", err)
+	}
+	if !bytes.Equal(pk, want) {
+		t.Error("the Protect key is not HKDF-SHA256 of the root under softwareProtectKeyInfo")
+	}
+}
+
+// TestSoftwareProvider_CopySharesState pins that a copy of a provider is the
+// same provider: one root, one lock, one Destroy.
+func TestSoftwareProvider_CopySharesState(t *testing.T) {
+	p := NewSoftwareProvider()
+	t.Cleanup(func() { _ = p.Destroy() })
+
+	// Copied through reflect, as vet's copylocks would refuse a plain copy.
+	cp := new(SoftwareProvider)
+	reflect.ValueOf(cp).Elem().Set(reflect.ValueOf(p).Elem())
+
+	key := bytes.Repeat([]byte{0x5a}, RootKeyBytes)
+	blob, err := cp.Protect(t.Context(), append([]byte(nil), key...))
+	if err != nil {
+		t.Fatalf("Protect through the copy: %v", err)
+	}
+	got := make([]byte, RootKeyBytes)
+	if err := p.Unprotect(t.Context(), blob, got); err != nil {
+		t.Fatalf("the original cannot open the copy's blob: %v", err)
+	}
+	if !bytes.Equal(got, key) {
+		t.Error("the original recovered a different key from the copy's blob")
+	}
+
+	if err := p.Destroy(); err != nil {
+		t.Fatalf("Destroy: %v", err)
+	}
+	if err := cp.Health(); !errors.Is(err, ErrSealerDestroyed) {
+		t.Errorf("copy Health after the original's Destroy = %v, want ErrSealerDestroyed", err)
+	}
+}
+
+// TestSoftwareProvider_ZeroValue pins that a provider NewSoftwareProvider did
+// not build is refused, not used.
+func TestSoftwareProvider_ZeroValue(t *testing.T) {
+	var p SoftwareProvider
+	ctx := t.Context()
+
+	if _, err := p.Protect(ctx, make([]byte, RootKeyBytes)); !errors.Is(err, ErrProviderNotConstructed) {
+		t.Errorf("zero-value Protect = %v, want ErrProviderNotConstructed", err)
+	}
+	if err := p.Unprotect(ctx, nil, make([]byte, RootKeyBytes)); !errors.Is(err, ErrProviderNotConstructed) {
+		t.Errorf("zero-value Unprotect = %v, want ErrProviderNotConstructed", err)
+	}
+	if err := p.UnsealRoot(ctx, make([]byte, RootKeyBytes)); !errors.Is(err, ErrProviderNotConstructed) {
+		t.Errorf("zero-value UnsealRoot = %v, want ErrProviderNotConstructed", err)
+	}
+	if err := p.Health(); !errors.Is(err, ErrProviderNotConstructed) {
+		t.Errorf("zero-value Health = %v, want ErrProviderNotConstructed", err)
+	}
+	if err := p.Destroy(); err != nil {
+		t.Errorf("zero-value Destroy = %v, want nil", err)
 	}
 }

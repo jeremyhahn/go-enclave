@@ -38,19 +38,19 @@ const (
 	sealSurvivedRefusal = "the sealed value survived the refusals and opened once the ceiling lifted"
 )
 
-// TestSealedEnclave_LockedMemoryExhausted pins that a sealed round trip under
+// TestSealed_LockedMemoryExhausted pins that a sealed round trip under
 // a low RLIMIT_MEMLOCK reports ErrLockedMemoryUnavailable rather than aborting,
 // wherever locked memory is needed (root, KEK, transient DEK, destination),
 // and that the sealed value survives a failed Open intact.
 //
 // It runs in a subprocess because the fault is injected process-wide.
-func TestSealedEnclave_LockedMemoryExhausted(t *testing.T) {
+func TestSealed_LockedMemoryExhausted(t *testing.T) {
 	if os.Getenv(sealLimitMarker) == "1" {
 		sealLimitChild(t)
 		return
 	}
 
-	out, err := runTestChild(t, "TestSealedEnclave_LockedMemoryExhausted", sealLimitMarker, "1")
+	out, err := runTestChild(t, "TestSealed_LockedMemoryExhausted", sealLimitMarker, "1")
 	if err != nil {
 		t.Fatalf("subprocess failed (an abort here is the behavior this test forbids): %v\n%s", err, out)
 	}
@@ -133,11 +133,11 @@ func sealLimitChild(t *testing.T) {
 	t.Log(sealSurvivedRefusal)
 }
 
-// TestSealedEnclave_OpenedPlaintextIsLocked pins, using the kernel's VmLck,
+// TestSealed_OpenedPlaintextIsLocked pins, using the kernel's VmLck,
 // that Open's destination is genuinely mlock'd, and that the transient DEK is
 // released before Open returns, so an open value costs exactly the
 // plaintext's page.
-func TestSealedEnclave_OpenedPlaintextIsLocked(t *testing.T) {
+func TestSealed_OpenedPlaintextIsLocked(t *testing.T) {
 	freshProcessSealer(t)
 
 	s, err := NewSealed(t.Context(), append([]byte(nil), sealedMaterial...))
@@ -181,7 +181,7 @@ func TestSealedEnclave_OpenedPlaintextIsLocked(t *testing.T) {
 	}
 }
 
-// TestSealedEnclave_NoPlaintextInProcessMemory pins that no copy of the
+// TestSealed_NoPlaintextInProcessMemory pins that no copy of the
 // material survives anywhere in process memory once nothing is open.
 //
 // Every anonymous mapping is swept, named or not (the Go runtime names its heap
@@ -189,14 +189,14 @@ func TestSealedEnclave_OpenedPlaintextIsLocked(t *testing.T) {
 // generated into locked memory and compared inside a borrow, so the test never
 // matches a copy of its own making. The control must find a match outside the
 // needle's own mapping, proving the sweep can see where a leak would be.
-func TestSealedEnclave_NoPlaintextInProcessMemory(t *testing.T) {
+func TestSealed_NoPlaintextInProcessMemory(t *testing.T) {
 	freshProcessSealer(t)
 	// The needle is generated straight into locked memory. A []byte literal
 	// would put a copy on the heap and the sweep would find the test's own
 	// constant in every run.
-	needleEnclave, err := NewMemoryEnclaveSized(64)
+	needleEnclave, err := NewMemorySized(64)
 	if err != nil {
-		t.Fatalf("NewMemoryEnclaveSized: %v", err)
+		t.Fatalf("NewMemorySized: %v", err)
 	}
 	defer needleEnclave.Destroy()
 	if err := needleEnclave.WithBytes(func(b []byte) error {
@@ -255,7 +255,7 @@ func TestSealedEnclave_NoPlaintextInProcessMemory(t *testing.T) {
 // findNeedle sweeps process memory outside the mapping containing home for the
 // material held in probe, comparing from inside a borrow so the needle never
 // exists as a heap value.
-func findNeedle(probe *MemoryEnclave, home uintptr) ([]string, error) {
+func findNeedle(probe *Memory, home uintptr) ([]string, error) {
 	var hits []string
 	var err error
 	berr := probe.WithBytes(func(needle []byte) error {
@@ -268,12 +268,12 @@ func findNeedle(probe *MemoryEnclave, home uintptr) ([]string, error) {
 	return hits, err
 }
 
-// TestSealedEnclave_FailedOpenLeaksNoLockedMemory pins the cleanup on Open's
+// TestSealed_FailedOpenLeaksNoLockedMemory pins the cleanup on Open's
 // failure path. Open allocates its DEK and destination before it knows whether
-// the envelope authenticates, and a MemoryEnclave has no finalizer, so a
+// the envelope authenticates, and a Memory has no finalizer, so a
 // dropped Destroy would leak locked pages on every retried open. VmLck is the
 // yardstick, so it measures what the kernel charged.
-func TestSealedEnclave_FailedOpenLeaksNoLockedMemory(t *testing.T) {
+func TestSealed_FailedOpenLeaksNoLockedMemory(t *testing.T) {
 	freshProcessSealer(t)
 
 	s, err := NewSealed(t.Context(), append([]byte(nil), sealedMaterial...))
@@ -336,18 +336,18 @@ func TestSealedEnclave_FailedOpenLeaksNoLockedMemory(t *testing.T) {
 	s.sealed[len(s.sealed)-1] ^= 0xFF // restore so the deferred Destroy is clean
 }
 
-// TestSealedEnclave_SizeMismatchDoesNotDecryptOntoTheHeap is the residency
-// half of TestSealedEnclave_SizeMismatchIsRejected. A recorded length smaller
+// TestSealed_SizeMismatchDoesNotDecryptOntoTheHeap is the residency
+// half of TestSealed_SizeMismatchIsRejected. A recorded length smaller
 // than the real plaintext would make the AEAD's append reallocate and write
 // the plaintext to the heap while Open still returned an error. Only a memory
 // sweep can show that it does not.
-func TestSealedEnclave_SizeMismatchDoesNotDecryptOntoTheHeap(t *testing.T) {
+func TestSealed_SizeMismatchDoesNotDecryptOntoTheHeap(t *testing.T) {
 	freshProcessSealer(t)
 	// Generated into locked memory: a literal would put the test's own constant
 	// on the heap.
-	needleEnclave, err := NewMemoryEnclaveSized(64)
+	needleEnclave, err := NewMemorySized(64)
 	if err != nil {
-		t.Fatalf("NewMemoryEnclaveSized: %v", err)
+		t.Fatalf("NewMemorySized: %v", err)
 	}
 	defer needleEnclave.Destroy()
 	if err := needleEnclave.WithBytes(func(b []byte) error {
@@ -425,14 +425,14 @@ func TestSealedEnclave_SizeMismatchDoesNotDecryptOntoTheHeap(t *testing.T) {
 // sealFromEnclave seals a copy of src's material without the plaintext
 // touching the ordinary heap: NewSealed is called on a borrow of a locked
 // transfer enclave, so the input it wipes is locked memory.
-func sealFromEnclave(t *testing.T, src *MemoryEnclave) *SealedEnclave {
+func sealFromEnclave(t *testing.T, src *Memory) *Sealed {
 	t.Helper()
-	transfer, err := NewMemoryEnclaveSized(src.Size())
+	transfer, err := NewMemorySized(src.Size())
 	if err != nil {
 		t.Fatalf("allocating the transfer enclave: %v", err)
 	}
 	defer func() { _ = transfer.Destroy() }()
-	var sealed *SealedEnclave
+	var sealed *Sealed
 	if err := transfer.WithBytes(func(dst []byte) error {
 		if err := src.WithBytes(func(b []byte) error { copy(dst, b); return nil }); err != nil {
 			return err

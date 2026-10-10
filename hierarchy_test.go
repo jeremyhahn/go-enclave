@@ -148,7 +148,7 @@ func TestSealer_InitializationFailurePaths(t *testing.T) {
 		if _, err := p.Protect(ctx, make([]byte, RootKeyBytes)); !errors.Is(err, ErrSealFailed) {
 			t.Fatalf("Protect = %v, want ErrSealFailed", err)
 		}
-		if p.root != nil {
+		if p.s.root != nil {
 			t.Fatal("a root whose fill failed was kept")
 		}
 	})
@@ -166,7 +166,7 @@ func TestSealer_RotationAndRetiredGenerationFailurePaths(t *testing.T) {
 		t.Cleanup(func() { _ = s.Destroy() })
 		return s
 	}
-	seal := func(t *testing.T, s *Sealer, data string) *SealedEnclave {
+	seal := func(t *testing.T, s *Sealer, data string) *Sealed {
 		t.Helper()
 		v, err := s.Seal(ctx, []byte(data))
 		if err != nil {
@@ -201,7 +201,7 @@ func TestSealer_RotationAndRetiredGenerationFailurePaths(t *testing.T) {
 		if err := s.kek.Destroy(); err != nil {
 			t.Fatalf("destroying the KEK: %v", err)
 		}
-		if err := s.rotateKEK(); !errors.Is(err, ErrSealerWiped) {
+		if err := s.rotateKEK(t.Context()); !errors.Is(err, ErrSealerWiped) {
 			t.Fatalf("rotateKEK = %v, want ErrSealerWiped", err)
 		}
 		if s.root.IsAlive() {
@@ -237,9 +237,9 @@ func TestSealer_RotationAndRetiredGenerationFailurePaths(t *testing.T) {
 	})
 
 	t.Run("blobs this hierarchy never produced", func(t *testing.T) {
-		dek, err := NewMemoryEnclaveSized(dekBytes)
+		dek, err := NewMemorySized(dekBytes)
 		if err != nil {
-			t.Fatalf("NewMemoryEnclaveSized: %v", err)
+			t.Fatalf("NewMemorySized: %v", err)
 		}
 		t.Cleanup(func() { _ = dek.Destroy() })
 
@@ -323,7 +323,7 @@ func TestSealer_KEKRotatesAtTheMessageLimit(t *testing.T) {
 
 	// Rotation must not strand what came before it: the retired-generation
 	// values open through the root-unwrap path.
-	for name, v := range map[string]*SealedEnclave{"sealed before": before, "sealed at the limit": atLimit} {
+	for name, v := range map[string]*Sealed{"sealed before": before, "sealed at the limit": atLimit} {
 		e, err := v.Open(t.Context())
 		if err != nil {
 			t.Fatalf("%s: Open after rotation: %v", name, err)
@@ -364,7 +364,7 @@ func TestSealer_ConcurrentSealsAcrossRotation(t *testing.T) {
 	s.kekUsed.Store(kekMessageLimit - 1)
 
 	const goroutines, seals = 8, 12
-	values := make([][]*SealedEnclave, goroutines)
+	values := make([][]*Sealed, goroutines)
 	var wg sync.WaitGroup
 	for g := 0; g < goroutines; g++ {
 		wg.Add(1)
@@ -415,11 +415,11 @@ func TestSealer_ProviderRootReachesTheHierarchy(t *testing.T) {
 	kekBlob := append([]byte(nil), s.kekBlobs[1]...)
 	s.mu.RUnlock()
 
-	buildRoot := func(fill byte) *MemoryEnclave {
+	buildRoot := func(fill byte) *Memory {
 		t.Helper()
-		root, err := NewMemoryEnclaveSized(RootKeyBytes)
+		root, err := NewMemorySized(RootKeyBytes)
 		if err != nil {
-			t.Fatalf("NewMemoryEnclaveSized: %v", err)
+			t.Fatalf("NewMemorySized: %v", err)
 		}
 		if err := root.WithBytes(func(b []byte) error {
 			for i := range b {
@@ -433,12 +433,12 @@ func TestSealer_ProviderRootReachesTheHierarchy(t *testing.T) {
 	}
 
 	// The unwrapped KEK lands in locked memory, never an ordinary buffer.
-	kekEnclave, err := NewMemoryEnclaveSized(kekBytes)
+	kekEnclave, err := NewMemorySized(kekBytes)
 	if err != nil {
 		t.Fatalf("allocating the KEK destination: %v", err)
 	}
 	defer func() { _ = kekEnclave.Destroy() }()
-	unwrapInto := func(root *MemoryEnclave, aad []byte) error {
+	unwrapInto := func(root *Memory, aad []byte) error {
 		return kekEnclave.WithBytes(func(kek []byte) error {
 			return openWithKeyInto(root, kekBlob[blobHeaderLen:], aad, kek)
 		})
@@ -568,9 +568,9 @@ func TestSealer_PerCallLossDuringRotationIsNotAWipe(t *testing.T) {
 		}()
 	}
 	for range 200 {
-		dead, err := NewMemoryEnclaveSized(dekBytes)
+		dead, err := NewMemorySized(dekBytes)
 		if err != nil {
-			t.Fatalf("NewMemoryEnclaveSized: %v", err)
+			t.Fatalf("NewMemorySized: %v", err)
 		}
 		if err := dead.Destroy(); err != nil {
 			t.Fatalf("Destroy: %v", err)
@@ -640,7 +640,7 @@ func TestSealer_RotationOverlappingASweepLeavesTheSealerWiped(t *testing.T) {
 	s.kekUsed.Store(kekMessageLimit + 1) // the next rotation is due
 
 	registryMu.Lock()
-	before := make(map[*MemoryEnclave]struct{}, len(live))
+	before := make(map[*memoryState]struct{}, len(live))
 	for e := range live {
 		before[e] = struct{}{}
 	}
@@ -650,7 +650,7 @@ func TestSealer_RotationOverlappingASweepLeavesTheSealerWiped(t *testing.T) {
 	// WipeAll skips the root but reclaims the old KEK. The test holds that borrow
 	// across the sweep and releases it before the mint continues.
 	s.mu.RLock()
-	root := s.root
+	root := s.root.(*Memory)
 	s.mu.RUnlock()
 	prev := lockMemory
 	swept := false
@@ -673,7 +673,7 @@ func TestSealer_RotationOverlappingASweepLeavesTheSealerWiped(t *testing.T) {
 		return prev(b)
 	})
 
-	if err := s.rotateKEK(); !errors.Is(err, ErrSealerWiped) {
+	if err := s.rotateKEK(t.Context()); !errors.Is(err, ErrSealerWiped) {
 		t.Fatalf("rotateKEK with a sweep inside its mint = %v, want ErrSealerWiped", err)
 	}
 	if !swept {
@@ -707,7 +707,7 @@ func TestSealer_RotationOverlappingASweepLeavesTheSealerWiped(t *testing.T) {
 	registryMu.Lock()
 	var leaked int
 	for e := range live {
-		if _, ok := before[e]; !ok && e.IsAlive() {
+		if _, ok := before[e]; !ok && (&Memory{memoryState: e}).IsAlive() {
 			leaked++
 		}
 	}
@@ -736,7 +736,7 @@ func TestSealer_RotationCleanupReportsAndRetriesARefusedRelease(t *testing.T) {
 	s.kekUsed.Store(kekMessageLimit + 1)
 
 	s.mu.RLock()
-	root := s.root
+	root := s.root.(*Memory)
 	s.mu.RUnlock()
 	prevLock, prevUnmap := lockMemory, unmapMemory
 	refused := errors.New("munmap: cannot allocate memory")
@@ -766,7 +766,7 @@ func TestSealer_RotationCleanupReportsAndRetriesARefusedRelease(t *testing.T) {
 		return prevLock(b)
 	})
 
-	err = s.rotateKEK()
+	err = s.rotateKEK(t.Context())
 	lockMemory = prevLock
 	if !errors.Is(err, ErrSealerWiped) || !errors.Is(err, ErrLockedMemoryUnavailable) {
 		t.Fatalf("rotateKEK with its cleanup refused = %v, want ErrSealerWiped joined with the refusal (ErrLockedMemoryUnavailable)", err)
@@ -791,11 +791,11 @@ func TestSealer_RotationCleanupReportsAndRetriesARefusedRelease(t *testing.T) {
 		t.Fatalf("Seal with unmap allowed = %v, want a clean ErrSealerWiped", err)
 	}
 	s.mu.RLock()
-	rootK, curK := s.root, s.kek
+	rootK, curK := s.root.(*Memory), s.kek.(*Memory)
 	s.mu.RUnlock()
 	registryMu.Lock()
-	_, rootOnLedger := live[rootK]
-	_, kekOnLedger := live[curK]
+	_, rootOnLedger := live[ledgerKey(rootK)]
+	_, kekOnLedger := live[ledgerKey(curK)]
 	registryMu.Unlock()
 	if rootOnLedger || kekOnLedger {
 		t.Fatalf("after the public retry: root on ledger %t, KEK on ledger %t; want both released without a sweep", rootOnLedger, kekOnLedger)
@@ -845,7 +845,7 @@ func TestSealer_RotationKeepsAFailedMintsRefusedKEK(t *testing.T) {
 		return prevLock(b)
 	})
 
-	err = s.rotateKEK()
+	err = s.rotateKEK(t.Context())
 	lockMemory = prevLock
 	if !errors.Is(err, ErrSealerWiped) || !errors.Is(err, ErrLockedMemoryUnavailable) {
 		t.Fatalf("rotateKEK whose mint failed and whose KEK release was refused = %v, want ErrSealerWiped joined with the refusal", err)
@@ -860,7 +860,7 @@ func TestSealer_RotationKeepsAFailedMintsRefusedKEK(t *testing.T) {
 	registryMu.Lock()
 	var leftover int
 	for e := range live {
-		if !e.IsAlive() && e.m != nil {
+		if !(&Memory{memoryState: e}).IsAlive() && e.m != nil {
 			leftover++
 		}
 	}
@@ -946,11 +946,11 @@ func TestSealer_DeadHierarchyCleanupRunsAtTheBoundary(t *testing.T) {
 		t.Fatalf("boundary once the refusal lifted = %v, want a clean ErrSealerWiped", err)
 	}
 	s.mu.RLock()
-	rootK, curK := s.root, s.kek
+	rootK, curK := s.root.(*Memory), s.kek.(*Memory)
 	s.mu.RUnlock()
 	registryMu.Lock()
-	_, rootOnLedger := live[rootK]
-	_, kekOnLedger := live[curK]
+	_, rootOnLedger := live[ledgerKey(rootK)]
+	_, kekOnLedger := live[ledgerKey(curK)]
 	registryMu.Unlock()
 	if rootOnLedger || kekOnLedger {
 		t.Fatalf("after the boundary retry: root on ledger %t, KEK on ledger %t; want both released", rootOnLedger, kekOnLedger)
@@ -983,7 +983,7 @@ func TestSealer_RotatesAtTheConfiguredLimit(t *testing.T) {
 		t.Fatalf("NewSealer: %v", err)
 	}
 	ctx := t.Context()
-	var vals []*SealedEnclave
+	var vals []*Sealed
 	for i := 0; i < 10; i++ {
 		v, err := s.Seal(ctx, []byte(fmt.Sprintf("value-%02d", i)))
 		if err != nil {
@@ -1030,7 +1030,7 @@ func TestSealer_ConcurrentSealsRotateWithoutLosingAValue(t *testing.T) {
 				t.Fatalf("NewSealer: %v", err)
 			}
 			const workers, each = 8, 12
-			vals := make([][]*SealedEnclave, workers)
+			vals := make([][]*Sealed, workers)
 			errs := make(chan error, workers)
 			var wg sync.WaitGroup
 			for w := range workers {
@@ -1111,17 +1111,17 @@ func TestSealer_SealersSharingARootWrapUnderDistinctKeys(t *testing.T) {
 	if len(*salts) != 2 || bytes.Equal((*salts)[0], (*salts)[1]) {
 		t.Fatal("two sealers drew the same wrapping salt")
 	}
-	if ok, err := a.root.EqualTo(mustBytes(t, b.root)); ok || err != nil {
+	if ok, err := a.root.(*Memory).EqualTo(mustBytes(t, b.root.(*Memory))); ok || err != nil {
 		t.Fatalf("two sealers over one root wrap under the same key (equal=%t, err=%v)", ok, err)
 	}
 	blob := a.kekBlobs[1]
-	kek, err := NewMemoryEnclaveSized(kekBytes)
+	kek, err := NewMemorySized(kekBytes)
 	if err != nil {
-		t.Fatalf("NewMemoryEnclaveSized: %v", err)
+		t.Fatalf("NewMemorySized: %v", err)
 	}
 	defer kek.Destroy()
 	err = kek.WithBytes(func(k []byte) error {
-		return openWithKeyInto(b.root, blob[blobHeaderLen:], blob[:blobHeaderLen], k)
+		return openWithKeyInto(b.root.(*Memory), blob[blobHeaderLen:], blob[:blobHeaderLen], k)
 	})
 	if !errors.Is(err, ErrSealedAuthentication) {
 		t.Fatalf("one sealer's KEK blob under the other's wrapping key = %v, want ErrSealedAuthentication", err)
@@ -1129,7 +1129,7 @@ func TestSealer_SealersSharingARootWrapUnderDistinctKeys(t *testing.T) {
 }
 
 // mustBytes copies an enclave's material out for a comparison in a test.
-func mustBytes(t *testing.T, e *MemoryEnclave) []byte {
+func mustBytes(t *testing.T, e *Memory) []byte {
 	t.Helper()
 	var out []byte
 	if err := e.WithBytes(func(b []byte) error { out = append(out, b...); return nil }); err != nil {
@@ -1195,7 +1195,7 @@ func TestSealer_RefusesAGenerationPastTheRootCeiling(t *testing.T) {
 		t.Fatalf("after the refusal: generation %d, hierarchy alive %t; want %d and true", gen, alive, uint32(maxKEKGenerations))
 	}
 
-	for name, v := range map[string]*SealedEnclave{"first": first, "last": last} {
+	for name, v := range map[string]*Sealed{"first": first, "last": last} {
 		e, err := v.Open(ctx)
 		if err != nil {
 			t.Fatalf("Open of the %s value after the refusal: %v", name, err)
@@ -1839,7 +1839,7 @@ func TestSealer_RefusedReleaseOfADiscardedKEKIsRetried(t *testing.T) {
 	if !errors.Is(err, ErrSealerWiped) || !pagesHeld(err) {
 		t.Fatalf("Seal = %v, want ErrSealerWiped with the KEK's refused release reported", err)
 	}
-	kek := s.pendingKEK
+	kek, _ := s.pendingKEK.(*Memory)
 	if kek == nil {
 		t.Fatal("the KEK whose release was refused is no longer referenced by the sealer; nothing will retry it")
 	}

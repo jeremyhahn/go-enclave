@@ -18,7 +18,7 @@
 # build/ci/buildgates fails when a docs/<feature>/ directory has no line, when
 # a source file matches no glob or two features' globs, when a glob matches
 # nothing, and when an integration test does not carry a feature's prefix.
-locked-memory         enclave      enclave TestLockedMemory_         constanttime.go doc.go enclave.go errors.go harden*.go madvise*.go mapping.go osmem*.go secret_erase.go secret_noerase.go internal/memscan/*.go
+locked-memory         enclave      enclave TestLockedMemory_         constanttime.go doc.go enclave.go errors.go harden*.go madvise*.go mapping.go nocopy.go osmem*.go secret_erase.go secret_noerase.go internal/memscan/*.go
 locked-memory-budget  enclave      enclave TestLockedMemoryBudget_   allocator.go memlock.go memlock_*.go singleton.go
 sealing               enclave      enclave TestSealing_              aead.go hierarchy.go keywrap.go provider.go sealed.go sealer.go
 shutdown-sweep        enclave      enclave TestShutdownSweep_        registry.go

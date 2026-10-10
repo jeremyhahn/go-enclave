@@ -8,7 +8,10 @@
 
 package enclave
 
-import "encoding/binary"
+import (
+	"encoding/binary"
+	"errors"
+)
 
 // Blob framing. Every wrapped-key blob this package produces starts with a
 // fixed header that is also the AAD of the wrapping, so a blob cannot be
@@ -50,9 +53,20 @@ func parseBlobHeader(blob []byte) (kind byte, gen uint32, err error) {
 
 // wrapKey seals key under the key in wrapping and returns the blob: the
 // frame for kind and gen, which the seal binds as AAD, then the sealed key.
-func wrapKey(wrapping *MemoryEnclave, key []byte, kind byte, gen uint32) ([]byte, error) {
+// A wrapping handle with [AEAD] seals in its device; one with only
+// [ByteAccess] seals in this process.
+func wrapKey(wrapping Handle, key []byte, kind byte, gen uint32) ([]byte, error) {
 	header := blobHeader(kind, gen)
-	body, err := sealWithKey(wrapping, key, header)
+	var body []byte
+	var err error
+	switch k := wrapping.(type) {
+	case AEAD:
+		body, err = sealOnDevice(k, key, header)
+	case ByteAccess:
+		body, err = sealWithKey(k, key, header)
+	default:
+		err = &CapabilityError{Backend: backendName(wrapping), Capability: CapabilityAEAD}
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -62,9 +76,74 @@ func wrapKey(wrapping *MemoryEnclave, key []byte, kind byte, gen uint32) ([]byte
 // unwrapKey recovers the key in a wrapKey blob into dst, verifying the frame
 // as AAD. The caller chooses wrapping from the frame (parseBlobHeader); any
 // frame other than the one sealed fails authentication here.
-func unwrapKey(wrapping *MemoryEnclave, blob, dst []byte) error {
+func unwrapKey(wrapping Handle, blob, dst []byte) error {
 	if len(blob) < blobHeaderLen {
 		return ErrSealedAuthentication
 	}
-	return openWithKeyInto(wrapping, blob[blobHeaderLen:], blob[:blobHeaderLen], dst)
+	sealed, header := blob[blobHeaderLen:], blob[:blobHeaderLen]
+	switch k := wrapping.(type) {
+	case AEAD:
+		return openOnDeviceInto(k, sealed, header, dst)
+	case ByteAccess:
+		return openWithKeyInto(k, sealed, header, dst)
+	default:
+		return &CapabilityError{Backend: backendName(wrapping), Capability: CapabilityAEAD}
+	}
+}
+
+// sealOnDevice is sealWithKey for a key that never leaves its device: the
+// handle's AEAD seals, under a fresh random nonce carried in front.
+func sealOnDevice(key AEAD, plaintext, aad []byte) ([]byte, error) {
+	ns := key.NonceSize()
+	out := make([]byte, ns, ns+len(plaintext)+key.Overhead())
+	var nonce []byte
+	if ns > 0 {
+		nonce = out[:ns]
+		if err := fillRandom(nonce); err != nil {
+			return nil, &SealError{Cause: err}
+		}
+	}
+	sealed, err := key.Seal(out, nonce, plaintext, aad)
+	if err != nil {
+		return nil, deviceFailure[sealFailed](err)
+	}
+	return sealed, nil
+}
+
+// openOnDeviceInto is openWithKeyInto for a key that never leaves its
+// device, with the same refusal of a result that did not land in dst.
+func openOnDeviceInto(key AEAD, sealed, aad, dst []byte) error {
+	ns := key.NonceSize()
+	if len(sealed) <= ns || len(dst) == 0 {
+		return ErrSealedAuthentication
+	}
+	var nonce []byte
+	if ns > 0 {
+		nonce = sealed[:ns]
+	}
+	got, err := key.Open(dst[:0:len(dst)], nonce, sealed[ns:], aad)
+	if err != nil {
+		return deviceFailure[openFailed](err)
+	}
+	if len(got) > 0 && &got[0] != &dst[0] {
+		Wipe(got)
+		return ErrPlaintextEscaped
+	}
+	if len(got) != len(dst) {
+		return ErrSealedAuthentication
+	}
+	return nil
+}
+
+// deviceFailure translates an AEAD handle's error: a failed authentication
+// is the envelope's, a destroyed handle is left for hierarchyFailure to
+// judge, and anything else is the device's own failure of kind K.
+func deviceFailure[K kind](err error) error {
+	switch {
+	case errors.Is(err, ErrAEADAuthentication):
+		return ErrSealedAuthentication
+	case errors.Is(err, ErrEnclaveDestroyed):
+		return err
+	}
+	return &causeError[K]{Cause: err}
 }

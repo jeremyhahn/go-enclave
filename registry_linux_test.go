@@ -23,7 +23,7 @@ import (
 // mapping, named or not. The control comes first: with the enclaves alive the
 // material must be found outside the needle's own mapping.
 func TestWipeAll_LeavesNoResidentMaterial(t *testing.T) {
-	// The needle lives in a raw mapping, not a MemoryEnclave: WipeAll would
+	// The needle lives in a raw mapping, not a Memory: WipeAll would
 	// destroy an enclave holding it, and a []byte literal would put it on the heap.
 	m, err := newMapping(64)
 	if err != nil {
@@ -45,18 +45,18 @@ func TestWipeAll_LeavesNoResidentMaterial(t *testing.T) {
 	// Several enclaves, so the sweep has more than one copy to find.
 	const copies = 4
 	for i := 0; i < copies; i++ {
-		// From a locked transfer enclave, never a heap copy: NewMemoryEnclave
+		// From a locked transfer enclave, never a heap copy: NewMemory
 		// wipes its input, and that wipe must land in locked pages.
-		transfer, err := NewMemoryEnclaveSized(len(m.data))
+		transfer, err := NewMemorySized(len(m.data))
 		if err != nil {
 			t.Fatalf("allocating the transfer enclave: %v", err)
 		}
 		if err := transfer.WithBytes(func(dst []byte) error {
 			copy(dst, m.data)
-			_, nerr := NewMemoryEnclave(dst)
+			_, nerr := NewMemory(dst)
 			return nerr
 		}); err != nil {
-			t.Fatalf("NewMemoryEnclave: %v", err)
+			t.Fatalf("NewMemory: %v", err)
 		}
 		if err := transfer.Destroy(); err != nil {
 			t.Fatalf("destroying the transfer enclave: %v", err)
@@ -102,8 +102,8 @@ func TestWipeAll_ReturnsLockedMemoryToTheKernel(t *testing.T) {
 
 	const n = 6
 	for i := 0; i < n; i++ {
-		if _, err := NewMemoryEnclaveSized(64); err != nil {
-			t.Fatalf("NewMemoryEnclaveSized: %v", err)
+		if _, err := NewMemorySized(64); err != nil {
+			t.Fatalf("NewMemorySized: %v", err)
 		}
 	}
 

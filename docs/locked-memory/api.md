@@ -1,6 +1,6 @@
 # Locked-memory enclaves — API
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-07
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-09
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Transports
@@ -14,22 +14,23 @@ transport own those surfaces.
 
 | Capability | Embedded Go call | REST / gRPC / QUIC / MCP / Unix socket |
 |---|---|---|
-| Bring existing material into locked memory (move) | `enclave.NewMemoryEnclave(data)` | N/A |
-| Bring existing material in (copy, source kept) | `enclave.NewMemoryEnclaveCopy(src)` | N/A |
-| Generate in place | `enclave.NewMemoryEnclaveSized(n)` then `WithBytes`, `Freeze` | N/A |
-| Read under lock | `(*MemoryEnclave).WithBytes(fn)`, `EqualTo(b) (bool, error)` | N/A |
-| Make read-only | `(*MemoryEnclave).Freeze()` | N/A |
-| Inspect | `(*MemoryEnclave).Size()`, `(*MemoryEnclave).IsAlive()`, `(*MemoryEnclave).String()` | N/A |
-| Release | `(*MemoryEnclave).Destroy() error` | N/A |
+| Bring existing material into locked memory (move) | `enclave.NewMemory(data)` | N/A |
+| Bring existing material in (copy, source kept) | `enclave.NewMemoryCopy(src)` | N/A |
+| Generate in place | `enclave.NewMemorySized(n)` then `WithBytes`, `Freeze` | N/A |
+| Read under lock | `(*Memory).WithBytes(fn)`, `EqualTo(b) (bool, error)` | N/A |
+| Make read-only | `(*Memory).Freeze()` | N/A |
+| Inspect | `(*Memory).Size()`, `(*Memory).IsAlive()`, `(*Memory).String()` | N/A |
+| Release | `(*Memory).Destroy() error` | N/A |
+| Which backend holds it | `(*Memory).Backend() Backend` | N/A |
 | Cost of an enclave | `enclave.LockedSize(n) int64` | N/A |
-| Core-dump hardening status | `enclave.CoreDumpsDisabled() error` | N/A |
+| Core-dump limit status (after `HardenProcess`) | `enclave.CoreDumpsDisabled() error` | N/A |
 | Opt-in process hardening | `enclave.HardenProcess() (ProcessHardening, error)` | N/A |
 | Zero a heap slice | `enclave.Wipe(b)` | N/A |
 
 Request and response schemas are the Go signatures in
 [engineering.md](engineering.md#exported-surface); error mapping is in
 [engineering.md](engineering.md#error-semantics). There is no authentication or
-permission scope: anything in the process that holds the `*MemoryEnclave` can
+permission scope: anything in the process that holds the `*Memory` can
 use it. No result set is unbounded, so there is no pagination.
 
 ## Versioning

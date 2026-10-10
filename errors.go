@@ -28,7 +28,7 @@ var (
 	// read. The locked pages have already been wiped and released.
 	ErrEnclaveDestroyed = errors.New("enclave: enclave has been destroyed")
 
-	// ErrInvalidSize is returned by [NewMemoryEnclaveSized] and
+	// ErrInvalidSize is returned by [NewMemorySized] and
 	// [Allocator.NewSized], before anything is mapped, for a size that is
 	// non-positive or too large to map (the sizes [LockedSize] reports as 0).
 	ErrInvalidSize = errors.New("enclave: enclave size must be positive and small enough to map")
@@ -46,12 +46,16 @@ var (
 	ErrReleasedWithoutWipe = errors.New("enclave: pages unmapped without an in-process wipe; mprotect was denied")
 
 	// ErrEnclaveCorrupted reports that an enclave's canary or guard pages were
-	// overwritten, detected at release. See [MemoryEnclave.Destroy].
+	// overwritten, detected at release. See [Memory.Destroy].
 	ErrEnclaveCorrupted = errors.New("enclave: canary verification failed; memory ahead of the enclave was overwritten")
 
+	// ErrNilFunc is returned by [Memory.WithBytes] for a nil function, which
+	// it never calls; the enclave is unchanged.
+	ErrNilFunc = errors.New("enclave: WithBytes was given a nil function")
+
 	// ErrCoreDumpLimitUnsupported is what [CoreDumpsDisabled] reports on
-	// Windows, which has no process-wide core-dump limit; dump exposure there
-	// must be governed by host policy.
+	// Windows, which has no process-wide core-dump limit, whether or not
+	// [HardenProcess] ran; dump exposure there must be governed by host policy.
 	ErrCoreDumpLimitUnsupported = errors.New("enclave: this platform has no process-wide core-dump limit to lower")
 
 	// errInvalidProtection reports a protection outside the defined values, so
@@ -110,10 +114,18 @@ var (
 	ErrInvalidTransfer = errors.New("enclave: invalid headroom transfer")
 
 	// ErrNilAllocator is returned for a nil *Allocator by [SetAllocator],
-	// [SealedEnclave.OpenWith] (which never falls back to the unbudgeted
-	// [SealedEnclave.Open]), and the Allocator methods that can fail. New
+	// [Sealed.OpenIn] (which never falls back to the unbudgeted
+	// [Sealed.Open]), and the Allocator methods that can fail. New
 	// still wipes the data it was handed.
 	ErrNilAllocator = errors.New("enclave: allocator is nil")
+
+	// ErrAllocatorNotConstructed is returned for an [Allocator] that was not
+	// built by [NewAllocator] or [NewAllocatorWithinRLimit], such as the zero
+	// value, by [SetAllocator] (which installs nothing), by [Sealed.OpenIn],
+	// and by the Allocator methods that can fail, as either side of
+	// [Allocator.TransferTo]. Nothing is admitted or changed; New and Import
+	// still wipe the data they were handed.
+	ErrAllocatorNotConstructed = errors.New("enclave: allocator was not constructed with NewAllocator or NewAllocatorWithinRLimit")
 
 	// ErrAllocatorInstalled is returned by [SetAllocator] when the process
 	// allocator is already set, by an earlier SetAllocator or by the first
@@ -236,12 +248,34 @@ var (
 	// errDumpableNotCleared reports a PR_SET_DUMPABLE that succeeded but did
 	// not read back as cleared.
 	errDumpableNotCleared = errors.New("enclave: the process is still dumpable after PR_SET_DUMPABLE 0")
+
+	// ErrCoreDumpLimitFailed reports that [HardenProcess] could not lower
+	// RLIMIT_CORE to zero, soft and hard: setrlimit or its read-back was
+	// refused, or the read-back disagreed. Every [CoreDumpLimitError] matches
+	// it; [CoreDumpsDisabled] keeps reporting it until a later HardenProcess
+	// succeeds.
+	ErrCoreDumpLimitFailed = errors.New("enclave: lowering the core-dump limit to zero failed")
+
+	// ErrCoreDumpLimitNotApplied is what [CoreDumpsDisabled] reports before
+	// [HardenProcess] has run: importing the package leaves RLIMIT_CORE as the
+	// process found it.
+	ErrCoreDumpLimitNotApplied = errors.New("enclave: the core-dump limit was not lowered; HardenProcess has not run")
+
+	// errCoreLimitNotCleared reports a setrlimit(RLIMIT_CORE) that succeeded
+	// but did not read back as zero, soft and hard.
+	errCoreLimitNotCleared = errors.New("enclave: RLIMIT_CORE is not zero after setrlimit")
 )
 
 // ProcessHardeningError is the error behind [ErrProcessHardeningFailed]. Its
-// Cause is the refused system call, or the read-back that disagreed; Unwrap
-// returns it.
+// Cause is the refused system call, the read-back that disagreed, or a
+// [CoreDumpLimitError]; Unwrap returns it.
 type ProcessHardeningError = causeError[processHardeningFailed]
+
+// CoreDumpLimitError is the error behind [ErrCoreDumpLimitFailed], which
+// errors.Is reports for every CoreDumpLimitError. Its Cause is the refused
+// setrlimit or getrlimit's *os.SyscallError, or the read-back that disagreed;
+// Unwrap returns it.
+type CoreDumpLimitError = causeError[coreDumpLimitFailed]
 
 // Sealing.
 var (
@@ -302,7 +336,7 @@ var (
 	// reports this error after a sweep.
 	ErrSealerWiped = errors.New("enclave: this sealer's keys were destroyed by a shutdown sweep; sealed values are unrecoverable and re-initializing requires constructing a new Sealer")
 
-	// ErrOpenabilityUnknown is returned by [SealedEnclave.Openable] when a
+	// ErrOpenabilityUnknown is returned by [Sealed.Openable] when a
 	// shutdown sweep has run since this value was sealed (or during the seal)
 	// and the sealer's provider can report nothing about its own sealing
 	// state. It occurs only in [ModePerOperation], only after a [WipeAll],
@@ -341,7 +375,7 @@ var (
 	ErrNilSealer = errors.New("enclave: sealer is nil")
 
 	// ErrSealerDestroyed is returned by every Seal and Open, and by
-	// [SealedEnclave.Openable], once [Sealer.Destroy] has run; and by a
+	// [Sealed.Openable], once [Sealer.Destroy] has run; and by a
 	// [SoftwareProvider] once its own Destroy has run. The sealer fails closed
 	// and never re-keys.
 	ErrSealerDestroyed = errors.New("enclave: sealer was destroyed; sealed values are unrecoverable and sealing requires constructing a new Sealer")
@@ -351,12 +385,35 @@ var (
 	// material is wiped as on every other failure.
 	ErrSealerNotConstructed = errors.New("enclave: sealer was not constructed with NewSealer")
 
+	// ErrInvalidSealerOption is returned by [NewSealer] for a nil
+	// [SealerOption].
+	ErrInvalidSealerOption = errors.New("enclave: a sealer option is nil")
+
+	// ErrSealSourceReadOnly is returned by [Sealer.Seal] and [NewSealed] for
+	// data this process cannot write, such as a view into a frozen [Memory]
+	// passed from inside its WithBytes. Seal wipes its input, and a write to a
+	// read-only page kills the process, so the value is refused before any key
+	// is touched and data is left as it was. Seal the enclave itself with
+	// [Sealer.SealFrom] or [NewSealedFrom], which borrow it and never wipe it.
+	ErrSealSourceReadOnly = errors.New("enclave: material to seal is read-only and cannot be wiped; seal its enclave with SealFrom")
+
+	// ErrKeyScheduleExposed is returned by [NewSealer] with
+	// [WithRequireKeyScheduleErasure] when a class of the sealer's keys would
+	// leave its AES key schedule on the heap: neither does the build erase it
+	// ([KeyScheduleErasure]) nor does the sealer's backend confine the process
+	// ([Confiner]). Every [KeyScheduleExposedError] matches it.
+	ErrKeyScheduleExposed = errors.New("enclave: a sealing key's AES key schedule would reach the heap without being erased")
+
 	// ErrProviderMessageLimit reports that a [SoftwareProvider] in
 	// [ModePerOperation] has performed as many Protect operations (2^31) as
 	// its single root key may safely encrypt, and refuses further ones. The
 	// provider does not rotate; use [ModeRootKey], which does, or a hardware
 	// [KeyProtector].
 	ErrProviderMessageLimit = errors.New("enclave: software provider reached its per-key message bound; use ModeRootKey or a hardware provider")
+
+	// ErrProviderNotConstructed reports a [SoftwareProvider] that was not
+	// built by [NewSoftwareProvider], such as the zero value.
+	ErrProviderNotConstructed = errors.New("enclave: software provider was not constructed with NewSoftwareProvider")
 
 	// errHierarchyUninitialized marks a ModeRootKey hierarchy not yet built:
 	// distinct from wiped, because uninitialized may initialize and wiped
@@ -383,6 +440,11 @@ type OpenError = causeError[openFailed]
 // not be repeated. errors.Is reports ErrSealerWiped for every
 // SealerWipedError; Unwrap returns the Cause.
 type SealerWipedError = causeError[sealerWiped]
+
+// KeyScheduleExposedError is the error behind [ErrKeyScheduleExposed], which
+// errors.Is reports for every KeyScheduleExposedError. Its Name is the first
+// key class found exposed: "wrapping-key", "kek" or "dek".
+type KeyScheduleExposedError = nameError[keyScheduleExposed]
 
 // contextError reports that the caller's context ended before or during an
 // operation. It unwraps to each of its non-nil fields, so the error matches
@@ -484,6 +546,57 @@ func (e *CapabilityError) Error() string {
 // Is reports every CapabilityError as [ErrCapabilityUnsupported].
 func (e *CapabilityError) Is(target error) bool { return target == ErrCapabilityUnsupported }
 
+// Handle cleanup.
+
+// ErrCleanupFailed reports that a [Handle] the operation no longer needed,
+// such as a sealer's outgoing KEK or a plaintext handle an open did not
+// return, refused its Destroy and still holds its material. Every
+// [CleanupError] matches it.
+var ErrCleanupFailed = errors.New("enclave: a handle refused its Destroy and still holds its material")
+
+// CleanupError reports a [Handle] that refused its Destroy, with the failure
+// of the operation that wanted it gone. The [Sealer] the operation ran under
+// keeps the handle and retries its Destroy on every [Sealer.Destroy], so the
+// material stays reachable until it is released.
+//
+// Match it with errors.Is against [ErrCleanupFailed], and against the
+// operation's failure and the cause, which Unwrap returns; read both with
+// errors.As.
+type CleanupError struct {
+	// Failure is the operation's own error, or nil when the operation did its
+	// work and failed only for the refused Destroy.
+	Failure error
+	// Cause is what the handle's Destroy returned.
+	Cause error
+}
+
+// Error is the operation's failure, when there is one, followed by
+// [ErrCleanupFailed]'s text and the cause's.
+func (e *CleanupError) Error() string {
+	msg := ErrCleanupFailed.Error()
+	if e.Cause != nil {
+		msg += ": " + e.Cause.Error()
+	}
+	if e.Failure != nil {
+		msg = e.Failure.Error() + "; " + msg
+	}
+	return msg
+}
+
+// Is reports every CleanupError as [ErrCleanupFailed].
+func (e *CleanupError) Is(target error) bool { return target == ErrCleanupFailed }
+
+// Unwrap returns the operation's failure and the cause, skipping a nil one.
+func (e *CleanupError) Unwrap() []error {
+	errs := make([]error, 0, 2)
+	for _, err := range []error{e.Failure, e.Cause} {
+		if err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errs
+}
+
 // Shutdown sweep.
 
 // ErrSweepInProgress is returned by [WipeAll] when it was never admitted:
@@ -494,17 +607,19 @@ func (e *CapabilityError) Is(target error) bool { return target == ErrCapability
 var ErrSweepInProgress = errors.New("enclave: another WipeAll is in progress; nothing was swept")
 
 // SweepError reports what an admitted [WipeAll] sweep found that is not a held
-// page: canary corruption, unwiped unmaps, or both. Neither leaves pages held,
-// so the count cannot carry them.
+// page: canary corruption, unwiped unmaps, a registered [Sweeper] that failed,
+// or any mix. None leaves locked-memory pages held, so the count cannot carry
+// them.
 //
 // Match it with errors.Is against [ErrEnclaveCorrupted] (Corrupt non-zero) and
-// [ErrReleasedWithoutWipe] (Unwiped non-zero); read the numbers with errors.As.
-// WipeAll returns one only when a field is non-zero, and never a nil
-// *SweepError behind a non-nil error.
+// [ErrReleasedWithoutWipe] (Unwiped non-zero), and against each failed
+// backend's own errors, which Unwrap returns; read the numbers and the failures
+// with errors.As. WipeAll returns one only when a field is non-zero or
+// non-empty, and never a nil *SweepError behind a non-nil error.
 type SweepError struct {
 	// Corrupt is how many entries this sweep found with a failed canary
 	// (enclaves, and orphaned mappings that had material copied in), plus
-	// every enclave whose [MemoryEnclave.Destroy] reported [ErrEnclaveCorrupted]
+	// every enclave whose [Memory.Destroy] reported [ErrEnclaveCorrupted]
 	// since the previous admitted sweep. Each is counted once per sweep. A
 	// corrupt entry whose pages the kernel would not release is also in the
 	// count WipeAll returns.
@@ -514,10 +629,24 @@ type SweepError struct {
 	// overwrite because the mprotect that makes a frozen region writable was
 	// denied. Their pages are gone, so they are never in the count.
 	Unwiped int
+
+	// Backends has one entry per registered backend whose Sweep returned an
+	// error, in name order. What such a backend still holds is in the count.
+	Backends []BackendSweepFailure
 }
 
-// Error implements error. Each non-zero condition is one line naming its
-// count and ending in its sentinel's text; both lines appear when both hold.
+// BackendSweepFailure records one failed [Sweeper.Sweep] in a [SweepError]. It
+// is a record, not an error type.
+type BackendSweepFailure struct {
+	// Backend is the name the backend is registered under.
+	Backend string
+	// Err is what its Sweep returned.
+	Err error
+}
+
+// Error implements error. Each non-zero count is one line naming it and ending
+// in its sentinel's text, followed by one line per failed backend, its name
+// quoted.
 func (e *SweepError) Error() string {
 	var lines []string
 	if e.Corrupt > 0 {
@@ -529,19 +658,40 @@ func (e *SweepError) Error() string {
 			" of the swept enclaves were unmapped without an in-process wipe because mprotect was denied: "+
 			ErrReleasedWithoutWipe.Error())
 	}
-	switch len(lines) {
-	case 0:
+	for _, f := range e.Backends {
+		cause := "<nil>"
+		if f.Err != nil {
+			cause = f.Err.Error()
+		}
+		lines = append(lines, "enclave: backend "+strconv.Quote(f.Backend)+" failed its sweep: "+cause)
+	}
+	if len(lines) == 0 {
 		// Only a hand-built SweepError gets here.
 		return "enclave: sweep reported nothing"
-	case 1:
-		return lines[0]
 	}
-	return lines[0] + "\n" + lines[1]
+	msg := lines[0]
+	for _, line := range lines[1:] {
+		msg += "\n" + line
+	}
+	return msg
+}
+
+// Unwrap returns every failed backend's error, in name order, so errors.Is and
+// errors.As reach each backend's own typed error.
+func (e *SweepError) Unwrap() []error {
+	errs := make([]error, 0, len(e.Backends))
+	for _, f := range e.Backends {
+		if f.Err != nil {
+			errs = append(errs, f.Err)
+		}
+	}
+	return errs
 }
 
 // Is reports whether e carries the condition target names:
 // [ErrEnclaveCorrupted] when Corrupt is non-zero, [ErrReleasedWithoutWipe]
-// when Unwiped is. A zero field never matches its sentinel.
+// when Unwiped is. A zero count never matches its sentinel here; a backend's
+// own error can still match through Unwrap.
 func (e *SweepError) Is(target error) bool {
 	switch target {
 	case ErrEnclaveCorrupted:
@@ -563,9 +713,11 @@ type (
 	releasedWithoutWipe     struct{}
 	limitDiscoveryFailed    struct{}
 	processHardeningFailed  struct{}
+	coreDumpLimitFailed     struct{}
 	sealFailed              struct{}
 	openFailed              struct{}
 	sealerWiped             struct{}
+	keyScheduleExposed      struct{}
 	backendNotRegistered    struct{}
 	backendExists           struct{}
 )
@@ -574,9 +726,11 @@ func (lockedMemoryUnavailable) sentinel() error { return ErrLockedMemoryUnavaila
 func (releasedWithoutWipe) sentinel() error     { return ErrReleasedWithoutWipe }
 func (limitDiscoveryFailed) sentinel() error    { return ErrLimitDiscoveryFailed }
 func (processHardeningFailed) sentinel() error  { return ErrProcessHardeningFailed }
+func (coreDumpLimitFailed) sentinel() error     { return ErrCoreDumpLimitFailed }
 func (sealFailed) sentinel() error              { return ErrSealFailed }
 func (openFailed) sentinel() error              { return ErrOpenFailed }
 func (sealerWiped) sentinel() error             { return ErrSealerWiped }
+func (keyScheduleExposed) sentinel() error      { return ErrKeyScheduleExposed }
 func (backendNotRegistered) sentinel() error    { return ErrBackendNotRegistered }
 func (backendExists) sentinel() error           { return ErrBackendExists }
 
@@ -606,9 +760,9 @@ func (e *causeError[K]) Is(target error) bool {
 func (e *causeError[K]) Unwrap() error { return e.Cause }
 
 // nameError is the shape of every error type that is its kind's sentinel
-// plus the backend name it concerns.
+// plus the name it concerns: a backend's, or a sealing key class's.
 type nameError[K kind] struct {
-	// Name is the backend name the failure concerns.
+	// Name is the backend name or key class the failure concerns.
 	Name string
 }
 
@@ -652,20 +806,8 @@ func withCleanupFailure(failure, cleanup error) error {
 // destroyOnFailure destroys e, which a failed operation leaves unwanted, and
 // returns failure with any release the kernel refused, which destroyTransient
 // would drop.
-func destroyOnFailure(failure error, e *MemoryEnclave) error {
+func destroyOnFailure(failure error, e *Memory) error {
 	return withCleanupFailure(failure, e.Destroy())
-}
-
-// destroyAll destroys every key, nil ones included, and returns every release
-// the kernel refused. A refused key is already wiped and stays on the
-// [WipeAll] ledger; destroying it again retries the release, and destroying a
-// released one again is a no-op.
-func destroyAll(keys ...*MemoryEnclave) error {
-	var errs error
-	for _, k := range keys {
-		errs = withCleanupFailure(errs, k.Destroy())
-	}
-	return errs
 }
 
 // contextFailure returns nil while ctx is live; otherwise the operation's

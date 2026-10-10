@@ -15,7 +15,7 @@ import (
 )
 
 // newWrappingKey returns a fresh key enclave the test destroys on cleanup.
-func newWrappingKey(t *testing.T) *MemoryEnclave {
+func newWrappingKey(t *testing.T) *Memory {
 	t.Helper()
 	k, err := newKeyEnclave(dekBytes)
 	if err != nil {
@@ -72,7 +72,7 @@ func TestUnwrapKey_RefusesWhatWrapKeyDidNotProduce(t *testing.T) {
 	}
 
 	cases := map[string]struct {
-		wrapping *MemoryEnclave
+		wrapping *Memory
 		blob     []byte
 	}{
 		"another kind":          {wrapping, reframed(blobKindKEK, 3)},

@@ -7,7 +7,7 @@
   type assertion. A named registry (`Register`, `Lookup`, `BackendNames`,
   `DefaultBackend`) always holds locked memory under `"locked-memory"`; nothing
   registers at import. `As` reaches a backend's or handle's native interface
-  without panicking. `*MemoryEnclave` is a `Handle`, `ByteAccess` and
+  without panicking. `*Memory` is a `Handle`, `ByteAccess` and
   `Freezer`, and its new `Backend` method returns the default. New typed
   errors: `ErrBackendNotRegistered` (`*BackendNotRegisteredError`),
   `ErrBackendExists` (`*BackendExistsError`), `ErrInvalidBackend`, and

@@ -1,6 +1,6 @@
 # Locked-memory enclaves — architecture
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-07
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-09
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Problem
@@ -13,7 +13,7 @@ allocation*, never another caller's live key.
 
 ## Shape chosen
 
-One `MemoryEnclave` owns one guarded mapping, built by this package over
+One `Memory` owns one guarded mapping, built by this package over
 `golang.org/x/sys` with one system call per primitive. There is no global
 coordinator on the access path: an enclave's own `sync.RWMutex` is the whole of
 its concurrency story, and a shutdown ledger (see
@@ -54,7 +54,9 @@ flowchart TD
   B -- no, frozen --> D
   C --> D[mprotect whole mapping RW]
   D -- refused --> U[munmap without wipe]
-  U -- ok --> UR[refund Allocator reservation, leave ledger] --> UW[return ErrReleasedWithoutWipe]
+  U -- ok --> UR[refund Allocator reservation, leave ledger] --> UQ{data wiped before the mprotect?}
+  UQ -- yes, was writable --> OK
+  UQ -- no, frozen --> UW[return ErrReleasedWithoutWipe]
   U -- refused --> H[keep mapping: pages held, retry later]
   D -- ok --> E[wipe data, verify canary + guards, wipe mapping; mark verified]
   E --> F{unlocked on an earlier attempt?}
@@ -96,8 +98,9 @@ the `munmap` when its `munlock` is refused, since unmapping drops the lock.)
 
 | Concern | File(s) |
 |---|---|
-| `MemoryEnclave`, constructors, borrow, `Freeze`, `Destroy` | [enclave.go](../../enclave.go) |
-| Mapping layout, canary, release sequence, `LockedSize`, `CoreDumpsDisabled` | [mapping.go](../../mapping.go) |
+| `Memory` (a handle on shared `memoryState`), constructors, borrow, `Freeze`, `Destroy`, `Backend` | [enclave.go](../../enclave.go) |
+| Mapping layout, canary, release sequence, `LockedSize` | [mapping.go](../../mapping.go) |
+| `HardenProcess`, `CoreDumpsDisabled` | [harden.go](../../harden.go), [harden_linux.go](../../harden_linux.go), [harden_unsupported.go](../../harden_unsupported.go); the `RLIMIT_CORE` call in the `osmem` files |
 | `Wipe` and the constant-time copy and compare | [constanttime.go](../../constanttime.go) |
 | OS primitives, one syscall each | [osmem.go](../../osmem.go), [osmem_unix.go](../../osmem_unix.go), [osmem_windows.go](../../osmem_windows.go), [osmem_unsupported.go](../../osmem_unsupported.go) |
 | Per-mapping core-dump and fork exclusion | [madvise_unix.go](../../madvise_unix.go), [madvise_linux.go](../../madvise_linux.go), [madvise_bsd.go](../../madvise_bsd.go), [madvise_openbsd.go](../../madvise_openbsd.go), [madvise_unsupported.go](../../madvise_unsupported.go) |
@@ -110,7 +113,7 @@ and consumers reach it only through the exported Go API of package `enclave`.
 
 **Protects against:** the material reaching swap (`mlock` for the enclave's
 life); reaching a core dump (per-mapping exclusion where the kernel offers one,
-plus `RLIMIT_CORE` lowered to zero at import); a `fork(2)` child inheriting the
+plus `RLIMIT_CORE` lowered to zero by an opted-in `HardenProcess`); a `fork(2)` child inheriting the
 pages (Linux `MADV_DONTFORK`); a linear overflow (post-guard
 fault); an underflow into the slack (canary, reported at release); a stray
 write through a retained slice once frozen (fault); a failed allocation
@@ -125,13 +128,13 @@ in to `HardenProcess`), a debugger, a cold-boot capture. While an enclave exists
 `mlock` keeps pages out of swap, not out of a hibernation (suspend-to-disk)
 image or a virtual-machine snapshot, which capture locked memory too.
 Nor does it cover copies the caller makes: the `[]byte` handed to
-`NewMemoryEnclaveCopy`, a string made from bytes borrowed through `WithBytes`, or bytes
+`NewMemoryCopy`, a string made from bytes borrowed through `WithBytes`, or bytes
 generated on the heap before being moved in. For narrowing the live-memory window, see
 [sealing](../sealing/architecture.md).
 
 ## Scope fence
 
-- No cryptography. The only primitive near a `MemoryEnclave` is `crypto/rand`
+- No cryptography. The only primitive near a `Memory` is `crypto/rand`
   filling the canary.
 - No persistence and no cross-process sharing.
 - No automatic destruction (no finalizer, no fault handler).

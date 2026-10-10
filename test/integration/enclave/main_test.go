@@ -9,7 +9,7 @@
 //go:build integration
 
 // Package enclave_test is go-enclave's integration suite. It drives the public
-// API (MemoryEnclave, Allocator, Sealer/SealedEnclave, WipeAll) against the real
+// API (Memory, Allocator, Sealer/Sealed, WipeAll) against the real
 // kernel and verifies outcomes from the kernel's side: admission under a real
 // RLIMIT_MEMLOCK with VmLck cross-checked, VmFlags and guard pages from
 // /proc/self/smaps, plaintext residue swept through /proc/self/mem, sealing with

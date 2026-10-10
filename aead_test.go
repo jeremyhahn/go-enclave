@@ -19,12 +19,12 @@ import (
 	"unsafe"
 )
 
-// TestSealedEnclave_AADRefusesMismatch pins the additional-authenticated-data
+// TestSealed_AADRefusesMismatch pins the additional-authenticated-data
 // path of the shared AEAD helpers: a message sealed under one AAD must not
 // open under another, and must open under its own. Everything the envelope's
 // blob-binding claims rests on this behavior;
 // TestSealer_EnvelopeBindsBlobToCiphertext exercises it end to end.
-func TestSealedEnclave_AADRefusesMismatch(t *testing.T) {
+func TestSealed_AADRefusesMismatch(t *testing.T) {
 	key, err := newKeyEnclave(dekBytes)
 	if err != nil {
 		t.Fatalf("newKeyEnclave: %v", err)
@@ -59,13 +59,13 @@ func TestSealedEnclave_AADRefusesMismatch(t *testing.T) {
 // away; it is never read.
 var aesCipherSink cipher.Block
 
-// TestSealedEnclave_KeyScheduleReachesTheHeapAsDocumented pins the exposure
+// TestSealed_KeyScheduleReachesTheHeapAsDocumented pins the exposure
 // documented in docs/sealing/engineering.md, "Key-schedule heap exposure":
 // aes.NewCipher allocates on the heap, and its schedule holds the key either
 // byte-exact (hardware path, including fips140=only) or as big-endian uint32
 // words (generic path). Offset and layout are not asserted. A failure means
 // the documentation needs re-measuring, not that the package is broken.
-func TestSealedEnclave_KeyScheduleReachesTheHeapAsDocumented(t *testing.T) {
+func TestSealed_KeyScheduleReachesTheHeapAsDocumented(t *testing.T) {
 	key := make([]byte, dekBytes)
 	for i := range key {
 		key[i] = byte(0xA0 + i)
@@ -125,10 +125,10 @@ func TestSealedEnclave_KeyScheduleReachesTheHeapAsDocumented(t *testing.T) {
 	}
 }
 
-// TestSealedEnclave_KeysAreDrawnFromTheCSPRNG pins that newKeyEnclave fills
+// TestSealed_KeysAreDrawnFromTheCSPRNG pins that newKeyEnclave fills
 // keys from the CSPRNG. A constant-key mutant survives every envelope test,
 // because the random nonce keeps sealed bytes non-deterministic.
-func TestSealedEnclave_KeysAreDrawnFromTheCSPRNG(t *testing.T) {
+func TestSealed_KeysAreDrawnFromTheCSPRNG(t *testing.T) {
 	a, err := newKeyEnclave(dekBytes)
 	if err != nil {
 		t.Fatalf("newKeyEnclave: %v", err)

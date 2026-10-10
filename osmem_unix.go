@@ -65,11 +65,25 @@ func sysUnmap(b []byte) error {
 	return os.NewSyscallError("munmap", unix.Munmap(b))
 }
 
+// coreDumpsBeforeHardening is what CoreDumpsDisabled reports until
+// HardenProcess has run.
+var coreDumpsBeforeHardening = ErrCoreDumpLimitNotApplied
+
 // sysDisableCoreDumps sets RLIMIT_CORE to zero, soft and hard, so other code
-// in the process cannot raise it again. It does not bind a core_pattern pipe;
-// excludeFromCoreDump covers that case.
+// in the process cannot raise it again, and reads it back. It does not bind a
+// core_pattern pipe; excludeFromCoreDump covers that case.
 func sysDisableCoreDumps() error {
-	return os.NewSyscallError("setrlimit", unix.Setrlimit(unix.RLIMIT_CORE, &unix.Rlimit{Cur: 0, Max: 0}))
+	if err := unix.Setrlimit(unix.RLIMIT_CORE, &unix.Rlimit{Cur: 0, Max: 0}); err != nil {
+		return os.NewSyscallError("setrlimit", err)
+	}
+	var rl unix.Rlimit
+	if err := unix.Getrlimit(unix.RLIMIT_CORE, &rl); err != nil {
+		return os.NewSyscallError("getrlimit", err)
+	}
+	if rl.Cur != 0 || rl.Max != 0 {
+		return errCoreLimitNotCleared
+	}
+	return nil
 }
 
 // unixProtection translates a protection to PROT_* bits.

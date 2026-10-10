@@ -63,8 +63,8 @@ func TestDefaultBackend_IsLockedMemoryAndAlwaysRegistered(t *testing.T) {
 	}
 }
 
-func TestMemoryEnclave_BackendIsTheDefault(t *testing.T) {
-	e, err := NewMemoryEnclaveCopy([]byte("material"))
+func TestMemory_BackendIsTheDefault(t *testing.T) {
+	e, err := NewMemoryCopy([]byte("material"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,9 +78,9 @@ func TestMemoryEnclave_BackendIsTheDefault(t *testing.T) {
 	if h.Backend() != DefaultBackend() {
 		t.Error("Backend() changed once destroyed")
 	}
-	var none *MemoryEnclave
+	var none *Memory
 	if none.Backend() != DefaultBackend() {
-		t.Error("a nil *MemoryEnclave does not report the default backend")
+		t.Error("a nil *Memory does not report the default backend")
 	}
 }
 
@@ -212,7 +212,7 @@ func TestAs(t *testing.T) {
 		t.Fatal("As did not match the wrapper itself first")
 	}
 
-	var e *MemoryEnclave
+	var e *Memory
 	if As(inner, &e) || e != nil {
 		t.Fatal("As matched an unrelated type")
 	}

@@ -43,7 +43,7 @@ func TestShutdownSweep_WipeAllReclaimsEverythingAndLeavesNoResidue(t *testing.T)
 			t.Fatalf("NewAllocator: %v", err)
 		}
 
-		var held []*enclave.MemoryEnclave
+		var held []*enclave.Memory
 		frozen := enclaveFromNeedle(t, n)
 		if err := frozen.Freeze(); err != nil {
 			t.Fatalf("Freeze: %v", err)
@@ -52,9 +52,9 @@ func TestShutdownSweep_WipeAllReclaimsEverythingAndLeavesNoResidue(t *testing.T)
 
 		src := heapBytes(needleLen)
 		n.fill(src)
-		constructed, err := enclave.NewMemoryEnclave(src)
+		constructed, err := enclave.NewMemory(src)
 		if err != nil {
-			t.Fatalf("NewMemoryEnclave: %v", err)
+			t.Fatalf("NewMemory: %v", err)
 		}
 		held = append(held, constructed)
 
@@ -67,7 +67,7 @@ func TestShutdownSweep_WipeAllReclaimsEverythingAndLeavesNoResidue(t *testing.T)
 		}
 		held = append(held, admitted)
 
-		var sealedValues []*enclave.SealedEnclave
+		var sealedValues []*enclave.Sealed
 		for _, mode := range sealerModes {
 			s, err := enclave.NewSealer(providerOption(enclave.NewSoftwareProvider(), mode))
 			if err != nil {
@@ -75,9 +75,9 @@ func TestShutdownSweep_WipeAllReclaimsEverythingAndLeavesNoResidue(t *testing.T)
 			}
 			v := sealNeedle(t, ctx, s, n)
 			sealedValues = append(sealedValues, v)
-			o, err := v.OpenWith(ctx, alloc)
+			o, err := openInAllocator(t, ctx, v, alloc)
 			if err != nil {
-				t.Fatalf("OpenWith(%v): %v", mode, err)
+				t.Fatalf("OpenIn(%v): %v", mode, err)
 			}
 			held = append(held, o)
 		}
@@ -141,7 +141,7 @@ func TestShutdownSweep_WipeAllWaitsForLiveBorrowsUntilItsDeadline(t *testing.T) 
 	isolated(t, childOpts{}, func(t *testing.T) {
 		n := newNeedle(t)
 		borrowed := enclaveFromNeedle(t, n)
-		others := []*enclave.MemoryEnclave{enclaveFromNeedle(t, newNeedle(t)), enclaveFromNeedle(t, newNeedle(t))}
+		others := []*enclave.Memory{enclaveFromNeedle(t, newNeedle(t)), enclaveFromNeedle(t, newNeedle(t))}
 		page := enclave.LockedSize(needleLen)
 
 		entered := make(chan struct{})
@@ -454,7 +454,7 @@ func TestShutdownSweep_DestroyReturnsCanaryCorruptionAfterWiping(t *testing.T) {
 // underflowOneByte writes the canary's last byte, just before the data, through
 // the writable pages of an unfrozen sized enclave, as a consumer's off-by-one
 // underflow would. A frozen enclave would fault instead.
-func underflowOneByte(t *testing.T, e *enclave.MemoryEnclave) {
+func underflowOneByte(t *testing.T, e *enclave.Memory) {
 	t.Helper()
 	if err := e.WithBytes(func(b []byte) error {
 		p := (*byte)(unsafe.Add(unsafe.Pointer(unsafe.SliceData(b)), -1)) //#nosec G103 -- deliberate underflow to corrupt the canary

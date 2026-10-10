@@ -130,7 +130,7 @@ func TestAllocator_BudgetHoldsTheEnclavesItPromises(t *testing.T) {
 		t.Fatalf("NewAllocator: %v", err)
 	}
 
-	var held []*MemoryEnclave
+	var held []*Memory
 	defer func() {
 		for _, e := range held {
 			e.Destroy()

@@ -60,14 +60,14 @@ In scope:
   envelopes, oracles in error reporting, non-approved cryptography on a sealing
   path.
 - **Provider-contract violations by this package** — calling `UnsealRoot` more
-  than once after it succeeded; holding a `Sealer` or `SealedEnclave` mutex
+  than once after it succeeded; holding a `Sealer` or `Sealed` mutex
   across a provider call (the init semaphore and the borrow of the private
   per-call enclave the provider writes into span `UnsealRoot` by design); silent
   re-keying after a sweep, a conformance-suite check that can pass a provider
   that violates the seam.
 - **Admission-control bypass** — admitting allocations past an `Allocator`
   budget beyond what its documentation allows (the over-subscription
-  `ForceLimit` reports, and `OpenWith`'s unadmitted transient key pages), or one
+  `ForceLimit` reports, and `OpenIn`'s unadmitted transient key pages), or one
   failure destroying another caller's enclave.
 - **Build and release supply chain** — the Makefile, pinned tool installation
   and checksum verification, `scripts/`, and the CI and release workflows
@@ -78,7 +78,7 @@ Out of scope — these are documented limits, not vulnerabilities (reports that
 show the documentation understates them are in scope):
 
 - An adversary who can read this process's live memory (`ptrace`,
-  `/proc/<pid>/mem`, a debugger): a `MemoryEnclave` is readable for its whole
+  `/proc/<pid>/mem`, a debugger): a `Memory` is readable for its whole
   life, and with the software sealer or `ModeRootKey` the sealing keys are too.
 - AES key schedules left on the heap by seals and opens, as described in
   [docs/sealing/engineering.md](docs/sealing/engineering.md#key-schedule-heap-exposure),
@@ -87,7 +87,7 @@ show the documentation understates them are in scope):
   that survives the garbage collection after its operation IS in scope.
 - Core dumps on Windows, darwin, NetBSD, AIX, Solaris and illumos, where no
   per-mapping exclusion is available; and copies the caller makes itself
-  (bytes taken out of a `WithBytes` borrow, and `NewMemoryEnclaveCopy` sources).
+  (bytes taken out of a `WithBytes` borrow, and `NewMemoryCopy` sources).
 - `GOEXPERIMENT=boringcrypto` builds refusing to seal.
 - Defects in third-party providers (TPM, HSM, KMS): report those to their
   authors, unless the seam or the conformance suite is at fault.

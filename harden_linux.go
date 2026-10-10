@@ -26,31 +26,19 @@ var (
 	}
 )
 
-// HardenProcess applies the process-wide protections that are the binary's
-// choice, not a library's, and reports which took effect. This package never
-// calls it; a main package opts in, normally first thing in main.
-//
-// On Linux it marks the process non-dumpable with prctl(PR_SET_DUMPABLE, 0) and
-// reads the flag back; a refusal or a disagreeing read-back is a
-// *[ProcessHardeningError]. That stops core dumps, including ones piped to a
-// collector, and stops other processes of the same uid from attaching with
-// ptrace or reading /proc/<pid>/mem. The cost is the same list: same-uid
-// debuggers, profilers and crash collectors stop working, and /proc/<pid> files
-// become owned by root, so same-uid tools lose the restricted ones (maps, fd,
-// environ). Children created by fork inherit the flag; an execve of an ordinary
-// binary resets it, so exec'd children are dumpable again.
-//
-// On other platforms it returns [ErrProcessHardeningUnsupported].
-func HardenProcess() (ProcessHardening, error) {
+// markNotDumpable is [HardenProcess]'s Linux step: prctl(PR_SET_DUMPABLE, 0),
+// then a read-back. A refusal or a disagreeing read-back is a
+// *ProcessHardeningError.
+func markNotDumpable() error {
 	if err := setDumpable(0); err != nil {
-		return ProcessHardening{}, &ProcessHardeningError{Cause: err}
+		return &ProcessHardeningError{Cause: err}
 	}
 	v, err := getDumpable()
 	if err != nil {
-		return ProcessHardening{}, &ProcessHardeningError{Cause: err}
+		return &ProcessHardeningError{Cause: err}
 	}
 	if v != 0 {
-		return ProcessHardening{}, &ProcessHardeningError{Cause: errDumpableNotCleared}
+		return &ProcessHardeningError{Cause: errDumpableNotCleared}
 	}
-	return ProcessHardening{NotDumpable: true}, nil
+	return nil
 }
