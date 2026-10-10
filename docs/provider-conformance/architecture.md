@@ -1,6 +1,6 @@
 # Provider conformance — architecture
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-04
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-09
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Problem
@@ -29,7 +29,7 @@ flowchart TD
   V -- no --> CE["*ConfigError (ErrInvalidConfig)"]
   V -- yes --> MP["mode/interface pairing:<br/>claimed modes implemented and accepted, unclaimed not implemented"]
   MP --> KP{"claims ModePerOperation?"}
-  KP -- yes --> KPC["KeyProtector checks:<br/>round trip · Protect retains no slice ·<br/>no write after caller wiped dst ·<br/>no disturbance by a later call ·<br/>tampered blob refused · wrong length refused ·<br/>ended context refused · residue sweep"]
+  KP -- yes --> KPC["KeyProtector checks:<br/>round trip · Protect retains no slice ·<br/>no write after caller wiped dst ·<br/>no disturbance by a later call ·<br/>tampered blob refused · wrong length refused ·<br/>forged blob refused · ended context refused ·<br/>concurrent round trips · residue sweep"]
   KP -- no --> RU
   KPC --> RU{"claims ModeRootKey?"}
   RU -- yes --> RUC["RootUnsealer checks:<br/>fills whole dst with a real root ·<br/>no disturbance by a later call ·<br/>ended context refused, nothing consumed"]
@@ -74,6 +74,8 @@ at the next boundary once `ctx` ends.
 | Require cross-instance blob refusal | A device-backed provider hands every instance the same device key; a blob from another instance *is* its own. |
 | A boolean "skip residue sweep" | A reason string is required and echoed to `Logf`, so a green run records what it did not measure. |
 | Report a provider call aborted by the run's context as a provider failure | It proves only that the run stopped waiting. Reported as `ErrAborted` instead. |
+| Let the tamper cases stand for forgery | A bare public-key wrap refuses every malformed blob through its padding or tag and opens a well-formed one built from the public key. Only the author can build that blob, so `Config.Forge` does; a declared `PublicKey` provider without it is `ErrNotMeasured`. |
+| Find shared provider state only with `-race` | An author may not run it, and a device library's state is often outside Go. The concurrency check compares each call's output, so a racy provider fails without it. |
 | Measure mid-call cancellation | Only the provider can hold a call open; the suite measures the refusal of already-ended contexts. |
 
 ## Component boundaries

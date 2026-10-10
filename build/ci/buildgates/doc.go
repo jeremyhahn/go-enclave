@@ -14,7 +14,7 @@
 //   - check-releasability: TestReleasability* (releasability_test.go)
 //   - check-changelog-assembly: TestChangelogAssemble* (changelog_assemble_test.go)
 //   - check-scripts: TestScripts* (scripts_test.go)
-//   - check-buildgates: every other test (action_pins_test.go, automerge_test.go,
+//   - check-buildgates: every other test (action_pins_test.go
 //     and the rest); check-action-pins is its deprecated alias
 //
 // gosec's ./... never reaches this module, and trivy still scans it: these

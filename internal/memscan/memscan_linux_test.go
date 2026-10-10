@@ -10,6 +10,7 @@ package memscan
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -38,7 +39,7 @@ func TestMappingContainsWipesTheScanBuffer(t *testing.T) {
 
 	// Control: the scan found it, so the buffer held it. Otherwise an all-zero
 	// buffer afterwards would prove nothing.
-	if !mappingContains(bytes.NewReader(region), 0, uintptr(len(region)), needle, buf) {
+	if found, err := mappingContains(bytes.NewReader(region), 0, uintptr(len(region)), needle, buf); err != nil || !found {
 		t.Fatal("control: the scan did not find a needle that is there, so the wipe assertion below is vacuous")
 	}
 	if !AllZero(buf) {
@@ -56,7 +57,7 @@ func TestMappingContainsWipesTheScanBufferOnAMiss(t *testing.T) {
 	region := bytes.Repeat([]byte{0xAB}, 4096)
 	buf := scratch(2048, len(needle))
 
-	if mappingContains(bytes.NewReader(region), 0, uintptr(len(region)), needle, buf) {
+	if found, err := mappingContains(bytes.NewReader(region), 0, uintptr(len(region)), needle, buf); err != nil || found {
 		t.Fatal("the scan reported a match in a region that does not contain the needle")
 	}
 	if !AllZero(buf) {
@@ -91,7 +92,7 @@ func TestMappingContainsWipesWhatTheReaderUsedAsScratch(t *testing.T) {
 	const regionLen = 1500 // shorter than buf: the request is the region, not the buffer
 
 	r := &scratchingReader{fill: 0x5C}
-	if mappingContains(r, 0, regionLen, needle, buf) {
+	if found, _ := mappingContains(r, 0, regionLen, needle, buf); found {
 		t.Fatal("reported a match the reader never produced")
 	}
 	// The reader must have been asked for the whole region, or the zero buffer
@@ -125,7 +126,7 @@ func TestMappingContainsSpansChunkBoundaries(t *testing.T) {
 				t.Fatalf("placement at %d does not cross a %d-byte read boundary; the test would pass "+
 					"with the overlap deleted", start, read)
 			}
-			if !mappingContains(bytes.NewReader(region), 0, uintptr(len(region)), needle, buf) {
+			if found, err := mappingContains(bytes.NewReader(region), 0, uintptr(len(region)), needle, buf); err != nil || !found {
 				t.Errorf("a needle at offset %d, straddling the %d-byte read boundary at %d, was missed",
 					start, read, (start/read+1)*read)
 			}
@@ -143,8 +144,12 @@ func TestMappingContainsStopsAtAnOffsetReadAtCannotTake(t *testing.T) {
 	r := &scratchingReader{}
 	maxOffset := uint64(math.MaxInt64) // a variable, so the conversion below compiles on 32-bit targets
 	lo := uintptr(maxOffset + 1)
-	if mappingContains(r, lo, lo+4096, []byte("x"), scratch(64, 1)) {
+	found, err := mappingContains(r, lo, lo+4096, []byte("x"), scratch(64, 1))
+	if found {
 		t.Fatal("reported a match above the largest file offset")
+	}
+	if err == nil {
+		t.Error("an address ReadAt cannot take was reported as scanned clean")
 	}
 	if r.calls != 0 {
 		t.Errorf("ReadAt was called %d time(s) for an address above math.MaxInt64", r.calls)
@@ -155,11 +160,64 @@ func TestMappingContainsStopsAtAnOffsetReadAtCannotTake(t *testing.T) {
 // than the overlap ends the scan rather than looping on the same offset.
 func TestMappingContainsStopsWhenAReadCannotAdvance(t *testing.T) {
 	r := &shortReader{n: 3}
-	if mappingContains(r, 0, 4096, []byte("needle"), scratch(64, len("needle"))) {
+	found, err := mappingContains(r, 0, 4096, []byte("needle"), scratch(64, len("needle")))
+	if found {
 		t.Fatal("reported a match the reader never produced")
+	}
+	if err == nil {
+		t.Error("a read that cannot advance left the region unscanned but was reported clean")
 	}
 	if r.calls != 1 {
 		t.Errorf("ReadAt was called %d times; a read that cannot advance must end the scan", r.calls)
+	}
+}
+
+// eofReader serves data from address 0. A read that ends at the end of data
+// returns a full count together with io.EOF, which io.ReaderAt permits. When
+// failAt is positive, a read that would cross it returns the bytes up to failAt
+// (fewer than asked) and io.ErrUnexpectedEOF instead.
+type eofReader struct {
+	data   []byte
+	failAt int
+}
+
+func (r *eofReader) ReadAt(p []byte, off int64) (int, error) {
+	if r.failAt > 0 && int(off)+len(p) > r.failAt {
+		return copy(p, r.data[off:r.failAt]), io.ErrUnexpectedEOF
+	}
+	n := copy(p, r.data[off:])
+	if int(off)+n >= len(r.data) {
+		return n, io.EOF
+	}
+	return n, nil
+}
+
+func TestMappingContainsAcceptsAFullFinalReadWithEOF(t *testing.T) {
+	needle := []byte("needle")
+	region := make([]byte, 200)
+	copy(region[len(region)-len(needle):], needle)
+	found, err := mappingContains(&eofReader{data: region}, 0, uintptr(len(region)), needle, scratch(64, len(needle)))
+	if err != nil || !found {
+		t.Errorf("needle in the final chunk, read with io.EOF: found, err = %v, %v; want true, nil", found, err)
+	}
+	clean := make([]byte, 200)
+	found, err = mappingContains(&eofReader{data: clean}, 0, uintptr(len(clean)), needle, scratch(64, len(needle)))
+	if err != nil || found {
+		t.Errorf("clean region, final chunk read with io.EOF: found, err = %v, %v; want false, nil", found, err)
+	}
+}
+
+func TestFindRefusesAShortReadWithAnError(t *testing.T) {
+	needle := []byte("needle")
+	maps := "00000000-000000c8 rw-p 00000000 00:00 0 [anon: x]\n"
+	mem := &eofReader{data: make([]byte, 200), failAt: 100}
+	_, err := find(maps, mem, needle, 0x100000, scratch(64, len(needle)))
+	if !errors.Is(err, ErrUnreadableMapping) {
+		t.Errorf("a short read with an error before the end of the mapping: find = %v, want ErrUnreadableMapping", err)
+	}
+	ok := &eofReader{data: make([]byte, 200)}
+	if hits, err := find(maps, ok, needle, 0x100000, scratch(64, len(needle))); err != nil || len(hits) != 0 {
+		t.Errorf("a full final read with io.EOF: find = %v, %v; want no hits, nil", hits, err)
 	}
 }
 
@@ -222,13 +280,76 @@ func TestFindSweepsOnlyWhatCanHoldACopy(t *testing.T) {
 	}, "\n")
 	buf := scratch(0x400, len(needle))
 
-	got := find(maps, mem, needle, 0x20800, buf)
+	got, err := find(maps, mem, needle, 0x20800, buf)
+	if err != nil {
+		t.Fatalf("find: %v", err)
+	}
 	want := []string{"10000-11000 rw-p 00000000 00:00 0", "60000-61000 rw-s 00000000 08:01 99 /var/tmp/shared file"}
 	if !slices.Equal(got, want) {
 		t.Errorf("find = %q, want %q", got, want)
 	}
 	if !AllZero(buf) {
 		t.Error("the scan buffer holds what it read after the sweep returned")
+	}
+}
+
+// TestFindFailsClosedOnAnUnreadableMapping pins that a swept mapping the
+// reader refuses is a typed error, not a clean result, and that a hit found
+// before it is not reported alongside it.
+func TestFindFailsClosedOnAnUnreadableMapping(t *testing.T) {
+	needle := []byte("the-needle")
+	mem := addressSpace{0x10000: make([]byte, 0x1000)} // 0x20000 is unmapped: reads fail
+	maps := "10000-11000 rw-p 00000000 00:00 0\n20000-21000 rw-p 00000000 00:00 0 [anon: x]\n"
+
+	hits, err := find(maps, mem, needle, 0, scratch(0x400, len(needle)))
+	var ue *UnreadableMappingError
+	if !errors.Is(err, ErrUnreadableMapping) || !errors.As(err, &ue) || ue.Mapping != "20000-21000 rw-p 00000000 00:00 0 [anon: x]" {
+		t.Fatalf("find = %v, %v; want an UnreadableMappingError for the second mapping", hits, err)
+	}
+	if !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Errorf("the read failure is not reachable through Unwrap: %v", err)
+	}
+	if hits != nil {
+		t.Errorf("hits = %q alongside an error", hits)
+	}
+}
+
+// TestFindExcusesOnlyKernelMappings pins the one rule for mappings the sweep
+// may leave unread: the kernel's [vvar] and [vsyscall], which /proc/self/mem
+// refuses and which hold no process data.
+func TestFindExcusesOnlyKernelMappings(t *testing.T) {
+	needle := []byte("the-needle")
+	mem := addressSpace{0x10000: make([]byte, 0x1000)}
+	for _, path := range []string{"[vvar]", "[vvar_vclock]", "[vsyscall]"} {
+		maps := "10000-11000 rw-p 00000000 00:00 0\n20000-21000 r--p 00000000 00:00 0 " + path + "\n"
+		if _, err := find(maps, mem, needle, 0, scratch(0x400, len(needle))); err != nil {
+			t.Errorf("%s: find = %v, want the kernel mapping excused", path, err)
+		}
+	}
+	maps := "10000-11000 rw-p 00000000 00:00 0\n20000-21000 r--p 00000000 00:00 0 [vdso]\n"
+	if _, err := find(maps, mem, needle, 0, scratch(0x400, len(needle))); !errors.Is(err, ErrUnreadableMapping) {
+		t.Errorf("[vdso]: find = %v, want ErrUnreadableMapping: it is readable and must be swept", err)
+	}
+}
+
+// TestFindFailsClosedOnAnEmptySweep pins that a sweep that read nothing is an
+// error: nothing scanned, so "no hits" proves nothing.
+func TestFindFailsClosedOnAnEmptySweep(t *testing.T) {
+	needle := []byte("the-needle")
+	mem := addressSpace{0x10000: make([]byte, 0x1000)}
+	for name, tc := range map[string]struct {
+		maps string
+		home uintptr
+	}{
+		"empty listing":         {"", 0},
+		"nothing sweepable":     {"30000-31000 r--p 00000000 08:01 1234 /usr/lib/libc.so.6\n40000-41000 ---p 00000000 00:00 0\n", 0},
+		"only the home mapping": {"10000-11000 rw-p 00000000 00:00 0\n", 0x10800},
+		"only a kernel mapping": {"20000-21000 r--p 00000000 00:00 0 [vvar]\n", 0},
+	} {
+		hits, err := find(tc.maps, mem, needle, tc.home, scratch(0x400, len(needle)))
+		if !errors.Is(err, ErrEmptySweep) || hits != nil {
+			t.Errorf("%s: find = %v, %v; want ErrEmptySweep", name, hits, err)
+		}
 	}
 }
 

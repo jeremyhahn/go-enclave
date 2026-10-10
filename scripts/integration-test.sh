@@ -18,7 +18,8 @@
 # and `make ci-integration` shares one scanned image across userns, default and
 # FIPS.
 #
-# <coverpkg> is the import path the package's coverage floor applies to.
+# <coverpkg> is the comma-separated import paths the suite's coverage floor
+# applies to, each package on its own.
 #
 # Environment (exported by the Makefile): DEVCONTAINER_COMPOSE,
 # DEVCONTAINER_SERVICE, INTEGRATION_TESTFLAGS, COVERAGE_THRESHOLD, TRIVY_VERSION

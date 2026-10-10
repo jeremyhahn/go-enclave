@@ -9,6 +9,19 @@ import (
 	"testing"
 )
 
+// gitIn runs git in dir with no user or system configuration.
+func gitIn(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", dir, "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+		"-c", "commit.gpgSign=false", "-c", "init.defaultBranch=main"}, args...)...)
+	cmd.Env = layerEnv(os.Environ(), map[string]string{"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"})
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
+
 func TestScriptsFeatures_PrintsTheFeaturesAChangeTouches(t *testing.T) {
 	const featureMap = "# a map of its own: the script reads FEATURES_MAP\n" +
 		"alpha pkga suitea TestAlpha_ alpha.go lib/*.go\n" +

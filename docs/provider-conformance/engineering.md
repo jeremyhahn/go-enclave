@@ -1,6 +1,6 @@
 # Provider conformance — engineering contract
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-07
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-09
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Exported surface
@@ -10,14 +10,17 @@ Package `providertest` (import path `github.com/jeremyhahn/go-enclave/providerte
 | Identifier | Contract |
 |---|---|
 | `TestProvider(ctx context.Context, cfg Config) error` | Runs the suite. `nil` = every property was measured and held, except those `cfg` explicitly relaxed. |
-| `Config.New func() (any, error)` | Returns a fresh provider. Called twice by the mode-pairing check (once per mode) and once by each other check that runs: up to 2 + 8 + 3 = 13 times when both modes are claimed. Nil or typed-nil results are failures. |
+| `Config.New func() (any, error)` | Returns a fresh provider. Called twice by the mode-pairing check (once per mode) and once by each other check that runs: up to 2 + 10 + 3 = 15 times when both modes are claimed. Nil or typed-nil results are failures. |
 | `Config.Modes []enclave.Mode` | The modes the provider **claims**. Must be non-empty and valid. Checked in both directions. |
 | `Config.SkipResidueSweep string` | Non-empty reason skips the residue sweep and accepts retention by copy as unmeasured; echoed to `Logf`. Empty, an unmeasurable sweep returns `ErrNotMeasured`. |
 | `Config.SingleUseRoot string` | Non-empty reason relaxes the two `RootUnsealer` checks that need a second `UnsealRoot` call; echoed to `Logf`. |
+| `Config.PublicKey bool` | Declares that `Protect` needs no secret (an RSA-OAEP, ECIES or HPKE wrap). Without `Forge`, the forged-blob check is unmeasured: `ErrNotMeasured` unless `SkipForgery` accepts that. Requires `ModePerOperation`. |
+| `Config.Forge func(p enclave.KeyProtector, key []byte) ([]byte, error)` | The attacker: a blob wrapping `key` built only from `p`'s public material. `Unprotect` must refuse it as `ErrSealedAuthentication`. Runs whether or not `PublicKey` is set. Requires `ModePerOperation`. |
+| `Config.SkipForgery string` | Non-empty reason skips the forged-blob check; echoed to `Logf`. |
 | `Config.Logf func(format string, args ...any)` | Receives what was measured, skipped and why. Pass `t.Logf`. |
-| `ErrInvalidConfig` / `*ConfigError{Field, Reason}` | `cfg` cannot be run; no provider was tested. |
+| `ErrInvalidConfig` / `*ConfigError{Field, Reason}` | `cfg` cannot be run (`New` nil, `Modes` empty or invalid, `PublicKey` or `Forge` without `ModePerOperation`); no provider was tested. |
 | `ErrAborted` / `*AbortedError{Err}` | `ctx` ended before the run finished; unwraps to `ctx.Err()` and renders as `ErrAborted`'s text, `": "` and `Err`. Never a pass. |
-| `ErrNotMeasured` / `*NotMeasuredError{Property, Reason}` | A property could not be measured on this host (residue sweep off Linux, without locked memory, or blind) and `cfg` did not accept that. Neither a pass nor a provider defect. |
+| `ErrNotMeasured` / `*NotMeasuredError{Property, Reason}` | A property could not be measured (residue sweep off Linux, without locked memory, or blind; a `PublicKey` provider without `Forge`) and `cfg` did not accept that. Neither a pass nor a provider defect. |
 | `*PropertyError{Property, Detail}` | One failed assertion; several can share a `Property`. Walk them via the joined error's `Unwrap() []error`. |
 
 ## Properties checked
@@ -27,11 +30,13 @@ Package `providertest` (import path `github.com/jeremyhahn/go-enclave/providerte
 | mode/interface pairing | both | The provider must implement each claimed mode's interface (and `NewSealer` must accept it through `WithKeyProtector`/`WithRootUnsealer`), and must NOT implement an unclaimed mode's. |
 | Protect/Unprotect round trip | per-operation | Recovers the key (exact compare); `Protect` does not mutate its input; the blob contains no run of 8 consecutive key bytes. |
 | Protect does not retain the caller's key slice | per-operation | Spy |
-| Unprotect does not write into a destination the caller has finished with | per-operation | Spy, with populated-destination control |
-| a later provider call does not disturb an earlier destination | per-operation | Spy |
+| Unprotect does not write into a destination the caller has finished with | per-operation | Spy, with populated-destination control; the later call's destination must hold its own key |
+| a later provider call does not disturb an earlier destination | per-operation | Spy; the later call's destination must hold its own key |
 | a blob this provider did not produce is refused | per-operation | Nil, empty, truncated, extended, random and a sample of bit-flipped blobs must fail as `ErrSealedAuthentication`; the destination must hold no run of 8 consecutive key bytes afterwards. |
 | a destination of the wrong length is an authentication failure | per-operation | |
+| a blob forged from the provider's public key is refused | per-operation | The blob `Config.Forge` builds must fail as `ErrSealedAuthentication`, leaving no run of 8 consecutive key bytes in the destination. Unmeasured for a `PublicKey` provider without `Forge`; not run for one that declares neither. |
 | Protect and Unprotect refuse a context that has already ended | per-operation | Already-canceled and already-expired contexts; error must match that context's error, not `ErrSealedAuthentication`; the destination must hold no run of 8 consecutive key bytes; the next call still works. |
+| Protect and Unprotect are safe for concurrent use | per-operation | 8 goroutines released together, each running 4 round trips with keys of its own on one provider; every call must succeed and recover its own key. Not run once a spy caught writes into a returned destination, which would race with it. |
 | no copy of the key is findable in the process after Unprotect returns | per-operation | Residue sweep for the whole 32-byte key (Linux; unmeasured is `ErrNotMeasured` unless skipped with a reason; limits below) |
 | UnsealRoot writes a root across the whole destination | root-key | Not a placeholder (not all-zero, not constant) |
 | UnsealRoot does not retain the caller's destination | root-key | Spy (needs a second call) |
@@ -50,6 +55,18 @@ heuristic in places, so a pass is weaker than the contract:
   shorter fragments, or transformed key bytes, is not detected.
 - **Tamper refusal** is checked for a fixed set of malformed blobs and a bounded
   sample of single-bit flips, not every forgery.
+- **Forgery refusal** is checked only with the blob `Config.Forge` builds, so
+  the evidence is as strong as that hook. The tamper cases cannot stand in for
+  it: a bare public-key wrap (RSA-OAEP, ECIES) refuses every malformed blob
+  through its padding or tag, yet opens a well-formed one an attacker encrypted
+  to the public key. The suite cannot tell a public-key provider from a
+  secret-keyed one, so it relies on the author's `PublicKey` declaration; an
+  undeclared public-key provider without `Forge` passes with forgery
+  unchecked.
+- **Concurrency** is checked by output, on the overlap the scheduler produces
+  in 32 round trips from 8 goroutines. A race that needs other timing or more
+  load is not detected; `go test -race` adds a data-race probe for state the
+  provider touches from Go.
 - **The residue sweep** searches, at one moment, every readable mapping in
   `/proc/self/maps` that can hold a runtime copy, for the **whole** 32-byte key,
   excluding the needle's own mapping: anonymous mappings (named or not), every
@@ -118,16 +135,17 @@ own goroutine once the provider returns, never under a running provider.
    otherwise returns `ErrNotMeasured`.
 5. **Fail closed when unmeasured.** A residue sweep that cannot run (non-Linux,
    no locked memory, blind control) returns `ErrNotMeasured`, never `nil`,
-   unless `Config.SkipResidueSweep` records why that is accepted.
+   unless `Config.SkipResidueSweep` records why that is accepted; so does a
+   `PublicKey` provider without `Forge`, unless `Config.SkipForgery` does.
 
 ## Error semantics
 
 | Return | Meaning | Caller action |
 |---|---|---|
 | `nil` | Every property was measured and held, except those `cfg` relaxed | Read `Logf` output for what was relaxed. |
-| matches `ErrInvalidConfig` | `New` nil, `Modes` empty or invalid | Fix the test harness. |
+| matches `ErrInvalidConfig` | `New` nil, `Modes` empty or invalid, `PublicKey` or `Forge` without `ModePerOperation` | Fix the test harness. |
 | matches `ErrAborted` | Run incomplete | Re-run with a longer deadline; inspect any joined `*PropertyError`. |
-| matches `ErrNotMeasured` | A property could not be measured on this host | Run on Linux with locked memory, or set `SkipResidueSweep` with the reason it is acceptable; inspect any joined `*PropertyError`. |
+| matches `ErrNotMeasured` | A property could not be measured | Run on Linux with locked memory, or set `SkipResidueSweep` with the reason it is acceptable; for a `PublicKey` provider set `Forge`, or `SkipForgery` with the reason; inspect any joined `*PropertyError`. |
 | joined `*PropertyError`s | Provider violates the seam | Fix the provider. |
 
 Every sentinel and error type is declared in
@@ -153,5 +171,5 @@ integration suite (`test/integration/enclave/provider_test.go`) runs it against
 ## Observability
 
 `Config.Logf` is the only output besides the returned error: what was measured,
-what was skipped and why (residue sweep, single-use root, non-Linux host), and
-the residue sweep's mapping counts.
+what was skipped and why (residue sweep, forged-blob check, concurrency check,
+single-use root, non-Linux host), and the residue sweep's mapping counts.

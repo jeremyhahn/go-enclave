@@ -11,6 +11,12 @@ package providertest
 import (
 	"bytes"
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/ecdh"
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"os"
@@ -335,6 +341,76 @@ func TestSuiteCatchesALaterCallWipingAnEarlierDestination(t *testing.T) {
 		"a later provider call does not disturb an earlier destination")
 }
 
+// onlyFirstUnprotectProtector recovers the key on its first Unprotect and
+// reports success with zeros on every later one, the second call the spy
+// checks make to disturb the first destination.
+type onlyFirstUnprotectProtector struct {
+	inner *enclave.SoftwareProvider
+	mu    sync.Mutex
+	n     int
+}
+
+func (p *onlyFirstUnprotectProtector) Protect(ctx context.Context, key []byte) ([]byte, error) {
+	return p.inner.Protect(ctx, key)
+}
+
+func (p *onlyFirstUnprotectProtector) Unprotect(ctx context.Context, blob, key []byte) error {
+	if err := p.inner.Unprotect(ctx, blob, key); err != nil {
+		return err
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.n++; p.n > 1 {
+		enclave.Wipe(key) // THE DEFECT: a later call returns nil without the key.
+	}
+	return nil
+}
+
+func TestSuiteCatchesASecondUnprotectWithoutTheKey(t *testing.T) {
+	const want = "a second Unprotect returned nil but its destination does not hold the second key"
+	wantFail(t, perOp(func() (any, error) { return &onlyFirstUnprotectProtector{inner: software()}, nil }),
+		"Unprotect does not write into a destination the caller has finished with: "+want,
+		"a later provider call does not disturb an earlier destination: "+want)
+}
+
+// sharedBufferProtector stages every recovered key in one buffer the instance
+// owns, then copies it out after a pause standing in for a device round trip.
+// Each access holds the lock, so the race detector stays quiet; the defect is
+// that one buffer serves every call, so a concurrent Unprotect overwrites or
+// wipes it during the pause and the caller receives what another call left.
+type sharedBufferProtector struct {
+	inner *enclave.SoftwareProvider
+	mu    sync.Mutex
+	buf   [keyBytes]byte
+}
+
+func (p *sharedBufferProtector) Protect(ctx context.Context, key []byte) ([]byte, error) {
+	return p.inner.Protect(ctx, key)
+}
+
+func (p *sharedBufferProtector) Unprotect(ctx context.Context, blob, key []byte) error {
+	if len(key) != keyBytes {
+		return p.inner.Unprotect(ctx, blob, key)
+	}
+	p.mu.Lock()
+	err := p.inner.Unprotect(ctx, blob, p.buf[:])
+	p.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	time.Sleep(time.Millisecond)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	copy(key, p.buf[:])
+	clear(p.buf[:])
+	return nil
+}
+
+func TestSuiteCatchesAProviderSharingABufferAcrossCalls(t *testing.T) {
+	wantOnlyProperty(t, perOp(func() (any, error) { return &sharedBufferProtector{inner: software()}, nil }),
+		"Protect and Unprotect are safe for concurrent use", "Unprotect returned nil but wrote")
+}
+
 // ---------------------------------------------------------------------------
 // The controls that keep the spy from reading a false green
 // ---------------------------------------------------------------------------
@@ -476,6 +552,235 @@ func (p *forgeableProtector) Unprotect(ctx context.Context, blob, key []byte) er
 func TestSuiteCatchesAForgeryOpeningToAttackerChosenMaterial(t *testing.T) {
 	wantFail(t, perOp(func() (any, error) { return newForgeableProtector(), nil }),
 		"Unprotect ACCEPTED")
+}
+
+// publicKeyWrapProtector wraps each key to a P-256 public key (an ephemeral
+// key agreement, then AES-GCM under the agreed secret), the ECIES shape of a
+// TPM or KMS public-key wrap. Without a signer it is the bare wrap the
+// KeyProtector contract disqualifies: its tag refuses every tampered blob, so
+// it passes every other check, yet anyone holding the public key builds a blob
+// it opens. With a signer it signs each wrap and verifies before opening, the
+// composition the contract requires.
+type publicKeyWrapProtector struct {
+	priv   *ecdh.PrivateKey
+	signer ed25519.PrivateKey
+}
+
+// p256PublicBytes is the length of an uncompressed P-256 public key. P-256 is
+// used because X25519 is prohibited under GODEBUG=fips140=only.
+const p256PublicBytes = 65
+
+func newPublicKeyWrapProtector(signed bool) (*publicKeyWrapProtector, error) {
+	priv, err := ecdh.P256().GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, err
+	}
+	p := &publicKeyWrapProtector{priv: priv}
+	if signed {
+		if _, p.signer, err = ed25519.GenerateKey(rand.Reader); err != nil {
+			return nil, err
+		}
+	}
+	return p, nil
+}
+
+// wrapTo is the half of the wrap that needs only the public key: what Protect
+// does, and what an attacker does.
+func wrapTo(pub *ecdh.PublicKey, key []byte) ([]byte, error) {
+	eph, err := ecdh.P256().GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, err
+	}
+	aead, err := wrapAEAD(eph, pub)
+	if err != nil {
+		return nil, err
+	}
+	return aead.Seal(eph.PublicKey().Bytes(), nil, key, nil), nil
+}
+
+// wrapAEAD derives the AEAD of one wrap. The nonce is random and travels with
+// the ciphertext because fips140=only refuses a caller-chosen GCM nonce.
+func wrapAEAD(priv *ecdh.PrivateKey, pub *ecdh.PublicKey) (cipher.AEAD, error) {
+	shared, err := priv.ECDH(pub)
+	if err != nil {
+		return nil, err
+	}
+	kek := sha256.Sum256(shared)
+	clear(shared)
+	block, err := aes.NewCipher(kek[:])
+	clear(kek[:])
+	if err != nil {
+		return nil, err
+	}
+	return cipher.NewGCMWithRandomNonce(block)
+}
+
+// forgeWrap is Config.Forge for publicKeyWrapProtector: the attacker wraps to
+// the public key and, if the provider expects a signature, signs with a key of
+// its own.
+func forgeWrap(kp enclave.KeyProtector, key []byte) ([]byte, error) {
+	p := kp.(*publicKeyWrapProtector)
+	blob, err := wrapTo(p.priv.PublicKey(), key)
+	if err != nil || p.signer == nil {
+		return blob, err
+	}
+	_, attacker, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, err
+	}
+	return append(blob, ed25519.Sign(attacker, blob)...), nil
+}
+
+func (p *publicKeyWrapProtector) Protect(ctx context.Context, key []byte) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	blob, err := wrapTo(p.priv.PublicKey(), key)
+	if err != nil || p.signer == nil {
+		return blob, err
+	}
+	return append(blob, ed25519.Sign(p.signer, blob)...), nil
+}
+
+func (p *publicKeyWrapProtector) Unprotect(ctx context.Context, blob, key []byte) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if p.signer != nil {
+		if len(blob) < ed25519.SignatureSize {
+			return enclave.ErrSealedAuthentication
+		}
+		wrap, sig := blob[:len(blob)-ed25519.SignatureSize], blob[len(blob)-ed25519.SignatureSize:]
+		if !ed25519.Verify(p.signer.Public().(ed25519.PublicKey), wrap, sig) {
+			return enclave.ErrSealedAuthentication
+		}
+		blob = wrap
+	}
+	if len(key) != keyBytes || len(blob) < p256PublicBytes {
+		return enclave.ErrSealedAuthentication
+	}
+	eph, err := ecdh.P256().NewPublicKey(blob[:p256PublicBytes])
+	if err != nil {
+		return enclave.ErrSealedAuthentication
+	}
+	aead, err := wrapAEAD(p.priv, eph)
+	if err != nil {
+		return enclave.ErrSealedAuthentication
+	}
+	if len(blob) != p256PublicBytes+keyBytes+aead.Overhead() {
+		return enclave.ErrSealedAuthentication
+	}
+	// Opened straight into the caller's destination, so there is no transient
+	// to wipe; GCM clears it if the tag does not verify.
+	if _, err := aead.Open(key[:0], nil, blob[p256PublicBytes:], nil); err != nil {
+		return enclave.ErrSealedAuthentication
+	}
+	return nil
+}
+
+// publicKeyWrap configures publicKeyWrapProtector as a public-key provider
+// whose Forge is forgeWrap.
+func publicKeyWrap(signed bool) Config {
+	cfg := perOp(func() (any, error) { return newPublicKeyWrapProtector(signed) })
+	cfg.PublicKey = true
+	cfg.Forge = forgeWrap
+	return cfg
+}
+
+const forgeryProperty = "a blob forged from the provider's public key is refused"
+
+func TestSuiteCatchesABarePublicKeyWrap(t *testing.T) {
+	wantOnlyProperty(t, publicKeyWrap(false), forgeryProperty,
+		"Unprotect ACCEPTED a blob Config.Forge built", "the key the attacker chose")
+}
+
+func TestASignedPublicKeyWrapConforms(t *testing.T) {
+	cfg := publicKeyWrap(true)
+	cfg.Logf = t.Logf
+	if err := TestProvider(t.Context(), cfg); err != nil {
+		t.Fatalf("a public-key wrap that verifies a signature before opening must pass: %v", err)
+	}
+}
+
+// TestAPublicKeyProviderWithoutForgeIsNotMeasured also shows why Forge
+// exists: with the forgery accepted as unmeasured, the bare wrap passes every
+// other check, the tampered-blob cases included.
+func TestAPublicKeyProviderWithoutForgeIsNotMeasured(t *testing.T) {
+	cfg := publicKeyWrap(false)
+	cfg.Forge = nil
+	cfg.Logf = t.Logf
+	err := TestProvider(t.Context(), cfg)
+	if !errors.Is(err, ErrNotMeasured) {
+		t.Fatalf("TestProvider = %v, want an error matching ErrNotMeasured", err)
+	}
+	var nm *NotMeasuredError
+	if !errors.As(err, &nm) || nm.Property != forgeryProperty || !strings.Contains(nm.Reason, "Config.Forge is nil") {
+		t.Errorf("the unmeasured forgery is not a populated *NotMeasuredError for %q: %#v", forgeryProperty, nm)
+	}
+	var pe *PropertyError
+	if errors.As(err, &pe) {
+		t.Errorf("an unmeasured property was charged to the provider: %v", pe)
+	}
+
+	var log strings.Builder
+	cfg.Logf = func(format string, args ...any) { fmt.Fprintf(&log, format+"\n", args...) }
+	cfg.SkipForgery = "the forgery is tested in the device's own suite"
+	if err := TestProvider(t.Context(), cfg); err != nil {
+		t.Fatalf("with SkipForgery set the bare wrap should pass everything else: %v", err)
+	}
+	if !strings.Contains(log.String(), "forged-blob check SKIPPED") ||
+		!strings.Contains(log.String(), cfg.SkipForgery) {
+		t.Errorf("the skip was not reported with its recorded reason. Log was:\n%s", log.String())
+	}
+}
+
+func TestAForgeThatFailsIsReported(t *testing.T) {
+	tests := []struct {
+		name  string
+		forge func(enclave.KeyProtector, []byte) ([]byte, error)
+		want  string
+	}{
+		{"an error", func(enclave.KeyProtector, []byte) ([]byte, error) {
+			return nil, errors.New("planted: no public key")
+		}, "Config.Forge: planted: no public key"},
+		{"an empty blob", func(enclave.KeyProtector, []byte) ([]byte, error) {
+			return []byte{}, nil
+		}, "Config.Forge returned an empty blob"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := publicKeyWrap(true)
+			cfg.Forge = tc.forge
+			wantOnlyProperty(t, cfg, forgeryProperty, tc.want)
+		})
+	}
+}
+
+// wantOnlyProperty requires the run to fail on property, with every finding a
+// *PropertyError for it: the planted provider violates that property and
+// nothing else.
+func wantOnlyProperty(t *testing.T, cfg Config, property string, wants ...string) {
+	t.Helper()
+	cfg.Logf = t.Logf
+	err := TestProvider(t.Context(), cfg)
+	if err == nil {
+		t.Fatalf("the suite PASSED a provider that deliberately violates %q; the check does not exist", property)
+	}
+	for _, want := range wants {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the suite failed, but not on %q:\n%v", want, err)
+		}
+	}
+	joined, ok := err.(interface{ Unwrap() []error })
+	if !ok {
+		t.Fatalf("TestProvider returned %T, want the joined property failures", err)
+	}
+	for _, e := range joined.Unwrap() {
+		var pe *PropertyError
+		if !errors.As(e, &pe) || pe.Property != property {
+			t.Errorf("a finding is not a *PropertyError for %q: %v", property, e)
+		}
+	}
 }
 
 func TestSuiteCatchesAnUnauthenticatedProvider(t *testing.T) {
@@ -977,6 +1282,26 @@ func TestConfigIsValidated(t *testing.T) {
 			},
 			want:  "Config.Modes contains Mode(99), which names no sealing mode",
 			field: "Modes",
+		},
+		{
+			name: "a public-key declaration without a KeyProtector claim",
+			cfg: Config{
+				New:       func() (any, error) { return software(), nil },
+				Modes:     []enclave.Mode{enclave.ModeRootKey},
+				PublicKey: true,
+			},
+			want:  "Config.PublicKey is set, but Config.Modes does not claim ModePerOperation",
+			field: "PublicKey",
+		},
+		{
+			name: "a forge without a KeyProtector claim",
+			cfg: Config{
+				New:   func() (any, error) { return software(), nil },
+				Modes: []enclave.Mode{enclave.ModeRootKey},
+				Forge: forgeWrap,
+			},
+			want:  "Config.Forge is set, but Config.Modes does not claim ModePerOperation",
+			field: "Forge",
 		},
 	}
 	for _, tc := range tests {

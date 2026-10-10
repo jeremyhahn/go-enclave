@@ -206,7 +206,7 @@ lint-actions:
 ## lint-scripts: shellcheck (pinned) over scripts/*.sh, build/docker/devcontainer/*.sh and build/ci/*.sh
 # The scripts are POSIX sh, and release.yml runs them with a write token. -x
 # follows the `. lib.sh` every script sources. build/ci/*.sh are the workflows'
-# scripts; each names its own shell on its first line (automerge.sh is bash).
+# scripts; each names its own shell on its first line.
 .PHONY: lint-scripts
 lint-scripts:
 	@sc=$(call tool,shellcheck,SHELLCHECK) && \
@@ -386,10 +386,11 @@ export INTEGRATION_TESTFLAGS
 # ("-" prints it). Caller-supplied, so raw-bound.
 GO_ENCLAVE_IT_PROFILE_OUT ?=
 $(call raw_bind,GO_ENCLAVE_IT_PROFILE_OUT)
-# Integration coverage is gated per suite on the package it is FOR, against
-# COVERAGE_THRESHOLD. providertest has no suite of its own: the enclave suite
-# drives it in the devcontainer, and coverage-providertest gates the harness.
-INTEGRATION_COVERPKG_enclave := github.com/jeremyhahn/go-enclave
+# Integration coverage is gated per suite on the packages it is FOR, against
+# COVERAGE_THRESHOLD, each package on its own. providertest has no suite of its
+# own: the enclave suite drives it in the devcontainer, so that suite is gated on
+# it too (comma-separated import paths, as run-integration-tests.sh takes them).
+INTEGRATION_COVERPKG_enclave := github.com/jeremyhahn/go-enclave,github.com/jeremyhahn/go-enclave/providertest
 # FIPS strict run: same suite with GOFIPS140=latest and fips140=only. The suite
 # fails unless the runtime reports the promised GO_ENCLAVE_IT_FIPS_MODE.
 INTEGRATION_FIPS_ENV  := -e GOFIPS140=latest -e GODEBUG=fips140=only -e GO_ENCLAVE_IT_FIPS_MODE=only

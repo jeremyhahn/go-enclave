@@ -138,6 +138,33 @@ type Config struct {
 	// so such a provider still satisfies the seam.
 	SingleUseRoot string
 
+	// PublicKey declares that Protect needs no secret: anyone holding the
+	// provider's public key can build a blob for Unprotect (an RSA-OAEP, ECIES
+	// or HPKE wrap). The seam requires such a provider to authenticate the
+	// blob with something an attacker lacks, such as a signature by a device
+	// key. The tampered-blob cases cannot tell the difference, since a bare
+	// wrap's padding or tag refuses every malformed blob yet opens a well-formed
+	// one an attacker built, so the suite needs Forge to build one. Set without
+	// Forge, the property is unmeasured and [TestProvider] returns an error
+	// matching [ErrNotMeasured], unless SkipForgery accepts that. It requires
+	// [enclave.ModePerOperation].
+	PublicKey bool
+
+	// Forge plays the attacker against a public-key provider: given the
+	// provider under test and a key, it returns a blob wrapping that key built
+	// only from what an attacker has, the provider's public material. For
+	// example, the key encrypted to the provider's public key and signed, if
+	// the provider expects a signature, by a key the attacker generated.
+	// Unprotect must refuse it with an error matching
+	// [enclave.ErrSealedAuthentication]. Forge runs whether or not PublicKey is
+	// set. It requires [enclave.ModePerOperation].
+	Forge func(p enclave.KeyProtector, key []byte) ([]byte, error)
+
+	// SkipForgery, when non-empty, records why the forged-blob check is not
+	// run, and skips it. The reason is echoed through Logf. Whether Unprotect
+	// opens a blob an attacker built from the public key is then unmeasured.
+	SkipForgery string
+
 	// Logf, if set, receives the suite's notes: what was measured, what was
 	// skipped and why. Pass t.Logf. A nil Logf discards them, leaving no record
 	// of what a nil return relaxed.
@@ -181,6 +208,16 @@ func TestProvider(ctx context.Context, cfg Config) error {
 			return &ConfigError{Field: "Modes", Reason: "contains " + m.String() + ", which names no sealing mode"}
 		}
 	}
+	if !claims[enclave.ModePerOperation] {
+		if cfg.PublicKey {
+			return &ConfigError{Field: "PublicKey", Reason: "is set, but Config.Modes does not claim " +
+				"ModePerOperation; a public-key wrap is a KeyProtector"}
+		}
+		if cfg.Forge != nil {
+			return &ConfigError{Field: "Forge", Reason: "is set, but Config.Modes does not claim " +
+				"ModePerOperation; only a KeyProtector opens a blob"}
+		}
+	}
 
 	r := &report{ctx: ctx, logf: cfg.Logf}
 	checks := []func(*report, Config){func(r *report, cfg Config) { checkModePairing(r, cfg, claims) }}
@@ -218,8 +255,6 @@ func (r *report) fail(property, format string, args ...any) {
 
 // unmeasured records a property this run could not measure. Like fail, it is
 // dropped once the run's context has ended.
-//
-//nolint:unparam // only the residue sweep can be unmeasured; the property still names it.
 func (r *report) unmeasured(property, format string, args ...any) {
 	reason := fmt.Sprintf(format, args...)
 	r.note("providertest: %s", reason)
@@ -233,6 +268,17 @@ func (r *report) note(format string, args ...any) {
 	if r.logf != nil {
 		r.logf(format, args...)
 	}
+}
+
+// failed reports whether property has a recorded finding.
+func (r *report) failed(property string) bool {
+	for _, f := range r.failures {
+		var pe *PropertyError
+		if errors.As(f, &pe) && pe.Property == property {
+			return true
+		}
+	}
+	return false
 }
 
 // err joins the recorded failures. A run whose context ended is never nil: it
@@ -451,6 +497,13 @@ func sealerOption(p any, m enclave.Mode) (enclave.SealerOption, bool) {
 
 // keyProtectorChecks are the ModePerOperation half of the suite. Each check
 // takes its own provider instance.
+// The spy properties that catch a provider writing into a destination after
+// its call returned, which checkConcurrentUse must not race with.
+const (
+	noWriteAfterWipeProperty = "Unprotect does not write into a destination the caller has finished with"
+	noDisturbanceProperty    = "a later provider call does not disturb an earlier destination"
+)
+
 var keyProtectorChecks = []func(*report, Config){
 	checkRoundTrip,
 	checkProtectDoesNotRetainTheKey,
@@ -458,7 +511,9 @@ var keyProtectorChecks = []func(*report, Config){
 	checkDestinationNotDisturbedByALaterCall,
 	checkTamperedBlobRefused,
 	checkDestinationLengthIsAuthenticated,
+	checkForgedBlobRefused,
 	checkKeyProtectorRefusesAnEndedContext,
+	checkConcurrentUse,
 	checkNoResidueAfterUnprotect,
 }
 
@@ -563,7 +618,7 @@ func checkProtectDoesNotRetainTheKey(r *report, cfg Config) {
 // caller does, and requires it to stay zero across later provider calls. It
 // catches a provider that keeps the last destination and writes into it again.
 func checkDestinationNotWrittenAfterTheCallerWipedIt(r *report, cfg Config) {
-	const property = "Unprotect does not write into a destination the caller has finished with"
+	const property = noWriteAfterWipeProperty
 
 	p, err := newProtector(cfg)
 	if err != nil {
@@ -613,6 +668,9 @@ func checkDestinationNotWrittenAfterTheCallerWipedIt(r *report, cfg Config) {
 		r.fail(property, "a second Unprotect failed: %v", err)
 		return
 	}
+	if !bytes.Equal(later, second) {
+		r.fail(property, "a second Unprotect returned nil but its destination does not hold the second key")
+	}
 	if _, err := p.Protect(r.ctx, first); err != nil {
 		r.fail(property, "a later Protect failed: %v", err)
 		return
@@ -637,7 +695,7 @@ func checkDestinationNotWrittenAfterTheCallerWipedIt(r *report, cfg Config) {
 // or wiped by a later call. A provider that wipes a retained destination passes
 // the zero-stays-zero check but leaves its caller holding zeros as a key.
 func checkDestinationNotDisturbedByALaterCall(r *report, cfg Config) {
-	const property = "a later provider call does not disturb an earlier destination"
+	const property = noDisturbanceProperty
 
 	p, err := newProtector(cfg)
 	if err != nil {
@@ -681,6 +739,9 @@ func checkDestinationNotDisturbedByALaterCall(r *report, cfg Config) {
 	if err := p.Unprotect(r.ctx, secondBlob, later); err != nil {
 		r.fail(property, "a second Unprotect failed: %v", err)
 		return
+	}
+	if !bytes.Equal(later, second) {
+		r.fail(property, "a second Unprotect returned nil but its destination does not hold the second key")
 	}
 	if _, err := p.Protect(r.ctx, first); err != nil {
 		r.fail(property, "a later Protect failed: %v", err)
@@ -827,6 +888,186 @@ func checkDestinationLengthIsAuthenticated(r *report, cfg Config) {
 			r.fail(property, "a refused Unprotect into a %d-byte destination left plaintext key material "+
 				"in it", n)
 		}
+	}
+}
+
+// checkForgedBlobRefused submits the blob Config.Forge builds from the
+// provider's public material. The tampered-blob cases cannot catch a bare
+// public-key wrap: its padding or tag refuses every malformed blob, but a blob
+// an attacker encrypted to the public key is well formed.
+func checkForgedBlobRefused(r *report, cfg Config) {
+	const property = "a blob forged from the provider's public key is refused"
+
+	switch {
+	case cfg.SkipForgery != "":
+		r.note("providertest: forged-blob check SKIPPED by Config.SkipForgery — %q. Whether Unprotect opens a "+
+			"blob an attacker built from the public key is therefore unmeasured", cfg.SkipForgery)
+		return
+	case cfg.Forge == nil && cfg.PublicKey:
+		r.unmeasured(property, "forged-blob check not run: Config.PublicKey declares a public-key provider but "+
+			"Config.Forge is nil, so the suite cannot build the blob an attacker would. Set Forge, or accept that "+
+			"with Config.SkipForgery")
+		return
+	case cfg.Forge == nil:
+		r.note("providertest: forged-blob check not run: Config.PublicKey is not set, so Protect is taken to need " +
+			"a secret and the tampered-blob cases stand for forgery")
+		return
+	}
+
+	p, err := newProtector(cfg)
+	if err != nil {
+		r.fail(property, "%v", err)
+		return
+	}
+	key, err := randKey()
+	if err != nil {
+		r.fail(property, "%v", err)
+		return
+	}
+	forged, err := cfg.Forge(p, bytes.Clone(key))
+	if err != nil {
+		r.fail(property, "%v", &stepError{step: "Config.Forge", err: err})
+		return
+	}
+	if len(forged) == 0 {
+		r.fail(property, "Config.Forge returned an empty blob, which the tampered-blob cases already submit; "+
+			"this check would measure nothing")
+		return
+	}
+
+	const canary = 0x5A
+	dst := bytes.Repeat([]byte{canary}, keyBytes)
+	err = p.Unprotect(r.ctx, forged, dst)
+	switch {
+	case err == nil:
+		what := "material the attacker did not choose"
+		if bytes.Equal(dst, key) {
+			what = "the key the attacker chose"
+		}
+		r.fail(property, "Unprotect ACCEPTED a blob Config.Forge built without the provider's private key, and "+
+			"wrote %s into the destination: anyone who can write a stored blob chooses the key every sealed "+
+			"value opens under. A public-key wrap must be authenticated by something an attacker lacks, such "+
+			"as a signature by a device key", what)
+		return
+	case !errors.Is(err, enclave.ErrSealedAuthentication):
+		r.fail(property, "Unprotect refused the forged blob with %v, want an error matching "+
+			"ErrSealedAuthentication", err)
+	}
+	if containsRun(dst, key) {
+		r.fail(property, "a refused Unprotect of the forged blob left the attacker's key in the destination: "+
+			"the provider decrypts before it authenticates")
+	}
+	r.note("providertest: a blob forged by Config.Forge was refused")
+}
+
+// concurrentWorkers goroutines each run concurrentRounds round trips in the
+// concurrency check: enough to overlap the calls of a provider that blocks on
+// a device, few enough device round trips for a hardware provider.
+const (
+	concurrentWorkers = 8
+	concurrentRounds  = 4
+)
+
+// checkConcurrentUse runs round trips from several goroutines at once, as a
+// Sealer does, each with keys of its own, and requires each to recover its
+// own. A provider staging keys or blobs in shared state mixes them up under
+// load, returning another call's key or a false ErrSealedAuthentication. The
+// check compares outputs, so it needs no race detector; under -race it is
+// also a data-race probe.
+//
+// It does not run against a provider the spies caught writing into a
+// destination after its call returned: those writes would race with this
+// check's own reads, and under -race the race report would end the caller's
+// test binary instead of the run reporting what the spies found.
+func checkConcurrentUse(r *report, cfg Config) {
+	const property = "Protect and Unprotect are safe for concurrent use"
+
+	for _, spy := range []string{noWriteAfterWipeProperty, noDisturbanceProperty} {
+		if r.failed(spy) {
+			r.note("providertest: concurrency check not run: the provider writes into destinations after "+
+				"its calls return (%q failed), which concurrent calls would race with", spy)
+			return
+		}
+	}
+
+	p, err := newProtector(cfg)
+	if err != nil {
+		r.fail(property, "%v", err)
+		return
+	}
+	var keys [concurrentWorkers][concurrentRounds][]byte
+	for w := range keys {
+		for i := range keys[w] {
+			if keys[w][i], err = randKey(); err != nil {
+				r.fail(property, "%v", err)
+				return
+			}
+		}
+	}
+	// whose names what a destination holds instead of its own key.
+	whose := func(dst []byte) string {
+		for w := range keys {
+			for i := range keys[w] {
+				if bytes.Equal(dst, keys[w][i]) {
+					return fmt.Sprintf("the key of goroutine %d, round %d", w, i)
+				}
+			}
+		}
+		if memscan.AllZero(dst) {
+			return "zeros"
+		}
+		return "bytes that are no key this check protected"
+	}
+
+	var (
+		mu       sync.Mutex
+		findings []string
+		wg       sync.WaitGroup
+	)
+	record := func(format string, args ...any) {
+		mu.Lock()
+		defer mu.Unlock()
+		findings = append(findings, fmt.Sprintf(format, args...))
+	}
+	start := make(chan struct{})
+	for w := range concurrentWorkers {
+		wg.Go(func() {
+			<-start
+			for i, key := range keys[w] {
+				if r.ctx.Err() != nil {
+					return
+				}
+				// A copy, so a Protect that mutates its input (a finding of
+				// the round trip) neither looks like a concurrency defect
+				// nor writes the key table other goroutines read.
+				blob, err := p.Protect(r.ctx, bytes.Clone(key))
+				if err != nil {
+					record("goroutine %d, round %d: Protect: %v", w, i, err)
+					return
+				}
+				dst := make([]byte, keyBytes)
+				if err := p.Unprotect(r.ctx, blob, dst); err != nil {
+					record("goroutine %d, round %d: Unprotect of the blob it had just protected: %v", w, i, err)
+					return
+				}
+				if !bytes.Equal(dst, key) {
+					record("goroutine %d, round %d: Unprotect returned nil but wrote %s into its destination",
+						w, i, whose(dst))
+					return
+				}
+			}
+		})
+	}
+	close(start)
+	wg.Wait()
+
+	for _, f := range findings {
+		r.fail(property, "%s, with %d goroutines calling one provider at once: the provider shares state "+
+			"across calls without synchronizing it, and a Sealer calls it concurrently", f, concurrentWorkers)
+	}
+	if len(findings) == 0 {
+		r.note("providertest: %d goroutines recovered their own keys from %d concurrent round trips",
+			concurrentWorkers, concurrentWorkers*concurrentRounds)
 	}
 }
 

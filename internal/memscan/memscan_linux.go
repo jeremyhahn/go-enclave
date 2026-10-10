@@ -28,10 +28,20 @@ const chunk = 1 << 20
 
 var errEmptyNeedle = errors.New("memscan: an empty needle matches everywhere")
 
+var (
+	errOffsetRange = errors.New("address above the largest file offset")
+	errNoProgress  = errors.New("read returned no more than the overlap")
+)
+
 // Find returns the /proc/self/maps lines of every swept mapping (see
 // sweptMapping) that contains needle, excluding the one that contains home.
 // Pass 0 for home to exclude nothing. The scan buffer is wiped after every
 // mapping (see mappingContains).
+//
+// It fails closed: a swept mapping it cannot read returns an
+// *UnreadableMappingError (ErrUnreadableMapping), and a sweep that read nothing
+// returns ErrEmptySweep. Only the kernel's own [vvar] and [vsyscall] regions
+// are excused. Callers must not discard these errors.
 //
 // It needs an unfiltered /proc that lets a process read its own
 // /proc/self/maps and /proc/self/mem; a caller fails rather than skips without
@@ -51,14 +61,21 @@ func Find(needle []byte, home uintptr) ([]string, error) {
 		return nil, err
 	}
 	defer func() { _ = mem.Close() }()
-	return find(string(maps), mem, needle, home, make([]byte, chunk+len(needle)-1)), nil
+	return find(string(maps), mem, needle, home, make([]byte, chunk+len(needle)-1))
 }
 
 // find is Find over a maps listing and the memory it describes, reading
 // through buf. Chunks overlap by len(needle)-1 so a needle straddling a read
 // boundary is found, so buf must be longer than that.
-func find(maps string, mem io.ReaderAt, needle []byte, home uintptr, buf []byte) []string {
+//
+// It fails closed. A swept mapping that cannot be read in full returns an
+// *UnreadableMappingError (ErrUnreadableMapping), and a sweep that read no
+// mapping returns ErrEmptySweep, so neither can pass as a clean result. The one
+// excuse is a kernelMapping, which holds no process data. A home mapping is
+// excluded without being read, and does not count as read.
+func find(maps string, mem io.ReaderAt, needle []byte, home uintptr, buf []byte) ([]string, error) {
 	var hits []string
+	read := 0
 	for _, line := range strings.Split(maps, "\n") {
 		fields := strings.Fields(line)
 		if len(fields) < 5 {
@@ -74,15 +91,40 @@ func find(maps string, mem io.ReaderAt, needle []byte, home uintptr, buf []byte)
 		if home >= lo && home < hi {
 			continue
 		}
-		if mappingContains(mem, lo, hi, needle, buf) {
+		if kernelMapping(strings.Join(fields[5:], " ")) {
+			continue
+		}
+		found, err := mappingContains(mem, lo, hi, needle, buf)
+		if err != nil {
+			return nil, &UnreadableMappingError{Mapping: strings.TrimSpace(line), Err: err}
+		}
+		read++
+		if found {
 			hits = append(hits, strings.TrimSpace(line))
 		}
 	}
-	return hits
+	if read == 0 {
+		return nil, ErrEmptySweep
+	}
+	return hits, nil
+}
+
+// kernelMapping reports whether a mapping is one the kernel provides to every
+// process and /proc/self/mem refuses to read ([vvar], [vsyscall]). They hold
+// no process data, so they are the only mappings the sweep may leave unread.
+// The vDSO is readable and is swept like any other.
+func kernelMapping(path string) bool {
+	switch path {
+	case "[vvar]", "[vvar_vclock]", "[vsyscall]":
+		return true
+	}
+	return false
 }
 
 // mappingContains reports whether the region [lo, hi) of mem contains needle,
-// reading it through the caller's scratch buffer.
+// reading it through the caller's scratch buffer. A region it could not read
+// in full, because a read failed or made no progress, is an error rather than
+// a miss; a match found before the failure is still a match.
 //
 // It wipes buf before returning. Otherwise buf carries a copy of the needle
 // into the scan of a later mapping, possibly the one buf lives in, and the
@@ -90,7 +132,7 @@ func find(maps string, mem io.ReaderAt, needle []byte, home uintptr, buf []byte)
 // handed to ReadAt (io.ReaderAt may scribble on all of it even on a short
 // read); the rest of buf was never written. Wiping the whole 1 MiB buffer per
 // mapping makes the sweep too slow under the race detector.
-func mappingContains(mem io.ReaderAt, lo, hi uintptr, needle, buf []byte) bool {
+func mappingContains(mem io.ReaderAt, lo, hi uintptr, needle, buf []byte) (bool, error) {
 	used := 0
 	// clear is a memclr of memory buf still references, so it is not elided.
 	defer func() { clear(buf[:used]) }()
@@ -101,23 +143,28 @@ func mappingContains(mem io.ReaderAt, lo, hi uintptr, needle, buf []byte) bool {
 			// Unreachable in practice, but ReadAt takes a signed offset and a
 			// wrap would scan the wrong region. Widened to uint64 so it compiles
 			// on 32-bit targets, where it is always false.
-			return false
+			return false, errOffsetRange
 		}
 		n := readLen(off, hi, len(buf))
 		used = max(used, n)
 		read, rerr := mem.ReadAt(buf[:n], int64(off))
 		if read > 0 && bytes.Contains(buf[:read], needle) {
-			return true
+			return true, nil
+		}
+		if off+uintptr(read) >= hi {
+			// The read reached the end of the region: all of it was scanned. An
+			// io.ReaderAt may return a full count with io.EOF, which is not a failure.
+			return false, nil
 		}
 		if rerr != nil {
-			return false
+			return false, rerr
 		}
 		if read <= overlap {
-			return false
+			return false, errNoProgress
 		}
 		off += uintptr(read - overlap)
 	}
-	return false
+	return false, nil
 }
 
 // readLen is the length of one read of [off, hi) into a buffer of size max.
