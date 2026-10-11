@@ -7,8 +7,8 @@
 # move back to ci.yml once its reason for being here is gone; that move is
 # deliberate, not automatic.
 #
-# Every step is a make target (#89, devops §4), exactly as in ci.yml: the FIPS
-# environment, trivy's version, checksum and flags, and the .trivyignore
+# Every step is a make target (#89, devops §4), exactly as in ci.yml: trivy's
+# version, checksum and flags, and the .trivyignore
 # wiring all live in the Makefile, so a nightly finding reproduces with the
 # same `make` line locally. The jobs run on the bare runner with actions/setup-go,
 # and get their pinned tools as ci.yml does (see its header).
@@ -31,32 +31,8 @@ env:
   TOOL_INSTALL: ${{ github.server_url == 'https://github.com' && '1' || '0' }}
 
 jobs:
-  # GOFIPS140=latest + GODEBUG=fips140=only (STRICT, not `on`), set by the
-  # target itself; the Makefile records why `on` is a gate that cannot
-  # fail on the thing it exists to catch. The target covers the same
-  # packages as `make test`, but it is NOT the same run with only the FIPS
-  # env added: it runs once, without -race and without the -cpu=1,2,8
-  # matrix. It exists to find non-approved cryptography on a tested path,
-  # which neither the race detector nor the CPU matrix bears on; the race
-  # and contention defects stay with `make test`/`make coverage` in ci.yml.
-  # If it fails, that failure IS the finding:
-  # something on a tested path uses non-approved cryptography. Do not
-  # weaken it to make it pass — fix the call site, or document a
-  # deliberate exemption with the owner's approval.
-  fips:
-    name: FIPS
-    runs-on: ubuntu-latest
-    # nightly runs standalone; build health is ci.yml's job.
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
-        with:
-          go-version-file: go.mod
-
-      - name: Build and unit tests (FIPS 140-3 strict)
-        run: make test-fips
+  # The FIPS-strict unit run (`make test-fips`) moved to ci.yml in #154, so it
+  # gates every PR.
 
   # trivy is baked into the toolchain image at the pin in scripts/tool-pins.sh
   # (the pinned release tarball, accepted only if it matches the SHA-256 pinned

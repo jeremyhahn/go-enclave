@@ -12,6 +12,7 @@ import (
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/fips140"
 	"errors"
 	"fmt"
 	"sync"
@@ -130,8 +131,22 @@ type deviceKey struct {
 	seals, opens atomic.Int64
 }
 
-func (k *deviceKey) NonceSize() int { return 12 }
-func (k *deviceKey) Overhead() int  { return 16 }
+// FIPS 140-only mode refuses AES-GCM under a caller-chosen nonce, so there
+// the key draws its own and carries it in the ciphertext (NonceSize 0), as
+// the AEAD contract allows.
+func (k *deviceKey) NonceSize() int {
+	if fips140.Enforced() {
+		return 0
+	}
+	return 12
+}
+
+func (k *deviceKey) Overhead() int {
+	if fips140.Enforced() {
+		return 12 + 16
+	}
+	return 16
+}
 
 func (k *deviceKey) Seal(dst, nonce, plaintext, additionalData []byte) ([]byte, error) {
 	k.seals.Add(1)
@@ -162,7 +177,11 @@ func (k *deviceKey) gcm(fn func(cipher.AEAD) error) error {
 		if err != nil {
 			return err
 		}
-		g, err := cipher.NewGCM(block)
+		newGCM := cipher.NewGCM
+		if fips140.Enforced() {
+			newGCM = cipher.NewGCMWithRandomNonce
+		}
+		g, err := newGCM(block)
 		if err != nil {
 			return err
 		}

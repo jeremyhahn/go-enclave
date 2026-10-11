@@ -8,9 +8,11 @@ import (
 	"crypto/cipher"
 	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/fips140"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"os"
 	"runtime"
@@ -612,7 +614,8 @@ func checkImportedPurpose(r *report, property string, hc HandleCase, h enclave.H
 // checkImportedAESKey requires an AES-256-GCM handle to be that algorithm, and
 // to open what the imported key sealed in this process. A handle that draws
 // its own nonce carries it in a format the seam leaves to the backend, so only
-// its constants are checked.
+// its constants are checked. FIPS 140-only mode refuses this process a GCM
+// under a caller-chosen nonce, so there only the ciphertext body is checked.
 func checkImportedAESKey(r *report, property, name string, aead enclave.AEAD, key []byte) {
 	const nonceSize, overhead = 12, 16
 	if aead.Overhead() != overhead || aead.NonceSize() != nonceSize && aead.NonceSize() != 0 {
@@ -628,16 +631,39 @@ func checkImportedAESKey(r *report, property, name string, aead enclave.AEAD, ke
 		r.fail(property, "%s: the imported key is not an AES key: %v", name, err)
 		return
 	}
+	nonce := randomBytes(nonceSize)
+	plaintext := []byte("backendtest imported key")
+	if fips140.Enforced() {
+		checkImportedGCMBody(r, property, name, aead, block, nonce, plaintext)
+		return
+	}
 	gcm, err := cipher.NewGCM(block)
 	if err != nil {
 		r.fail(property, "%s: %v", name, err)
 		return
 	}
-	nonce := randomBytes(nonceSize)
-	plaintext := []byte("backendtest imported key")
 	opened, err := aead.Open(nil, nonce, gcm.Seal(nil, nonce, plaintext, nil), nil)
 	if err != nil || !bytes.Equal(opened, plaintext) {
 		r.fail(property, "%s: the handle cannot open what the imported key sealed (%v); it does not hold the imported key", name, err)
+	}
+}
+
+// checkImportedGCMBody is checkImportedAESKey under FIPS 140-only mode: it
+// requires the handle's ciphertext body under nonce to be GCM's, the plaintext
+// under AES-CTR from the nonce's second counter block, using the approved
+// AES-CTR the mode leaves this process. The tag is the handle's own.
+func checkImportedGCMBody(r *report, property, name string, aead enclave.AEAD, block cipher.Block, nonce, plaintext []byte) {
+	sealed, err := aead.Seal(nil, nonce, plaintext, nil)
+	if err != nil || len(sealed) != len(plaintext)+aead.Overhead() {
+		r.fail(property, "%s: the handle cannot seal under the imported key (%d bytes, %v)", name, len(sealed), err)
+		return
+	}
+	// GCM's J0+1 for a 12-byte nonce: the nonce, then a 32-bit counter of 2.
+	counter := binary.BigEndian.AppendUint32(bytes.Clone(nonce), 2)
+	want := make([]byte, len(plaintext))
+	cipher.NewCTR(block, counter).XORKeyStream(want, plaintext)
+	if !bytes.Equal(sealed[:len(plaintext)], want) {
+		r.fail(property, "%s: the handle's ciphertext is not the imported key's AES-GCM; it does not hold the imported key", name)
 	}
 }
 

@@ -55,10 +55,10 @@
 # Some steps are guarded on `github.server_url` so host-specific tooling runs
 # only where it exists.
 #
-# Long-horizon checks — the FIPS-strict UNIT test run and `trivy fs` — live in
-# nightly.yml rather than on the push path (devops §8a: alpha phase). The
-# integration suite's FIPS run is the exception: it is on the push path, in
-# `integration`. release.yml runs everything, trivy included, on a tag.
+# The long-horizon check `trivy fs` lives in nightly.yml rather than on the
+# push path (devops §8a: alpha phase). Both FIPS-strict runs are on the push
+# path: the unit tests in `fips`, the integration suite in `integration`.
+# release.yml runs everything, trivy included, on a tag.
 
 name: CI
 
@@ -175,9 +175,35 @@ jobs:
 
       - run: make ci-build
 
-  # FIPS (owner mandate 2026-08-17, security-review.md §6) runs nightly
-  # (nightly.yml -> `make test-fips`), not here; moving it onto the push path
-  # is a deliberate decision, not a drive-by.
+  # FIPS (owner mandate 2026-08-17, security-review.md §6). It ran nightly
+  # until #154: a red `make test-fips` reached main because no PR ran it, so it
+  # gates every PR now.
+  #
+  # GOFIPS140=latest + GODEBUG=fips140=only (STRICT, not `on`), set by the
+  # target itself; the Makefile records why `on` is a gate that cannot
+  # fail on the thing it exists to catch. The target covers the same
+  # packages as `make test`, but it is NOT the same run with only the FIPS
+  # env added: it runs once, without -race and without the -cpu=1,2,8
+  # matrix. It exists to find non-approved cryptography on a tested path,
+  # which neither the race detector nor the CPU matrix bears on; the race
+  # and contention defects stay with `test`.
+  # If it fails, that failure IS the finding:
+  # something on a tested path uses non-approved cryptography. Do not
+  # weaken it to make it pass — fix the call site, or document a
+  # deliberate exemption with the owner's approval.
+  fips:
+    name: FIPS
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+
+      - name: Build and unit tests (FIPS 140-3 strict)
+        run: make test-fips
 
   # make ci-test runs the suite with TESTFLAGS (-race -count=1 -cpu=1,2,8) and
   # FAILS below the Makefile's COVERAGE_THRESHOLD, then the erasing build
@@ -270,10 +296,9 @@ jobs:
     name: CI Gate
     runs-on: ubuntu-latest
     if: always()
-    # trivy and the UNIT-test FIPS run live in nightly.yml, off the push
-    # path; they gate nothing here. The integration suite's FIPS run is part
-    # of `integration` and gates.
-    needs: [lint, security, build, test, integration]
+    # trivy lives in nightly.yml, off the push path; it gates nothing here.
+    # The integration suite's FIPS run is part of `integration` and gates.
+    needs: [lint, security, build, fips, test, integration]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
@@ -283,5 +308,6 @@ jobs:
             lint="${{ needs.lint.result }}" \
             security="${{ needs.security.result }}" \
             build="${{ needs.build.result }}" \
+            fips="${{ needs.fips.result }}" \
             test="${{ needs.test.result }}" \
             integration="${{ needs.integration.result }}"

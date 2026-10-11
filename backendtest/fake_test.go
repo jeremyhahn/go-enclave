@@ -9,10 +9,13 @@ import (
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/elliptic"
+	"crypto/fips140"
 	"crypto/hkdf"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"io"
 	"sync"
@@ -737,7 +740,7 @@ func (h *keyHandle) withGCM(nonce []byte, fn func(g cipher.AEAD, nonce []byte) e
 		if err != nil {
 			return err
 		}
-		g, err := cipher.NewGCM(block)
+		g, err := newFakeGCM(block)
 		if err != nil {
 			return err
 		}
@@ -748,6 +751,65 @@ func (h *keyHandle) withGCM(nonce []byte, fn func(g cipher.AEAD, nonce []byte) e
 		return use(make([]byte, materialBytes))
 	}
 	return err
+}
+
+// newFakeGCM is the keyHandle's AES-256-GCM. FIPS 140-only mode refuses GCM
+// under a caller-chosen nonce, which the fake takes so the suite can catch
+// nonce reuse; there it is fipsGCM instead.
+func newFakeGCM(block cipher.Block) (cipher.AEAD, error) {
+	if !fips140.Enforced() {
+		return cipher.NewGCM(block)
+	}
+	mac := make([]byte, 2*aes.BlockSize)
+	block.Encrypt(mac[:aes.BlockSize], []byte("fake fipsGCM mac"))
+	block.Encrypt(mac[aes.BlockSize:], []byte("fake fipsGCM key"))
+	return &fipsGCM{block: block, mac: mac}, nil
+}
+
+// fipsGCM stands in for AES-GCM under FIPS 140-only mode from approved
+// primitives: AES-CTR from GCM's second counter block, so its ciphertext body
+// is GCM's, then a 16-byte HMAC-SHA256 tag over the nonce, additional data and
+// ciphertext. It is a test double, not GCM.
+type fipsGCM struct {
+	block cipher.Block
+	mac   []byte
+}
+
+func (g *fipsGCM) NonceSize() int { return 12 }
+func (g *fipsGCM) Overhead() int  { return 16 }
+
+func (g *fipsGCM) Seal(dst, nonce, plaintext, aad []byte) []byte {
+	n := len(dst)
+	dst = append(dst, plaintext...)
+	g.stream(nonce).XORKeyStream(dst[n:], dst[n:])
+	return append(dst, g.tag(nonce, aad, dst[n:])...)
+}
+
+func (g *fipsGCM) Open(dst, nonce, ciphertext, aad []byte) ([]byte, error) {
+	if len(ciphertext) < g.Overhead() {
+		return nil, enclave.ErrAEADAuthentication
+	}
+	body, tag := ciphertext[:len(ciphertext)-g.Overhead()], ciphertext[len(ciphertext)-g.Overhead():]
+	if !hmac.Equal(tag, g.tag(nonce, aad, body)) {
+		return nil, enclave.ErrAEADAuthentication
+	}
+	n := len(dst)
+	dst = append(dst, body...)
+	g.stream(nonce).XORKeyStream(dst[n:], dst[n:])
+	return dst, nil
+}
+
+func (g *fipsGCM) stream(nonce []byte) cipher.Stream {
+	return cipher.NewCTR(g.block, binary.BigEndian.AppendUint32(bytes.Clone(nonce), 2))
+}
+
+func (g *fipsGCM) tag(nonce, aad, body []byte) []byte {
+	m := hmac.New(sha256.New, g.mac)
+	m.Write(nonce)
+	m.Write(binary.BigEndian.AppendUint64(nil, uint64(len(aad))))
+	m.Write(aad)
+	m.Write(body)
+	return m.Sum(nil)[:g.Overhead()]
 }
 
 func (h *keyHandle) Derive(ctx context.Context, info []byte, n int) (enclave.Handle, error) {
@@ -763,9 +825,10 @@ var otherKey = sync.OnceValue(func() *ecdsa.PrivateKey {
 	return k
 })
 
-// rsaKey is every decrypter's key, generated once for the run.
+// rsaKey is every decrypter's key, generated once for the run: 2048 bits,
+// the least FIPS 140-only mode accepts.
 var rsaKey = sync.OnceValue(func() *rsa.PrivateKey {
-	k, err := rsa.GenerateKey(rand.Reader, 1024)
+	k, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		panic(err)
 	}
