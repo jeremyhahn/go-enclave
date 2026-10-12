@@ -25,6 +25,14 @@
 # actions/setup-go at the version go.mod declares. The devcontainer is for the
 # integration suite, which `make ci-integration` runs through compose.
 #
+# The CI Gate is the exception: it runs on `runs-on: ci-gate`, a label with
+# reserved capacity (two 1-CPU slots on each Dell). In Gitea Actions even a
+# needs-only job takes a runner slot, so on the shared label the gate sat
+# queued behind PR jobs long after its needs had passed, holding back the
+# combined status release.sh cuts from. Those runners are small, so the gate
+# stays light: no checkout, no toolchain, one shell step that carries
+# build/ci/summary.sh inline and reads the needs results.
+#
 # Things here that are the result of being burned, and are worth understanding
 # before editing:
 #
@@ -314,19 +322,73 @@ jobs:
   # empty on Gitea and reports success while jobs fail.
   ci-gate:
     name: CI Gate
-    runs-on: ubuntu-latest
+    # The reserved gate runner (see the header): one light step, no checkout.
+    runs-on: ci-gate
     if: always()
     # trivy lives in nightly.yml, off the push path; it gates nothing here.
     # The integration suite's FIPS run is part of `integration` and gates.
     needs: [lint, security, build, fips, test, integration]
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-
       - name: Fail closed on any non-success
         env:
           FULL: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'ci:full') }}
+        # build/ci/summary.sh, verbatim (buildgates holds the copy to the file).
         run: |
-          sh build/ci/summary.sh "a CI job did not pass" "$FULL" \
+          script=$(mktemp)
+          cat > "$script" <<'SUMMARY'
+          #!/bin/sh
+          # summary.sh — the pass/fail summary a gate job ends with: one line per job,
+          # and a failure unless every job the run selected succeeded.
+          #
+          # Usage: sh build/ci/summary.sh <message> <full> <tier>:<job>=<result>...
+          #
+          # <message> is the error printed when any job did not pass. <full> is `true`
+          # when this run selected the full tier and `false` when it did not; <tier> is
+          # `pr` (the job runs on every event) or `full` (only when the full tier is
+          # selected). A skipped job fails the gate like a failed one: a job that never
+          # ran proved nothing. The one exception is a `full` job skipped in a run that
+          # did not select the full tier, because that job's `if:` was false by design.
+          # Anything else (an unknown tier, a <full> other than true or false) fails
+          # closed. The results arrive one per argument because Gitea does not implement
+          # join(needs.*.result) (it evaluates empty and reports success while jobs
+          # fail), so a workflow names every job it needs.
+          set -eu
+
+          [ $# -ge 3 ] || { echo "usage: $0 <message> <full> <tier>:<job>=<result>..." >&2; exit 2; }
+          message=$1
+          full=$2
+          shift 2
+          case $full in
+            true|false) ;;
+            *) echo "$0: <full> is '$full', want true or false" >&2; exit 2 ;;
+          esac
+
+          bad=0
+          for pair in "$@"; do
+            tagged=${pair%%=*}
+            result=${pair#*=}
+            tier=${tagged%%:*}
+            name=${tagged#*:}
+            case $tier:$result in
+              pr:success|full:success) printf 'OK   %s\n' "$name" ;;
+              full:skipped)
+                if [ "$full" = false ]; then
+                  printf 'OK   %s (full tier, not selected)\n' "$name"
+                else
+                  printf 'SKIP %s (did not run: see its job)\n' "$name"; bad=1
+                fi ;;
+              pr:skipped) printf 'SKIP %s (did not run: see its job)\n' "$name"; bad=1 ;;
+              pr:*|full:*) printf 'FAIL %s (%s)\n' "$name" "$result"; bad=1 ;;
+              *) printf 'FAIL %s (no pr: or full: tier tag)\n' "$pair"; bad=1 ;;
+            esac
+          done
+
+          if [ "$bad" -ne 0 ]; then
+            echo "::error::$message"
+          fi
+          exit "$bad"
+          SUMMARY
+          sh "$script" "a CI job did not pass" "$FULL" \
             pr:lint="${{ needs.lint.result }}" \
             pr:security="${{ needs.security.result }}" \
             pr:build="${{ needs.build.result }}" \

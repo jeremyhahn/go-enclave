@@ -1,0 +1,8 @@
+# actionlint configuration (`make lint-actions` picks it up from .github/).
+self-hosted-runner:
+  # Custom runner labels of our Gitea runners. ci-gate is the reserved label
+  # the CI Gate runs on (see the header of workflows/ci.yml).
+  labels:
+    - ci-gate
+    # The batch runners: dispatch-only work (workflows/batch.yml, handbook batch.yml).
+    - batch

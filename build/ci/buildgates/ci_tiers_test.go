@@ -32,6 +32,12 @@ import (
 const (
 	ciWorkflowFile = ".github/workflows/ci.yml"
 	ciGateJob      = "ci-gate"
+	// ciGateRunner is the gate's runner label, reserved so the gate never
+	// queues behind PR jobs. Its runners are 1-CPU slots: the gate uses no
+	// action (no checkout, no toolchain) and carries summary.sh inline.
+	ciGateRunner = "ci-gate"
+	// gateSummaryHeredoc delimits the inline copy of build/ci/summary.sh.
+	gateSummaryHeredoc = "SUMMARY"
 	// fullTierIf is the `if:` every full-tier job carries, written out, and
 	// the gate's FULL value inside ${{ }}.
 	fullTierIf = "github.event_name == 'push' || github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'ci:full')"
@@ -60,11 +66,13 @@ type tieredWorkflow struct {
 }
 
 type tieredJob struct {
-	If    any      `yaml:"if"`
-	Needs []string `yaml:"needs"`
-	Steps []struct {
-		Env map[string]string `yaml:"env"`
-		Run string            `yaml:"run"`
+	If     any      `yaml:"if"`
+	RunsOn any      `yaml:"runs-on"`
+	Needs  []string `yaml:"needs"`
+	Steps  []struct {
+		Uses string            `yaml:"uses"`
+		Env  map[string]string `yaml:"env"`
+		Run  string            `yaml:"run"`
 	} `yaml:"steps"`
 }
 
@@ -121,6 +129,14 @@ func ciTierViolations(src []byte) ([]string, error) {
 	}
 	if gate.If != "always()" {
 		bad = append(bad, fmt.Sprintf("job %s: if is %v, want always()", ciGateJob, gate.If))
+	}
+	if gate.RunsOn != ciGateRunner {
+		bad = append(bad, fmt.Sprintf("job %s: runs-on is %v, want the reserved label %s", ciGateJob, gate.RunsOn, ciGateRunner))
+	}
+	for i, st := range gate.Steps {
+		if st.Uses != "" {
+			bad = append(bad, fmt.Sprintf("job %s step %d: uses %s; the gate runner is too small for actions, run shell only", ciGateJob, i+1, st.Uses))
+		}
 	}
 	var jobs []string
 	for name := range wf.Jobs {
@@ -194,6 +210,42 @@ func ciTierViolations(src []byte) ([]string, error) {
 
 // workflowTriggerViolations returns what is wrong with one workflow's triggers
 // and concurrency, or nil.
+// gateSummaryViolations returns how ci.yml's gate departs from running its
+// inline copy of build/ci/summary.sh: the gate has no checkout, so the script
+// travels in its step as a heredoc, and that copy must be the file exactly
+// (the file is what TestCIGateSummaryPassesOnlyUnselectedFullSkips drives)
+// and must be what the step runs.
+func gateSummaryViolations(src, summary []byte) ([]string, error) {
+	var wf tieredWorkflow
+	if err := yaml.Unmarshal(src, &wf); err != nil {
+		return nil, err
+	}
+	open := `cat > "$script" <<'` + gateSummaryHeredoc + "'\n"
+	end := "\n" + gateSummaryHeredoc + "\n"
+	var bad []string
+	copies := 0
+	for i, st := range wf.Jobs[ciGateJob].Steps {
+		_, rest, ok := strings.Cut(st.Run, open)
+		if !ok {
+			continue
+		}
+		copies++
+		body, after, ok := strings.Cut(rest, end)
+		switch {
+		case !ok:
+			bad = append(bad, fmt.Sprintf("job %s step %d: the %s heredoc is not closed", ciGateJob, i+1, gateSummaryHeredoc))
+		case body+"\n" != string(summary):
+			bad = append(bad, fmt.Sprintf("job %s step %d: the inline summary.sh differs from build/ci/summary.sh; copy the file verbatim", ciGateJob, i+1))
+		case !strings.HasPrefix(after, `sh "$script" `):
+			bad = append(bad, fmt.Sprintf("job %s step %d: the line after the heredoc does not run the copy (`sh \"$script\" ...`)", ciGateJob, i+1))
+		}
+	}
+	if copies != 1 {
+		bad = append(bad, fmt.Sprintf("job %s: %d steps write the inline summary.sh (`%s`), want exactly one", ciGateJob, copies, strings.TrimSpace(open)))
+	}
+	return bad, nil
+}
+
 func workflowTriggerViolations(file string, src []byte) ([]string, error) {
 	var wf tieredWorkflow
 	if err := yaml.Unmarshal(src, &wf); err != nil {
@@ -223,6 +275,13 @@ func TestCIGateTiersMatchTheJobs(t *testing.T) {
 		t.Fatalf("read %s: %v", ciWorkflowFile, err)
 	}
 	bad, err := ciTierViolations(src)
+	if err != nil {
+		t.Fatalf("parse %s: %v", ciWorkflowFile, err)
+	}
+	for _, b := range bad {
+		t.Errorf("%s: %s", ciWorkflowFile, b)
+	}
+	bad, err = gateSummaryViolations(src, []byte(readFile(t, filepath.Join(root, "build", "ci", "summary.sh"))))
 	if err != nil {
 		t.Fatalf("parse %s: %v", ciWorkflowFile, err)
 	}
@@ -274,12 +333,35 @@ func TestCIGateTiers_RefusesWhatItMustRefuse(t *testing.T) {
 		{"pr job needs a full job", "    name: Lint\n", "    name: Lint\n    needs: [fips]\n"},
 		{"gate FULL flag differs", "          FULL: ${{ " + fullTierIf, "          FULL: ${{ github.event_name == 'push'"},
 		{"no labeled type", "types: [opened, synchronize, reopened, labeled]", "types: [opened, synchronize, reopened]"},
+		{"gate on the shared runner", "    runs-on: " + ciGateRunner + "\n", "    runs-on: ubuntu-latest\n"},
+		{"gate uses an action", "      - name: Fail closed on any non-success\n", "      - uses: actions/checkout@abc # v7\n      - name: Fail closed on any non-success\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if !strings.Contains(ci, tc.old) {
 				t.Fatalf("%s no longer contains %q; update this case", ciWorkflowFile, tc.old)
 			}
 			bad, err := ciTierViolations([]byte(strings.Replace(ci, tc.old, tc.new, 1)))
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			if len(bad) == 0 {
+				t.Fatal("no violation; want a refusal")
+			}
+		})
+	}
+
+	summary := []byte(readFile(t, filepath.Join(repoRoot(t), "build", "ci", "summary.sh")))
+	for _, tc := range []struct{ name, old, new string }{
+		{"copy drifts", "pr:skipped) printf 'SKIP", "pr:skipped) printf 'OK  "},
+		{"copy not run", `sh "$script" "a CI job`, `sh build/ci/summary.sh "a CI job`},
+		{"heredoc not closed", "\n          SUMMARY\n", "\n          EOF\n"},
+		{"no copy", `cat > "$script" <<'SUMMARY'`, `cat > "$script" <<'EOF'`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if !strings.Contains(ci, tc.old) {
+				t.Fatalf("%s no longer contains %q; update this case", ciWorkflowFile, tc.old)
+			}
+			bad, err := gateSummaryViolations([]byte(strings.Replace(ci, tc.old, tc.new, 1)), summary)
 			if err != nil {
 				t.Fatalf("parse: %v", err)
 			}
