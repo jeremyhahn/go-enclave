@@ -1,6 +1,6 @@
 # Sealing and the provider seam — API
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-10
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-11
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Transports
@@ -28,6 +28,71 @@ transport itself, behind the `KeyProtector`/`RootUnsealer` interfaces.
 
 Schemas and error mapping: [engineering.md](engineering.md). No permission
 scope; no pagination.
+
+## Exported symbols
+
+Every exported symbol of the feature. The contract of each is in
+[engineering.md](engineering.md#exported-surface); this table names it.
+
+### Types, constants and constructors
+
+| Symbol | Kind | Notes |
+|---|---|---|
+| `Mode` | `uint8` type | How a `Sealer` uses its provider. `String()` names it (`ModeRootKey`, `ModePerOperation`, else `Mode(n)`). |
+| `ModeRootKey` | `Mode` constant | The zero value: unseal a root once, run an in-memory KEK hierarchy. Selected by `WithRootUnsealer`, and by no provider option. |
+| `ModePerOperation` | `Mode` constant | Protect and unprotect each value's DEK through the provider on every seal and open. Selected by `WithKeyProtector`. |
+| `SealerOption` | `func(*sealerConfig)` type | An option of `NewSealer`. A nil option is `ErrInvalidSealerOption`. |
+| `Sealer` | struct | Seals values and opens them. Built by `NewSealer`; a zero value is `ErrSealerNotConstructed`. |
+| `Sealed` | struct | An envelope of ciphertext on the heap. `String()` and `GoString()` print a redacted form, `Sealed(sealed)` or `Sealed(destroyed)`, under `%v`, `%s` and `%#v`, never the ciphertext. |
+| `NewSealer`, `WithKeyProtector`, `WithRootUnsealer`, `WithKEKRotationLimit`, `WithBackend`, `WithRequireKeyScheduleErasure` | functions | Construction and options. |
+| `SetSealer`, `NewSealed`, `NewSealedFrom` | functions | The process sealer: install it, seal under it. |
+| `KeyScheduleErasure` | function | Whether this build erases AES key schedules. |
+| `KeyProtector`, `RootUnsealer`, `HealthReporter`, `RootKeyBytes` | interfaces, constant | The provider seam. |
+| `SoftwareProvider`, `NewSoftwareProvider` | struct, function | The shipped provider. Methods: `Protect`, `Unprotect`, `UnsealRoot`, `Health`, `Destroy`. |
+
+### Methods
+
+| Method | Notes |
+|---|---|
+| `(*Sealer).Seal`, `SealFrom`, `Mode`, `Destroy` | Seal, seal from an enclave, read the mode, end the sealer. |
+| `(*Sealed).Open`, `OpenIn`, `Openable`, `IsAlive`, `Destroy`, `String`, `GoString` | Open into locked memory or another backend, probe, release. |
+| `(Mode).String` | See above. |
+
+### Errors
+
+Sentinels match with `errors.Is`; the types in the second column also match
+with `errors.As`. Meaning, origin and handling of each:
+[engineering.md](engineering.md#error-semantics).
+
+| Sentinel | Type | Raised by |
+|---|---|---|
+| `ErrSealFailed` | `*SealError` (`Cause`) | Seal paths. |
+| `ErrOpenFailed` | `*OpenError` (`Cause`) | `Open`, `OpenIn`. |
+| `ErrSealedAuthentication` | | Open paths, providers. |
+| `ErrPlaintextEscaped` | | Open (defensive). |
+| `ErrMaterialTooLarge` | | Seal. |
+| `ErrSealerWiped` | `*SealerWipedError` (`Cause`) | All sealing paths, `Openable`. |
+| `ErrOpenabilityUnknown` | | `Openable`. |
+| `ErrInvalidProvider` | | `NewSealer`. |
+| `ErrSealerExhausted` | | Seal in `ModeRootKey`, as a `*SealError` cause. |
+| `ErrInvalidRotationLimit` | | `NewSealer`. |
+| `ErrSealerInstalled` | | `SetSealer`. |
+| `ErrNilSealer` | | `SetSealer`, `(*Sealer).Seal` and `SealFrom` on a nil sealer. |
+| `ErrSealerDestroyed` | | All sealing paths, `Openable`, `SoftwareProvider`. |
+| `ErrSealerNotConstructed` | | `(*Sealer).Seal`, `SealFrom` and `SetSealer` on a `Sealer` not built by `NewSealer`. |
+| `ErrInvalidSealerOption` | | `NewSealer`, for a nil option. |
+| `ErrSealSourceReadOnly` | | `Seal`, `NewSealed`, for read-only data. |
+| `ErrKeyScheduleExposed` | `*KeyScheduleExposedError` (`Name`) | `NewSealer` with `WithRequireKeyScheduleErasure`. |
+| `ErrProviderMessageLimit` | | `SoftwareProvider.Protect`. |
+| `ErrProviderNotConstructed` | | `SoftwareProvider` methods other than `Destroy`. |
+
+The same paths also return errors defined by other features, documented where
+they belong, with their meaning on a sealing path in
+[engineering.md](engineering.md#error-semantics): `ErrEmptyEnclave`,
+`ErrEnclaveDestroyed`, `ErrLockedMemoryUnavailable`, `ErrNilAllocator`,
+`ErrBudgetExhausted`, `ErrInvalidBackend`, `ErrCleanupFailed`
+(`*CleanupError`) and `*CapabilityError` (the [feature index](../README.md)
+lists those features).
 
 ## Versioning
 

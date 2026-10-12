@@ -1,0 +1,3 @@
+### Changed
+
+- **The sealing and provider-conformance docs list every exported symbol and describe the shipped shape** (#159). `docs/sealing/api.md` covers `Mode`, `SealerOption`, `Sealed.String`/`GoString` and every sealing error; its error table gains `ErrInvalidSealerOption`, `ErrSealSourceReadOnly` and `ErrKeyScheduleExposed`. `docs/sealing/architecture.md` describes `WithBackend`, `SealFrom` and `OpenIn(Backend)`. `docs/provider-conformance/api.md` covers every `Config` field and the `ConfigError`, `AbortedError`, `FindingsError` and `NotMeasuredError` types. Both architecture documents gain a data-flow section and their portfolio boundary.

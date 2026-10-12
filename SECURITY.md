@@ -18,9 +18,8 @@ so upgrading to get a fix can require the steps in
 | Latest release | Yes |
 | Anything older | No — upgrade |
 
-Only Linux runs the tests. The BSDs and Windows are **build-only** for
-v0.9.0-rc.1, so a report against them is welcome and in scope, but no test has
-exercised that code ([test status](docs/locked-memory/engineering.md#test-status)).
+Reports against the BSDs and Windows are in scope, though they are build-only
+([test status](docs/locked-memory/engineering.md#test-status)).
 
 ## Reporting a vulnerability
 

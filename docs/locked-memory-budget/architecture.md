@@ -1,6 +1,6 @@
 # Locked-memory budget and admission — architecture
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-09
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-11
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Problem
@@ -28,8 +28,10 @@ flowchart LR
 - **`Allocator`** holds the *remaining* budget in one atomic word, `free`.
   Admission, release, raise and lower are all signed adjustments of that word,
   so a lowering and an in-flight admission are decided by the same
-  compare-and-swap and cannot both take the last page. A successful reservation
-  and a refund are lock-free. A **refusal** reports its figures from an
+  compare-and-swap and cannot both take the last page. Admission is a
+  compare-and-swap loop and a refund is one atomic add; neither takes a
+  lock. Retunes (`SetLimit`, `ForceLimit`, `TransferTo`) serialize on a
+  per-allocator mutex, so the allocator as a whole is not lock-free. A **refusal** reports its figures from an
   unlocked read and falls back to the retune mutex's read lock when that pair is
   inconsistent (`budgetSnapshot`), so a refusal can wait for a retune in
   progress. The retune mutex is written only by budget changes.
@@ -83,6 +85,39 @@ sequenceDiagram
   T->>L1: Unlock
 ```
 
+## Data flow
+
+```mermaid
+sequenceDiagram
+  participant C as caller
+  participant A as Allocator
+  participant K as kernel
+  participant R as registry (ledgers)
+  C->>A: New(data) / NewSized(n) / OpenIn
+  A->>A: charge = LockedSize(n); CAS free -= charge
+  alt charge > free
+    A-->>C: *BudgetError (ErrBudgetExhausted), no syscall
+  else admitted
+    A->>K: mmap, mlock, guard pages
+    alt kernel refuses
+      A->>A: rollback; refund decided once
+      A-->>C: ErrLockedMemoryUnavailable
+    else constructed
+      A->>R: register enclave (last step)
+      A-->>C: *Memory holding the reservation
+    end
+  end
+  C->>A: Destroy (on the Memory)
+  A->>K: unmap
+  A->>A: free += charge, once
+```
+
+Control flows the other way for budgets. `SetLimit` and `ForceLimit` read the
+ceiling (opted-in allocators only), take the allocator's retune mutex and adjust
+`free` and `limit`; `TransferTo` takes both mutexes in id order and moves the
+bytes. Only the retune path reads `RLIMIT_MEMLOCK`; admission never does.
+Contracts and error mapping: [engineering.md](engineering.md).
+
 ## Rejected alternatives
 
 | Alternative | Why rejected |
@@ -106,6 +141,13 @@ sequenceDiagram
 | The install-once, lazily defaulted process slot the process allocator lives in | [singleton.go](../../singleton.go) |
 | Ceiling discovery (`DiscoverLockedMemoryLimit` is the platform function itself) | [memlock.go](../../memlock.go), [memlock_linux.go](../../memlock_linux.go), [memlock_unix.go](../../memlock_unix.go), [memlock_bsd.go](../../memlock_bsd.go), [memlock_unsupported.go](../../memlock_unsupported.go) |
 | Orphan ledger the refund rides on | [registry.go](../../registry.go) |
+
+Ownership: go-enclave owns the locked-memory primitive and its bounded
+`Allocator`; no other project hand-rolls an admission budget. The registry row
+is the go-enclave row of the handbook's `software/docs/00-ownership-and-sdk-boundary.md`
+(§L1). That document has no go-enclave row in §R, so the Tier column of §R does
+not apply here: the capability is embedded-Go only, as
+[api.md](api.md#transports) states.
 
 ## Trust boundaries
 

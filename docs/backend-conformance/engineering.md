@@ -1,0 +1,232 @@
+# Backend conformance — engineering contract
+
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-11
+> Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
+
+The suite holds a backend to the contract in
+[backends/engineering.md](../backends/engineering.md). Its design is in
+[architecture.md](architecture.md).
+
+## Exported surface
+
+| Identifier | Contract |
+|---|---|
+| `TestBackend(ctx, cfg) error` | Runs every check once against fresh backends. A nil `ctx` is `context.Background()`. Returns nil, or one of the errors below; never panics on a backend's panic. |
+| `Config` | The run's input ([fields](#config)). |
+| `HandleCase` | One kind of handle the backend makes ([fields](#handlecase)). |
+| `ErrInvalidConfig`, `ConfigError{Field, Reason}` | The `Config` cannot be run; no backend was tested. Returned on its own, not inside a `FindingsError`. Text: `backendtest: Config.<Field> <Reason>`. |
+| `ErrUncheckedCapability`, `UncheckedCapabilityError{Case, Capability, Reason}` | A declared capability the suite cannot exercise. Returned on its own when the `Config` shows it up front, and inside a `FindingsError` when a check finds it. `Case` is empty for the backend's own capabilities. |
+| `ErrNotMeasured`, `NotMeasuredError{Property, Reason}` | A property could not be measured on this host and the `Config` did not accept that. |
+| `ErrAborted`, `AbortedError{Cause}` | `ctx` ended before the run finished. Matches `ErrAborted`, unwraps to `Cause` (`context.Canceled`, `context.DeadlineExceeded`). |
+| `FindingsError{Findings []error}` | Every finding of the run, in the order found, never empty. `Unwrap() []error` returns them, so `errors.Is` and `errors.As` reach each one. `Error()` prints one finding per line. |
+| `PropertyError{Property, Detail}` | One property of the seam the backend did not honor. Several may share a `Property`. Text: `backendtest: <Property>: <Detail>`. |
+
+### `Config`
+
+| Field | Contract |
+|---|---|
+| `New func() (enclave.Backend, error)` | Required. Returns a fresh backend; called at most once per check. A nil backend, typed nil included, is a finding. |
+| `BackendCapabilities []enclave.Capability` | Exactly what the backend itself claims: `CapabilityImport`, `CapabilitySweep`, `CapabilityConfine`, `CapabilityAttest`. |
+| `Handles []HandleCase` | Required, at least one. |
+| `SkipResidueSweep string` | If set, the reason the residue sweep may not run; the result is a note on `Logf` instead of a `*NotMeasuredError`. |
+| `VerifyEvidence func(nonce []byte, evidence enclave.Evidence) error` | Returns nil when the evidence binds `nonce`, an error when it does not, as the attestation's relying party would judge it. Without it every `Attester` the suite meets is an `*UncheckedCapabilityError`: attestation binding is certified only with it. |
+| `Logf func(format string, args ...any)` | Receives notes about skipped optional measurements. May be nil. |
+
+### `HandleCase`
+
+| Field | Contract |
+|---|---|
+| `Name string` | Required, unique among the cases; names the case in every failure. |
+| `New func(ctx, b enclave.Backend) (enclave.Handle, error)` | Returns a live handle of `b`, such as a key the device generates. Exactly one of `New` and `Import` is set. |
+| `Import []enclave.ImportOption` | For an `Importer`: the option set the suite imports `ImportSize` random bytes with. The case then also checks the purpose's handle contract. |
+| `ImportSize int` | Positive for an imported case. |
+| `Capabilities []enclave.Capability` | Exactly what this case's handles claim: `CapabilityBytes`, `CapabilityFreeze`, `CapabilitySign`, `CapabilityDecrypt`, `CapabilityAEAD`, `CapabilityDerive`, `CapabilityAttest`. |
+
+## Invariants
+
+1. **Fails closed.** A check that cannot run is a `*NotMeasuredError` or an
+   `*UncheckedCapabilityError`, never a pass. `SkipResidueSweep` is the only
+   waiver, and it leaves a note on `Logf`.
+2. **Typed errors only.** Every error is declared in
+   [backendtest/errors.go](../../backendtest/errors.go). A `Config` it refuses
+   before any check is a bare `*ConfigError` or `*UncheckedCapabilityError`;
+   otherwise the result is nil or a `*FindingsError`.
+3. **Only what failed while `ctx` was live is reported.** After it ends a
+   compliant backend fails its calls with the context's error, so a later
+   failure is the abort, not a finding. A panic is reported either way. No
+   further check starts once `ctx` ends.
+4. **A fresh backend per check.** Every check that needs a backend calls
+   `Config.New` afresh.
+5. **No import of `testing`, no new dependency**, and nothing in the root
+   package depends on `backendtest`.
+6. **The suite wipes what it holds.** It wipes the random material it imports
+   and the buffer its residue sweep scans.
+
+## Error semantics
+
+| Error | From | Matches |
+|---|---|---|
+| `*ConfigError` | `TestBackend`, before any check | `ErrInvalidConfig`; `Field` is the field at fault (`New`, `Handles`, `Handles[i]` for a case setting both or neither of `New` and `Import`, `Handles[i].Name`, `Handles[i].ImportSize`, `Handles[i].Capabilities`, `BackendCapabilities`). |
+| `*UncheckedCapabilityError` | `TestBackend`, before any check or from a check | `ErrUncheckedCapability`. |
+| `*FindingsError` | `TestBackend` | Itself; unwraps to each finding. |
+| `*PropertyError` | A check | Itself, by `errors.As`; `Property` is the bold name in [What it checks](#what-it-checks). |
+| `*NotMeasuredError` | The residue check | `ErrNotMeasured`. |
+| `*AbortedError` | `TestBackend`, last | `ErrAborted` and the context's error. |
+
+Match with `errors.Is` and `errors.As`, never the text.
+
+## What it checks
+
+Each bold name is the `Property` of the `*PropertyError` the check reports.
+A check that panics is reported as **panic safety**, including a panic in one
+of the concurrent-use goroutines.
+
+1. **Configuration**, before any check. `New` is set; `Handles` is not
+   empty; case names are non-empty and unique; each case sets exactly one of
+   `New` and `Import`, and an imported case a positive `ImportSize`; no
+   capability list repeats a capability or holds one from the other side of
+   the seam. Each of these is a `*ConfigError`. A capability the enclave
+   package does not name, `CapabilityFreeze` without `CapabilityBytes`, and
+   `CapabilityImport` with no imported case (no valid import would ever be
+   seen to succeed) are refused as unchecked.
+2. **Backend identity.** `Config.New` returns a non-nil backend without error,
+   and `Name` is a valid backend name and stable.
+3. **Backend capabilities are exact** and **handle capabilities are exact**:
+   each capability the backend or a case claims is found by type assertion on
+   the backend or on that case's handle, and each unclaimed one is not.
+4. **Handle lifecycle**, for every case. Making the handle succeeds (an
+   imported case needs a backend that is an `Importer`) and returns a non-nil
+   handle whose dynamic type is a pointer. `Backend()` is non-nil and is the
+   backend under test (by `As`), before and after `Destroy`. A new handle is
+   alive with a positive `Size`, and an imported one is the material's size.
+   After `Destroy` twice, `IsAlive` is false and `Size` is 0. Only a nil
+   return obliges the handle to be dead: a `Destroy` that returns
+   `ErrLockedMemoryUnavailable`, which the seam documents as resumed by a
+   retry, is called again, up to four calls in all, and any other error, or that
+   one on every attempt, is a failure; so is an error that leaves the handle
+   alive. The same rule judges every `Destroy` the suite calls. Every
+   error-returning method the handle has then returns `ErrEnclaveDestroyed`:
+   `WithBytes` (without calling fn), `EqualTo`, `Freeze`, `Derive` (with no
+   handle), `Sign`, `Decrypt`, `Seal`, `Open` and `Attest`. `NonceSize`,
+   `Overhead` and `Public()` are unchanged. No nil receiver is manufactured.
+5. **Per capability**, on a fresh live handle of every case that claims it,
+   or on the backend for a backend capability:
+   - **ByteAccess**: the view is `Size` bytes and holds the imported
+     material; `WithBytes` returns fn's error; `EqualTo` is true for the
+     material and false for an altered byte or a wrong length.
+   - **Freezer**: `Freeze` succeeds and is idempotent, the handle stays alive
+     with its material, and a write to the `WithBytes` view faults on every
+     page and on its first and last byte, each probed on its own. A refused
+     `Freeze` leaves the handle alive.
+   - **Deriver**: an ended context is refused with an error matching its own,
+     and no handle. Each derived handle is alive, of the requested size and
+     of the parent's backend, and is destroyed cleanly. The same info derives
+     the same material and different info different material, compared
+     through `ByteAccess` or, failing that, by one `AEAD` opening what the
+     other sealed. If either comparison cannot be made that way, the
+     capability is refused as unchecked.
+   - **crypto.Signer**: signatures verify against `Public()`: ECDSA over
+     SHA-256; RSA PKCS #1 v1.5 and PSS over SHA-256; Ed25519. Any other
+     public key is refused as unchecked.
+   - **crypto.Decrypter**: an RSA-OAEP SHA-256 ciphertext to `Public()`
+     decrypts to the message, and a tampered one is refused. A non-RSA public
+     key is refused as unchecked.
+   - **AEAD**: `Seal` appends to dst and adds at most `Overhead` bytes;
+     `Open` appends the plaintext to dst; a wrong-length nonce is
+     `ErrInvalidNonce` for both; a flipped bit or different additional data
+     is `ErrAEADAuthentication` with no plaintext.
+   - **Attester**, on the backend or a case: the evidence has a `Format` and
+     `Data`, and differs for different nonces; 1- and 64-byte nonces are
+     accepted, an empty or 65-byte nonce is refused, never truncated; an
+     ended context is refused with an error matching its own. Evidence for a
+     nonce passes `Config.VerifyEvidence` against that nonce and fails it
+     against another; with no `VerifyEvidence` the capability is refused as
+     unchecked, because evidence that merely differs between calls need not
+     bind the nonce.
+   - **Importer**: the source is wiped on success, on invalid options (a nil
+     option, a wrong AES-256-GCM key length; both `ErrInvalidImport`) and on
+     an ended context (an error matching its own). None of these refusals
+     returns a live handle; the seam does not require the handle to be nil,
+     so a dead one passes, and any handle a refusal returns is destroyed. An
+     imported case's handle meets its purpose's contract: its `Size` is the
+     material's; a `PurposeMaterial` handle has `ByteAccess`, any other has
+     `ByteAccess` or `AEAD`; `ByteAccess` holds the material; an AES-256-GCM
+     `AEAD` reports `Overhead` 16 and `NonceSize` 12 (or 0) and, at 12, opens
+     what an in-process GCM sealed with the imported key. An `AEAD` handle
+     without `ByteAccess` that is not such a key, so the suite cannot see its
+     material, is refused as unchecked.
+   - **Sweeper**: under a nil and an ended `ctx`, with one handle of every
+     case live, `Sweep` returns 0 and nil, every handle is destroyed as item 4
+     requires (`IsAlive`, `Size` and every error-returning method), and a
+     second `Sweep` returns 0 and nil again.
+   - **Confiner**: `ConfinesProcess` gives the same answer every time.
+6. **Concurrent use**, for every case. 32 goroutines, released together from
+   a start barrier, run every operation the handle has, `Size`, `IsAlive`,
+   `Backend` and, on a `Freezer`, `Freeze` included, while `Destroy` lands,
+   and each again after it returns. `Destroy` is called once an operation is
+   under way: with `ByteAccess`, one `WithBytes` borrow is held open from the
+   `Destroy` call until `Destroy` returns, for at most 20 ms, and a `Destroy`
+   that returns while that borrow is still open is a failure: `Destroy` waits
+   out in-flight borrows. Destroy is judged by the lifecycle rule above, no
+   operation returns an error other than `ErrEnclaveDestroyed`, `Size` is the
+   live size or 0, `Backend` is the backend under test, and no borrow sees
+   bytes other than the material, such as wiped or freed memory. Once
+   `Destroy` has returned nil, each goroutine's last pass checks the destroyed
+   state of item 4, `IsAlive`, `Size` and `Backend` apart from the
+   error-returning methods. Run it under `-race`.
+7. **Residue** (Linux, [internal/memscan](../../internal/memscan/memscan_linux.go)),
+   for every case that claims `ByteAccess`. A locked copy of the material is
+   the needle. A control sweep with the handle alive must find the material
+   outside the needle. After `Destroy`, a second sweep must find it nowhere. A
+   backend that claims `CapabilitySweep` is measured again on a fresh handle
+   ended by `Sweep` instead of `Destroy`. If the platform has no sweep, the
+   control misses, the sweep fails, or the material is under 16 bytes, the
+   result is a `*NotMeasuredError`. `SkipResidueSweep` turns this into a note
+   logged through `Logf`.
+
+## FIPS 140-only toolchains
+
+The AES-256-GCM check in item 5 (**Importer**) builds an in-process
+`cipher.NewGCM` from the imported key and seals with a nonce the suite
+supplies, to prove the handle holds that key. Under a toolchain that enforces
+FIPS 140 mode (`GODEBUG=fips140=only`), `cipher.NewGCM` refuses
+caller-supplied nonces, so the suite builds the comparison itself: it seals
+through the handle and checks the ciphertext body against the imported key's
+AES-CTR keystream from GCM's first counter block. That still proves the handle
+holds the imported key, and nothing panics, so the suite runs as it does without
+`fips140=only`. A handle that draws its own nonce (`NonceSize` 0) skips the
+comparison and has its constants checked only.
+
+## Cost
+
+Linear in the number of cases: each case builds a handful of handles per
+check, plus 32 goroutines for the concurrency check and one scan of the
+process's readable mappings per residue measurement. The concurrency check
+holds one borrow open for at most 20 ms per case.
+
+## Configuration and persistence
+
+None beyond `Config`. The suite persists nothing.
+
+## Test strategy
+
+`backendtest/backendtest_test.go` runs the suite against the `*Allocator` (the
+locked-memory backend) and against well-behaved fakes, and drives the invalid
+config, unchecked capability, aborted run and residue paths.
+`backendtest/fake_test.go` holds a deliberately broken fake for each check, and
+the check must catch it;
+`errors_test.go` covers each error's text, sentinel and unwrapping.
+`frozenhead_unix_test.go` and `frozenhead_windows_test.go` are the
+per-platform probes of a frozen mapping's first page. `make test-backend-conformance` (the `backendtest` package's `make test-backendtest`)
+runs them and `make coverage-backendtest` holds the package to the coverage
+floor. `make integration-test-backend-conformance` selects the integration
+tests named `TestBackendConformance_` in
+`test/integration/enclave/backend_conformance_test.go`: the `*Allocator`
+passes, a backend that under-claims a capability is a finding, and an invalid
+config is refused.
+
+## Observability
+
+`Config.Logf` receives a note for each measurement the config allowed to be
+skipped. Log the result of `TestBackend` with `t.Fatal(err)`: `FindingsError`
+prints one finding per line.

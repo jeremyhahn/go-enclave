@@ -205,6 +205,7 @@ WORKDIR /src
 
 # By name, not `COPY . .`: the context also carries the toolchain's inputs.
 COPY --chown=root:root go.mod go.sum *.go ./
+COPY --chown=root:root backendtest/ backendtest/
 COPY --chown=root:root providertest/ providertest/
 COPY --chown=root:root internal/ internal/
 COPY --chown=root:root test/integration/ test/integration/

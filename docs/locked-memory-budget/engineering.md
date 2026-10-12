@@ -1,6 +1,6 @@
 # Locked-memory budget and admission — engineering contract
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-09
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-11
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Exported surface
@@ -84,13 +84,14 @@
    strand live reservations on an allocator nothing admits against. The slot is
    the package's generic install-once process singleton (`singleton.go`).
 9. **Readers never see ungranted headroom.** Where a retune writes both words,
-   `limit` is stored before `free` is credited, so a lock-free reader may
-   overstate usage but never understates it. A lock-free refusal can still pair
+   `limit` is stored before `free` is credited, so a reader that does not take
+   the retune mutex may overstate usage but never understates it. A refusal
+   that reads without the mutex can still pair
    words from either side of a retune: mid-raise on an over-subscribed
    allocator `limit − free` can wrap, and a lowering between its two loads
    gives `free > limit`. `budgetSnapshot` rejects any negative difference and
    re-reads under the read lock, so `BudgetError.InUse` is never negative while
-   the ordinary refusal stays lock-free.
+   the ordinary refusal takes no lock.
 10. **A copy is the same allocator.** `Allocator` is a handle on one
     unexported state; a copied value admits against the same budget, so it
     can never admit the same headroom twice (`go vet` flags the copy). A zero
@@ -153,8 +154,8 @@ None. Budgets are set in code. Nothing is persisted.
   (a fixed budget, not a discovered line size; it is exactly 64 on amd64) with
   `free` and `limit` in one line. A new field must justify its place on the hot
   type, or the hot pair moves into its own aligned struct.
-- `BenchmarkRefusalSerial` / `BenchmarkRefusalParallel` guard that refusal is
-  lock-free. A refusal performs only atomic loads, so concurrent refusers share
+- `BenchmarkRefusalSerial` / `BenchmarkRefusalParallel` guard that the ordinary
+  refusal takes no lock. A refusal performs only atomic loads, so concurrent refusers share
   a read-only cacheline and parallel refusal is cheaper per operation than
   serial (parallel/serial about 0.6–0.75). Any read-modify-write on the path —
   a mutex, even `RWMutex.RLock`, or one no-op `free.Add(0)` — serializes

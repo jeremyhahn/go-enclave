@@ -9,7 +9,7 @@
 
 - **`providertest.AbortedError.Err` is renamed `Cause`** (#146), like every
   other cause-carrying error type. See
-  [Upgrading](docs/README.md#v090-alpha-from-v08).
+  [Upgrading](docs/README.md#v090-from-v08).
 - **No failure is an `errors.Join` composite** (#146). A failure that came with
   a failed cleanup, or several refused releases, such as from
   `(*Sealer).Destroy`, `(*SoftwareProvider).Destroy` or a rolled-back

@@ -1,6 +1,6 @@
 # go-enclave documentation
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-10
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-11
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 One folder per capability, each with the same five files: `architecture.md`
@@ -22,6 +22,7 @@ v0.9.0-rc.1: they compile, and no test runs on them
 | [sealing](sealing/user.md) | `Sealed`, `Sealer` modes, the `KeyProtector`/`RootUnsealer` seam, contexts, `Openable`, FIPS, the key-schedule heap exposure and its erasure under `runtime/secret` |
 | [shutdown-sweep](shutdown-sweep/user.md) | `WipeAll(ctx)`: admission, waiting for borrows, termination, the count and `SweepError` |
 | [provider-conformance](provider-conformance/user.md) | `providertest.TestProvider(ctx, cfg)` for TPM/HSM/KMS provider authors |
+| [backend-conformance](backend-conformance/user.md) | `backendtest`: the conformance suite for `Backend` and `Handle` authors |
 | [backends](backends/user.md) | The seam for hardware enclaves: `Handle`, `Backend`, capabilities, the named registry, `As`, the sealing wiring (`WithBackend`, `OpenIn`, `SealFrom`) and the [`backendtest`](backends/architecture.md#conformance-backendtest) conformance suite |
 
 ## Upgrading
@@ -31,7 +32,7 @@ and `api.md` link here. The module is pre-1.0 (`v0.y.z-alpha`): a breaking
 change lands in a MINOR bump under a `BREAKING` heading in
 [CHANGELOG.md](../CHANGELOG.md). Upgrade one release at a time.
 
-### v0.9.0-alpha (from v0.8)
+### v0.9.0 (from v0.8)
 
 #### Renames
 

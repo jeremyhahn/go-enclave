@@ -1,6 +1,6 @@
 # Shutdown sweep — architecture
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-09
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-11
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Problem
@@ -60,6 +60,39 @@ stateDiagram-v2
   Backends --> [*]: Sweep(ctx) each registered Sweeper in name order; count = ledger size + held counts; generation even; return count, nil or *SweepError
 ```
 
+## Data flow
+
+```mermaid
+sequenceDiagram
+  participant P as program (main, signal handler)
+  participant S as WipeAll
+  participant L as ledgers (registryMu)
+  participant E as enclave
+  participant B as registered Sweepers
+  P->>S: WipeAll(ctx)
+  S->>S: acquire sweepSlot (or return ErrSweepInProgress)
+  S->>S: sweepGen odd; arm sweepWaiting
+  loop each pass
+    S->>L: snapshot enclaves and orphans
+    S->>E: TryLock, unmap, settleRelease (refund once, note corruption)
+    E-->>L: leave the ledger
+    opt held by a borrow and ctx live
+      S->>S: wait on sweepWake
+      E-->>S: last holder releases, posts wake-up
+    end
+  end
+  S->>B: Sweep(ctx), in name order
+  S->>L: read count under the lock
+  S->>S: sweepGen even; release slot
+  S-->>P: count, nil or *SweepError (Corrupt, Unwiped, Backends)
+```
+
+Findings flow one way: corruption and unwiped releases are tallied per entry
+during the pass and a backend's error is recorded as a `BackendSweepFailure`;
+all three leave through the one `*SweepError`, while the count is read from the
+ledgers afterwards. Contracts: [engineering.md](engineering.md); the symbols:
+[api.md](api.md).
+
 ### Termination
 
 The entries present at the first pass are what the call **owes**. Only
@@ -74,7 +107,7 @@ only the owed borrows bound the call.
 
 | Alternative | Why rejected |
 |---|---|
-| A fault handler that purges on failure (memguard's model) | Destroys unrelated live data in response to someone else's error, then panics. The sweep is called on purpose and never panics. |
+| A fault handler that purges on failure (memguard's model) | Destroys unrelated live data in response to someone else's error, then panics. The sweep is called on purpose and raises no panic of its own; a registered `Sweeper` that panics is not recovered. |
 | Fixed sleep between a bounded number of passes (before v0.7: 200 µs × 8) | A guess at reader duration that a health probe on a loaded host lost; a reader present for 1.4 ms was abandoned. |
 | Block on `Lock` | Cannot be abandoned when `ctx` ends, and a pending writer stalls every new reader of that enclave. |
 | Trust a failed `TryLock` to mean "held" | `TryLock` has no synchronizing effect and can fail with nobody holding the lock; a sweep sleeping on it could wait for a release that already happened. The `holders` counter closes it. |
@@ -90,10 +123,18 @@ only the owed borrows bound the call.
 
 | Concern | File |
 |---|---|
-| Ledgers, orphans, `WipeAll`, `SweepError`, `ErrSweepInProgress`, wake mechanism, generation, the `holders`-counting locks, `TryLock` classification, `settleRelease` | [registry.go](../../registry.go) |
+| `SweepError`, `ErrSweepInProgress` | [errors.go](../../errors.go) |
+| Ledgers, orphans, `WipeAll`, wake mechanism, generation, the `holders`-counting locks, `TryLock` classification, `settleRelease` | [registry.go](../../registry.go) |
 | `holders` field, release body (`releaseLocked`), `publish` (every constructor's last step) | [enclave.go](../../enclave.go) |
 | Orphan creation (failed rollback keeps the mapping) | [mapping.go](../../mapping.go) (`abandon`), [enclave.go](../../enclave.go) (`publish`), [allocator.go](../../allocator.go) (`admit` decides the refund) |
 | Generation consumers | [sealer.go](../../sealer.go), [sealed.go](../../sealed.go) |
+
+Ownership: go-enclave owns the process-wide teardown; the consuming binary
+calls it and a library never does. This is the go-enclave row of the handbook's
+`software/docs/00-ownership-and-sdk-boundary.md` (§L1: "process-wide lifecycle
+is the consuming binary's call"). That document has no go-enclave row in §R, so
+there is no tier to cite; the call is embedded-Go only
+([api.md](api.md#transports)).
 
 ## Trust boundaries
 

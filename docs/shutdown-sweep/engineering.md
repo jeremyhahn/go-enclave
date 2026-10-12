@@ -1,6 +1,6 @@
 # Shutdown sweep — engineering contract
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-09
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-11
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Exported surface
@@ -71,8 +71,10 @@
    waiting for it, until `ctx` ends.
 9. **Program-owned, never library-called.** It destroys every enclave in the
    process, including those of subsystems a library cannot know about. It is a
-   cooperative teardown step, not a fault handler: it never panics, and a
-   corrupt enclave is reported and the sweep continues.
+   cooperative teardown step, not a fault handler: it raises no panic of its
+   own, and a corrupt enclave is reported and the sweep continues. A
+   registered `Sweeper` that panics is the backend's own panic and is not
+   recovered.
 10. **Backends are swept second, outside the registry lock.** Phase two runs
     only after phase one has finished, still holding the sweep slot and with
     the generation still odd, so a backend's `Sweep` never races the
@@ -84,7 +86,7 @@
     the snapshot waits for the next `WipeAll`. A panic in a `Sweep` is not
     recovered.
 
-## Return values
+## Error semantics
 
 The **count** is what is still held when the call returns, read from the
 ledgers under their lock: enclaves still borrowed when `ctx` ended, enclaves

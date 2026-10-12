@@ -1,13 +1,129 @@
 # Backends — engineering contract
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-10
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-11
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 This contract covers the seam and its wiring into sealing: `WithBackend`,
 `OpenIn`'s `Backend` parameter, `SealFrom` and `WithRequireKeyScheduleErasure`
 are contracted in [sealing](../sealing/engineering.md#exported-surface). The
 conformance suite `backendtest` is contracted in
-[architecture.md](architecture.md#conformance-backendtest).
+[backend-conformance](../backend-conformance/engineering.md).
+
+## Interface signatures
+
+Exact signatures; the godoc in [backend.go](../../backend.go) is the full
+contract of each method.
+
+```go
+// Core.
+type Handle interface {
+	Size() int        // bytes of material; 0 once destroyed
+	IsAlive() bool    // still holds its material
+	Destroy() error   // idempotent, waits out borrows, typed errors only
+	Backend() Backend // never nil, also once destroyed
+}
+
+type Backend interface {
+	Name() string // [a-z0-9]([a-z0-9.-]*[a-z0-9])?, 1 to 64 bytes, stable
+}
+
+// Handle capabilities.
+type ByteAccess interface {
+	Handle
+	WithBytes(fn func([]byte) error) error
+	EqualTo(other []byte) (bool, error)
+}
+
+type Freezer interface {
+	Handle
+	Freeze() error
+}
+
+type Deriver interface {
+	Handle
+	Derive(ctx context.Context, info []byte, n int) (Handle, error)
+}
+
+type AEAD interface {
+	Handle
+	NonceSize() int // constant of the algorithm, valid after Destroy
+	Overhead() int  // constant of the algorithm, valid after Destroy
+	Seal(dst, nonce, plaintext, additionalData []byte) ([]byte, error)
+	Open(dst, nonce, ciphertext, additionalData []byte) ([]byte, error)
+}
+
+// Handle or backend capability.
+type Attester interface {
+	Attest(ctx context.Context, nonce []byte) (Evidence, error)
+}
+
+type Evidence struct {
+	Format string // e.g. "tdx-quote", "sev-snp-report"
+	Data   []byte
+}
+
+// Backend capabilities.
+type Importer interface {
+	Backend
+	Import(ctx context.Context, material []byte, opts ...ImportOption) (Handle, error)
+}
+
+type Sweeper interface {
+	Backend
+	Sweep(ctx context.Context) (held int, err error)
+}
+
+type Confiner interface {
+	Backend
+	ConfinesProcess() bool // this whole process runs inside the backend's boundary
+}
+
+// Import intent.
+type Purpose string   // PurposeMaterial "material", PurposeWrappingKey "wrapping-key", PurposeDataKey "data-key"
+type Algorithm string // AlgorithmAES256GCM "aes-256-gcm"; a backend module may name its own
+
+type ImportSpec struct {
+	Purpose   Purpose
+	Algorithm Algorithm
+}
+
+type ImportOption func(*ImportSpec)
+
+func WithPurpose(p Purpose) ImportOption
+func WithAlgorithm(a Algorithm) ImportOption
+func NewImportSpec(opts ...ImportOption) (ImportSpec, error)
+
+// Registry.
+const LockedMemoryBackendName = "locked-memory"
+
+func DefaultBackend() Backend
+func Register(b Backend) error
+func Lookup(name string) (Backend, error)
+func BackendNames() []string
+func As(v, target any) bool
+
+// Errors.
+var ErrBackendNotRegistered, ErrBackendExists, ErrInvalidBackend, ErrCapabilityUnsupported error
+var ErrInvalidImport, ErrInvalidNonce, ErrAEADAuthentication, ErrCleanupFailed error
+
+type BackendNotRegisteredError struct{ Name string }
+type BackendExistsError struct{ Name string }
+type CapabilityError struct {
+	Backend    string
+	Capability Capability
+}
+type CleanupError struct {
+	Failure error
+	Causes  []error
+}
+
+type Capability string // "bytes", "freeze", "sign", "decrypt", "aead", "derive", "attest", "import", "sweep", "confine"
+```
+
+`*Memory` satisfies `Handle`, `ByteAccess` and `Freezer`, asserted at compile
+time. Every handle's dynamic type is a pointer to shared state, and handle
+structs carry a `noCopy` field so `go vet`'s copylocks check reports a
+dereferenced copy ([architecture](architecture.md#lifetime-and-ownership)).
 
 ## Exported surface
 
@@ -123,19 +239,17 @@ the admitting allocator as `Backend()`, `Import`, and copies of `Memory` and
 `Allocator` sharing state; `wipeall_backends_test.go` covers the sweep phase.
 
 Tests that register a backend remove it in `t.Cleanup` by editing the registry
-map directly; that is the only place a name is ever unbound. There is no
-integration suite: the registry touches no kernel state.
+map directly; that is the only place a name is ever unbound.
+`make integration-test-backends` runs the `TestBackends_` tests in
+`test/integration/enclave`: registration, lookup and `As` through the public
+API, `NewImportSpec`, and the `*Allocator` as a backend that names itself,
+imports into its budget and refuses an import it cannot honour.
 
 ## Testing a backend
 
-A backend author calls `backendtest.TestBackend` from a package test with a
-`Config`: a factory for a fresh backend, the backend's exact capability list,
-and one `HandleCase` per kind of handle it makes. Run it under `-race`. What it
-checks and what it returns are in
-[What it checks](architecture.md#what-it-checks). The suite's own tests run with
-`make test-backendtest`, `make coverage-backendtest` (held to the coverage
-floor) and `make test-backends`. Each check has a deliberately
-broken fake in `backendtest/fake_test.go` that the check must catch.
+A backend author calls `backendtest.TestBackend` from a package test. What it
+checks, what it returns and how its own tests run are in
+[backend-conformance](../backend-conformance/engineering.md).
 
 ## Observability
 

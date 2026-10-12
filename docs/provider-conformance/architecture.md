@@ -1,6 +1,6 @@
 # Provider conformance — architecture
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-09
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-11
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Problem
@@ -17,8 +17,10 @@ repositories, so the check has to ship to them.
 ## Shape chosen
 
 A subpackage, `providertest`, in the shape of `testing/fstest.TestFS`: one call,
-`TestProvider(ctx, cfg)`, which returns `nil` or an error joining one
-`*PropertyError` per failed **assertion**. One property can contribute several
+`TestProvider(ctx, cfg)`, which returns `nil`, a `*ConfigError` for a `Config` it cannot run, or a
+`*FindingsError` holding one `*PropertyError` per failed **assertion**, a
+`*NotMeasuredError` per property it could not measure and, if `ctx` ended, an
+`*AbortedError`. One property can contribute several
 (the tampered-blob check records one per blob it wrongly accepted), all
 carrying the same `Property` name. It does not import `testing`, takes no
 dependency on any provider, and nothing in go-enclave depends on it.
@@ -34,7 +36,7 @@ flowchart TD
   KPC --> RU{"claims ModeRootKey?"}
   RU -- yes --> RUC["RootUnsealer checks:<br/>fills whole dst with a real root ·<br/>no disturbance by a later call ·<br/>ended context refused, nothing consumed"]
   RU -- no --> R
-  RUC --> R["result: nil, or *FindingsError of *PropertyError;<br/>+ *AbortedError if ctx ended"]
+  RUC --> R["result: nil, or *FindingsError of *PropertyError<br/>and *NotMeasuredError; + *AbortedError if ctx ended"]
 ```
 
 Each check calls `cfg.New` for a fresh provider — the mode-pairing check once
@@ -63,6 +65,33 @@ at the next boundary once `ctx` ends.
    mapping so it cannot plant what it looks for. A sweep that cannot run
    returns `ErrNotMeasured` unless `SkipResidueSweep` accepted that.
 
+## Data flow
+
+```mermaid
+sequenceDiagram
+  participant A as author's test
+  participant T as TestProvider
+  participant P as provider (cfg.New)
+  participant L as cfg.Logf
+  A->>T: ctx, Config
+  T->>T: validate Config → *ConfigError, nothing run
+  loop each check, until ctx ends
+    T->>P: cfg.New() — a fresh provider
+    T->>P: Protect / Unprotect / UnsealRoot with slices the suite owns
+    P-->>T: results and written slices
+    T->>T: compare against the spy and the control
+    T->>L: notes: measured, skipped, why
+  end
+  T-->>A: nil, or *FindingsError of *PropertyError, *NotMeasuredError, *AbortedError
+```
+
+Inputs are the `Config` and the provider the author's `New` builds. The suite
+hands the provider only slices it owns, so it can watch them afterwards, and
+reads nothing from the provider but its return values and what the provider
+wrote into those slices. Findings accumulate in the run's report; the report
+and the `Logf` notes are the only output. The suite keeps no state between
+runs.
+
 ## Rejected alternatives
 
 | Alternative | Why rejected |
@@ -83,11 +112,22 @@ at the next boundary once `ctx` ends.
 | Concern | File |
 |---|---|
 | `Config`, `TestProvider`, the checks | [providertest/providertest.go](../../providertest/providertest.go) |
-| `ErrInvalidConfig`/`ConfigError`, `ErrAborted`/`AbortedError`, `PropertyError`, `FindingsError` | [providertest/errors.go](../../providertest/errors.go) |
+| `ErrInvalidConfig`/`ConfigError`, `ErrAborted`/`AbortedError`, `ErrNotMeasured`/`NotMeasuredError`, `PropertyError`, `FindingsError` | [providertest/errors.go](../../providertest/errors.go) |
 | Residue sweep | [providertest/residue.go](../../providertest/residue.go); the `/proc/self/mem` scan it shares with the root package's tests is [internal/memscan](../../internal/memscan/memscan_linux.go) |
 
 The provider under test is the author's; the suite runs in the author's
 repository and test binary.
+
+### Portfolio boundary
+
+The handbook's ownership and SDK boundary
+(`software/docs/00-ownership-and-sdk-boundary.md`) fixes who writes a provider:
+**L1**, the go-xkms row, gives all hardware and cloud crypto to go-xkms, and the
+go-enclave row keeps only the locked-memory primitive. This suite is the
+check go-enclave ships to those owners. **§R** has no row for it today; its
+"Barrier, seal, ceremony" rows describe `SealingStrategy`, a different seam.
+Registering the capability is a handbook change, and this document names only
+identifiers that exist (**L9**).
 
 ## Trust boundaries
 

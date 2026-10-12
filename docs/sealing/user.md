@@ -1,6 +1,6 @@
 # Sealing and the provider seam — user guide
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-10
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-11
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Choose the type by access pattern
@@ -27,14 +27,15 @@ long-lived key in the device, which limits the exposure to values sealed or
 opened recently. It does not remove that exposure. See
 [architecture.md](architecture.md#what-each-mode-buys-against-a-live-memory-reader).
 
-`NewSealer(WithBackend(b))` keeps the wrapping key, KEKs and DEKs in `b`
-instead. That narrows the exposure but never closes it on its own: a key the
+`NewSealer(WithBackend(b))` keeps the wrapping key and the KEKs in `b`
+instead; DEKs are always generated in this process
+([architecture.md](architecture.md#backends-and-enclave-sources)). That narrows the exposure but never closes it on its own: a key the
 backend hands back as bytes still runs AES on the heap. To refuse every
 configuration that leaves a schedule exposed, construct with
 `WithRequireKeyScheduleErasure()`; `NewSealer` then fails with a
 `*KeyScheduleExposedError` naming the first exposed key. Which configurations
 pass is in
-[backends/architecture.md](../backends/architecture.md#b4-generalising-keyscheduleerasure).
+[backends/architecture.md](../backends/architecture.md#key-schedule-exposure).
 
 ## Seal and open
 
@@ -207,7 +208,7 @@ A wiped sealer never re-keys. Construct a new `Sealer` and re-seal from source.
 | `ErrSealerDestroyed` from `SetSealer` | The sealer was destroyed before it was installed | Install a live sealer. |
 | `ErrInvalidSealerOption` from `NewSealer` | A nil option | Pass only non-nil options. |
 | `ErrInvalidBackend` from `NewSealer` or `OpenIn` | A nil or typed-nil `Backend` | Pass a backend, or `DefaultBackend()`. |
-| `*KeyScheduleExposedError` from `NewSealer` | `WithRequireKeyScheduleErasure` and a key (`Name`: `wrapping-key`, `kek` or `dek`) whose AES schedule would land on the heap | Use a `runtime/secret` build or a confining backend; see [Choose the type](#choose-the-type-by-access-pattern). |
+| `*KeyScheduleExposedError` from `NewSealer` | `WithRequireKeyScheduleErasure` and a key (`Name`: `wrapping-key` or `dek`) whose AES schedule would land on the heap | Use a `runtime/secret` build or a confining backend; see [Choose the type](#choose-the-type-by-access-pattern). |
 | `ErrSealSourceReadOnly` | `Seal` or `NewSealed` was given a read-only view, such as the slice an opened `Memory` lends | Use `SealFrom` or `NewSealedFrom` with the handle. |
 | `*CapabilityError` from `NewSealer`, `OpenIn` or `SealFrom` | The backend cannot import or does not return the imported bytes, or the source handle does not expose its bytes | Use a backend that implements `Importer`; seal from a handle with `ByteAccess`. |
 | `ErrProviderMessageLimit` | `SoftwareProvider` used in `ModePerOperation` past 2^31 seals | Use `ModeRootKey` (rotates KEKs) or a hardware provider. |

@@ -1,6 +1,6 @@
 # Sealing and the provider seam — architecture
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-07
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-11
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Problem
@@ -126,6 +126,67 @@ sequenceDiagram
   S-->>C: *Sealed (data wiped on every path)
 ```
 
+## Backends and enclave sources
+
+The sealer is not tied to locked process memory at either end. Three entry
+points carry the [backend seam](../backends/architecture.md) into sealing:
+
+- **`WithBackend(b)`** chooses where a `ModeRootKey` sealer keeps its long-lived
+  keys. The wrapping key and every KEK are imported into `b`; a handle with an
+  `AEAD` wraps inside the device, one with only `ByteAccess` wraps here. Data
+  keys (DEKs) never leave this process. Without it, those keys live in locked
+  memory. In `ModePerOperation` the sealer holds no such key, so the option only
+  feeds the strict-mode check of `WithRequireKeyScheduleErasure`, which refuses
+  a configuration where an AES key schedule would stay on the heap.
+- **`SealFrom(ctx, src)`** seals material that already sits in an enclave
+  (`NewSealedFrom` for the process sealer). It borrows `src`, leaves it
+  unwiped and undestroyed, and so also seals a frozen `Memory` that `Seal`
+  refuses: `Seal` wipes its input, and writing to a read-only page kills the
+  process.
+- **`OpenIn(ctx, b)`** opens into any backend that can hold the material
+  instead of only a new `Memory`. Locked memory and an `*Allocator` are
+  decrypted into directly (the allocator admits the destination against its
+  budget). Any other `Importer` receives the plaintext from a locked scratch
+  enclave that is destroyed once the import returns, so plaintext still never
+  lands on the heap.
+
+## Data flow
+
+Where each byte goes, in the default `ModeRootKey`:
+
+```mermaid
+flowchart LR
+  SRC["caller slice, or an enclave (SealFrom)"] -->|"read under one borrow"| AEADS["AES-256-GCM seal under the DEK"]
+  DEK["DEK, fresh, locked"] --> AEADS
+  DEK -->|"wrapped under the current KEK"| BLOB["blob (heap)"]
+  AEADS --> CT["ciphertext (heap)"]
+  BLOB --> ENV["Sealed envelope"]
+  CT --> ENV
+  SRC -.->|"Seal: wiped on every path"| GONE["zero"]
+  ENV -->|"Open / OpenIn"| UNW["blob unwrapped: KEK, or wrapping key for a retired generation"]
+  UNW --> DEK2["DEK, fresh, locked"]
+  DEK2 --> DEC["AES-256-GCM open, blob as AAD"]
+  CT --> DEC
+  DEC -->|"decrypted in place"| DST["locked Memory, a budgeted allocation,<br/>or a scratch enclave imported into another backend"]
+```
+
+- **Seal.** The caller's slice (or the source enclave, read under its own
+  borrow) is read once. The DEK is generated into locked memory, wrapped, and
+  the material is sealed under it with the blob as additional authenticated
+  data. The DEK is destroyed before the call returns; `Seal` also wipes the
+  caller's slice on every path, `SealFrom` does not touch its source.
+- **Provider calls.** `ModeRootKey` calls the `RootUnsealer` once, at the first
+  seal, then runs on in-process keys (see the sequence above). `ModePerOperation`
+  calls the `KeyProtector` for the DEK on every seal (`Protect`) and open
+  (`Unprotect`); the material never reaches the provider, only the 32-byte DEK.
+- **Open.** The destination is allocated first, with capacity exactly the
+  plaintext length, then the DEK is recovered into locked memory and the
+  ciphertext is decrypted in place. A length mismatch is refused before
+  decrypting; a failed tag releases no plaintext.
+- **What reaches the heap** is ciphertext, blobs and AES key schedules, never
+  plaintext material
+  ([engineering.md](engineering.md#key-schedule-heap-exposure)).
+
 ## Rejected alternatives
 
 | Alternative | Why rejected |
@@ -164,6 +225,22 @@ TPM, HSM and KMS providers live in higher layers and are injected through
 `NewSealer(WithKeyProtector(p))`, `NewSealer(WithRootUnsealer(p))`, or
 `SetSealer`.
 
+### Portfolio boundary
+
+The handbook's ownership and SDK boundary
+(`software/docs/00-ownership-and-sdk-boundary.md`) places this package as
+follows:
+
+- **L1, go-enclave row.** go-enclave owns the portfolio's locked-memory
+  primitive; sealing is built on it and no consumer hand-rolls locked-memory
+  handling. **All hardware and cloud crypto is go-xkms's** (L1, go-xkms row),
+  which is why this package ships only `SoftwareProvider` and injects the rest
+  through the seam.
+- **§R.** The registry has no go-enclave sealing row today. Its "Barrier, seal,
+  ceremony" rows describe `SealingStrategy`, a different seam owned by
+  go-quicraft and go-qrdb, not `Sealer`, `Sealed` or the provider interfaces
+  here. Registering the sealing capability is a handbook change, not made by
+  this document (L9: a name written in a document must exist in code).
 ## Trust boundaries
 
 - **Provider boundary.** A provider must supply confidentiality **and**

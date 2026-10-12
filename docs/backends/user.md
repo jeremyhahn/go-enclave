@@ -1,6 +1,6 @@
 # Backends — user guide
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-10
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-11
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 A backend is what holds an enclave's material. Locked memory, the
@@ -70,6 +70,11 @@ if enclave.As(backend, &t) {
 	// …
 }
 ```
+
+## Check a backend you wrote
+
+Run the conformance suite from your backend's tests:
+[backend conformance](../backend-conformance/user.md).
 
 ## Troubleshooting
 

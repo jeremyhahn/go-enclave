@@ -446,9 +446,9 @@ var (
 	// and never re-keys.
 	ErrSealerDestroyed = errors.New("enclave: sealer was destroyed; sealed values are unrecoverable and sealing requires constructing a new Sealer")
 
-	// ErrSealerNotConstructed is returned by Seal and Open on a Sealer that
-	// was not built by [NewSealer], such as the zero value. The caller's
-	// material is wiped as on every other failure.
+	// ErrSealerNotConstructed is returned by [Sealer.Seal], [Sealer.SealFrom]
+	// and [SetSealer] for a Sealer that was not built by [NewSealer], such as
+	// the zero value. The caller's material is wiped as on every other failure.
 	ErrSealerNotConstructed = errors.New("enclave: sealer was not constructed with NewSealer")
 
 	// ErrInvalidSealerOption is returned by [NewSealer] for a nil
@@ -545,7 +545,7 @@ func (e *SealerWipedError) Unwrap() error { return e.Cause }
 
 // KeyScheduleExposedError is the error behind [ErrKeyScheduleExposed], which
 // errors.Is reports for every KeyScheduleExposedError. Its Name is the first
-// key class found exposed: "wrapping-key", "kek" or "dek".
+// key class found exposed: "wrapping-key" or "dek".
 type KeyScheduleExposedError struct {
 	// Name is the key class found exposed.
 	Name string

@@ -1,6 +1,6 @@
 # Locked-memory enclaves — architecture
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-09
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-11
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Problem
@@ -82,10 +82,43 @@ then refused is kept (sticky) and reported again by the retry that finally
 releases the pages. (A mapping abandoned by a failed constructor carries on to
 the `munmap` when its `munlock` is refused, since unmapping drops the lock.)
 
+### Process hardening
+
+Some protections are per-process, not per-mapping, and they are not the
+library's to impose. `HardenProcess` ([harden.go](../../harden.go)) is the one
+place they live, and it is opt-in: nothing in this package calls it, importing
+the package changes no process state, and a `main` package calls it, normally
+first.
+
+- **Steps.** Each is attempted and read back. Where `RLIMIT_CORE` exists (every
+  supported GOOS but Windows) it lowers the limit to zero, soft and hard. On
+  Linux it also sets `prctl(PR_SET_DUMPABLE, 0)`. The `RLIMIT_CORE` step is
+  implemented with the `osmem` primitives and the non-dumpable step in
+  [harden_linux.go](../../harden_linux.go), so `harden.go` only sequences them
+  and builds the report.
+- **Report.** A `ProcessHardening` names each step that took, so a partial
+  result is visible. The error is for the first step that failed; Windows, with
+  neither step, returns `ErrProcessHardeningUnsupported` and an empty report.
+- **Status.** `CoreDumpsDisabled` returns what the last `HardenProcess` did to
+  `RLIMIT_CORE`, kept in a mutex-guarded record, and
+  `ErrCoreDumpLimitNotApplied` before one has run. Constructors never consult it.
+- **Scope.** It is specific to locked memory, not a backend capability: only
+  that backend's protection is relative to the process, so dumps and same-uid
+  readers are its threat. See [backends](../backends/architecture.md).
+
+The per-process cost of each step, and what it does not bind, is in
+[engineering.md](engineering.md#configuration). The change from import-time
+behaviour is in [Upgrading](../README.md#upgrading).
+
 ## Rejected alternatives
 
 | Alternative | Why rejected |
 |---|---|
+| Lowering `RLIMIT_CORE` when the package is imported | A process-wide decision that belongs to the binary, not to a library: the limit is inherited across `fork` and `execve`, so every child the binary starts, go-enclave user or not, would run with it and could not raise it back without privilege. An import has no way to be declined, ordered or tested, and two libraries cannot both own it. |
+| Constructors that refuse to build, or lower the limit, while the process is unhardened | Moves the same process-wide choice into every allocation, and makes a library's success depend on a policy the binary never made. The binary reads `CoreDumpsDisabled` and decides. |
+| Lowering only the soft `RLIMIT_CORE` | Any code in the process could raise it again unprivileged; the hard limit is lowered too. |
+| `RLIMIT_CORE` as the only hardening step | It does not bind a piped Linux `core_pattern`, and does not stop a same-uid `ptrace` or `/proc/<pid>/mem` read. The non-dumpable flag covers both, at a cost the binary must choose ([engineering.md](engineering.md#configuration)). |
+| A `Hardener` capability that `HardenProcess` calls on registered backends | Only the locked-memory backend's protection depends on process state; see [backends](../backends/architecture.md). |
 | memguard `LockedBuffer` (used through v0.2.0-alpha) | On any mapping failure it purges — unmaps — every live buffer in the process, then panics. Guarding against that needed a process-wide lock that made allocating inside a live borrow deadlock. It also put NaCl secretbox, a non-FIPS algorithm, in every consumer's build graph. |
 | memcall primitives (used through v0.6.2-alpha) | Its `Free` re-protected and re-wiped the region itself and its `Lock` discarded an `madvise` result, so the release path could not tell which refusal it was recovering from and needed a second, "direct" unmap. It also reported success for core-dump hardening on Windows, where none exists. |
 | Panic on canary corruption (the behavior through v0.7) | Library code returns its failures. The case for a panic was that `defer e.Destroy()` drops the error; the next `WipeAll` now reports every corruption `Destroy` detected, so the evidence survives without one. See [engineering.md](engineering.md#canary-corruption). |
@@ -108,6 +141,52 @@ the `munmap` when its `munlock` is refused, since unmapping drops the lock.)
 
 go-enclave is a bottom-layer module: its only dependency is `golang.org/x/sys`,
 and consumers reach it only through the exported Go API of package `enclave`.
+Its place in the portfolio is the go-enclave row of the L1 ownership table in
+the handbook's `software/docs/00-ownership-and-sdk-boundary.md`: this module is
+the one owner of locked-memory handling, no other project holds its own
+mlock, guard-page or canary code, and process-wide lifecycle (`HardenProcess`,
+`WipeAll`) is the consuming binary's call, never a library's.
+
+## Data flow
+
+How bytes move through one enclave, from the caller's slice to the kernel.
+
+```mermaid
+flowchart TD
+  S[caller's slice] --> N{constructor}
+  N -- NewMemory --> M1[copy into the mapping, freeze, wipe the source slice]
+  N -- NewMemoryCopy --> M2[copy into the mapping, freeze, source kept]
+  N -- NewMemorySized --> M3[empty writable mapping]
+  M1 --> L[registered in the shutdown ledger]
+  M2 --> L
+  M3 --> L
+  L --> W[WithBytes: read lock, fn sees the data region in place]
+  M3 -.-> W
+  W --> FZ[Freeze: write lock, data region read-only]
+  FZ --> W
+  W --> D[Destroy: write lock, release sequence]
+  D --> K[wiped, unlocked and unmapped: back to the kernel]
+```
+
+1. **In.** `NewMemory` and `NewMemoryCopy` map an enclave of the slice's length
+   and load it frozen; `NewMemory` then wipes the caller's slice (it also wipes
+   it when it refuses), `NewMemoryCopy` leaves it. `NewMemorySized` maps a
+   writable enclave for the caller to fill in place, so the material is never on
+   the heap. An empty slice is `ErrEmptyEnclave`; a size that cannot be mapped is
+   `ErrInvalidSize`. A failure is a typed error ([engineering.md](engineering.md#error-semantics)).
+2. **Registered.** A built enclave is entered in the shutdown ledger, so a
+   concurrent `WipeAll` sees it only once it is complete
+   ([shutdown-sweep](../shutdown-sweep/architecture.md)).
+3. **Borrowed.** `WithBytes` takes the enclave's read lock and passes the data
+   region itself to the function, not a copy: the bytes are readable only inside
+   the call, and the lock holds `Destroy` off for its duration. A nil function is
+   `ErrNilFunc`; a destroyed enclave is `ErrEnclaveDestroyed`.
+4. **Frozen.** `Freeze` takes the write lock, so it cannot land mid-borrow, and
+   makes the data region read-only for good.
+5. **Out.** `Destroy` takes the write lock and runs the
+   [release sequence](#release-sequence): wipe, canary and guard check, `munlock`,
+   `munmap`, then the ledger and any `Allocator` reservation are settled. Nothing
+   else returns the pages to the kernel.
 
 ## Trust boundaries
 
