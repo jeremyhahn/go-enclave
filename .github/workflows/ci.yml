@@ -9,10 +9,17 @@
 # one place and fail in the other because the two were spelled differently.
 # Why each check exists is documented beside its Makefile target and its test.
 #
-# Every job starts at once, so a run takes as long as its slowest job. CI Gate,
-# the one required check, needs every job and fails closed on any result but
-# success. automerge.yml's merge trains are PRs from merge-train/* and get
-# their CI from the pull_request trigger like any PR.
+# TWO TIERS (#175). The PR tier (lint, security, build, test) runs on every
+# event and has no job-level `if:`. The full tier (fips, integration) runs on
+# push to main, on workflow_dispatch (the coordinator's nightly) and on a PR
+# labelled `ci:full`; each of its jobs carries exactly that condition as its
+# `if:`, and may need a PR-tier job, never the reverse. Every job starts at
+# once, so a run takes as long as its slowest job. CI Gate, the one required
+# check, needs every job and fails closed on any result but success, except a
+# full-tier job skipped in a run that did not select the full tier.
+# build/ci/buildgates (TestCIGateTiersMatchTheJobs) holds the jobs, the `if:`s
+# and the gate's tier tags to this. automerge.yml's merge trains are PRs from
+# merge-train/* and get their CI from the pull_request trigger like any PR.
 #
 # Jobs run on the bare runner (devops §1, §9): `runs-on: ubuntu-latest` plus
 # actions/setup-go at the version go.mod declares. The devcontainer is for the
@@ -56,8 +63,8 @@
 # only where it exists.
 #
 # The long-horizon check `trivy fs` lives in nightly.yml rather than on the
-# push path (devops §8a: alpha phase). Both FIPS-strict runs are on the push
-# path: the unit tests in `fips`, the integration suite in `integration`.
+# push path (devops §8a: alpha phase). Both FIPS-strict runs are in the full
+# tier: the unit tests in `fips`, the integration suite in `integration`.
 # release.yml runs everything, trivy included, on a tag.
 
 name: CI
@@ -67,9 +74,17 @@ on:
     branches: [main]                    # GitHub Flow: main is the only long-lived branch
   pull_request:
     branches: [main]
+    # labeled: adding `ci:full` to a PR starts a run with the full tier.
+    types: [opened, synchronize, reopened, labeled]
   workflow_dispatch:                  # re-fire the workflow by hand; also
                                       # the only retry when a run was
-                                      # never created in the first place
+                                      # never created in the first place;
+                                      # the coordinator's nightly full run
+
+# A new push to a ref cancels that ref's run in progress (devops §9b).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 # Read-only by default. Only the job that uploads SARIF (Security, on
 # github.com) is granted security-events: write, at job level.
@@ -175,9 +190,10 @@ jobs:
 
       - run: make ci-build
 
-  # FIPS (owner mandate 2026-08-17, security-review.md §6). It ran nightly
-  # until #154: a red `make test-fips` reached main because no PR ran it, so it
-  # gates every PR now.
+  # FIPS (owner mandate 2026-08-17, security-review.md §6; handbook docs/04
+  # §Compliance). It ran nightly until #154: a red `make test-fips` reached
+  # main because no PR ran it. It is in the full tier (#175): every push to
+  # main and every `ci:full` PR, never nightly-only.
   #
   # GOFIPS140=latest + GODEBUG=fips140=only (STRICT, not `on`), set by the
   # target itself; the Makefile records why `on` is a gate that cannot
@@ -193,6 +209,7 @@ jobs:
   # deliberate exemption with the owner's approval.
   fips:
     name: FIPS
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'ci:full')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -271,6 +288,7 @@ jobs:
   # which carries it at the pin in scripts/tool-pins.sh; nothing is downloaded.
   integration:
     name: Integration
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'ci:full')
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -289,9 +307,11 @@ jobs:
       - run: make ci-integration
 
   # The single required check. Every job above must appear in
-  # BOTH the needs list and the results check — a gate that can pass vacuously
-  # is worse than no gate. Do not use join(needs.*.result); it evaluates empty
-  # on Gitea and reports success while jobs fail.
+  # BOTH the needs list and the results check, tagged with its tier (pr or
+  # full) — a gate that can pass vacuously is worse than no gate. FULL is
+  # the full-tier condition itself, so a full job's skip passes only in a run
+  # that did not select it. Do not use join(needs.*.result); it evaluates
+  # empty on Gitea and reports success while jobs fail.
   ci-gate:
     name: CI Gate
     runs-on: ubuntu-latest
@@ -303,11 +323,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Fail closed on any non-success
+        env:
+          FULL: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'ci:full') }}
         run: |
-          sh build/ci/summary.sh "a CI job did not pass" \
-            lint="${{ needs.lint.result }}" \
-            security="${{ needs.security.result }}" \
-            build="${{ needs.build.result }}" \
-            fips="${{ needs.fips.result }}" \
-            test="${{ needs.test.result }}" \
-            integration="${{ needs.integration.result }}"
+          sh build/ci/summary.sh "a CI job did not pass" "$FULL" \
+            pr:lint="${{ needs.lint.result }}" \
+            pr:security="${{ needs.security.result }}" \
+            pr:build="${{ needs.build.result }}" \
+            full:fips="${{ needs.fips.result }}" \
+            pr:test="${{ needs.test.result }}" \
+            full:integration="${{ needs.integration.result }}"

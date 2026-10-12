@@ -367,7 +367,7 @@ Three different claims, and this package makes only the first two:
    wrapping key with HKDF-SHA256 (`crypto/hkdf`, a 32-byte key and salt);
    both are approved algorithms in Go's FIPS 140-3 module. There is no
    `NewGCM` fallback.
-2. **Strict-mode compatibility, tested.** `make test-fips` (run on every PR and on
+2. **Strict-mode compatibility, tested.** `make test-fips` (run in CI's full tier and on
    release) builds and runs the tests under
    `GOFIPS140=latest GODEBUG=fips140=only`. That is compatibility EVIDENCE,
    not proof: Go documents `fips140=only` as a best-effort check that can miss
