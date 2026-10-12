@@ -1,3 +1,0 @@
-### Fixed
-
-- **Lint runs actionlint at its pinned tag** (#145, #146). `scripts/tool.sh` ignores `TOOL_INSTALL=0` for actionlint and resolves it as under `TOOL_INSTALL=1`: a copy on `PATH` that reports exactly v1.7.12 and was built by the module's Go is used, and anything else is built with `go install` at the tag into `bin/tools`, verified by the Go checksum database. The CI runner image's copy is built from an untagged commit and reports a pseudo-version, which the version check refuses, so `make lint-actions` failed on every branch. The version check itself is unchanged and still refuses an unversioned binary.

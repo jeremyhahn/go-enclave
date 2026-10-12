@@ -6,6 +6,198 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [v0.8.0-rc.1] - 2026-10-12
+
+### Added
+
+- **The backend seam for hardware enclaves** (#135). `Handle` and `Backend`
+  are the core every backend provides. `ByteAccess`, `Freezer`, `Deriver`,
+  `AEAD`, `Attester`, `Importer`, `Sweeper` and `Confiner`, and the standard
+  `crypto.Signer` and `crypto.Decrypter`, are optional capabilities found by
+  type assertion. A named registry (`Register`, `Lookup`, `BackendNames`,
+  `DefaultBackend`) always holds locked memory under `"locked-memory"`; nothing
+  registers at import. `As` reaches a backend's or handle's native interface
+  without panicking. `*Memory` is a `Handle`, `ByteAccess` and
+  `Freezer`, and its new `Backend` method returns the default. New typed
+  errors: `ErrBackendNotRegistered` (`*BackendNotRegisteredError`),
+  `ErrBackendExists` (`*BackendExistsError`), `ErrInvalidBackend`, and
+  `ErrCapabilityUnsupported` (`*CapabilityError`). Behaviour is unchanged; the
+  design of the wiring still to come is in `docs/backends/architecture.md`.
+  `AEAD` is the package's own capability rather than `cipher.AEAD`, so `Seal`
+  and `Open` return `ErrEnclaveDestroyed`, `ErrInvalidNonce` or
+  `ErrAEADAuthentication` instead of panicking. `Import` takes a purpose and
+  an algorithm (`WithPurpose`, `WithAlgorithm`, resolved by `NewImportSpec`,
+  `ErrInvalidImport`), and each purpose fixes the imported handle's contract.
+  A backend name is a configuration label, not an instance identity.
+
+- **Build gates for the feature map and the toolchain** (#136). Every non-test source file must match exactly one feature's globs and every glob a file; every integration test must carry exactly one feature's prefix in its suite, and every prefix be used; every `docs/<feature>/` needs a line in the map. The Dockerfile's Go version must equal the `go` directive in `go.mod`.
+
+- **`.serena/project.yml` is tracked** (#140): the shared Serena project file (`project_name: "go-enclave"`; language servers go, yaml, bash, markdown). The rest of `.serena/` (caches, memories, `project.local.yml`) stays ignored and refused by the releasability gate, which reports the project file as strip-at-publish like `CLAUDE.md`.
+
+- **`*Allocator` is the locked-memory backend** (#145). It implements `Backend` (name `"locked-memory"`) and `Importer`, and `(*Memory).Backend()` returns the `*Allocator` that admitted the enclave, or `DefaultBackend()` for an unbudgeted one. An `*Allocator` is never registered: `Lookup("locked-memory")` stays the unbudgeted default.
+- **`ErrAllocatorNotConstructed`** (#145) for an `Allocator` not built by `NewAllocator` or `NewAllocatorWithinRLimit`, such as the zero value, from every function that takes one.
+- **`WipeAll` sweeps registered backends** (#145). After locked memory it calls `Sweep` on every registered backend other than the default that implements `Sweeper`, in name order and with the caller's `ctx` unchanged. The count adds every held count. `SweepError` gains `Backends []BackendSweepFailure`, one per failed `Sweep`, and `Unwrap() []error`, which makes each backend's own error reachable with `errors.Is` and `errors.As`.
+- **`ErrNilFunc`** (#145) from `(*Memory).WithBytes` for a nil function.
+
+- **`ErrProviderNotConstructed`** (#145): every `SoftwareProvider` method but `Destroy` reports it for a provider `NewSoftwareProvider` did not build, such as the zero value.
+
+- **`ErrCleanupFailed` and `*CleanupError`** (#145). A key or plaintext handle the sealer no longer needs and whose `Destroy` fails is kept by the sealer, and the operation fails with a `*CleanupError` carrying its own failure (`Failure`) and the refusals (`Causes`). Every `(*Sealer).Destroy` retries the kept handles. See [sealing](docs/sealing/engineering.md#error-semantics).
+
+- **`(*Sealer).SealFrom(ctx, src)` and `NewSealedFrom(ctx, src)`** (#145). They seal from any `Handle` with `ByteAccess`, borrowing the source and never wiping it, so a `Memory` that is already open can be re-sealed without copying its bytes onto the heap.
+- **`WithBackend(b)`** (#145). The sealer imports its wrapping key, KEKs and DEKs into `b` and seals through `b`'s `AEAD` when its handles have one. It refuses a nil backend with `ErrInvalidBackend` and a backend that is not an `Importer` with a `*CapabilityError`.
+- **`WithRequireKeyScheduleErasure()`, `ErrKeyScheduleExposed` and `*KeyScheduleExposedError`** (#145). With this option, `NewSealer` refuses any configuration that leaves an AES key schedule on the heap, and the error's `Name` is `"wrapping-key"` or `"dek"`. Offloading keys to a backend does not satisfy it on its own. See [sealing](docs/sealing/user.md#choose-the-type-by-access-pattern).
+- **`ErrSealSourceReadOnly`**, **`ErrInvalidSealerOption`** (#145).
+
+- Add `backendtest`, a conformance suite for backend authors. It checks the core `Handle` lifecycle and every declared capability live and after `Destroy`, sweeps for residue with `internal/memscan`, and refuses a capability it cannot exercise or observe with `ErrUncheckedCapability`, including a claimed `Importer` with no imported case. A panic in a concurrent operation is a finding, not a crash, and a run whose context ends reports `ErrAborted` without false findings. Every failure is typed: `ConfigError`, `FindingsError`, `PropertyError`, `NotMeasuredError`, `UncheckedCapabilityError` and `AbortedError`.
+
+- **`providertest` catches forgeable and racy providers** (#146).
+  `Config.PublicKey` declares a provider whose `Protect` needs no secret, and
+  `Config.Forge` builds the blob an attacker holding its public key could;
+  `Unprotect` must refuse it with `ErrSealedAuthentication`, which a bare
+  RSA-OAEP or ECIES wrap does not. `PublicKey` without `Forge` returns
+  `ErrNotMeasured` unless `Config.SkipForgery` records why. A new check runs
+  round trips from 8 goroutines at once on one provider and requires each to
+  recover its own key, so shared unsynchronized state fails without `-race`.
+  The two destination spies now also require the later `Unprotect` to recover
+  its own key.
+
+- **`providertest.FindingsError`** (#146). `TestProvider` returns one
+  `*FindingsError` whose `Findings` are every `*PropertyError`,
+  `*NotMeasuredError` and `*AbortedError` of the run, in order; `errors.Is` and
+  `errors.As` reach each one.
+
+- **`backendtest.Config.VerifyEvidence`** (#152): the attestation's relying party. With it, evidence for a nonce must verify against that nonce and not against another; without it every `Attester` is reported as an `*UncheckedCapabilityError`, never certified.
+
+### Changed
+
+- **Go 1.27.2** (#135): the module, the devcontainer and the build gates move to Go 1.27.2, the runner image's toolchain.
+
+- **The integration image is built once, scanned by ID, and shared** (#136). `scripts/integration-image.sh` builds it under a unique tag, runs trivy on that image, and runs the userns, default and FIPS suites on it with no rebuild; it removes the image last. `INTEGRATION_SCAN` is gone.
+- **The trivy copied out of the toolchain image is hash-checked** (#136). `build/ci/toolchain-trivy.sh` verifies it against `TRIVY_BIN_SHA256_LINUX_*`, and `scripts/tool.sh` with `TOOL_INSTALL=0` does the same for archive tools before running them.
+- **`scripts/features.sh` strips only GOOS/GOARCH suffixes** when it maps a test file to its source file (#136).
+- **The workflow permissions gate fails closed** (#136). Only `read-all`, `{}` and known scopes at `read` or `none` pass.
+- **The release publish job checks every stage before it checks out code** (#136). An inline step requires every `needs` result, `verify` included, to be `success` first; checkouts in write-capable jobs set `persist-credentials: false`, and a build gate pins both.
+
+- **The user-namespace `RLIMIT_MEMLOCK` test fails instead of skipping** (#136). `TestMemlockRLimit_EnforcedInsideAnUnprivilegedUserNamespace` moved to `memlock_userns_linux_test.go`, built with `-tags=userns`, and runs through `make integration-test-userns` in a new `userns` compose service whose seccomp profile (`build/docker/devcontainer/seccomp-userns.json`) differs from Docker's default only in permitting `CLONE_NEWUSER`. Where the namespace cannot be created, or carries no capabilities, it fails. `make integration-test-<feature>` for the budget feature depends on it. `registry_test.go` no longer calls a failing sweep a skip.
+- **The feature map is machine-readable** (#136). `scripts/features.map` gives each feature its unit package, integration suite, integration-test name prefix and source globs; `scripts/features.sh`, the Makefile and the build gates read it. The integration tests are renamed `Test<Feature>_…`, and `make integration-test-<feature>` runs only the feature's tests, without the whole-suite coverage floor, which `integration-test-enclave` and `ci-integration` keep.
+- **The workflow pin gate covers container images** (#136). A job's `container:` and `services.<name>.image` must name a `@sha256:` digest, in every YAML spelling the action gate already reads.
+
+- **The error types are defined types, not aliases of a generic one** (#146),
+  so `go doc` shows each type's fields and its `Error`, `Is` and `Unwrap`
+  methods. Struct literals, `errors.Is` and `errors.As` are unchanged.
+
+- **The memory scan fails closed** (#146). `internal/memscan` returns `ErrUnreadableMapping` (as `*UnreadableMappingError`, naming the mapping) when a mapping it must read cannot be read in full, and `ErrEmptySweep` when it read no mapping at all; neither passes as a clean sweep. Only the kernel's `[vvar]`, `[vvar_vclock]` and `[vsyscall]` are excused.
+- **The enclave integration suite gates `providertest` coverage** (#146). `INTEGRATION_COVERPKG_enclave` names `providertest` next to the root package, each held to `COVERAGE_THRESHOLD`.
+
+- **The v0.8.0-alpha entry that calls `MemoryEnclave.Open`, `OpenString` and `NewMemoryEnclaveFromString` deprecated (#110) is superseded** (#150). The same release removes them (#129), so v0.8.0-alpha shipped them removed and never as deprecated aliases. Read through `WithBytes`; the v0.9.0-alpha names are in [Upgrading](docs/README.md#v090-from-v08).
+- **`Sealer.Destroy` is documented by what it releases in each mode** (#150). It ends the sealer in both modes, so a value opens only through the sealer that sealed it. `ModeRootKey` releases its root, wrapping key, KEK and retained KEK blobs; `ModePerOperation` holds no key and never touches the injected provider. The docs and godoc no longer say a sealer's values are always unrecoverable because of keys it released.
+- **The BSDs and Windows are build-only for v0.9.0-rc.1** (#150). They compile, and no test runs on them; tests run on Linux only. The README, `SECURITY.md`, package documentation and platform tables say so.
+- **The docs match the exported API** (#150): the backend seam and its sealing wiring (`WithBackend`, `OpenIn(ctx, Backend)`, `SealFrom`, `NewSealedFrom`, `WithRequireKeyScheduleErasure`), the platform-layer file names, and the `docs/*/api.md` tables.
+
+- **`make test-fips` gates every PR** (#154): the FIPS 140-3 strict unit run moved from the nightly workflow to CI, and the CI Gate requires it.
+
+- **The backends docs match the code, and `backendtest` has its own feature folder** (#156). `docs/backend-conformance/` holds the suite's five files and the conformance material that was in `docs/backends/architecture.md`. `docs/backends/api.md` lists every exported symbol of the seam, errors included; `architecture.md` drops the review records, decisions and migration text (renames are in Upgrading), gains a data-flow section and cites the ownership rules; the status banner is `NORMATIVE`.
+
+- **The locked-memory docs cover process hardening, the error vocabulary and the data flow** (#157). `api.md` lists `ProcessHardening.NotDumpable` and `.CoreDumpsDisabled`, `(*Memory).GoString`, and every locked-memory and hardening sentinel with its error type. `architecture.md` gains the process-hardening shape and its rejected alternatives (including why `RLIMIT_CORE` is not lowered at import), a data-flow section, and the handbook ownership citation in the component boundaries.
+
+- **The locked-memory budget and shutdown-sweep docs list every exported symbol and the data flow** (#158). `docs/locked-memory-budget/api.md` gains `LockedMemoryLimit`, `LimitSource` and its values, and each budget sentinel with its error type; `docs/shutdown-sweep/api.md` gains `BackendSweepFailure`. Both `architecture.md` files gain a data-flow section and cite the handbook ownership row. The shutdown-sweep "Return values" section is now "Error semantics". The allocator is no longer called lock-free: admission is a compare-and-swap loop and retunes take a mutex.
+
+- **The sealing and provider-conformance docs list every exported symbol and describe the shipped shape** (#159). `docs/sealing/api.md` covers `Mode`, `SealerOption`, `Sealed.String`/`GoString` and every sealing error; its error table gains `ErrInvalidSealerOption`, `ErrSealSourceReadOnly` and `ErrKeyScheduleExposed`. `docs/sealing/architecture.md` describes `WithBackend`, `SealFrom` and `OpenIn(Backend)`. `docs/provider-conformance/api.md` covers every `Config` field and the `ConfigError`, `AbortedError`, `FindingsError` and `NotMeasuredError` types. Both architecture documents gain a data-flow section and their portfolio boundary.
+
+- **`ROADMAP.md` is current and the platform statement is stated once** (#160). The roadmap names `Memory` and `Sealed` and the v0.9.0-rc.1 milestone; the README and `SECURITY.md` link to the test status instead of restating it; the Upgrading heading is "v0.9.0 (from v0.8)" and the docs index lists `backend-conformance`.
+
+- **CI runs in two tiers and cancels superseded runs** (#175). Every pull request runs the PR tier (lint, build, test, security and CI Gate). The full tier (FIPS and integration) runs on push to `main`, on `workflow_dispatch` and on a PR labelled `ci:full`. CI Gate passes a full-tier job's skip only in a run that did not select the full tier. `ci.yml` cancels a ref's run in progress when the ref gets a new push. `nightly.yml` has no schedule and runs on dispatch. A build gate (`TestCIGateTiersMatchTheJobs`) holds the jobs, their conditions and the gate's tier tags to one another.
+
+### Fixed
+
+- `make release`, `make release-candidate` and `make release-alpha` refuse unless
+  local `main` equals `dev/main` and the forge reports a green combined commit
+  status for it (`FORGE_API_URL`, `FORGE_REPOSITORY` and `FORGE_TOKEN` are now
+  read; an unreachable forge is a refusal), and push `main` and the tag in one
+  atomic push, so a rejected `main` can no longer burn an immutable tag.
+- `release.yml` runs every job on the commit Verify resolved, not the tag ref
+  again, and publishes the release with that commit as its `target_commitish`.
+- `automerge.yml` declares `permissions: contents: read`, and a build gate
+  requires every workflow to declare a top-level `permissions:` block without a
+  write scope.
+- The integration job takes trivy from the pinned toolchain image instead of
+  downloading it on every run, and `make ci-integration` scans the image once.
+
+- **`GOEXPERIMENT=runtimesecret` is linted and scanned** (`lint-runtimesecret`, `gosec-runtimesecret`, `govulncheck-runtimesecret`, gated in `ci-lint` and `ci-security`), so the key-erasure code is no longer skipped (#136).
+- **`TESTFLAGS` on the command line no longer drops `-race`**, which is now `TEST_RACE` (#136).
+- **`go vet` of the build gates runs once per `ci-lint`**, not four times (#136).
+- **`scripts/tool.sh` with `TOOL_INSTALL=0` compares the Go that built a Go tool with the module's toolchain** and fails on a mismatch (#136).
+- **`scripts/deps-latest.sh` fails when `go list` fails** instead of hiding it (#136).
+- **Changelog fragments fold in numeric issue order** (`9x` before `10x`) (#136).
+- **`scripts/consumer-check.sh` clears the runner's `GOFLAGS`** (#136).
+- **The integration run removes its merged-profile temporary file** on exit (#136).
+
+- **A writable enclave no longer reports `ErrReleasedWithoutWipe`** (#145). Its data is wiped before the release `mprotect`, so when that `mprotect` is refused and the unmap succeeds, `Destroy` now returns nil. Only a frozen enclave, whose data the refusal leaves in place, still reports it. The same holds for the rollback of a failed `NewMemory`, `NewMemoryCopy` or `Allocator.New`.
+
+- **A copy of a `SoftwareProvider` no longer splits its lock and state** (#145). The state lives behind a pointer, so a copy shares the original's root, budget and lock, and `go vet` flags the copy.
+
+- **`OpenIn` into another backend could return a live plaintext handle after `(*Sealer).Destroy`** (#145). The sealer is now checked again after the import, and the handle is destroyed and `ErrSealerDestroyed` returned.
+- **A KEK rotation under `WithBackend` dropped an outgoing KEK whose `Destroy` failed and reported success** (#145). The KEK is now kept for retry and the seal returns a `*CleanupError`.
+- **A failed import whose handle refused `Destroy` lost the handle and the refusal** (#145), in `OpenIn` and in the sealer's own key imports.
+- **`Seal` and `NewSealed` checked only the first and last byte of the source** (#145). A source with a read-only page in the middle passed, and the wipe then crashed the process. Every page the source spans is now checked, and such a source is refused with `ErrSealSourceReadOnly`.
+
+- **`NewSealed` on a view lent by `WithBytes` of an opened `Memory` crashed with a fault while wiping read-only pages** (#145). `Seal` and `NewSealed` now refuse a read-only source with `ErrSealSourceReadOnly`.
+- **In `ModeRootKey`, retired KEK generations were kept for the life of the sealer** (#145). Each generation is now counted by its live values and in-flight opens and is dropped when the count reaches zero.
+- **`Seal` held the sealer's read lock across the data AEAD** (#145). The AEAD now runs outside the lock, and `Destroy` is re-checked afterwards.
+- **`(*Sealer).Mode()` on a nil receiver panicked** (#145).
+
+- **Lint runs actionlint at its pinned tag** (#145, #146). `scripts/tool.sh` ignores `TOOL_INSTALL=0` for actionlint and resolves it as under `TOOL_INSTALL=1`: a copy on `PATH` that reports exactly v1.7.12 and was built by the module's Go is used, and anything else is built with `go install` at the tag into `bin/tools`, verified by the Go checksum database. The CI runner image's copy is built from an untagged commit and reports a pseudo-version, which the version check refuses, so `make lint-actions` failed on every branch. The version check itself is unchanged and still refuses an unversioned binary.
+
+- **`backendtest` reused one AEAD nonce for every `Seal`** (#152), across concurrent calls and between checks, against the `cipher.AEAD` contract, so a backend that refuses a reused nonce failed. Every `Seal` now draws a fresh random nonce and opens with the same one.
+- **`backendtest` passed a `Destroy` racing concurrent operations that returned nil and left the handle alive** (#152). The handle must now be dead after the race whatever `Destroy` returned, and a handle a capability check or the `Importer` check created must be dead after its cleanup `Destroy`.
+
+- **`backendtest` certified attestation from evidence that merely differed between calls** (#152), so a backend returning fresh random evidence that binds no nonce passed. Binding is now judged by `Config.VerifyEvidence`.
+- **`backendtest` stopped probing a frozen view at its first fault** (#152), so a `Freeze` that protected only the first page passed. Every page and the view's first and last byte are now probed, each in its own call.
+- **`backendtest` failed a `Destroy` that returned the retryable `ErrLockedMemoryUnavailable`** (#152). Such a `Destroy` is now called again, up to four calls in all; only a nil return obliges the handle to be dead, and any other error stays a failure. The concurrent-use check follows the same rule.
+- **`backendtest`'s concurrent-use check could miss a `Destroy` race** (#152): it left out `Size`, `IsAlive`, `Backend` and `Freeze`, waited a fixed sleep for operations to start, and stopped each goroutine at its first `ErrEnclaveDestroyed`. The goroutines now start from a barrier, every one of those operations runs during the race and again after `Destroy` returns, and `Destroy` is called only once an operation is under way, with a `WithBytes` borrow held open across it.
+
+- **`backendtest` certified a `Destroy` that returned while a racing `WithBytes` borrow was still open** (#152), so a backend that wiped after returning passed. A `Destroy` that returns before the held borrow exits is now a concurrent-use failure.
+- **`backendtest` accepted live results after a racing `Destroy` returned nil** (#152). Each goroutine's last pass now requires the destroyed state: `IsAlive` false, `Size` 0, `Backend` unchanged, and `ErrEnclaveDestroyed` from every error-returning capability, reported apart.
+- **`backendtest` ignored the handle a refused `Import` returned** (#152), so an importer that refused with `ErrInvalidImport` but kept a live handle passed. A live handle returned with a refusal is now an `Importer` failure, and any returned handle is destroyed.
+- **`backendtest` checked a swept handle only by `IsAlive`** (#152), so a `Sweep` that cleared the flag but kept the material passed. A swept handle must now be destroyed in every way a destroyed handle is, and for a `Sweeper` the residue sweep also runs after `Sweep`.
+
+- **`backendtest` failed every AES-256-GCM `Importer` under FIPS 140-only mode** (#154): its import check ran `cipher.NewGCM` under a caller-chosen nonce, which `GODEBUG=fips140=only` refuses. There it now checks the handle's ciphertext body against AES-CTR from GCM's second counter block. The test fakes no longer use GCM under a caller-chosen nonce or RSA keys under 2048 bits in that mode.
+
+### Removed
+
+- **`make check-action-pins`**, the deprecated alias for `make check-buildgates` (#136).
+- **`make bench-providertest` and `make bench-memscan`**, which ran zero benchmarks; `make bench` runs the root package's (#136).
+
+- build/ci/automerge.sh and its tests: automerge.yml is the fleet template (v9), maintained and tested with the template.
+
+### Changed — BREAKING:
+
+- **`Memory` and `Allocator` are handles to shared state** (#145). A copy is the same enclave or budget: one `Destroy` reaches every copy, and a copied `Allocator` cannot admit past the original's budget. Both carry a `noCopy` field, so `go vet` reports a dereferenced copy. The zero `Allocator` now refuses with `ErrAllocatorNotConstructed` instead of acting as a zero budget.
+- **Importing the package no longer lowers `RLIMIT_CORE`; `HardenProcess` does** (#145). Importing the package changes no process state. `HardenProcess` lowers the limit to zero, soft and hard, and reads it back on every supported GOOS but Windows, so it now does something on macOS and the BSDs too. `ProcessHardening` gains `CoreDumpsDisabled`. `CoreDumpsDisabled()` reports what the last `HardenProcess` did: `ErrCoreDumpLimitNotApplied` before it runs, nil on success, or a `*CoreDumpLimitError` (`ErrCoreDumpLimitFailed`), which `HardenProcess` also returns inside its `*ProcessHardeningError`. Call `HardenProcess` from `main` to keep the old protection. See [Upgrading](docs/README.md#upgrading).
+
+- **`SoftwareProvider.Protect` no longer wraps under the root `UnsealRoot` exports** (#145). It wraps under a Protect key derived from the root with HKDF-SHA256 under its own versioned info, so the two uses never share a key. Blobs `Protect` produced before this change no longer open; the provider keeps its root only in memory, so no persisted format is affected.
+
+- **`MemoryEnclave` is now `Memory`** (#145). The package name already says "enclave", and `enclave.Memory` is the locked-memory backend's handle. There is no deprecated alias.
+- **`NewMemoryEnclave`, `NewMemoryEnclaveCopy` and `NewMemoryEnclaveSized` are now `NewMemory`, `NewMemoryCopy` and `NewMemorySized`** (#145). They follow the type.
+- **`SealedEnclave` is now `Sealed`** (#145). `NewSealed` already returned it, and `enclave.SealedEnclave` repeated the package.
+- **`(*SealedEnclave).OpenWith(ctx, a)` is now `(*Sealed).OpenIn(ctx, a)`** (#145). It still takes an `*Allocator` and behaves as before; the name says the argument is the destination. See [Upgrading](docs/README.md#v090-from-v08).
+
+- **`(*Sealed).OpenIn(ctx, b Backend) (Handle, error)`** (#145). It used to take an `*Allocator` and return a `*Memory`. Pass `DefaultBackend()` to get the behaviour of `Open`; a backend that cannot import is refused with a `*CapabilityError` before anything is decrypted. See [Upgrading](docs/README.md#upgrading).
+- **Copies of a `Sealer` or a `Sealed` share state** (#145). Both now keep their state behind a pointer, so destroying a copy destroys the original. `go vet` reports copies.
+- **`SetSealer` refuses a sealer that `NewSealer` did not build (`ErrSealerNotConstructed`) and a destroyed one (`ErrSealerDestroyed`)** (#145).
+- **`NewSealer` returns `ErrInvalidSealerOption` for a nil option** (#145). It used to panic.
+- **The default sealer destroys its own `SoftwareProvider`'s root after the first successful unseal** (#145). An injected provider is never destroyed.
+
+- **`providertest.AbortedError.Err` is renamed `Cause`** (#146), like every
+  other cause-carrying error type. See
+  [Upgrading](docs/README.md#v090-from-v08).
+- **No failure is an `errors.Join` composite** (#146). A failure that came with
+  a failed cleanup, or several refused releases, such as from
+  `(*Sealer).Destroy`, `(*SoftwareProvider).Destroy` or a rolled-back
+  construction, is one `*CleanupError` (`ErrCleanupFailed`) carrying the
+  operation's `Failure` and every refusal in `Causes`. Every sentinel and cause
+  it carries still matches.
+
 ## [v0.8.0-alpha] - 2026-10-08
 
 ### Security

@@ -1,6 +1,0 @@
-### Changed
-
-- **The v0.8.0-alpha entry that calls `MemoryEnclave.Open`, `OpenString` and `NewMemoryEnclaveFromString` deprecated (#110) is superseded** (#150). The same release removes them (#129), so v0.8.0-alpha shipped them removed and never as deprecated aliases. Read through `WithBytes`; the v0.9.0-alpha names are in [Upgrading](docs/README.md#v090-from-v08).
-- **`Sealer.Destroy` is documented by what it releases in each mode** (#150). It ends the sealer in both modes, so a value opens only through the sealer that sealed it. `ModeRootKey` releases its root, wrapping key, KEK and retained KEK blobs; `ModePerOperation` holds no key and never touches the injected provider. The docs and godoc no longer say a sealer's values are always unrecoverable because of keys it released.
-- **The BSDs and Windows are build-only for v0.9.0-rc.1** (#150). They compile, and no test runs on them; tests run on Linux only. The README, `SECURITY.md`, package documentation and platform tables say so.
-- **The docs match the exported API** (#150): the backend seam and its sealing wiring (`WithBackend`, `OpenIn(ctx, Backend)`, `SealFrom`, `NewSealedFrom`, `WithRequireKeyScheduleErasure`), the platform-layer file names, and the `docs/*/api.md` tables.
