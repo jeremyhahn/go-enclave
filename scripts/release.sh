@@ -16,6 +16,11 @@
 # FORGE_API_URL, FORGE_REPOSITORY and FORGE_TOKEN (a read token) for the forge's
 # combined commit status.
 #
+# Every git operation that talks to dev (the tag-free ls-remote, the fetch of
+# main and the push) runs through "$AGENT_GIT" "$REPO_NAME", which carries the
+# agent's credentials and URL rewrite; plain git on a maintainer host has no key
+# for dev. Local-only git (rev-parse, status, remote get-url) stays plain.
+#
 # The version is explicit, never derived. Before anything is written: VERSION
 # must have the form of its kind, be cut from main, move forward
 # (release-version-check.sh), the tag must be free locally and on dev (ls-remote
@@ -58,13 +63,13 @@ else
   esac
 fi
 [ -n "$agent_git" ] || die "AGENT_GIT is unset - point it at your commit-signing/release wrapper (maintainer tooling; not needed to build or test)"
+[ -n "$repo_name" ] || die "REPO_NAME is empty — set it to the literal repo name in the Makefile, never \$(notdir \$(CURDIR))"
 branch=$(git rev-parse --abbrev-ref HEAD)
 [ "$branch" = main ] || die "releases are cut from main; you are on $branch. 'push dev HEAD' would publish this branch to dev."
-[ -n "$repo_name" ] || die "REPO_NAME is empty — set it to the literal repo name in the Makefile, never \$(notdir \$(CURDIR))"
 ! git rev-parse -q --verify "refs/tags/$version" >/dev/null || die "tag $version already exists locally"
 git remote get-url dev >/dev/null 2>&1 || die "no 'dev' remote. The Gitea remote is named dev (version-control.md §2): git remote rename origin dev"
 rc=0
-git ls-remote --exit-code --tags dev "refs/tags/$version" >/dev/null 2>&1 || rc=$?
+"$agent_git" "$repo_name" ls-remote --exit-code --tags dev "refs/tags/$version" >/dev/null 2>&1 || rc=$?
 case $rc in
   0) die "tag $version already exists on dev (a local check alone would miss this and fail the push AFTER committing VERSION)" ;;
   2) ;;
@@ -76,7 +81,7 @@ esac
 # green on it (release-versioning §1a). A stale local main would have its main
 # push rejected while the tag still landed, burning an immutable tag; and an
 # unreached forge is an error here, never a pass.
-git fetch --quiet dev main || die "could not fetch main from dev; refusing to release on an unanswered check"
+"$agent_git" "$repo_name" fetch --quiet dev main || die "could not fetch main from dev; refusing to release on an unanswered check"
 remote_main=$(git rev-parse -q --verify 'FETCH_HEAD^{commit}') || die "dev has no main to compare against"
 head_sha=$(git rev-parse HEAD)
 [ "$head_sha" = "$remote_main" ] || die "local main ($head_sha) is not dev/main ($remote_main); update it first (git pull --ff-only dev main). Releasing from it would push a tag the main push does not accompany."

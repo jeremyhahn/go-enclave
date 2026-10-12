@@ -57,5 +57,5 @@ Nothing accepted. New work arrives as issues.
 
 ## Non-goals
 
-- Process-wide lifecycle (`WipeAll`) belongs to the consuming binary; see [ownership](../handbook/software/docs/00-ownership-and-sdk-boundary.md).
-- Everything outside the locked-memory primitive; see [ownership](../handbook/software/docs/00-ownership-and-sdk-boundary.md).
+- Process-wide lifecycle (`WipeAll`) belongs to the consuming binary; see [ownership](docs/locked-memory/architecture.md#component-boundaries).
+- Everything outside the locked-memory primitive; see [ownership](docs/locked-memory/architecture.md#component-boundaries).

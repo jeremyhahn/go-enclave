@@ -75,6 +75,32 @@ func awaitProgress(done <-chan struct{}, progress *atomic.Int64) bool {
 	}
 }
 
+// reclaimOnCleanup keeps a concurrency test's failure from leaving workers
+// registering enclaves into the tests after it, which each need a clean
+// ledger: at cleanup it halts the workers and the sweeper, waits for both while
+// they make progress, and reclaims what they left.
+func reclaimOnCleanup(t *testing.T, halt func(),
+	workersDone <-chan struct{}, workerProgress *atomic.Int64,
+	sweeperDone <-chan struct{}, sweeperProgress *atomic.Int64,
+) {
+	t.Helper()
+	t.Cleanup(func() {
+		halt()
+		if !awaitProgress(workersDone, workerProgress) {
+			t.Errorf("the workers were still blocked %v after being told to stop; their enclaves "+
+				"stay in the ledger", progressStallBound)
+			return
+		}
+		if !awaitProgress(sweeperDone, sweeperProgress) {
+			t.Errorf("WipeAll was still running %v after being told to stop", progressStallBound)
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), sweepHangBound)
+		defer cancel()
+		_, _ = WipeAll(ctx)
+	})
+}
+
 // TestWipeAll_DestroysEveryLiveEnclave pins that nothing this package allocated
 // survives a sweep. It counts the ledger rather than trusting the return value.
 func TestWipeAll_DestroysEveryLiveEnclave(t *testing.T) {
@@ -340,24 +366,7 @@ func TestWipeAll_ConcurrentWithConstructionAndDestruction(t *testing.T) {
 		close(workersDone)
 	}()
 
-	// A failure below must not leave workers registering enclaves into the
-	// tests after this one, which each need a clean ledger: stop them, wait
-	// for them, and reclaim what they left.
-	t.Cleanup(func() {
-		halt()
-		if !awaitProgress(workersDone, &completed) {
-			t.Errorf("the workers were still blocked %v after being told to stop; their enclaves "+
-				"stay in the ledger", progressStallBound)
-			return
-		}
-		if !awaitProgress(sweeperDone, &sweeps) {
-			t.Errorf("WipeAll was still running %v after being told to stop", progressStallBound)
-			return
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), sweepHangBound)
-		defer cancel()
-		_, _ = WipeAll(ctx)
-	})
+	reclaimOnCleanup(t, halt, workersDone, &completed, sweeperDone, &sweeps)
 
 	if !awaitProgress(workersDone, &completed) {
 		t.Fatalf("construction and destruction made no progress for %v alongside a running WipeAll "+
@@ -482,9 +491,14 @@ func TestWipeAll_ConcurrentWithAllocatorConstructionKeepsTheBudgetExact(t *testi
 	}()
 
 	// The sweeper runs WipeAll only when asked, and never between requests.
+	// begun and sweeps are the progress the stall check reads. halt ends the
+	// workers and the sweeper, early when the test fails.
+	var begun, sweeps atomic.Int64
 	kick := make(chan struct{}, 1)
 	settle := make(chan chan struct{})
 	stop := make(chan struct{})
+	var halting sync.Once
+	halt := func() { halting.Do(func() { close(stop) }) }
 	sweeperDone := make(chan struct{})
 	go func() {
 		defer close(sweeperDone)
@@ -494,8 +508,10 @@ func TestWipeAll_ConcurrentWithAllocatorConstructionKeepsTheBudgetExact(t *testi
 				return
 			case <-kick:
 				_, _ = WipeAll(context.Background())
+				sweeps.Add(1)
 			case reply := <-settle:
 				_, _ = WipeAll(context.Background())
+				sweeps.Add(1)
 				close(reply)
 			}
 		}
@@ -507,6 +523,15 @@ func TestWipeAll_ConcurrentWithAllocatorConstructionKeepsTheBudgetExact(t *testi
 		go func() {
 			defer workers.Done()
 			for i := 0; i < iterations; i++ {
+				// A worker begins an iteration only once the one before has
+				// finished, so begun moves exactly when the workers do.
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				begun.Add(1)
+
 				// A sweep in flight while New publishes. Non-blocking: one
 				// pending kick already guarantees the next sweep.
 				select {
@@ -562,20 +587,17 @@ func TestWipeAll_ConcurrentWithAllocatorConstructionKeepsTheBudgetExact(t *testi
 		close(workersDone)
 	}()
 
-	select {
-	case <-workersDone:
-	case <-time.After(120 * time.Second):
-		close(stop)
-		t.Fatal("allocator-backed construction did not drain within 120s alongside a running WipeAll. " +
-			"This test costs hundredths of a second on any machine measured; a bound this generous " +
-			"being reached means it is blocked, not merely slow")
+	reclaimOnCleanup(t, halt, workersDone, &begun, sweeperDone, &sweeps)
+
+	if !awaitProgress(workersDone, &begun) {
+		t.Fatalf("allocator-backed construction made no progress for %v alongside a running WipeAll "+
+			"(%d of %d iterations begun): it is blocked against the sweep, not merely slow",
+			progressStallBound, begun.Load(), goroutines*iterations)
 	}
 
-	close(stop)
-	select {
-	case <-sweeperDone:
-	case <-time.After(30 * time.Second):
-		t.Fatal("WipeAll did not return within 30s after the workers finished")
+	halt()
+	if !awaitProgress(sweeperDone, &sweeps) {
+		t.Fatalf("WipeAll did not return within %v after the workers finished", progressStallBound)
 	}
 
 	if remaining := sweep(t); remaining != 0 {

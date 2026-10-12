@@ -1623,6 +1623,10 @@ func TestScriptsRelease_ChecksTheVersionBeforeWritingAnything(t *testing.T) {
 // remote (a bare repository), one fragment to fold, and a wrapper standing in
 // for AGENT_GIT that signs nothing and logs the repo name it was given. It is
 // isolated from the user's and system git configuration.
+//
+// As on a maintainer host, plain git cannot reach dev: the remote's URL is
+// devRemote, which only the wrapper (and the test's own git) rewrites to the
+// bare repository, so a dev read or write that bypasses AGENT_GIT fails.
 type releaseRepo struct {
 	t         *testing.T
 	dir, bare string
@@ -1638,13 +1642,15 @@ func newReleaseRepo(t *testing.T) *releaseRepo {
 		"changelog.d/.gitkeep": "",
 		"changelog.d/134-x.md": "### Added\n\n- a candidate\n",
 	})
+	bare := t.TempDir()
 	wrapper := filepath.Join(t.TempDir(), "agent-git")
-	script := "#!/bin/sh\nprintf '%s\\n' \"$1\" >> \"$0.log\"\nshift\nexec git -c commit.gpgsign=false -c tag.gpgsign=false \"$@\"\n"
+	script := "#!/bin/sh\nprintf '%s\\n' \"$1\" >> \"$0.log\"\nshift\nexec git -c '" + devInsteadOf(bare) + "' -c commit.gpgsign=false -c tag.gpgsign=false \"$@\"\n"
 	writeExecutable(t, wrapper, []byte(script))
 	forge := newFakeForge()
 	forge.defaultState = "success"
-	r := &releaseRepo{t: t, dir: dir, bare: t.TempDir(), forge: forge, env: map[string]string{
+	r := &releaseRepo{t: t, dir: dir, bare: bare, forge: forge, env: map[string]string{
 		"GIT_CONFIG_GLOBAL": os.DevNull, "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_COUNT": "0",
+		"GIT_SSH_COMMAND": "false",
 		"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com",
 		"GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.com",
 		"AGENT_GIT": wrapper, "REPO_NAME": "go-enclave-test", "VERSION": "",
@@ -1652,16 +1658,24 @@ func newReleaseRepo(t *testing.T) *releaseRepo {
 	}}
 	r.git(r.bare, "init", "-q", "--bare")
 	r.git(dir, "init", "-q", "-b", "main")
-	r.git(dir, "remote", "add", "dev", r.bare)
+	r.git(dir, "remote", "add", "dev", devRemote)
 	r.git(dir, "add", "-A")
 	r.git(dir, "commit", "-q", "-m", "root")
 	r.git(dir, "push", "-q", "dev", "main")
 	return r
 }
 
+// devRemote is dev's URL in a releaseRepo: one plain git has no route to.
+const devRemote = "ssh://git@agent-only.invalid/dev.git"
+
+// devInsteadOf is the git configuration that routes devRemote to bare.
+func devInsteadOf(bare string) string {
+	return "url." + bare + ".insteadOf=" + devRemote
+}
+
 func (r *releaseRepo) git(dir string, args ...string) string {
 	r.t.Helper()
-	cmd := exec.Command("git", args...)
+	cmd := exec.Command("git", append([]string{"-c", devInsteadOf(r.bare)}, args...)...)
 	cmd.Dir = dir
 	cmd.Env = layerEnv(os.Environ(), r.env)
 	out, err := cmd.CombinedOutput()
