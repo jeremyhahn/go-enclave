@@ -1,6 +1,6 @@
 # Locked-memory budget and admission — architecture
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-11
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-12
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Problem
@@ -142,12 +142,8 @@ Contracts and error mapping: [engineering.md](engineering.md).
 | Ceiling discovery (`DiscoverLockedMemoryLimit` is the platform function itself) | [memlock.go](../../memlock.go), [memlock_linux.go](../../memlock_linux.go), [memlock_unix.go](../../memlock_unix.go), [memlock_bsd.go](../../memlock_bsd.go), [memlock_unsupported.go](../../memlock_unsupported.go) |
 | Orphan ledger the refund rides on | [registry.go](../../registry.go) |
 
-Ownership: go-enclave owns the locked-memory primitive and its bounded
-`Allocator`; no other project hand-rolls an admission budget. The registry row
-is the go-enclave row of the handbook's `software/docs/00-ownership-and-sdk-boundary.md`
-(§L1). That document has no go-enclave row in §R, so the Tier column of §R does
-not apply here: the capability is embedded-Go only, as
-[api.md](api.md#transports) states.
+No other project hand-rolls an admission budget: the bounded `Allocator` is part
+of go-enclave's [ownership of locked memory](../locked-memory/architecture.md#component-boundaries).
 
 ## Trust boundaries
 

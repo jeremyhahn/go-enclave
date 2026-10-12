@@ -1,6 +1,6 @@
 # Locked-memory budget and admission — engineering contract
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-11
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-12
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Exported surface
@@ -19,11 +19,11 @@
 | `SetAllocator(a *Allocator) error` | Installs the process allocator. One-shot. Binary only. |
 | `ProcessAllocator() (*Allocator, error)` | Returns the installed allocator, lazily installing the default. Libraries call this. |
 | `DiscoverLockedMemoryLimit() (LockedMemoryLimit, error)` | Snapshot of the ceiling and its source. |
-| `LockedMemoryLimit{Bytes int64; Bounded bool; Source LimitSource}` | `Bytes` is a ceiling only when `Bounded`. |
-| `LimitSource`: `LimitUnknown`, `LimitRLimit`, `LimitUnlimited`, `LimitNotEnforced`, `LimitUnsupported` | Where the figure came from. Only `LimitRLimit` is `Bounded`. |
-| `BudgetError{Requested, InUse, Limit int64}` | Matches `ErrBudgetExhausted`. `InUse` is never negative and may exceed `Limit` after `ForceLimit`. |
-| `BudgetInUseError{Requested, InUse, Limit int64}` | Matches `ErrBudgetInUse`. `Limit` is the unchanged budget. |
-| `RLimitError{Requested int64; Limit LockedMemoryLimit}` | Matches `ErrBudgetExceedsRLimit`. |
+| `LockedMemoryLimit{Bytes int64; Bounded bool; Source LimitSource}` | `Bytes` is a ceiling only when `Bounded`; it is populated for `LimitNotEnforced` and zero when nothing was read. |
+| `LimitSource`: `LimitUnknown`, `LimitRLimit`, `LimitUnlimited`, `LimitNotEnforced`, `LimitUnsupported` | Where the figure came from; each value: [api.md](api.md#limitsource-values). Only `LimitRLimit` is `Bounded`. |
+| `BudgetError{Requested, InUse, Limit int64}` | Matches `ErrBudgetExhausted`. `Requested` is the page-rounded charge. `InUse` is never negative and may exceed `Limit` after `ForceLimit`. |
+| `BudgetInUseError{Requested, InUse, Limit int64}` | Matches `ErrBudgetInUse`. `Requested` is the budget asked for (for `TransferTo`, what the source would be left with); `Limit` is the unchanged budget. |
+| `RLimitError{Requested int64; Limit LockedMemoryLimit}` | Matches `ErrBudgetExceedsRLimit`. `Limit` is always `Bounded`. |
 | `LimitDiscoveryError{Cause error}` | Matches `ErrLimitDiscoveryFailed`; unwraps to the `getrlimit` failure. |
 
 ## Invariants
@@ -139,8 +139,8 @@ None. Budgets are set in code. Nothing is persisted.
 ## Test strategy
 
 - Unit and race tests (`make test`, `make coverage`) across `-cpu=1,2,8`.
-- `Allocator.stalled` — a nil-in-production hook inside the retune CAS loop —
-  parks a lowering in the window a racing admission must hit, making the
+- `allocatorState.stalled` — a nil-in-production hook in `withdrawLocked`'s CAS
+  window — parks a lowering in the window a racing admission must hit, making the
   over-commit race deterministic. `reserve` deliberately duplicates the loop
   rather than sharing it, so the seam stays off the admission path.
 - `TestAllocator_Retune_RacesAdmission` arranges rounds of one-page claims with
@@ -150,7 +150,7 @@ None. Budgets are set in code. Nothing is persisted.
   one CPU. Each round needs RLIMIT_MEMLOCK of at least `retuneActors` (8)
   pages. Race tests bound their run by the side they assert about, with a
   minimum-sample floor and a vacuity control.
-- `TestAllocator_StaysWithinItsCachelineBudget` holds `Allocator` to 64 bytes
+- `TestAllocator_StaysWithinItsCachelineBudget` holds `allocatorState` to 64 bytes
   (a fixed budget, not a discovered line size; it is exactly 64 on amd64) with
   `free` and `limit` in one line. A new field must justify its place on the hot
   type, or the hot pair moves into its own aligned struct.

@@ -28,6 +28,12 @@ var errBorrowChanged = errors.New("borrowed material changed underneath the borr
 // names, instead of dying at the go test timeout.
 const sweepHangBound = 60 * time.Second
 
+// progressStallBound is how long a concurrency test's workers may go without
+// finishing a single unit of work before the test calls them deadlocked. It
+// bounds a stall, not the run: a slow or oversubscribed host under -race
+// stretches the run, but it does not stop every worker for this long.
+const progressStallBound = 60 * time.Second
+
 // sweep runs WipeAll and fails the test on any error, so an unexpected canary
 // failure is named rather than ignored.
 func sweep(t *testing.T) int {
@@ -46,6 +52,27 @@ func liveCount() int {
 	registryMu.Lock()
 	defer registryMu.Unlock()
 	return len(live)
+}
+
+// awaitProgress waits for done for as long as progress keeps moving. It
+// returns false once progress has stood still for progressStallBound: every
+// worker blocked at once, which a deadlock causes and a slow host does not.
+func awaitProgress(done <-chan struct{}, progress *atomic.Int64) bool {
+	poll := time.NewTicker(time.Second)
+	defer poll.Stop()
+	last, since := progress.Load(), time.Now()
+	for {
+		select {
+		case <-done:
+			return true
+		case <-poll.C:
+			if n := progress.Load(); n != last {
+				last, since = n, time.Now()
+			} else if time.Since(since) >= progressStallBound {
+				return false
+			}
+		}
+	}
 }
 
 // TestWipeAll_DestroysEveryLiveEnclave pins that nothing this package allocated
@@ -260,12 +287,25 @@ func TestWipeAll_ReturnsTheAllocatorReservations(t *testing.T) {
 func TestWipeAll_ConcurrentWithConstructionAndDestruction(t *testing.T) {
 	const goroutines, iterations = 50, 100
 
+	// completed and sweeps are the progress the watchdog reads. halt ends the
+	// workers and the sweeper, early when the test fails.
+	var completed, sweeps atomic.Int64
+	quit := make(chan struct{})
+	stop := make(chan struct{})
+	var halting sync.Once
+	halt := func() { halting.Do(func() { close(quit); close(stop) }) }
+
 	var workers sync.WaitGroup
 	for g := 0; g < goroutines; g++ {
 		workers.Add(1)
 		go func() {
 			defer workers.Done()
 			for i := 0; i < iterations; i++ {
+				select {
+				case <-quit:
+					return
+				default:
+				}
 				e, err := NewMemorySized(64)
 				if err != nil {
 					t.Errorf("NewMemorySized: %v", err)
@@ -275,11 +315,11 @@ func TestWipeAll_ConcurrentWithConstructionAndDestruction(t *testing.T) {
 				// correct, and Destroy is a no-op on one the sweep took.
 				_ = e.WithBytes(func([]byte) error { return nil })
 				e.Destroy()
+				completed.Add(1)
 			}
 		}()
 	}
 
-	stop := make(chan struct{})
 	sweeperDone := make(chan struct{})
 	go func() {
 		defer close(sweeperDone)
@@ -290,6 +330,7 @@ func TestWipeAll_ConcurrentWithConstructionAndDestruction(t *testing.T) {
 			default:
 			}
 			_, _ = WipeAll(context.Background())
+			sweeps.Add(1)
 		}
 	}()
 
@@ -299,19 +340,34 @@ func TestWipeAll_ConcurrentWithConstructionAndDestruction(t *testing.T) {
 		close(workersDone)
 	}()
 
-	select {
-	case <-workersDone:
-	case <-time.After(60 * time.Second):
-		close(stop)
-		t.Fatal("construction and destruction did not drain within 60s alongside a running WipeAll: " +
-			"they are deadlocked against the registry lock")
+	// A failure below must not leave workers registering enclaves into the
+	// tests after this one, which each need a clean ledger: stop them, wait
+	// for them, and reclaim what they left.
+	t.Cleanup(func() {
+		halt()
+		if !awaitProgress(workersDone, &completed) {
+			t.Errorf("the workers were still blocked %v after being told to stop; their enclaves "+
+				"stay in the ledger", progressStallBound)
+			return
+		}
+		if !awaitProgress(sweeperDone, &sweeps) {
+			t.Errorf("WipeAll was still running %v after being told to stop", progressStallBound)
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), sweepHangBound)
+		defer cancel()
+		_, _ = WipeAll(ctx)
+	})
+
+	if !awaitProgress(workersDone, &completed) {
+		t.Fatalf("construction and destruction made no progress for %v alongside a running WipeAll "+
+			"(%d of %d iterations done): they are deadlocked against the registry lock",
+			progressStallBound, completed.Load(), goroutines*iterations)
 	}
 
-	close(stop)
-	select {
-	case <-sweeperDone:
-	case <-time.After(30 * time.Second):
-		t.Fatal("WipeAll did not return within 30s after the workers finished")
+	halt()
+	if !awaitProgress(sweeperDone, &sweeps) {
+		t.Fatalf("WipeAll did not return within %v after the workers finished", progressStallBound)
 	}
 
 	if remaining := sweep(t); remaining != 0 {

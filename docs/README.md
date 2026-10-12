@@ -1,6 +1,6 @@
 # go-enclave documentation
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-11
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-12
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 One folder per capability, each with the same five files: `architecture.md`
@@ -11,8 +11,8 @@ Every feature of this repository is documented in this layout; there are no
 legacy documents to migrate. The generated API reference is on
 [pkg.go.dev](https://pkg.go.dev/github.com/jeremyhahn/go-enclave).
 
-Platforms: tests run on Linux only. The BSDs and Windows are build-only for
-v0.9.0-rc.1: they compile, and no test runs on them
+Platforms: tests run on Linux only. The BSDs and Windows are build-only:
+they compile, and no test runs on them
 ([test status](locked-memory/engineering.md#test-status)).
 
 | Feature | What it covers |
@@ -23,7 +23,7 @@ v0.9.0-rc.1: they compile, and no test runs on them
 | [shutdown-sweep](shutdown-sweep/user.md) | `WipeAll(ctx)`: admission, waiting for borrows, termination, the count and `SweepError` |
 | [provider-conformance](provider-conformance/user.md) | `providertest.TestProvider(ctx, cfg)` for TPM/HSM/KMS provider authors |
 | [backend-conformance](backend-conformance/user.md) | `backendtest`: the conformance suite for `Backend` and `Handle` authors |
-| [backends](backends/user.md) | The seam for hardware enclaves: `Handle`, `Backend`, capabilities, the named registry, `As`, the sealing wiring (`WithBackend`, `OpenIn`, `SealFrom`) and the [`backendtest`](backends/architecture.md#conformance-backendtest) conformance suite |
+| [backends](backends/user.md) | The seam for hardware enclaves: `Handle`, `Backend`, capabilities, the named registry, `As`, the sealing wiring (`WithBackend`, `OpenIn`, `SealFrom`) |
 
 ## Upgrading
 
@@ -49,8 +49,8 @@ are no deprecated aliases; rename with a search and replace.
 
 #### Locked memory
 
-**Importing the package no longer lowers `RLIMIT_CORE`; `HardenProcess` does**
-(#145). A library changing a process-wide limit at import was the binary's
+**Importing the package no longer lowers `RLIMIT_CORE`; `HardenProcess` does.**
+A library changing a process-wide limit at import was the binary's
 decision taken without it. Until `HardenProcess` runs, `CoreDumpsDisabled`
 returns `ErrCoreDumpLimitNotApplied`, so code that required it to be `nil`
 must call `HardenProcess` first:
@@ -113,7 +113,7 @@ nil option** with `ErrInvalidSealerOption`.
 
 #### Errors
 
-**No failure is an `errors.Join` composite any more** (#146). Where an
+**No failure is an `errors.Join` composite any more**. Where an
 operation's failure came with cleanup that also failed, or a release refused
 more than once, the error is a `*CleanupError` (`ErrCleanupFailed`): `Failure`
 is the operation's own error and `Causes` each refusal. Every `errors.Is` and
@@ -149,7 +149,7 @@ if ok { grant() }
 `recover` around `Destroy`; check the error, or rely on the next `WipeAll`,
 which reports every corruption `Destroy` detected since the previous sweep.
 
-**`Open`, `OpenString` and `NewMemoryEnclaveFromString` are removed** (#129).
+**`Open`, `OpenString` and `NewMemoryEnclaveFromString` are removed**.
 `Open`'s slice outlived the lock, so a concurrent `Destroy` or `WipeAll`
 unmapped it under its reader. Move readers to `WithBytes` and string sources to
 `NewMemoryEnclave([]byte(...))`:
@@ -169,7 +169,7 @@ e, err := enclave.NewMemoryEnclave([]byte(secret))
 #### Errors
 
 Every root sentinel and error type is declared in `errors.go`, and every
-`providertest` one in `providertest/errors.go` (#129).
+`providertest` one in `providertest/errors.go`.
 
 - `LockedMemoryError.Cause` is an `error`, was `any`.
 - `ProcessHardeningError` matches the new `ErrProcessHardeningFailed`.
@@ -240,13 +240,13 @@ enclave.NewSealer(enclave.WithKeyProtector(p))
 ```
 
 **`(*SealedEnclave).Destroy` returns `error`**, like `MemoryEnclave.Destroy`
-and `Sealer.Destroy`. It is always `nil` today; a `defer s.Destroy()` still
+and `Sealer.Destroy`. It is always `nil`; a `defer s.Destroy()` still
 compiles, and a method value passed as `func()` (for example
 `t.Cleanup(s.Destroy)`) needs a wrapper.
 
 #### Provider conformance
 
-`TestProvider` fails closed (#111). Off Linux, without locked memory, or with a
+`TestProvider` fails closed. Off Linux, without locked memory, or with a
 blind control, a residue sweep that cannot run used to be logged and return
 `nil`; it now returns an error matching `ErrNotMeasured` (`*NotMeasuredError`)
 unless `Config.SkipResidueSweep` is set with a reason. Every `providertest`

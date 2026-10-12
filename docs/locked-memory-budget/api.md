@@ -1,6 +1,6 @@
 # Locked-memory budget and admission — API
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-11
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-12
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Transports
@@ -28,11 +28,8 @@ scope; no pagination.
 
 ## Types
 
-| Symbol | Shape | Notes |
-|---|---|---|
-| `Allocator` | handle on one shared budget | Built only by `NewAllocator` / `NewAllocatorWithinRLimit`; a copy is the same allocator, a zero `Allocator{}` refuses every call. |
-| `LockedMemoryLimit` | `{Bytes int64; Bounded bool; Source LimitSource}` | Snapshot from `DiscoverLockedMemoryLimit`. `Bytes` is a ceiling only when `Bounded`; it is populated for `LimitNotEnforced` and zero when nothing was read. |
-| `LimitSource` | `uint8`, with `String()` | Where a `LockedMemoryLimit` came from; the constants below. |
+`Allocator`, `LockedMemoryLimit` and `LimitSource`; their contracts are in
+[engineering.md](engineering.md#exported-surface).
 
 ### `LimitSource` values
 
@@ -48,24 +45,14 @@ Per-platform discovery: [engineering.md](engineering.md#platform-contract-for-di
 
 ## Errors
 
-Every sentinel is declared in [errors.go](../../errors.go). Match with
-`errors.Is` / `errors.As`; the error types carry diagnostic fields only.
-When each is returned: [engineering.md](engineering.md#error-semantics).
-
-| Sentinel | Typed error | Fields |
-|---|---|---|
-| `ErrBudgetExhausted` | `*BudgetError` | `Requested` (page-rounded charge), `InUse`, `Limit`, all `int64`. |
-| `ErrInvalidBudget` | none | n/a |
-| `ErrBudgetInUse` | `*BudgetInUseError` | `Requested` (the budget asked for; for `TransferTo`, what the source would be left with), `InUse`, `Limit` (the unchanged budget). |
-| `ErrInvalidTransfer` | none | n/a |
-| `ErrNilAllocator` | none | n/a |
-| `ErrAllocatorNotConstructed` | none | n/a |
-| `ErrAllocatorInstalled` | none | n/a |
-| `ErrBudgetExceedsRLimit` | `*RLimitError` | `Requested int64`, `Limit LockedMemoryLimit` (always `Bounded`). |
-| `ErrLimitDiscoveryFailed` | `*LimitDiscoveryError` | `Cause error`; `Unwrap` returns the `getrlimit` failure. |
-
+Sentinels: `ErrBudgetExhausted`, `ErrInvalidBudget`, `ErrBudgetInUse`,
+`ErrInvalidTransfer`, `ErrNilAllocator`, `ErrAllocatorNotConstructed`,
+`ErrAllocatorInstalled`, `ErrBudgetExceedsRLimit`, `ErrLimitDiscoveryFailed`.
+Types: `*BudgetError`, `*BudgetInUseError`, `*RLimitError`,
+`*LimitDiscoveryError`. Match with `errors.Is` / `errors.As`; when each is
+returned and what its fields hold: [engineering.md](engineering.md#error-semantics).
 `ErrLockedMemoryUnavailable` also reaches this feature (admitted, then refused by
-the kernel); it belongs to [locked-memory](../locked-memory/api.md).
+the kernel); it belongs to [locked-memory](../locked-memory/api.md#errors).
 
 ## Versioning
 

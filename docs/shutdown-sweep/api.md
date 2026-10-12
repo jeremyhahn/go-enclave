@@ -1,6 +1,6 @@
 # Shutdown sweep — API
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-11
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-12
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Transports
@@ -18,22 +18,13 @@ every key in the process; it is deliberately absent.
 
 Schemas and error mapping: [engineering.md](engineering.md#error-semantics).
 
-## Types
+## Types and errors
 
-| Symbol | Shape | Notes |
-|---|---|---|
-| `SweepError` | `{Corrupt int; Unwiped int; Backends []BackendSweepFailure}` | Returned by `WipeAll` as `*SweepError` when an admitted sweep found something. `Unwrap() []error` returns each failed backend's error. |
-| `BackendSweepFailure` | `{Backend string; Err error}` | A record, not an error type: one `Sweeper` whose `Sweep` failed. `Backend` is its registered name, `Err` what it returned, unchanged. Reached only through `SweepError.Backends`, in name order. |
-
-## Errors
-
-| Sentinel | Typed error | Meaning |
-|---|---|---|
-| `ErrSweepInProgress` | none | The call was not admitted and swept nothing. |
-| `ErrEnclaveCorrupted` | via `*SweepError` (`Corrupt > 0`) | Declared in [locked-memory](../locked-memory/api.md). |
-| `ErrReleasedWithoutWipe` | via `*SweepError` (`Unwiped > 0`) | Declared in [locked-memory](../locked-memory/api.md). |
-
-A failed backend's own error is matched through `SweepError`'s `Unwrap`.
+`SweepError` (returned as `*SweepError`), the `BackendSweepFailure` records it
+carries, and the sentinel `ErrSweepInProgress`. `*SweepError` matches
+`ErrEnclaveCorrupted` and `ErrReleasedWithoutWipe`
+([locked-memory](../locked-memory/api.md#errors)) and unwraps to each failed
+backend's error. Contracts: [engineering.md](engineering.md#exported-surface).
 
 ## Versioning
 

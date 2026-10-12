@@ -1,6 +1,6 @@
 # Backend conformance — architecture
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-11
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-12
 > The conformance suite for the [backend seam](../backends/architecture.md). Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Problem
@@ -107,15 +107,11 @@ for.
 | Residue sweep | [backendtest/residue.go](../../backendtest/residue.go); the `/proc/self/mem` scan it shares with the root package's tests is [internal/memscan](../../internal/memscan/memscan_linux.go) |
 | `ErrInvalidConfig`/`ConfigError`, `ErrAborted`/`AbortedError`, `ErrNotMeasured`/`NotMeasuredError`, `ErrUncheckedCapability`/`UncheckedCapabilityError`, `FindingsError`, `PropertyError` | [backendtest/errors.go](../../backendtest/errors.go) |
 
-The backend under test is the author's and lives in the author's module. In
-the portfolio's ownership rules (handbook docs/00 L1) go-enclave owns the
-locked-memory primitive and the seam; hardware and cloud crypto is go-xkms's
-(§R, "Hardware / cloud KMS"), and attestation splits by RFC 9334 role:
-evidence-level primitives are go-xkms's, the Verifier is go-quicbaas's, the
-Attester and Relying-Party roles are go-trusted-platform's. This suite
-therefore never parses or appraises evidence; the author's `VerifyEvidence`
-stands in for the relying party. docs/00 §R has no go-enclave row; the suite
-adds none.
+The backend under test is the author's and lives in the author's module; the
+seam it implements is go-enclave's
+([backends](../backends/architecture.md#component-boundaries)). The suite never
+parses or appraises evidence; the author's `VerifyEvidence` stands in for the
+relying party.
 
 ## Trust boundaries
 

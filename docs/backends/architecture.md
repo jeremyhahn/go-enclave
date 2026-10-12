@@ -1,6 +1,6 @@
 # Backends — architecture
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-11
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-12
 > The backend seam. The declarations in [backend.go](../../backend.go) and [errors.go](../../errors.go) are canonical; exact signatures are in [engineering.md](engineering.md#interface-signatures) and the conformance suite is [backend-conformance](../backend-conformance/architecture.md). Conflicts with this document are defects.
 
 ## Problem
@@ -122,8 +122,7 @@ contents (no `Secret`, `SecureBytes`).
 | `Capability`, `CapabilityError`, `Evidence` | Named for what they carry. | |
 
 `Memory` and `Sealed` carry no `Enclave` suffix because `enclave.MemoryEnclave`
-would repeat the package. The old names are in
-[Upgrading](../README.md#upgrading).
+would repeat the package.
 
 ### What each backend class provides
 
@@ -438,7 +437,7 @@ and open path changes.
   reference, not the key.
 - **Freeze and read-only.** `Freezer` is a capability. A handle whose material
   is final when it is returned (moved, copied, imported, opened) is frozen
-  where the backend can freeze, as locked memory is today; opaque handles are
+  where the backend can freeze, as locked memory is; opaque handles are
   read-only by nature and do not implement `Freezer`.
 - **Borrows.** A `WithBytes` view is valid only inside `fn`, on every backend.
 - **No panics.** No function or method of the seam panics on the inputs its
@@ -622,17 +621,12 @@ errors and use are in [backend-conformance](../backend-conformance/architecture.
 | Conformance suite | [backendtest](../../backendtest/doc.go) |
 | Hardware backends | their own modules, never this one |
 
-In the portfolio's ownership rules (handbook docs/00 L1), go-enclave owns the
-locked-memory primitive and, with it, this seam: the `Backend`, `Handle` and
-capability interfaces. Hardware and cloud crypto (TPM2, PKCS#11, cloud KMS) is
-go-xkms's (§R, "Hardware / cloud KMS"), and a hardware backend module
-implements this seam rather than extending it. Attestation splits by RFC 9334
-role: evidence-level primitives are go-xkms's, the Verifier is go-quicbaas's,
-the Attester and Relying-Party roles are go-trusted-platform's. This module
-carries evidence as `Evidence` and never parses or appraises it. Keys held for
-sealing are go-enclave's own locked memory (L1); a consumer that must touch raw
-key bytes uses `Memory` and never hand-rolls locked-memory handling. docs/00 §R
-has no go-enclave row.
+go-enclave owns this seam (the `Backend`, `Handle` and capability interfaces)
+along with [locked memory](../locked-memory/architecture.md#component-boundaries).
+Hardware and cloud crypto (TPM2, PKCS#11, cloud KMS) belongs to go-xkms, and a
+hardware backend module implements this seam rather than extending it. This
+module carries attestation evidence as `Evidence` and never parses or
+appraises it.
 
 ## Rejected alternatives
 
@@ -643,7 +637,6 @@ has no go-enclave row.
 | A `Capabilities() []Capability` method | It can disagree with the method set; the type assertion is the truth. |
 | Name the core `Enclave` | Stutters. |
 | A generic `Allocator` over every backend, `NewAllocator(WithBackend(b))` | Scarce resources differ in unit from backend to backend ([above](#allocator-a-locked-memory-budget)). |
-| Deprecated aliases for the renamed types | The pre-release policy forbids them. |
 | `Unregister` | A configuration binding must be stable: a name resolves to one instance for the process's life. |
 | A second error type for backend sweep failures | One `errors.As` covers the whole sweep. |
 | A `Hardener` capability that `HardenProcess` calls on registered backends | Only locked memory's protection depends on process state. |

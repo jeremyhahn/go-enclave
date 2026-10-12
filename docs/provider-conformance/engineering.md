@@ -1,6 +1,6 @@
 # Provider conformance — engineering contract
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-09
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-12
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Exported surface
@@ -10,15 +10,15 @@ Package `providertest` (import path `github.com/jeremyhahn/go-enclave/providerte
 | Identifier | Contract |
 |---|---|
 | `TestProvider(ctx context.Context, cfg Config) error` | Runs the suite. `nil` = every property was measured and held, except those `cfg` explicitly relaxed. |
-| `Config.New func() (any, error)` | Returns a fresh provider. Called twice by the mode-pairing check (once per mode) and once by each other check that runs: up to 2 + 10 + 3 = 15 times when both modes are claimed. Nil or typed-nil results are failures. |
+| `Config.New func() (any, error)` | Returns a fresh provider. Called twice by the mode-pairing check (once per mode) and once by each other check that runs: up to 2 + 10 + 3 = 15 times when both modes are claimed. Nil or typed-nil results are failures. Instances need not be independent. |
 | `Config.Modes []enclave.Mode` | The modes the provider **claims**. Must be non-empty and valid. Checked in both directions. |
 | `Config.SkipResidueSweep string` | Non-empty reason skips the residue sweep and accepts retention by copy as unmeasured; echoed to `Logf`. Empty, an unmeasurable sweep returns `ErrNotMeasured`. |
-| `Config.SingleUseRoot string` | Non-empty reason relaxes the two `RootUnsealer` checks that need a second `UnsealRoot` call; echoed to `Logf`. |
+| `Config.SingleUseRoot string` | Non-empty reason relaxes the two `RootUnsealer` checks that need a second `UnsealRoot` call, so root-destination retention is unmeasured; echoed to `Logf`. |
 | `Config.PublicKey bool` | Declares that `Protect` needs no secret (an RSA-OAEP, ECIES or HPKE wrap). Without `Forge`, the forged-blob check is unmeasured: `ErrNotMeasured` unless `SkipForgery` accepts that. Requires `ModePerOperation`. |
 | `Config.Forge func(p enclave.KeyProtector, key []byte) ([]byte, error)` | The attacker: a blob wrapping `key` built only from `p`'s public material. `Unprotect` must refuse it as `ErrSealedAuthentication`. Runs whether or not `PublicKey` is set. Requires `ModePerOperation`. |
 | `Config.SkipForgery string` | Non-empty reason skips the forged-blob check; echoed to `Logf`. |
-| `Config.Logf func(format string, args ...any)` | Receives what was measured, skipped and why. Pass `t.Logf`. |
-| `ErrInvalidConfig` / `*ConfigError{Field, Reason}` | `cfg` cannot be run (`New` nil, `Modes` empty or invalid, `PublicKey` or `Forge` without `ModePerOperation`); no provider was tested. |
+| `Config.Logf func(format string, args ...any)` | Receives what was measured, skipped and why. Pass `t.Logf`; nil discards the notes. |
+| `ErrInvalidConfig` / `*ConfigError{Field, Reason}` | `cfg` cannot be run (`New` nil, `Modes` empty or invalid, `PublicKey` or `Forge` without `ModePerOperation`); no provider was tested. Returned bare, not in a `*FindingsError`. |
 | `ErrAborted` / `*AbortedError{Cause}` | `ctx` ended before the run finished; unwraps to `ctx.Err()` and renders as `ErrAborted`'s text, `": "` and `Cause`. Never a pass. |
 | `ErrNotMeasured` / `*NotMeasuredError{Property, Reason}` | A property could not be measured (residue sweep off Linux, without locked memory, or blind; a `PublicKey` provider without `Forge`) and `cfg` did not accept that. Neither a pass nor a provider defect. |
 | `*PropertyError{Property, Detail}` | One failed assertion; several can share a `Property`. Walk them via `FindingsError.Findings`. |

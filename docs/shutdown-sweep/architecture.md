@@ -1,6 +1,6 @@
 # Shutdown sweep — architecture
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-11
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-12
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Problem
@@ -108,7 +108,7 @@ only the owed borrows bound the call.
 | Alternative | Why rejected |
 |---|---|
 | A fault handler that purges on failure (memguard's model) | Destroys unrelated live data in response to someone else's error, then panics. The sweep is called on purpose and raises no panic of its own; a registered `Sweeper` that panics is not recovered. |
-| Fixed sleep between a bounded number of passes (before v0.7: 200 µs × 8) | A guess at reader duration that a health probe on a loaded host lost; a reader present for 1.4 ms was abandoned. |
+| Fixed sleep between a bounded number of passes | A guess at reader duration that a health probe on a loaded host loses: a reader present longer than the passes is abandoned. |
 | Block on `Lock` | Cannot be abandoned when `ctx` ends, and a pending writer stalls every new reader of that enclave. |
 | Trust a failed `TryLock` to mean "held" | `TryLock` has no synchronizing effect and can fail with nobody holding the lock; a sweep sleeping on it could wait for a release that already happened. The `holders` counter closes it. |
 | Serialize sweeps with a `sync.Mutex` | A second caller with a deadline would wait as long as the *first* caller's context allowed. |
@@ -130,11 +130,8 @@ only the owed borrows bound the call.
 | Generation consumers | [sealer.go](../../sealer.go), [sealed.go](../../sealed.go) |
 
 Ownership: go-enclave owns the process-wide teardown; the consuming binary
-calls it and a library never does. This is the go-enclave row of the handbook's
-`software/docs/00-ownership-and-sdk-boundary.md` (§L1: "process-wide lifecycle
-is the consuming binary's call"). That document has no go-enclave row in §R, so
-there is no tier to cite; the call is embedded-Go only
-([api.md](api.md#transports)).
+calls it and a library never does
+([ownership](../locked-memory/architecture.md#component-boundaries)).
 
 ## Trust boundaries
 

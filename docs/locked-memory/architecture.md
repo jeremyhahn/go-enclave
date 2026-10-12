@@ -1,6 +1,6 @@
 # Locked-memory enclaves — architecture
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-11
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-12
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Problem
@@ -107,8 +107,7 @@ first.
   readers are its threat. See [backends](../backends/architecture.md).
 
 The per-process cost of each step, and what it does not bind, is in
-[engineering.md](engineering.md#configuration). The change from import-time
-behaviour is in [Upgrading](../README.md#upgrading).
+[engineering.md](engineering.md#configuration).
 
 ## Rejected alternatives
 
@@ -119,9 +118,9 @@ behaviour is in [Upgrading](../README.md#upgrading).
 | Lowering only the soft `RLIMIT_CORE` | Any code in the process could raise it again unprivileged; the hard limit is lowered too. |
 | `RLIMIT_CORE` as the only hardening step | It does not bind a piped Linux `core_pattern`, and does not stop a same-uid `ptrace` or `/proc/<pid>/mem` read. The non-dumpable flag covers both, at a cost the binary must choose ([engineering.md](engineering.md#configuration)). |
 | A `Hardener` capability that `HardenProcess` calls on registered backends | Only the locked-memory backend's protection depends on process state; see [backends](../backends/architecture.md). |
-| memguard `LockedBuffer` (used through v0.2.0-alpha) | On any mapping failure it purges — unmaps — every live buffer in the process, then panics. Guarding against that needed a process-wide lock that made allocating inside a live borrow deadlock. It also put NaCl secretbox, a non-FIPS algorithm, in every consumer's build graph. |
-| memcall primitives (used through v0.6.2-alpha) | Its `Free` re-protected and re-wiped the region itself and its `Lock` discarded an `madvise` result, so the release path could not tell which refusal it was recovering from and needed a second, "direct" unmap. It also reported success for core-dump hardening on Windows, where none exists. |
-| Panic on canary corruption (the behavior through v0.7) | Library code returns its failures. The case for a panic was that `defer e.Destroy()` drops the error; the next `WipeAll` now reports every corruption `Destroy` detected, so the evidence survives without one. See [engineering.md](engineering.md#canary-corruption). |
+| memguard `LockedBuffer` | On any mapping failure it purges — unmaps — every live buffer in the process, then panics. Guarding against that needed a process-wide lock that made allocating inside a live borrow deadlock. It also put NaCl secretbox, a non-FIPS algorithm, in every consumer's build graph. |
+| memcall primitives | Its `Free` re-protected and re-wiped the region itself and its `Lock` discarded an `madvise` result, so the release path could not tell which refusal it was recovering from and needed a second, "direct" unmap. It also reported success for core-dump hardening on Windows, where none exists. |
+| Panic on canary corruption | Library code returns its failures. The case for a panic is that `defer e.Destroy()` drops the error; the next `WipeAll` reports every corruption `Destroy` detected, so the evidence survives without one. See [engineering.md](engineering.md#canary-corruption). |
 | `WerRegisterExcludedMemoryBlock` on Windows | Covers WER reports only, and draws on a per-process pool of 512 entries shared with every WER user: failing closed would cap live enclaves and starve other libraries; best effort would be silently partial ([madvise_unsupported.go](../../madvise_unsupported.go)). |
 | Refuse to build enclaves where no per-mapping dump exclusion exists | Would also remove `mlock`, guard pages and canary — strictly worse than losing one control. |
 | A reversible `Freeze` | Re-mutable pages reopen exactly the window `Freeze` closes; the fill is the only reason pages are ever writable. |
@@ -141,10 +140,8 @@ behaviour is in [Upgrading](../README.md#upgrading).
 
 go-enclave is a bottom-layer module: its only dependency is `golang.org/x/sys`,
 and consumers reach it only through the exported Go API of package `enclave`.
-Its place in the portfolio is the go-enclave row of the L1 ownership table in
-the handbook's `software/docs/00-ownership-and-sdk-boundary.md`: this module is
-the one owner of locked-memory handling, no other project holds its own
-mlock, guard-page or canary code, and process-wide lifecycle (`HardenProcess`,
+It is the one owner of locked-memory handling: no other project holds its own
+mlock, guard-page or canary code. Process-wide lifecycle (`HardenProcess`,
 `WipeAll`) is the consuming binary's call, never a library's.
 
 ## Data flow

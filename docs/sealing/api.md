@@ -1,6 +1,6 @@
 # Sealing and the provider seam — API
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-11
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-12
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Transports
@@ -60,31 +60,16 @@ Every exported symbol of the feature. The contract of each is in
 
 ### Errors
 
-Sentinels match with `errors.Is`; the types in the second column also match
-with `errors.As`. Meaning, origin and handling of each:
-[engineering.md](engineering.md#error-semantics).
-
-| Sentinel | Type | Raised by |
-|---|---|---|
-| `ErrSealFailed` | `*SealError` (`Cause`) | Seal paths. |
-| `ErrOpenFailed` | `*OpenError` (`Cause`) | `Open`, `OpenIn`. |
-| `ErrSealedAuthentication` | | Open paths, providers. |
-| `ErrPlaintextEscaped` | | Open (defensive). |
-| `ErrMaterialTooLarge` | | Seal. |
-| `ErrSealerWiped` | `*SealerWipedError` (`Cause`) | All sealing paths, `Openable`. |
-| `ErrOpenabilityUnknown` | | `Openable`. |
-| `ErrInvalidProvider` | | `NewSealer`. |
-| `ErrSealerExhausted` | | Seal in `ModeRootKey`, as a `*SealError` cause. |
-| `ErrInvalidRotationLimit` | | `NewSealer`. |
-| `ErrSealerInstalled` | | `SetSealer`. |
-| `ErrNilSealer` | | `SetSealer`, `(*Sealer).Seal` and `SealFrom` on a nil sealer. |
-| `ErrSealerDestroyed` | | All sealing paths, `Openable`, `SoftwareProvider`. |
-| `ErrSealerNotConstructed` | | `(*Sealer).Seal`, `SealFrom` and `SetSealer` on a `Sealer` not built by `NewSealer`. |
-| `ErrInvalidSealerOption` | | `NewSealer`, for a nil option. |
-| `ErrSealSourceReadOnly` | | `Seal`, `NewSealed`, for read-only data. |
-| `ErrKeyScheduleExposed` | `*KeyScheduleExposedError` (`Name`) | `NewSealer` with `WithRequireKeyScheduleErasure`. |
-| `ErrProviderMessageLimit` | | `SoftwareProvider.Protect`. |
-| `ErrProviderNotConstructed` | | `SoftwareProvider` methods other than `Destroy`. |
+Sentinels: `ErrSealFailed`, `ErrOpenFailed`, `ErrSealedAuthentication`,
+`ErrPlaintextEscaped`, `ErrMaterialTooLarge`, `ErrSealerWiped`,
+`ErrOpenabilityUnknown`, `ErrInvalidProvider`, `ErrSealerExhausted`,
+`ErrInvalidRotationLimit`, `ErrSealerInstalled`, `ErrNilSealer`,
+`ErrSealerDestroyed`, `ErrSealerNotConstructed`, `ErrInvalidSealerOption`,
+`ErrSealSourceReadOnly`, `ErrKeyScheduleExposed`, `ErrProviderMessageLimit`,
+`ErrProviderNotConstructed`. Types: `*SealError`, `*OpenError`,
+`*SealerWipedError` (each with `Cause`) and `*KeyScheduleExposedError` (`Name`).
+Match a sentinel with `errors.Is` and read a type with `errors.As`; meaning,
+origin and handling of each: [engineering.md](engineering.md#error-semantics).
 
 The same paths also return errors defined by other features, documented where
 they belong, with their meaning on a sealing path in

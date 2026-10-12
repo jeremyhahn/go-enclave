@@ -1,6 +1,6 @@
 # Sealing and the provider seam — engineering contract
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-11
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-12
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Exported surface
@@ -20,12 +20,12 @@
 | `(*Sealed).OpenIn(ctx, b Backend) (Handle, error)` | `Open` into any backend that can hold the material; the caller owns the handle. `DefaultBackend` is `Open`; an `*Allocator` admits the destination against its budget (typed-nil: `ErrNilAllocator`); another `Importer` receives the plaintext from a locked scratch enclave. Nil or typed-nil `b`: `ErrInvalidBackend`; not an `Importer`: `*CapabilityError` (`CapabilityImport`). Backend contract: [backends](../backends/engineering.md). |
 | `(*Sealed).Openable() error` | Diagnostic snapshot; takes no context and calls no provider other than a `ModePerOperation` provider's `HealthReporter.Health`. |
 | `(*Sealed).IsAlive() bool` | Ciphertext still held — **not** "can be opened". |
-| `(*Sealed).Destroy() error` / `String()` / `GoString()` | Idempotent, nil-safe; does not wait for in-flight opens; the error is always `nil` today. `%v` and `%#v` print a redacted form. |
+| `(*Sealed).Destroy() error` / `String()` / `GoString()` | Idempotent, nil-safe; does not wait for in-flight opens; the error is always `nil`. `%v` and `%#v` print a redacted form. |
 | `KeyProtector` | `Protect(ctx, key []byte) (blob []byte, err error)`; `Unprotect(ctx, blob, key []byte) error` |
 | `RootUnsealer` | `UnsealRoot(ctx, dst []byte) error` |
 | `HealthReporter` | `Health() error`: optional on a `KeyProtector`, found by type assertion. Non-blocking report of the provider's **in-process** sealing state: `nil` or `ErrSealerWiped`; `SoftwareProvider`'s also returns `ErrSealerDestroyed` after its `Destroy` and `ErrProviderNotConstructed` for a zero value. Believed and terminal. Not consulted in `ModeRootKey`. |
 | `RootKeyBytes = 32` | Length of every root and of every key handed to a provider. |
-| `SoftwareProvider`, `NewSoftwareProvider()` | Implements `KeyProtector`, `RootUnsealer` and `HealthReporter`; root generated into a locked enclave at first use. `Protect` wraps under HKDF-SHA256 of the root (info `go-enclave v1 SoftwareProvider Protect key`), never the root `UnsealRoot` exports. State is behind a pointer: a copy shares the original's root and lock. |
+| `SoftwareProvider`, `NewSoftwareProvider()` | Implements `KeyProtector`, `RootUnsealer` and `HealthReporter`; root generated into a locked enclave at first use. `Protect` wraps under HKDF-SHA256 of the root (info `go-enclave v1 SoftwareProvider Protect key`), never the root `UnsealRoot` exports. State is behind a pointer: a copy shares the original's root and lock. `Health` never generates a root. |
 | `(*SoftwareProvider).Destroy() error` | Releases the root and Protect key; later calls, on it or a copy, report `ErrSealerDestroyed`. Idempotent, nil-safe. |
 | `WithBackend(b Backend) SealerOption` | `ModeRootKey`: the wrapping key and every KEK are imported into `b` (`PurposeWrappingKey`, `AlgorithmAES256GCM`); a handle with `AEAD` wraps inside the device, one with only `ByteAccess` wraps here. Data keys stay in this process. In `ModePerOperation` it only answers `WithRequireKeyScheduleErasure`. Nil or typed-nil: `ErrInvalidBackend`; not an `Importer`: `*CapabilityError` (`CapabilityImport`). |
 | `WithRequireKeyScheduleErasure() SealerOption` | `NewSealer` refuses, with `*KeyScheduleExposedError` matching `ErrKeyScheduleExposed`, a configuration where an AES key schedule would stay on the heap: each key class must be covered by `KeyScheduleErasure()` or by a backend that is a `Confiner` confining this process. Checked once, in `NewSealer`. |
@@ -256,8 +256,8 @@ hand back a working sealer after a `WipeAll`, the silent re-keying
 
 Path 3 is the one whose permanence the package cannot vouch for, so still
 check the sealer's health before acting on `ErrSealerWiped` from a provider —
-`Openable()` on a value it sealed reports it for path 1 or 2, or a health
-callback's report.
+`Openable()` on a value it sealed reports it for path 1 or 2, or relays the provider's
+`HealthReporter` answer.
 
 ### Classifying an open failure
 
@@ -267,7 +267,7 @@ first match:
 1. `ErrSealedAuthentication` — a forgery verdict; never retry, investigate.
 2. `ErrSealerWiped` — this sealer could not serve the operation. Check
    `Openable()` before concluding anything: `ErrSealerWiped` there means the
-   sealer's own keys are gone (or its health callback says so); `nil` or
+   sealer's own keys are gone (or the provider's `HealthReporter` says so); `nil` or
    `ErrOpenabilityUnknown` means they are not known to be gone — the provider
    itself returned `ErrSealerWiped` (inspect the provider's error). A sweep
    that destroys only a per-call enclave is not reported this way; it is
@@ -341,7 +341,7 @@ refused, Windows has none, and a Linux `core_pattern` pipe ignores it.
 
 ### Erasure under `runtime/secret`
 
-Built with `GOEXPERIMENT=runtimesecret` for `linux/amd64` or `linux/arm64`,
+Built with `GOEXPERIMENT=runtimesecret` for `linux/amd64` or `linux/arm64` (not Android),
 every AES operation in the package (`withAEAD`), and the derivation of a
 `ModeRootKey` sealer's wrapping key from its root (`deriveWrappingKey`), runs
 under `runtime/secret.Do`, which erases the operation's registers and stack when it returns

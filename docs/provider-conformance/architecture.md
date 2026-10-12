@@ -1,6 +1,6 @@
 # Provider conformance — architecture
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-11
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-12
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Problem
@@ -116,18 +116,9 @@ runs.
 | Residue sweep | [providertest/residue.go](../../providertest/residue.go); the `/proc/self/mem` scan it shares with the root package's tests is [internal/memscan](../../internal/memscan/memscan_linux.go) |
 
 The provider under test is the author's; the suite runs in the author's
-repository and test binary.
-
-### Portfolio boundary
-
-The handbook's ownership and SDK boundary
-(`software/docs/00-ownership-and-sdk-boundary.md`) fixes who writes a provider:
-**L1**, the go-xkms row, gives all hardware and cloud crypto to go-xkms, and the
-go-enclave row keeps only the locked-memory primitive. This suite is the
-check go-enclave ships to those owners. **§R** has no row for it today; its
-"Barrier, seal, ceremony" rows describe `SealingStrategy`, a different seam.
-Registering the capability is a handbook change, and this document names only
-identifiers that exist (**L9**).
+repository and test binary. Hardware and cloud providers belong to go-xkms; this
+suite is the check go-enclave ships to their authors
+([sealing](../sealing/architecture.md#component-boundaries)).
 
 ## Trust boundaries
 

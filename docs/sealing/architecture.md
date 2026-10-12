@@ -1,6 +1,6 @@
 # Sealing and the provider seam — architecture
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-11
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-12
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Problem
@@ -195,7 +195,7 @@ flowchart LR
 | One provider interface | A mismatch between provider and mode would surface at the first seal, hours after boot. |
 | `sync.Once` for the root unseal | One transient failure (memlock ceiling, device hiccup) would be permanent for the process. |
 | A mutex for first-time initialization | A mutex wait cannot be abandoned when a caller's context ends. The init slot is a channel selected against `ctx.Done()`. |
-| Holding `Sealer.mu` across `UnsealRoot` (before v0.7) | A stalled provider stalled every `Seal`, `Open` and `Openable` on that sealer, with no way to give up. |
+| Holding `Sealer.mu` across `UnsealRoot` | A stalled provider stalled every `Seal`, `Open` and `Openable` on that sealer, with no way to give up. |
 | `cipher.NewGCM` with caller-supplied nonces (and with it `GOEXPERIMENT=boringcrypto`) | FIPS 140-only mode refuses GCM with arbitrary IVs. `NewGCMWithRandomNonce` removes caller-managed nonces; random 96-bit nonces can still collide, so collision risk is bounded by per-key usage limits: at most 2^31 DEK wraps per KEK generation before rotation (`kekMessageLimit`, [hierarchy.go](../../hierarchy.go); `WithKEKRotationLimit` can only lower it), at most 2^31 KEK generations per sealer wrapping key (`maxKEKGenerations`; past it a seal fails with `ErrSealerExhausted`) — a key each sealer derives from the provider's root with HKDF-SHA256 under its own random salt, so sealers sharing a root, or restarts unsealing the same one, never share it — and 2^31 `Protect` calls per `SoftwareProvider` Protect key, itself HKDF-SHA256 of the root under its own info so it is never the root `UnsealRoot` exports (`softwareProtectLimit`, [provider_software.go](../../provider_software.go)), half of crypto/cipher's documented 2^32 bound. boringcrypto builds therefore cannot seal; Go's native FIPS 140-3 module is the supported route. |
 | XSalsa20-Poly1305 / ChaCha20-Poly1305 (no key schedule) | Not FIPS-approved. |
 | A hand-written AES whose schedule lives in locked memory | Unvalidated, unreviewed cryptography; a worse class of defect than the bounded heap exposure it removes. |
@@ -225,22 +225,13 @@ TPM, HSM and KMS providers live in higher layers and are injected through
 `NewSealer(WithKeyProtector(p))`, `NewSealer(WithRootUnsealer(p))`, or
 `SetSealer`.
 
-### Portfolio boundary
+Sealing is built on go-enclave's
+[locked memory](../locked-memory/architecture.md#component-boundaries); no
+consumer hand-rolls locked-memory handling. Hardware and cloud crypto belongs to
+go-xkms, which is why this package ships only `SoftwareProvider` and injects the
+rest through the seam. `Sealer` is not the `SealingStrategy` seam of go-quicraft
+and go-qrdb.
 
-The handbook's ownership and SDK boundary
-(`software/docs/00-ownership-and-sdk-boundary.md`) places this package as
-follows:
-
-- **L1, go-enclave row.** go-enclave owns the portfolio's locked-memory
-  primitive; sealing is built on it and no consumer hand-rolls locked-memory
-  handling. **All hardware and cloud crypto is go-xkms's** (L1, go-xkms row),
-  which is why this package ships only `SoftwareProvider` and injects the rest
-  through the seam.
-- **§R.** The registry has no go-enclave sealing row today. Its "Barrier, seal,
-  ceremony" rows describe `SealingStrategy`, a different seam owned by
-  go-quicraft and go-qrdb, not `Sealer`, `Sealed` or the provider interfaces
-  here. Registering the sealing capability is a handbook change, not made by
-  this document (L9: a name written in a document must exist in code).
 ## Trust boundaries
 
 - **Provider boundary.** A provider must supply confidentiality **and**

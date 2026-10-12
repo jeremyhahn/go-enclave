@@ -1,6 +1,6 @@
 # Locked-memory enclaves — API
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-11
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-12
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Transports
@@ -34,41 +34,23 @@ text, so `%v`, `%s` and `%#v` never print the contents.
 
 ## Process hardening
 
-`HardenProcess` returns a `ProcessHardening` report. A field is true only when
-the protection was read back in effect.
-
-| Field | Meaning |
-|---|---|
-| `ProcessHardening.NotDumpable bool` | The process is marked non-dumpable (Linux `prctl(PR_SET_DUMPABLE, 0)`). |
-| `ProcessHardening.CoreDumpsDisabled bool` | `RLIMIT_CORE` was lowered to zero, soft and hard. |
-
-`CoreDumpsDisabled() error` reports the `RLIMIT_CORE` step of the last
-`HardenProcess`: `nil` when it took, else one of the errors below. Why hardening
-is opt-in, and its cost to the process, are in
-[architecture.md](architecture.md#process-hardening) and
-[engineering.md](engineering.md#configuration).
+`HardenProcess` returns a `ProcessHardening` report (`NotDumpable`,
+`CoreDumpsDisabled`); a field is true only when the protection was read back in
+effect. `CoreDumpsDisabled() error` reports the `RLIMIT_CORE` step of the last
+`HardenProcess`. Contracts: [engineering.md](engineering.md#exported-surface);
+why hardening is opt-in: [architecture.md](architecture.md#process-hardening).
 
 ## Errors
 
-Match a sentinel with `errors.Is` and read a type's `Cause` with `errors.As`.
-When each is returned, and what the caller does about it, is in
-[engineering.md](engineering.md#error-semantics).
-
-| Sentinel | Error type | Returned when |
-|---|---|---|
-| `ErrEmptyEnclave` | none | An enclave is requested over zero bytes of material. |
-| `ErrEnclaveDestroyed` | none | A destroyed enclave is borrowed, frozen or read. |
-| `ErrInvalidSize` | none | `NewMemorySized` (or `Allocator.NewSized`) is given a size that is non-positive or too large to map. |
-| `ErrLockedMemoryUnavailable` | `*LockedMemoryError{Cause}` | The kernel refused to map, lock, protect or release the pages (often the `RLIMIT_MEMLOCK` ceiling). Every `*LockedMemoryError` matches it. |
-| `ErrReleasedWithoutWipe` | `*UnwipedReleaseError{Cause}` | `Destroy` unmapped the pages without the in-process wipe because `mprotect` was denied, or a constructor's rollback did. On `Destroy` it never also matches `ErrLockedMemoryUnavailable`; on a constructor's rollback it comes in a `*CleanupError` with the freeze failure, so that error matches both. |
-| `ErrCleanupFailed` | `*CleanupError{Failure, Causes}` | A failure and an independent cleanup failure happened together (a refused rollback, a refused unlock). `Failure` is the operation's own error and `Causes` each refusal; it matches all of them and `ErrCleanupFailed`. Read it with `errors.As` and a `*CleanupError` target. |
-| `ErrEnclaveCorrupted` | none | The canary or a guard page was overwritten, detected at release. |
-| `ErrNilFunc` | none | `WithBytes` is given a nil function; the enclave is unchanged. |
-| `ErrCoreDumpLimitUnsupported` | none | `CoreDumpsDisabled` on Windows, which has no process-wide core-dump limit. |
-| `ErrCoreDumpLimitNotApplied` | none | `CoreDumpsDisabled` before `HardenProcess` has run. |
-| `ErrCoreDumpLimitFailed` | `*CoreDumpLimitError{Cause}` | `HardenProcess` could not lower `RLIMIT_CORE` to zero, soft and hard. Every `*CoreDumpLimitError` matches it. |
-| `ErrProcessHardeningUnsupported` | none | `HardenProcess` on a platform with neither step (Windows); nothing is applied. |
-| `ErrProcessHardeningFailed` | `*ProcessHardeningError{Cause}` | A hardening step was refused or did not read back in effect. Every `*ProcessHardeningError` matches it; a failed `RLIMIT_CORE` step has a `*CoreDumpLimitError` as its `Cause`. |
+Sentinels: `ErrEmptyEnclave`, `ErrEnclaveDestroyed`, `ErrInvalidSize`,
+`ErrLockedMemoryUnavailable`, `ErrReleasedWithoutWipe`, `ErrCleanupFailed`,
+`ErrEnclaveCorrupted`, `ErrNilFunc`, `ErrCoreDumpLimitUnsupported`,
+`ErrCoreDumpLimitNotApplied`, `ErrCoreDumpLimitFailed`,
+`ErrProcessHardeningUnsupported`, `ErrProcessHardeningFailed`. Cause-carrying
+types: `*LockedMemoryError`, `*UnwipedReleaseError`, `*CleanupError`,
+`*CoreDumpLimitError`, `*ProcessHardeningError`. Match a sentinel with
+`errors.Is` and read a type with `errors.As`; when each is returned and what the
+caller does about it: [engineering.md](engineering.md#error-semantics).
 
 ## Schemas and access
 

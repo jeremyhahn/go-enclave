@@ -1,6 +1,6 @@
 # Locked-memory enclaves — engineering contract
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-11
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-12
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Exported surface
@@ -151,7 +151,7 @@ should stop is the caller's decision.
 
 | GOOS | Lock primitive | Per-mapping dump exclusion (verified) | Fork exclusion (verified) | `CoreDumpsDisabled()` after `HardenProcess` | Notes |
 |---|---|---|---|---|---|
-| linux, android | `mlock` | `MADV_DONTDUMP` (refusal fails the allocation) | `MADV_DONTFORK` on the whole mapping (refusal fails the allocation) | `setrlimit(RLIMIT_CORE, 0/0)` result | The only GOOS whose tests run ([test status](#test-status)). |
+| linux, android | `mlock` | `MADV_DONTDUMP` (refusal fails the allocation) | `MADV_DONTFORK` on the whole mapping (refusal fails the allocation) | `setrlimit(RLIMIT_CORE, 0/0)` result | Linux is the only GOOS whose tests run ([test status](#test-status)). |
 | freebsd, dragonfly | `mlock` | `MAP_NOCORE` + `MADV_NOCORE` (madvise refusal fails the allocation) | none: x/sys exposes no `minherit` | setrlimit result | |
 | openbsd | `mlock` | `MAP_CONCEAL` on the `mmap` itself | none: x/sys exposes no `minherit`, and raw syscalls are refused | setrlimit result | |
 | darwin, ios, netbsd | `mlock` | none exposed by x/sys | none | setrlimit result | `RLIMIT_CORE` is the only control. |
@@ -161,11 +161,10 @@ should stop is the caller's decision.
 
 ### Test status
 
-Linux is the only platform whose tests run. For v0.9.0-rc.1 the BSDs (freebsd,
-openbsd, netbsd, dragonfly) and Windows are **build-only**: `make cross-build`
-compiles and vets them and nothing executes, so their rows above describe what
-the code does, not behavior a test has observed. Test runners for them come in
-a later release. darwin, iOS, illumos, Solaris, AIX and Android are likewise
+Linux is the only platform whose tests run. The BSDs (freebsd, openbsd, netbsd,
+dragonfly) and Windows are **build-only**: `make cross-build` compiles and vets
+them and nothing executes, so their rows above describe what the code does,
+not behavior a test has observed. darwin, iOS, illumos, Solaris, AIX and Android are likewise
 compiled, not run (iOS is not in the matrix; it builds through the darwin
 files).
 
@@ -225,7 +224,7 @@ exactly one implementation of each:
 | `madvise`: dump and fork exclusion, `coreDumpMapFlags` | `_linux`, `_bsd` (dragonfly, freebsd), `_openbsd` | `_unsupported`: darwin, netbsd, aix, solaris, windows; the hooks are no-ops |
 | `memlock`: ceiling discovery | `_linux`, `_bsd` (darwin, dragonfly, freebsd, netbsd, openbsd) | `_unsupported`: aix, solaris, windows; reports `LimitUnsupported` |
 | `harden`: the non-dumpable step of `HardenProcess` (`harden.go` runs the steps; the `RLIMIT_CORE` step is `osmem`'s) | `_linux` | `_unsupported`: the step is `ErrProcessHardeningUnsupported` |
-| `secret`: key-schedule erasure | `secret_erase.go` (linux, amd64 or arm64, `GOEXPERIMENT=runtimesecret`) | `secret_noerase.go` |
+| `secret`: key-schedule erasure | `secret_erase.go` (linux but not android, amd64 or arm64, `GOEXPERIMENT=runtimesecret`) | `secret_noerase.go` |
 
 `_unsupported` is the only catch-all; its build constraint is the exact
 complement of the named files. `_unix` holds code the named platforms share

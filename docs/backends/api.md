@@ -1,6 +1,6 @@
 # Backends — API
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-11
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-12
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Transports
@@ -32,71 +32,23 @@ Schemas and error mapping: [engineering.md](engineering.md#error-semantics).
 
 ## Exported symbols
 
-Every exported symbol of the seam. Contracts are in
-[engineering.md](engineering.md#exported-surface), exact signatures in
-[engineering.md](engineering.md#interface-signatures).
+Interfaces: `Handle`, `Backend`, `ByteAccess`, `Freezer`, `Deriver`, `AEAD`,
+`Attester`, `Importer`, `Sweeper`, `Confiner`. Types and constants: `Evidence`,
+`ImportSpec`, `ImportOption`, `Purpose` (`PurposeMaterial`,
+`PurposeWrappingKey`, `PurposeDataKey`), `Algorithm` (`AlgorithmAES256GCM`),
+`Capability` (`CapabilityBytes` … `CapabilityConfine`),
+`LockedMemoryBackendName`. Functions: `WithPurpose`, `WithAlgorithm`,
+`NewImportSpec`, `DefaultBackend`, `Register`, `Lookup`, `BackendNames`, `As`.
+Errors: `ErrBackendNotRegistered` (`*BackendNotRegisteredError`),
+`ErrBackendExists` (`*BackendExistsError`), `ErrInvalidBackend`,
+`ErrCapabilityUnsupported` (`*CapabilityError`), `ErrInvalidImport`,
+`ErrInvalidNonce`, `ErrAEADAuthentication`, `ErrCleanupFailed`
+(`*CleanupError`); `ErrEnclaveDestroyed` is the lifecycle sentinel for every
+backend's handles ([locked-memory](../locked-memory/api.md#errors)).
 
-### Interfaces
-
-| Symbol | On | Methods |
-|---|---|---|
-| `Handle` | every enclave | `Size() int`, `IsAlive() bool`, `Destroy() error`, `Backend() Backend` |
-| `Backend` | every backend | `Name() string` |
-| `ByteAccess` | handle | `WithBytes(fn func([]byte) error) error`, `EqualTo(other []byte) (bool, error)` |
-| `Freezer` | handle | `Freeze() error` |
-| `Deriver` | handle | `Derive(ctx, info []byte, n int) (Handle, error)` |
-| `AEAD` | handle | `NonceSize() int`, `Overhead() int`, `Seal(dst, nonce, plaintext, additionalData []byte) ([]byte, error)`, `Open(dst, nonce, ciphertext, additionalData []byte) ([]byte, error)` |
-| `Attester` | handle or backend | `Attest(ctx, nonce []byte) (Evidence, error)` |
-| `Importer` | backend | `Import(ctx, material []byte, opts ...ImportOption) (Handle, error)` |
-| `Sweeper` | backend | `Sweep(ctx) (held int, err error)` |
-| `Confiner` | backend | `ConfinesProcess() bool` |
-
-### Types and constants
-
-| Symbol | Kind | Summary |
-|---|---|---|
-| `Evidence{Format string; Data []byte}` | struct | What `Attest` returns; never parsed by this package. |
-| `ImportSpec{Purpose; Algorithm}` | struct | An import's resolved options. |
-| `ImportOption` | func type | `func(*ImportSpec)`; built by `WithPurpose` and `WithAlgorithm`. |
-| `Purpose` | string type | What imported material is for. |
-| `PurposeMaterial` (`"material"`), `PurposeWrappingKey` (`"wrapping-key"`), `PurposeDataKey` (`"data-key"`) | constants | The three purposes. |
-| `Algorithm` | string type | The algorithm an imported key is for. |
-| `AlgorithmAES256GCM` (`"aes-256-gcm"`) | constant | The algorithm this module names. |
-| `Capability` | string type | Names a capability in a `CapabilityError`. |
-| `CapabilityBytes` (`"bytes"`), `CapabilityFreeze` (`"freeze"`), `CapabilitySign` (`"sign"`), `CapabilityDecrypt` (`"decrypt"`), `CapabilityAEAD` (`"aead"`), `CapabilityDerive` (`"derive"`), `CapabilityAttest` (`"attest"`), `CapabilityImport` (`"import"`), `CapabilitySweep` (`"sweep"`), `CapabilityConfine` (`"confine"`) | constants | One per capability: `ByteAccess`, `Freezer`, `crypto.Signer`, `crypto.Decrypter`, `AEAD`, `Deriver`, `Attester`, `Importer`, `Sweeper`, `Confiner`. |
-| `LockedMemoryBackendName` (`"locked-memory"`) | constant | The default backend's name. |
-
-### Functions
-
-| Symbol | Summary |
-|---|---|
-| `WithPurpose(p Purpose) ImportOption`, `WithAlgorithm(a Algorithm) ImportOption` | Set the purpose and the algorithm of an import. |
-| `NewImportSpec(opts ...ImportOption) (ImportSpec, error)` | Resolves the options; `ErrInvalidImport` on a refusal. |
-| `DefaultBackend() Backend` | The locked-memory backend. |
-| `Register(b Backend) error` | Adds `b` under `b.Name()`. |
-| `Lookup(name string) (Backend, error)` | The backend registered under `name`. |
-| `BackendNames() []string` | Every registered name, sorted. |
-| `As(v, target any) bool` | Reaches a native interface through a wrapper. |
-| `(*Memory).Backend() Backend`, `(*Allocator).Name() string`, `(*Allocator).Import(...)` | The locked-memory backend's side of the seam. |
-
-### Errors
-
-| Sentinel | Typed error | Returned when |
-|---|---|---|
-| `ErrBackendNotRegistered` | `*BackendNotRegisteredError{Name}` | `Lookup` found no backend under `Name`. |
-| `ErrBackendExists` | `*BackendExistsError{Name}` | `Register` found `Name` taken. |
-| `ErrInvalidBackend` | none | A nil or typed-nil backend, or an invalid name. |
-| `ErrCapabilityUnsupported` | `*CapabilityError{Backend, Capability}` | An operation needs a capability the handle or backend lacks. |
-| `ErrInvalidImport` | none | `NewImportSpec` refused the options, or an `Importer` refused the material's length. |
-| `ErrInvalidNonce` | none | An `AEAD` got a nonce that is not `NonceSize` bytes. |
-| `ErrAEADAuthentication` | none | An `AEAD`'s `Open` could not authenticate. |
-| `ErrCleanupFailed` | `*CleanupError{Failure, Causes}` | A handle no longer needed refused its `Destroy`, or cleanup failed alongside another failure. |
-
-The typed errors are returned as pointers, so `errors.As` needs a pointer
-target: `var ce *enclave.CapabilityError; errors.As(err, &ce)`.
-
-`ErrEnclaveDestroyed` is the lifecycle sentinel for every backend's handles
-([locked-memory/api.md](../locked-memory/api.md)).
+Exact signatures: [engineering.md](engineering.md#interface-signatures);
+contracts: [engineering.md](engineering.md#exported-surface); when each error
+is returned: [engineering.md](engineering.md#error-semantics).
 
 ## Versioning
 
