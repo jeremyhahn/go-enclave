@@ -2,7 +2,7 @@
 
 - **`(*Sealer).SealFrom(ctx, src)` and `NewSealedFrom(ctx, src)`** (#145). They seal from any `Handle` with `ByteAccess`, borrowing the source and never wiping it, so a `Memory` that is already open can be re-sealed without copying its bytes onto the heap.
 - **`WithBackend(b)`** (#145). The sealer imports its wrapping key, KEKs and DEKs into `b` and seals through `b`'s `AEAD` when its handles have one. It refuses a nil backend with `ErrInvalidBackend` and a backend that is not an `Importer` with a `*CapabilityError`.
-- **`WithRequireKeyScheduleErasure()`, `ErrKeyScheduleExposed` and `*KeyScheduleExposedError`** (#145). With this option, `NewSealer` refuses any configuration that leaves an AES key schedule on the heap, and the error's `Name` is `"wrapping-key"`, `"kek"` or `"dek"`. Offloading keys to a backend does not satisfy it on its own. See [sealing](docs/sealing/user.md#choose-the-type-by-access-pattern).
+- **`WithRequireKeyScheduleErasure()`, `ErrKeyScheduleExposed` and `*KeyScheduleExposedError`** (#145). With this option, `NewSealer` refuses any configuration that leaves an AES key schedule on the heap, and the error's `Name` is `"wrapping-key"` or `"dek"`. Offloading keys to a backend does not satisfy it on its own. See [sealing](docs/sealing/user.md#choose-the-type-by-access-pattern).
 - **`ErrSealSourceReadOnly`**, **`ErrInvalidSealerOption`** (#145).
 
 ### Changed — BREAKING:

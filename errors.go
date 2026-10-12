@@ -448,7 +448,8 @@ var (
 
 	// ErrSealerNotConstructed is returned by [Sealer.Seal], [Sealer.SealFrom]
 	// and [SetSealer] for a Sealer that was not built by [NewSealer], such as
-	// the zero value. The caller's material is wiped as on every other failure.
+	// the zero value. Seal wipes the caller's data as on every other failure;
+	// SealFrom leaves src as it was, and SetSealer takes no material.
 	ErrSealerNotConstructed = errors.New("enclave: sealer was not constructed with NewSealer")
 
 	// ErrInvalidSealerOption is returned by [NewSealer] for a nil

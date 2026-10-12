@@ -233,7 +233,8 @@ func sweepInFlight(g uint64) bool { return g%2 == 1 }
 // process, never by a library: it destroys enclaves belonging to every
 // subsystem. Never call it from inside a borrow.
 //
-// It never panics and never unmaps under a lock holder. A held enclave is
+// It raises no panic of its own (a panicking [Sweeper] is the backend's panic
+// and is not recovered) and never unmaps under a lock holder. A held enclave is
 // waited for until its holder lets go or ctx ends, then skipped and counted.
 // ctx bounds only waiting (for another sweep, for borrows, for contended
 // locks); everything not held is reclaimed even under a done or nil ctx. One

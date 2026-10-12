@@ -192,7 +192,7 @@ supplies, to prove the handle holds that key. Under a toolchain that enforces
 FIPS 140 mode (`GODEBUG=fips140=only`), `cipher.NewGCM` refuses
 caller-supplied nonces, so the suite builds the comparison itself: it seals
 through the handle and checks the ciphertext body against the imported key's
-AES-CTR keystream from GCM's first counter block. That still proves the handle
+AES-CTR keystream from GCM's second counter block (J0+1, counter value 2). That still proves the handle
 holds the imported key, and nothing panics, so the suite runs as it does without
 `fips140=only`. A handle that draws its own nonce (`NonceSize` 0) skips the
 comparison and has its constants checked only.

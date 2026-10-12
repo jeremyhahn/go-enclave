@@ -11,21 +11,31 @@ A bounded `Allocator` that admits against a byte budget before allocating, with 
 
 ## Current milestone
 
-[Release candidate (M1)](../../milestone/1), target kind RC (v0.9.0-rc.1).
-Projected 2026-10-12.
+[Release candidate (M1)](../../milestone/1), target kind RC (v0.9.0-rc.1); projected: cuts when PR [#162](../../pulls/162) lands.
+No other milestone is open.
 
 ## Now
 
-- [#138](../../issues/138) v0.9.0-rc.1 pre-RC review fixes and hardware-backend seam (umbrella) — open
-- [#135](../../issues/135) backend seam for hardware enclaves (registry, injection, capabilities) — done
-- [#136](../../issues/136) release safety, analysis and build-gate fixes from the pre-RC review — done
-- [#137](../../issues/137) signed release artifacts (IS-14) — done
-- [#140](../../issues/140) docs conformance for the Serena agent rule — done
-- [#145](../../issues/145) rename `MemoryEnclave`, `SealedEnclave` and `OpenWith`; add `noCopy` — done
-- [#146](../../issues/146) conformance suite, typed errors and `memscan` fail closed — done
-- [#150](../../issues/150) docs match the exported API — done
-- [#154](../../issues/154) FIPS 140-only backend fakes, `test-fips` gates every PR (PR [#155](../../pulls/155)) — done
-- [#156](../../issues/156), [#157](../../issues/157), [#158](../../issues/158), [#159](../../issues/159), [#160](../../issues/160) owner documentation programme — open
+Each line: issue, outcome, the `docs/<feature>/` folder that specifies it, status.
+
+- [#138](../../issues/138) v0.9.0-rc.1 pre-RC review fixes and hardware-backend seam (umbrella) — `docs/backends/`, `docs/locked-memory/`, `docs/sealing/`, `docs/backend-conformance/` — open
+- [#135](../../issues/135) backend seam for hardware enclaves (registry, injection, capabilities) — `docs/backends/` — done
+- [#136](../../issues/136) release safety, analysis and build-gate fixes; [#137](../../issues/137) signed release artifacts (IS-14); [#140](../../issues/140) docs conformance for the Serena agent rule — folder to add: `docs/build-and-release/` — done
+- [#145](../../issues/145) rename `MemoryEnclave`, `SealedEnclave` and `OpenWith`; add `noCopy` — `docs/locked-memory/`, `docs/sealing/` — done
+- [#146](../../issues/146) conformance suite, typed errors and `memscan` fail closed — `docs/provider-conformance/`, `docs/backend-conformance/` — done
+- [#150](../../issues/150) docs match the exported API — every folder in the [index](docs/README.md) — done
+- [#154](../../issues/154) FIPS 140-only backend fakes, `test-fips` gates every PR (PR [#155](../../pulls/155)) — `docs/sealing/`, `docs/backend-conformance/` — done
+- [#156](../../issues/156) owner docs: backends — `docs/backends/`, `docs/backend-conformance/` — in review (PR [#162](../../pulls/162))
+- [#157](../../issues/157) owner docs: locked memory — `docs/locked-memory/` — in review (PR [#162](../../pulls/162))
+- [#158](../../issues/158) owner docs: budget and shutdown sweep — `docs/locked-memory-budget/`, `docs/shutdown-sweep/` — in review (PR [#162](../../pulls/162))
+- [#159](../../issues/159) owner docs: sealing — `docs/sealing/`, `docs/provider-conformance/` — in review (PR [#162](../../pulls/162))
+- [#160](../../issues/160) owner docs: roadmap and docs index — the [index](docs/README.md) — in review (PR [#162](../../pulls/162))
+- [#163](../../issues/163) `ErrSealerNotConstructed` godoc matches the code — `docs/sealing/` — open
+- [#164](../../issues/164) `WipeAll` godoc on `Sweeper` panics — `docs/shutdown-sweep/` — open
+- [#165](../../issues/165) `KeyScheduleExposedError` wording in the #145 changelog fragment — `docs/sealing/` — open
+- [#166](../../issues/166) GCM counter-block wording in backend-conformance engineering — `docs/backend-conformance/` — open
+- [#167](../../issues/167) roadmap names the folder behind each item — the [index](docs/README.md) — open
+- [#168](../../issues/168) spec-review scrub of `docs/` for the RC — every folder in the [index](docs/README.md) — blocked: go-quicraft pilot verdict and scrub slot 6 of dept-software#126
 - readiness: `make release-candidate` passes on main — open
 - readiness: v0.9.0-rc.1 tag cut — open
 - readiness: post-tag consumer check — open
