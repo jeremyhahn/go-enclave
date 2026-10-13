@@ -174,6 +174,85 @@ func TestSealableWithin_BoundsTheSealedLengthByInt(t *testing.T) {
 	}
 }
 
+// fuzzSealMax caps the plaintext FuzzSealOpenRoundTrip seals, to keep each
+// iteration cheap; the sizes above it, up to the limit, are covered through
+// sealableWithin.
+const fuzzSealMax = 64 << 10
+
+// FuzzSealOpenRoundTrip checks that Open(Seal(p)) returns p exactly, through
+// one Sealer for the whole target, and that sealableWithin accepts every size
+// up to its limit and refuses every size over it with ErrMaterialTooLarge,
+// for any int width from 32 to 64 bits.
+func FuzzSealOpenRoundTrip(f *testing.F) {
+	s, err := NewSealer()
+	if err != nil {
+		f.Fatalf("NewSealer: %v", err)
+	}
+	f.Cleanup(func() {
+		if err := s.Destroy(); err != nil {
+			f.Errorf("Sealer.Destroy: %v", err)
+		}
+	})
+
+	f.Add([]byte("p"), uint64(0), uint64(0))
+	f.Add(bytes.Repeat([]byte{0xa5}, 4096), maxSealedPlaintext+1, uint64(math.MaxInt64))
+	f.Add([]byte("boundary"), uint64(math.MaxInt32-sealedOverhead+1), uint64(0))
+	f.Fuzz(func(t *testing.T, p []byte, n, width uint64) {
+		maxInt := uint64(math.MaxInt32) + width%(math.MaxInt64-math.MaxInt32+1)
+		limit := min(maxSealedPlaintext, maxInt-sealedOverhead)
+		if err := sealableWithin(limit, maxInt); err != nil {
+			t.Fatalf("sealableWithin(%d, %d) at the limit = %v, want nil", limit, maxInt, err)
+		}
+		if err := sealableWithin(limit+1, maxInt); !errors.Is(err, ErrMaterialTooLarge) {
+			t.Fatalf("sealableWithin(%d, %d) over the limit = %v, want ErrMaterialTooLarge", limit+1, maxInt, err)
+		}
+		switch err := sealableWithin(n, maxInt); {
+		case n <= limit && err != nil:
+			t.Fatalf("sealableWithin(%d, %d) = %v, want nil under the limit %d", n, maxInt, err, limit)
+		case n > limit && !errors.Is(err, ErrMaterialTooLarge):
+			t.Fatalf("sealableWithin(%d, %d) = %v, want ErrMaterialTooLarge over the limit %d", n, maxInt, err, limit)
+		}
+
+		if len(p) > fuzzSealMax {
+			p = p[:fuzzSealMax]
+		}
+		want := bytes.Clone(p)
+		v, err := s.Seal(t.Context(), p)
+		if len(want) == 0 {
+			if !errors.Is(err, ErrEmptyEnclave) {
+				t.Fatalf("Seal(empty) = %v, want ErrEmptyEnclave", err)
+			}
+			return
+		}
+		if err != nil {
+			t.Fatalf("Seal(%d bytes): %v", len(want), err)
+		}
+		defer func() {
+			if err := v.Destroy(); err != nil {
+				t.Errorf("Sealed.Destroy: %v", err)
+			}
+		}()
+
+		m, err := v.Open(t.Context())
+		if err != nil {
+			t.Fatalf("Open(%d bytes): %v", len(want), err)
+		}
+		defer func() {
+			if err := m.Destroy(); err != nil {
+				t.Errorf("Memory.Destroy: %v", err)
+			}
+		}()
+		if err := m.WithBytes(func(got []byte) error {
+			if !bytes.Equal(got, want) {
+				t.Errorf("Open(Seal(p)) = %d bytes differing from p (%d bytes)", len(got), len(want))
+			}
+			return nil
+		}); err != nil {
+			t.Fatalf("WithBytes: %v", err)
+		}
+	})
+}
+
 // misbehavingAEAD is an AEAD whose Open does what crypto/cipher never does,
 // so the guards in openInto can be reached.
 type misbehavingAEAD struct {
@@ -195,33 +274,40 @@ var _ cipher.AEAD = misbehavingAEAD{}
 func TestOpenInto_Guards(t *testing.T) {
 	const n = 8
 	sealed := make([]byte, n+sealedOverhead)
+	mark := func(dst []byte, k int) []byte { return append(dst, bytes.Repeat([]byte{0xAA}, k)...) }
 	var escaped []byte
 
+	// Each AEAD writes into dst before it refuses or misreports; the refusal
+	// must leave dst wiped.
 	cases := map[string]struct {
 		open func(dst, ciphertext []byte) ([]byte, error)
 		want error
 	}{
 		"reported failure with full output": {
-			open: func(dst, _ []byte) ([]byte, error) { return dst[:n], errors.New("tag mismatch") },
+			open: func(dst, _ []byte) ([]byte, error) { return mark(dst, n), errors.New("tag mismatch") },
 			want: ErrSealedAuthentication,
 		},
 		"plaintext reallocated onto the heap": {
-			open: func(_, _ []byte) ([]byte, error) {
+			open: func(dst, _ []byte) ([]byte, error) {
+				mark(dst, n-1)
 				escaped = bytes.Repeat([]byte{0xAA}, n)
 				return escaped, nil
 			},
 			want: ErrPlaintextEscaped,
 		},
 		"short plaintext in place": {
-			open: func(dst, _ []byte) ([]byte, error) { return dst[:n-1], nil },
+			open: func(dst, _ []byte) ([]byte, error) { return mark(dst, n-1), nil },
 			want: ErrSealedAuthentication,
 		},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
-			dst := make([]byte, n)
+			dst := fuzzDestination(n)
 			if err := openInto(misbehavingAEAD{open: c.open}, sealed, nil, dst); !errors.Is(err, c.want) {
 				t.Fatalf("openInto = %v, want %v", err, c.want)
+			}
+			if !bytes.Equal(dst, make([]byte, n)) {
+				t.Fatalf("dst = %x after the refusal, want it wiped", dst)
 			}
 		})
 	}
@@ -232,7 +318,11 @@ func TestOpenInto_Guards(t *testing.T) {
 	if err := openInto(misbehavingAEAD{}, make([]byte, sealedOverhead), nil, nil); !errors.Is(err, ErrSealedAuthentication) {
 		t.Errorf("openInto of an empty message = %v, want ErrSealedAuthentication", err)
 	}
-	if err := openInto(misbehavingAEAD{}, sealed, nil, make([]byte, n+1)); !errors.Is(err, ErrSealedAuthentication) {
+	dst := fuzzDestination(n + 1)
+	if err := openInto(misbehavingAEAD{}, sealed, nil, dst); !errors.Is(err, ErrSealedAuthentication) {
 		t.Errorf("openInto into a mis-sized destination = %v, want ErrSealedAuthentication", err)
+	}
+	if !bytes.Equal(dst, fuzzDestination(n+1)) {
+		t.Error("openInto wrote a mis-sized destination it refuses before decryption")
 	}
 }

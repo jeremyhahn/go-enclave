@@ -67,7 +67,10 @@
    the plaintext. `Open` allocates the destination first,
    with capacity exactly the plaintext length, and decrypts in place; a length
    mismatch is refused **before** decrypting. `ErrPlaintextEscaped` guards the
-   (unreachable) case of the AEAD reallocating.
+   (unreachable) case of the AEAD reallocating. **A refused open wipes the
+   destination** once the AEAD, in software or in a device, has opened into
+   it, and leaves it untouched if refused before: a device key's length
+   cannot be checked first, its `Overhead` being only an upper bound.
 2. **No `Sealer` or `Sealed` mutex across a provider call.** Two
    things do span one, by design: the init slot (a one-slot semaphore acquired
    in a `select` against `ctx.Done()`) spans `UnsealRoot`, and the read lock of
@@ -417,6 +420,23 @@ process-lifetime `Sealer` (an AST guard test keeps it that way).
   because a rotation waiting on the write lock destroys the outgoing KEK and
   a later check would read that retirement as a sweep. No seam holds that
   window open.
+- Fuzz targets feed the parsers bytes go-enclave did not produce. None may
+  panic, and each refusal must leave the destination as
+  [invariant 1](#invariants) states.
+  `FuzzSoftwareProviderUnprotect` checks that `Unprotect` opens only its own
+  `Protect` blob and refuses every other blob with `ErrSealedAuthentication`,
+  or with `ctx.Err()` for an ended context. `FuzzSoftwareProviderRoundTrip`
+  checks that `Unprotect` returns any protected 32-byte key exactly.
+  `FuzzUnwrapKey` checks that `parseBlobHeader` refuses a short or
+  wrong-version frame and that `unwrapKey` refuses every blob `wrapKey` did not
+  produce. `FuzzOpenWithKeyInto` checks that a mutated ciphertext or AAD is
+  refused, and that a wrong-length destination is refused before decryption.
+  `FuzzUnwrapKeyDevice` and `FuzzOpenOnDeviceInto` do the same for a wrapping
+  key that encrypts in its device (`openOnDeviceInto`), at every nonce size
+  including 0, through a fake key that is honest or misbehaves: a plaintext
+  returned outside the destination is refused with `ErrPlaintextEscaped` and
+  wiped, one of the wrong length with `ErrSealedAuthentication`, and a device
+  failure is an `*OpenError` carrying it.
 - Provider behavior is checked by [provider-conformance](../provider-conformance/engineering.md),
   which `SoftwareProvider` passes in this repository's own tests.
 - `make test-fips` runs the suite in FIPS strict mode (`GOFIPS140=latest`; see [FIPS 140-3](#fips-140-3)).

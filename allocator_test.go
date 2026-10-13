@@ -23,6 +23,98 @@ import (
 	"github.com/jeremyhahn/go-enclave/internal/memscan"
 )
 
+// FuzzAllocatorAdmission drives an Allocator with a small budget through a
+// sequence of allocations and destroys decoded from the input, on one
+// goroutine (concurrency stays with the race tests). The first byte sets the
+// budget, 1 to 8 pages; each later pair is one operation: an even first byte
+// allocates ((op>>1)<<8 | arg) bytes, an odd one destroys live[arg%len(live)].
+// Properties: InUse matches the page-rounded bytes of the live handles and
+// never exceeds the budget; a request over the remaining budget is refused
+// with a *BudgetError matching ErrBudgetExhausted; destroying every handle
+// returns InUse to zero.
+func FuzzAllocatorAdmission(f *testing.F) {
+	f.Add([]byte{0})
+	f.Add([]byte{3, 0, 1, 0x10, 0, 0, 0xff, 1, 0, 0x20, 0})
+	f.Add([]byte{7, 0x7e, 0xff, 0, 1, 1, 0, 0, 0})
+	f.Fuzz(func(t *testing.T, data []byte) {
+		if len(data) == 0 {
+			return
+		}
+		const maxOps = 64
+		budget := int64(1+data[0]%8) * pageSize
+		a, err := NewAllocator(budget)
+		if err != nil {
+			t.Fatalf("NewAllocator(%d): %v", budget, err)
+		}
+
+		type handle struct {
+			m      *Memory
+			charge int64
+		}
+		var live []handle
+		var used int64
+		destroy := func(i int) {
+			h := live[i]
+			live = append(live[:i], live[i+1:]...)
+			if err := h.m.Destroy(); err != nil {
+				t.Fatalf("Destroy: %v", err)
+			}
+			used -= h.charge
+		}
+		defer func() {
+			for len(live) > 0 {
+				destroy(len(live) - 1)
+			}
+		}()
+
+		ops := data[1:]
+		for i := 0; i+1 < len(ops) && i < 2*maxOps; i += 2 {
+			op, arg := ops[i], ops[i+1]
+			if op&1 == 1 {
+				if len(live) > 0 {
+					destroy(int(arg) % len(live))
+				}
+			} else {
+				n := int(op>>1)<<8 | int(arg)
+				charge := LockedSize(n)
+				m, err := a.NewSized(n)
+				switch {
+				case n == 0:
+					if !errors.Is(err, ErrInvalidSize) {
+						t.Fatalf("NewSized(0) = %v, want ErrInvalidSize", err)
+					}
+				case charge > budget-used:
+					var be *BudgetError
+					if !errors.Is(err, ErrBudgetExhausted) || !errors.As(err, &be) {
+						t.Fatalf("NewSized(%d) with %d of %d bytes used = %v, want a *BudgetError", n, used, budget, err)
+					}
+					if be.Requested != charge || be.InUse != used || be.Limit != budget {
+						t.Fatalf("BudgetError = %+v, want Requested %d, InUse %d, Limit %d", *be, charge, used, budget)
+					}
+				case err != nil:
+					t.Fatalf("NewSized(%d) with %d of %d bytes used: %v", n, used, budget, err)
+				default:
+					live = append(live, handle{m, charge})
+					used += charge
+				}
+				if err != nil && m != nil {
+					t.Fatalf("NewSized(%d) returned an enclave with error %v", n, err)
+				}
+			}
+			if got := a.InUse(); got != used || got > a.Limit() {
+				t.Fatalf("InUse = %d, want %d within the limit %d", got, used, a.Limit())
+			}
+		}
+
+		for len(live) > 0 {
+			destroy(0)
+		}
+		if got := a.InUse(); got != 0 {
+			t.Fatalf("InUse after destroying every handle = %d, want 0", got)
+		}
+	})
+}
+
 func TestNewAllocator_InvalidBudget(t *testing.T) {
 	for _, n := range []int64{0, -1, -4096} {
 		a, err := NewAllocator(n)

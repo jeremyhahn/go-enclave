@@ -9,6 +9,7 @@
 package enclave
 
 import (
+	"bytes"
 	"context"
 	"testing"
 	"time"
@@ -125,4 +126,41 @@ func endedContexts(t *testing.T) map[string]struct {
 		"canceled": {canceled, context.Canceled},
 		"expired":  {expired, context.DeadlineExceeded},
 	}
+}
+
+// fuzzUntouched fills the destination a fuzz target hands to a parser. After a
+// refusal every byte is still fuzzUntouched or every byte is zero: a mix is a
+// partly written destination.
+const fuzzUntouched byte = 0xA5
+
+// fuzzDestination returns n bytes of fuzzUntouched.
+func fuzzDestination(n int) []byte {
+	return bytes.Repeat([]byte{fuzzUntouched}, n)
+}
+
+// refusedCleanly reports whether a refused parser left dst untouched or wiped
+// it whole.
+func refusedCleanly(dst []byte) bool {
+	untouched, wiped := true, true
+	for _, b := range dst {
+		untouched = untouched && b == fuzzUntouched
+		wiped = wiped && b == 0
+	}
+	return untouched || wiped
+}
+
+// fuzzSeedMutations returns the truncated and tampered seeds of a parser fuzz
+// target: every proper prefix of b, from empty up, so every frame boundary is
+// among them, then b with one bit flipped in each byte in turn.
+func fuzzSeedMutations(b []byte) [][]byte {
+	out := make([][]byte, 0, 2*len(b))
+	for i := range b {
+		out = append(out, bytes.Clone(b[:i]))
+	}
+	for i := range b {
+		c := bytes.Clone(b)
+		c[i] ^= 1 << (i % 8)
+		out = append(out, c)
+	}
+	return out
 }

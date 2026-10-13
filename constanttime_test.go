@@ -60,3 +60,29 @@ func TestEqualConstantTime(t *testing.T) {
 		}
 	}
 }
+
+// FuzzConstantTime checks the constant-time helpers differentially:
+// equalConstantTime must agree with bytes.Equal, and copyConstantTime with
+// copy, on every pair of inputs, unequal lengths included.
+func FuzzConstantTime(f *testing.F) {
+	f.Add([]byte("same"), []byte("same"))
+	f.Add([]byte("same"), []byte("sane"))
+	f.Add([]byte("same"), []byte("sam"))
+	f.Add([]byte{}, []byte("abc"))
+	f.Add([]byte("abc"), []byte{})
+	f.Fuzz(func(t *testing.T, x, y []byte) {
+		if got, want := equalConstantTime(x, y), bytes.Equal(x, y); got != want {
+			t.Fatalf("equalConstantTime(%q, %q) = %v, bytes.Equal = %v", x, y, got, want)
+		}
+		if !equalConstantTime(x, bytes.Clone(x)) {
+			t.Fatalf("equalConstantTime(%q, its copy) = false", x)
+		}
+
+		got, want := bytes.Clone(x), bytes.Clone(x)
+		copyConstantTime(got, y)
+		copy(want, y)
+		if !bytes.Equal(got, want) {
+			t.Fatalf("copyConstantTime(%q, %q) left %q, copy leaves %q", x, y, got, want)
+		}
+	})
+}

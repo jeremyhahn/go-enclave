@@ -127,17 +127,22 @@ func openInto(gcm cipher.AEAD, sealed, aad, dst []byte) error {
 	}
 
 	// dst[:0:len(dst)] pins the capacity so the AEAD's append cannot reallocate.
+	// The AEAD may have written into dst before refusing, so every refusal
+	// from here wipes dst.
 	got, oerr := gcm.Open(dst[:0:len(dst)], nil, sealed, aad)
 	if oerr != nil {
+		Wipe(dst)
 		return ErrSealedAuthentication
 	}
 	// Residency before length: a result that escaped AND has the wrong length
 	// must still have its heap copy wiped.
 	if len(got) > 0 && &got[0] != &dst[0] {
 		Wipe(got)
+		Wipe(dst)
 		return ErrPlaintextEscaped
 	}
 	if len(got) != len(dst) {
+		Wipe(dst)
 		return ErrSealedAuthentication
 	}
 	return nil

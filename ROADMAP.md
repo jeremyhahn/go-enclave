@@ -36,9 +36,11 @@ Each line: issue, outcome, the `docs/<feature>/` folder that specifies it, statu
 - [#166](../../issues/166) GCM counter-block wording in backend-conformance engineering — `docs/backend-conformance/` — done
 - [#167](../../issues/167) roadmap names the folder behind each item — the [index](docs/README.md) — done
 - [#168](../../issues/168) spec-review scrub of `docs/` for the RC — every folder in the [index](docs/README.md) — done
-- readiness: `make release-candidate` passes on main — open
-- readiness: v0.9.0-rc.1 tag cut — open
-- readiness: post-tag consumer check — open
+- [#184](../../issues/184) property fuzz of the `Allocator` budget, seal/open round trip and constant-time helpers — `docs/locked-memory-budget/`, `docs/sealing/`, `docs/locked-memory/` — open
+- [#183](../../issues/183) fuzz targets for parsing untrusted input — `docs/sealing/` — open
+- readiness: `make release-candidate` passes on main — done
+- readiness: [v0.8.0-rc.1](../../releases/tag/v0.8.0-rc.1) tag cut on 3ee5cb2, 2026-10-12 13:24Z — done
+- readiness: post-tag consumer check, release run 49323 8/8 green, published 2026-10-12 16:42Z — done
 - readiness: release-readiness checklist [#80](../../issues/80) — done
 
 ## Next

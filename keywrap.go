@@ -121,15 +121,21 @@ func openOnDeviceInto(key AEAD, sealed, aad, dst []byte) error {
 	if ns > 0 {
 		nonce = sealed[:ns]
 	}
+	// The device may have written into dst before refusing, and a length
+	// check cannot come first: Overhead is only an upper bound. So every
+	// refusal from here wipes dst.
 	got, err := key.Open(dst[:0:len(dst)], nonce, sealed[ns:], aad)
 	if err != nil {
+		Wipe(dst)
 		return deviceFailure[OpenError](err)
 	}
 	if len(got) > 0 && &got[0] != &dst[0] {
 		Wipe(got)
+		Wipe(dst)
 		return ErrPlaintextEscaped
 	}
 	if len(got) != len(dst) {
+		Wipe(dst)
 		return ErrSealedAuthentication
 	}
 	return nil

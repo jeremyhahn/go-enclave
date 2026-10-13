@@ -53,8 +53,12 @@
 #     template's v6. upload-artifact keeps the template's pins (v3.2.2 is
 #     the one Gitea accepts).
 # The CUSTOMIZE values:
-#   FUZZ_TAGS   '': the module has no Fuzz* targets yet; the fuzz job lists
-#               none and passes.
+#   FUZZ_TAGS   '': the Fuzz* targets, all in the root package, build with
+#               no tags: FuzzSoftwareProviderUnprotect,
+#               FuzzSoftwareProviderRoundTrip, FuzzUnwrapKey,
+#               FuzzUnwrapKeyDevice and FuzzOpenWithKeyInto (#183), and
+#               FuzzAllocatorAdmission, FuzzSealOpenRoundTrip and
+#               FuzzConstantTime (#184).
 #   RACE_TAGS   '': ci.yml's Test job (`make ci-test`) builds the unit suite
 #               with no tags. The userns test (`userns` tag), the integration
 #               suite (`integration` tag) and the GOEXPERIMENT=runtimesecret
