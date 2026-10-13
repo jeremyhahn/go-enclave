@@ -3,10 +3,11 @@
 > **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-12
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
-One folder per capability, each with the same five files: `architecture.md`
+One folder per capability, each with these files: `architecture.md`
 (design, boundaries, rejected alternatives), `engineering.md` (exported
-surface, invariants, errors, tests), `api.md` (the Go API per capability),
-`cli.md` (none: this is a library) and `user.md` (task-oriented usage).
+surface, invariants, errors, tests), `api.md` (the Go API per capability)
+and `user.md` (task-oriented usage). There is no CLI: this is a library
+([interfaces](SPEC.md#interfaces)).
 Every feature of this repository is documented in this layout; there are no
 legacy documents to migrate. The generated API reference is on
 [pkg.go.dev](https://pkg.go.dev/github.com/jeremyhahn/go-enclave).
