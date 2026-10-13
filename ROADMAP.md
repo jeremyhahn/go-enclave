@@ -1,6 +1,6 @@
 # go-enclave roadmap
 
-> **Status: REFERENCE** · Owner: Software Department · Last verified: 2026-10-12
+> **Status: REFERENCE** · Owner: Software Department · Last verified: 2026-10-13
 > Changes are proposed by docs-only PR.
 
 ## Mission
@@ -36,11 +36,13 @@ Each line: issue, outcome, the `docs/<feature>/` folder that specifies it, statu
 - [#166](../../issues/166) GCM counter-block wording in backend-conformance engineering — `docs/backend-conformance/` — done
 - [#167](../../issues/167) roadmap names the folder behind each item — the [index](docs/README.md) — done
 - [#168](../../issues/168) spec-review scrub of `docs/` for the RC — every folder in the [index](docs/README.md) — done
-- [#184](../../issues/184) property fuzz of the `Allocator` budget, seal/open round trip and constant-time helpers — `docs/locked-memory-budget/`, `docs/sealing/`, `docs/locked-memory/` — open
-- [#183](../../issues/183) fuzz targets for parsing untrusted input — `docs/sealing/` — open
+- [#184](../../issues/184) property fuzz of the `Allocator` budget, seal/open round trip and constant-time helpers — `docs/locked-memory-budget/`, `docs/sealing/`, `docs/locked-memory/` — done
+- [#183](../../issues/183) fuzz targets for parsing untrusted input, with the wipe-on-refusal fix (PR [#185](../../pulls/185)) — `docs/sealing/` — done
 - readiness: `make release-candidate` passes on main — done
 - readiness: [v0.8.0-rc.1](../../releases/tag/v0.8.0-rc.1) tag cut on 3ee5cb2, 2026-10-12 13:24Z — done
 - readiness: post-tag consumer check, release run 49323 8/8 green, published 2026-10-12 16:42Z — done
+- readiness: [v0.8.0-rc.2](../../releases/tag/v0.8.0-rc.2) tag cut on b5f772a, 2026-10-13 00:43Z — done
+- readiness: post-tag consumer check, release run 50067 8/8 green, published 2026-10-13 00:56Z — done
 - readiness: release-readiness checklist [#80](../../issues/80) — done
 
 ## Next
