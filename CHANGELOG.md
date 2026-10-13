@@ -6,6 +6,29 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [v0.8.0-rc.2] - 2026-10-13
+
+### Changed
+
+- **The CI Gate runs on its own reserved runner label, `ci-gate`** (#138). In Gitea Actions even a needs-only job takes a runner slot, so the gate sat queued behind PR jobs after every job it gates had passed, delaying the green combined status a release cut needs. The gate is now one shell step with no checkout: it carries `build/ci/summary.sh` inline, and the build gates hold that copy to the file.
+
+- ROADMAP and docs link ownership inside the repository.
+
+### Fixed
+
+- release targets read dev through AGENT_GIT
+
+- **A refused unwrap through a device key wiped nothing** (#183). When a wrapping key that encrypts in its device opened into the destination and the unwrap was then refused (wrong length, escaped plaintext, device error), the destination kept what the device wrote, which could be the key itself. Every refusal after the device's `Open` now wipes the destination; the software path's AEAD open does the same. See [sealing invariant 1](docs/sealing/engineering.md#invariants).
+
+### Added
+
+- **A dispatch-only Batch workflow for the batch runners** (#180). `.github/workflows/batch.yml`, from the handbook's batch template v1.1, runs CPU work that gates nothing on `main`: fuzzing, the unit suite under the race detector three times, a soak loop of `make integration-test`, and the root package's benchmarks with allocation counts. Each finding is printed on a `BATCH-FINDING` log line. It has no push, pull-request or schedule trigger.
+
+- **Fuzz targets for the parsers of untrusted blobs** (#183). `FuzzSoftwareProviderUnprotect`, `FuzzSoftwareProviderRoundTrip`, `FuzzUnwrapKey` and `FuzzOpenWithKeyInto` feed the root package's protected-key, wrapped-key and sealed-payload parsers bytes go-enclave did not produce. They check that a parser never panics, that it refuses every such input with `ErrSealedAuthentication` (or `ctx.Err()` for an ended context), and that it leaves the destination untouched or wiped, never partly written. The Batch workflow's fuzz job now has targets to run.
+- **Fuzz targets for the device-key unwrap path** (#183). `FuzzUnwrapKeyDevice` and `FuzzOpenOnDeviceInto` cover a wrapping key that encrypts in its device, at every nonce size, through an honest and a misbehaving fake key: a plaintext returned outside the destination is refused with `ErrPlaintextEscaped` and wiped, one of the wrong length with `ErrSealedAuthentication`, and a device failure is an `*OpenError`; every refusal leaves the destination untouched or wiped.
+
+- **Property fuzz targets for the admission, sealing and constant-time invariants** (#184). `FuzzAllocatorAdmission` drives an `Allocator` with a small budget through a decoded sequence of allocations and destroys and checks that admitted bytes never exceed the budget, that a request over the remaining budget is refused with a `*BudgetError`, and that destroying every handle returns the accounting to zero. `FuzzSealOpenRoundTrip` checks that `Open(Seal(p))` returns `p` exactly and that every size over the sealing limit is refused with `ErrMaterialTooLarge`. `FuzzConstantTime` checks the constant-time compare and copy against `bytes.Equal` and `copy`, unequal lengths included. The batch workflow fuzzes each target on `main`.
+
 ## [v0.8.0-rc.1] - 2026-10-12
 
 ### Added

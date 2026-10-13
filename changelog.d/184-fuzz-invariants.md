@@ -1,3 +1,0 @@
-### Added
-
-- **Property fuzz targets for the admission, sealing and constant-time invariants** (#184). `FuzzAllocatorAdmission` drives an `Allocator` with a small budget through a decoded sequence of allocations and destroys and checks that admitted bytes never exceed the budget, that a request over the remaining budget is refused with a `*BudgetError`, and that destroying every handle returns the accounting to zero. `FuzzSealOpenRoundTrip` checks that `Open(Seal(p))` returns `p` exactly and that every size over the sealing limit is refused with `ErrMaterialTooLarge`. `FuzzConstantTime` checks the constant-time compare and copy against `bytes.Equal` and `copy`, unequal lengths included. The batch workflow fuzzes each target on `main`.
