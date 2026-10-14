@@ -7,14 +7,16 @@ One folder per capability, each with these files: `architecture.md`
 (design, boundaries, rejected alternatives), `engineering.md` (exported
 surface, invariants, errors, tests), `api.md` (the Go API per capability)
 and `user.md` (task-oriented usage). There is no CLI: this is a library
-([interfaces](SPEC.md#interfaces)).
+([interfaces](SPEC.md#interfaces)). A folder may also hold a design
+proposal beside them.
 Every feature of this repository is documented in this layout; there are no
 legacy documents to migrate. The generated API reference is on
 [pkg.go.dev](https://pkg.go.dev/github.com/jeremyhahn/go-enclave).
 
 Platforms: tests run on Linux only. The BSDs and Windows are build-only:
 they compile, and no test runs on them
-([test status](locked-memory/engineering.md#test-status)).
+([test status](locked-memory/engineering.md#test-status)); how they would
+run is a proposal in [runtime testing](locked-memory/runtime-testing.md).
 
 | Feature | What it covers |
 |---|---|

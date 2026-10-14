@@ -166,7 +166,8 @@ dragonfly) and Windows are **build-only**: `make cross-build` compiles and vets
 them and nothing executes, so their rows above describe what the code does,
 not behavior a test has observed. darwin, iOS, illumos, Solaris, AIX and Android are likewise
 compiled, not run (iOS is not in the matrix; it builds through the darwin
-files).
+files). How the suite would run on the BSDs and Windows is a proposal awaiting
+the owner's approval: [runtime testing](runtime-testing.md).
 
 **Why `MADV_DONTFORK`, not `MADV_WIPEONFORK`.** Both keep the material out of a
 forked child. `WIPEONFORK` leaves the range mapped and zero-filled in the child,
