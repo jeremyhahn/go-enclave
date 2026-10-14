@@ -23,5 +23,6 @@ locked-memory-budget  enclave      enclave TestLockedMemoryBudget_   allocator.g
 sealing               enclave      enclave TestSealing_              aead.go hierarchy.go keywrap.go provider.go sealed.go sealer.go
 shutdown-sweep        enclave      enclave TestShutdownSweep_        registry.go
 backends              enclave      enclave TestBackends_             backend.go
+backend-detection     enclave      enclave TestBackendDetection_     detection.go
 backend-conformance   backendtest  enclave TestBackendConformance_   backendtest/*.go
 provider-conformance  providertest enclave TestProviderConformance_  provider_software.go providertest/*.go

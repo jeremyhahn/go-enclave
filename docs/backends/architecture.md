@@ -1,6 +1,6 @@
 # Backends — architecture
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-12
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-14
 > The backend seam. The declarations in [backend.go](../../backend.go) and [errors.go](../../errors.go) are canonical; exact signatures are in [engineering.md](engineering.md#interface-signatures) and the conformance suite is [backend-conformance](../backend-conformance/architecture.md). Conflicts with this document are defects.
 
 ## Problem
@@ -72,6 +72,11 @@ classDiagram
     <<capability>>
     ConfinesProcess() bool
   }
+  class Prober {
+    <<capability>>
+    Rank() int
+    Probe(ctx) error
+  }
   Handle <|-- ByteAccess
   Handle <|-- Freezer
   Handle <|-- Deriver
@@ -79,6 +84,7 @@ classDiagram
   Backend <|-- Importer
   Backend <|-- Sweeper
   Backend <|-- Confiner
+  Backend <|-- Prober
   Handle --> Backend : made by
   Memory ..|> ByteAccess
   Memory ..|> Freezer
@@ -89,7 +95,7 @@ classDiagram
 - **Backend** is the core every backend provides: its name.
 - **Capabilities** are separate interfaces. A handle's: `ByteAccess`,
   `Freezer`, `Deriver`, `AEAD`, and the standard library's `crypto.Signer` and
-  `crypto.Decrypter`. A backend's: `Importer`, `Sweeper`, `Confiner`. Either's:
+  `crypto.Decrypter`. A backend's: `Importer`, `Sweeper`, `Confiner`, `Prober`. Either's:
   `Attester`. A capability that embeds `Handle` or `Backend` yields a usable
   value from one assertion.
 - **A missing capability** is a `*CapabilityError` from any operation of this
@@ -114,7 +120,7 @@ contents (no `Secret`, `SecureBytes`).
 |---|---|---|
 | `Handle` | What the caller holds is a reference to material a backend holds: pages for locked memory, a key slot for a secure element. `enclave.Handle` names that and claims nothing about the contents. | `Enclave` (`enclave.Enclave` stutters; revive's `exported` rule reports it). `Region` (memory only). `Key` (names the contents; not all material is a key). `Slot` (device only). |
 | `Backend` | What makes and holds handles; `enclave.Backend` reads as "an enclave backend". | `Provider` (the `KeyProtector`/`RootUnsealer` seam's word, a different role). `Device` (locked memory is not one). `Strategy` (a pattern, not a mechanism). |
-| `ByteAccess`, `Freezer`, `Deriver`, `Attester`, `Importer`, `Sweeper`, `Confiner` | One verb each takes the `-er` form; byte access is a property, not a verb. | `Reader` (implies `io.Reader`'s stream). |
+| `ByteAccess`, `Freezer`, `Deriver`, `Attester`, `Importer`, `Sweeper`, `Confiner`, `Prober` | One verb each takes the `-er` form; byte access is a property, not a verb. | `Reader` (implies `io.Reader`'s stream). |
 | `AEAD` | The construction's own name, as `cipher.AEAD` uses it; `enclave.AEAD` is a handle that is one. | `Sealer` (taken by the sealing type). `Cipher` (not every cipher authenticates). |
 | `Purpose`, `Algorithm`, `ImportSpec`, `ImportOption`, `WithPurpose`, `WithAlgorithm`, `NewImportSpec` | What an import asks for; the options follow `SealerOption`'s `With…` form. | `KeyUsage` (material is not always a key). |
 | `Register`, `Lookup` | Their `Backend` parameter or result says what they register; compare `sql.Register`. | `RegisterBackend`, `LookupBackend` (repeat the signature). |
@@ -136,6 +142,7 @@ would repeat the package.
 | `Importer` | backend | yes (`Allocator`) | yes | where policy allows import, per purpose |
 | `Sweeper` | backend | no: `WipeAll`'s first phase sweeps every locked-memory enclave, an `Allocator`'s included | yes | releases sessions and transient objects |
 | `Confiner` | backend | no | yes, when this process runs inside the TEE | no: the process is outside the device |
+| `Prober` | backend | yes: rank 0, always usable | yes: ranks itself, probes for the TEE | yes: ranks itself, probes for the device |
 
 ### Opaque operations
 

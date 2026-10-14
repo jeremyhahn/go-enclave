@@ -1,6 +1,6 @@
 # Backend conformance — engineering contract
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-11
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-14
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 The suite holds a backend to the contract in
@@ -26,7 +26,7 @@ The suite holds a backend to the contract in
 | Field | Contract |
 |---|---|
 | `New func() (enclave.Backend, error)` | Required. Returns a fresh backend; called at most once per check. A nil backend, typed nil included, is a finding. |
-| `BackendCapabilities []enclave.Capability` | Exactly what the backend itself claims: `CapabilityImport`, `CapabilitySweep`, `CapabilityConfine`, `CapabilityAttest`. |
+| `BackendCapabilities []enclave.Capability` | Exactly what the backend itself claims: `CapabilityImport`, `CapabilitySweep`, `CapabilityConfine`, `CapabilityAttest`, `CapabilityProbe`. |
 | `Handles []HandleCase` | Required, at least one. |
 | `SkipResidueSweep string` | If set, the reason the residue sweep may not run; the result is a note on `Logf` instead of a `*NotMeasuredError`. |
 | `VerifyEvidence func(nonce []byte, evidence enclave.Evidence) error` | Returns nil when the evidence binds `nonce`, an error when it does not, as the attestation's relying party would judge it. Without it every `Attester` the suite meets is an `*UncheckedCapabilityError`: attestation binding is certified only with it. |
@@ -160,6 +160,10 @@ of the concurrent-use goroutines.
      requires (`IsAlive`, `Size` and every error-returning method), and a
      second `Sweep` returns 0 and nil again.
    - **Confiner**: `ConfinesProcess` gives the same answer every time.
+   - **Prober**: `Rank` gives the same answer every time, and `Probe` gives
+     one verdict, nil or an error, under the run context and a nil one,
+     called again and from 32 goroutines at once, without panicking. Whether
+     the verdict matches the host is the backend's own test.
 6. **Concurrent use**, for every case. 32 goroutines, released together from
    a start barrier, run every operation the handle has, `Size`, `IsAlive`,
    `Backend` and, on a `Freezer`, `Freeze` included, while `Destroy` lands,

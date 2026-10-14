@@ -6,8 +6,8 @@
 // checks the core Handle lifecycle, exact capability claims, context refusal,
 // concurrent use under the race detector, and the contract of every capability
 // the backend and its cases declare: ByteAccess, Freezer, Deriver,
-// crypto.Signer, crypto.Decrypter, AEAD, Attester, Importer, Sweeper and
-// Confiner, each in normal use and, for a handle, again after Destroy. On
+// crypto.Signer, crypto.Decrypter, AEAD, Attester, Importer, Sweeper,
+// Confiner and Prober, each in normal use and, for a handle, again after Destroy. On
 // Linux it also sweeps the process for a handle's material after Destroy and,
 // for a Sweeper, after Sweep.
 //
@@ -23,6 +23,7 @@
 //			New: func() (enclave.Backend, error) { return mybackend.Open() },
 //			BackendCapabilities: []enclave.Capability{
 //				enclave.CapabilityImport,
+//				enclave.CapabilityProbe,
 //			},
 //			Handles: []backendtest.HandleCase{{
 //				Name:       "material",

@@ -28,7 +28,7 @@ func allocatorBackendConfig(t *testing.T) backendtest.Config {
 		New: func() (enclave.Backend, error) {
 			return enclave.NewAllocator(1 << 20)
 		},
-		BackendCapabilities: []enclave.Capability{enclave.CapabilityImport},
+		BackendCapabilities: []enclave.Capability{enclave.CapabilityImport, enclave.CapabilityProbe},
 		Handles: []backendtest.HandleCase{{
 			Name:       "material",
 			Import:     []enclave.ImportOption{enclave.WithPurpose(enclave.PurposeMaterial)},

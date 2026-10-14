@@ -1,6 +1,6 @@
 # Backends — API
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-12
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-14
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Transports
@@ -21,7 +21,8 @@ a peer choose where the process keeps its keys.
 | Hold a sealer's keys in a backend | `enclave.WithBackend(b)`: see [sealing/api.md](../sealing/api.md) | N/A |
 | Open sealed material into a backend | `Sealed.OpenIn(ctx, b) (Handle, error)`: see [sealing/api.md](../sealing/api.md) | N/A |
 | Test a handle for a capability | `ba, ok := h.(enclave.ByteAccess)` (likewise `Freezer`, `Deriver`, `AEAD`, `crypto.Signer`, `crypto.Decrypter`) | N/A |
-| Test a backend for a capability | `imp, ok := b.(enclave.Importer)` (likewise `Sweeper`, `Confiner`) | N/A |
+| Test a backend for a capability | `imp, ok := b.(enclave.Importer)` (likewise `Sweeper`, `Confiner`, `Prober`) | N/A |
+| Rank a backend and probe the host for it | `p.Rank() int`, `p.Probe(ctx) error` on a `Prober`; `enclave.Detect` compares them: see [backend-detection/api.md](../backend-detection/api.md) | N/A |
 | Test for attestation, on either | `a, ok := h.(enclave.Attester)` (key evidence) or `a, ok := b.(enclave.Attester)` (platform evidence) | N/A |
 | Import with a purpose | `imp.Import(ctx, material, enclave.WithPurpose(p), enclave.WithAlgorithm(a))`; a backend resolves the set with `enclave.NewImportSpec(opts...)` | N/A |
 | Reach a native interface | `enclave.As(v, &target) bool` | N/A |
@@ -33,10 +34,10 @@ Schemas and error mapping: [engineering.md](engineering.md#error-semantics).
 ## Exported symbols
 
 Interfaces: `Handle`, `Backend`, `ByteAccess`, `Freezer`, `Deriver`, `AEAD`,
-`Attester`, `Importer`, `Sweeper`, `Confiner`. Types and constants: `Evidence`,
+`Attester`, `Importer`, `Sweeper`, `Confiner`, `Prober`. Types and constants: `Evidence`,
 `ImportSpec`, `ImportOption`, `Purpose` (`PurposeMaterial`,
 `PurposeWrappingKey`, `PurposeDataKey`), `Algorithm` (`AlgorithmAES256GCM`),
-`Capability` (`CapabilityBytes` … `CapabilityConfine`),
+`Capability` (`CapabilityBytes` … `CapabilityConfine`, `CapabilityProbe`),
 `LockedMemoryBackendName`. Functions: `WithPurpose`, `WithAlgorithm`,
 `NewImportSpec`, `DefaultBackend`, `Register`, `Lookup`, `BackendNames`, `As`.
 Errors: `ErrBackendNotRegistered` (`*BackendNotRegisteredError`),

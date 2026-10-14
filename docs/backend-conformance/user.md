@@ -1,6 +1,6 @@
 # Backend conformance — user guide
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-11
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-14
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 Check that a backend you wrote honors the [backend seam](../backends/user.md)
@@ -47,7 +47,7 @@ The suite checks claims in both directions, so list exactly what you
 implement:
 
 - **`BackendCapabilities`**: what the backend itself offers: `CapabilityImport`,
-  `CapabilitySweep`, `CapabilityConfine`, `CapabilityAttest`.
+  `CapabilitySweep`, `CapabilityConfine`, `CapabilityAttest`, `CapabilityProbe`.
 - **One `HandleCase` per kind of handle** the backend makes, each with its own
   `Capabilities` (`CapabilityBytes`, `CapabilityFreeze`, `CapabilitySign`,
   `CapabilityDecrypt`, `CapabilityAEAD`, `CapabilityDerive`,

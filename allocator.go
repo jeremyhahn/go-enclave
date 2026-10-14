@@ -42,7 +42,7 @@ var allocatorIDs atomic.Uint64
 // enclave it admits reports it from [Handle.Backend]. Its name is
 // [LockedMemoryBackendName], which the unbudgeted default holds in the
 // registry, so an Allocator is never registered; pass it where a backend is
-// injected.
+// injected. Like the default, it is a [Prober] of the same rank.
 type Allocator interface {
 	// Import is New behind the [Importer] contract: it resolves opts with
 	// [NewImportSpec] and admits material into a new frozen enclave, wiping
@@ -332,6 +332,13 @@ const aes256KeyBytes = 32
 // Name returns [LockedMemoryBackendName]: an Allocator is the locked-memory
 // backend with a budget. It is nil-safe.
 func (a *budgetAllocator) Name() string { return LockedMemoryBackendName }
+
+// Rank implements [Prober.Rank] as the default backend does. It is nil-safe.
+func (a *budgetAllocator) Rank() int { return lockedMemory{}.Rank() }
+
+// Probe implements [Prober.Probe] as the default backend does: a budget is no
+// host requirement. It is nil-safe.
+func (a *budgetAllocator) Probe(ctx context.Context) error { return lockedMemory{}.Probe(ctx) }
 
 // Import implements [Importer.Import] as [Allocator] describes it, with the
 // receiver errors of New.

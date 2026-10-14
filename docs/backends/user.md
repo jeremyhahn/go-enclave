@@ -1,6 +1,6 @@
 # Backends — user guide
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-11
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-14
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 A backend is what holds an enclave's material. Locked memory, the
@@ -37,6 +37,11 @@ if err != nil {
 ```
 
 `enclave.BackendNames()` lists what is registered; log it at startup.
+
+To let go-enclave pick instead of configuration, call `enclave.Detect(ctx)`
+after registering: it selects the most secure registered backend this host
+can run, locked memory when no other can
+([backend detection](../backend-detection/user.md)).
 
 ## Ask what a handle can do
 

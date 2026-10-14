@@ -679,6 +679,38 @@ func (e *CapabilityError) Error() string {
 // Is reports every CapabilityError as [ErrCapabilityUnsupported].
 func (e *CapabilityError) Is(target error) bool { return target == ErrCapabilityUnsupported }
 
+// Backend detection.
+
+// ErrBackendUnavailable reports that a registered backend's [Prober.Probe]
+// found it not usable on this host, so [Detect] passed it over. Every
+// [ProbeError] matches it.
+var ErrBackendUnavailable = errors.New("enclave: the backend is not usable on this host")
+
+// ProbeError reports a registered backend whose [Prober.Probe] failed: why
+// [Detect] passed it over. Match on [ErrBackendUnavailable]; Unwrap returns
+// what the backend's Probe returned, so its own typed errors match too.
+type ProbeError struct {
+	// Backend is the name the backend is registered under.
+	Backend string
+	// Cause is what its Probe returned.
+	Cause error
+}
+
+// Error is [ErrBackendUnavailable]'s text, the quoted name, then the cause.
+func (e *ProbeError) Error() string {
+	text := nameText(ErrBackendUnavailable, e.Backend)
+	if e.Cause == nil {
+		return text
+	}
+	return text + ": " + e.Cause.Error()
+}
+
+// Is reports every ProbeError as [ErrBackendUnavailable].
+func (e *ProbeError) Is(target error) bool { return target == ErrBackendUnavailable }
+
+// Unwrap returns what the backend's Probe returned.
+func (e *ProbeError) Unwrap() error { return e.Cause }
+
 // Handle cleanup.
 
 // ErrCleanupFailed reports that cleanup an operation did failed alongside

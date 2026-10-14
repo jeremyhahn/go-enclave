@@ -1,6 +1,6 @@
 # Backends — engineering contract
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-11
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-14
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 This contract covers the seam and its wiring into sealing: `WithBackend`,
@@ -78,6 +78,12 @@ type Confiner interface {
 	ConfinesProcess() bool // this whole process runs inside the backend's boundary
 }
 
+type Prober interface {
+	Backend
+	Rank() int                       // higher is more secure; locked memory is 0
+	Probe(ctx context.Context) error // nil when usable on this host
+}
+
 // Import intent.
 type Purpose string   // PurposeMaterial "material", PurposeWrappingKey "wrapping-key", PurposeDataKey "data-key"
 type Algorithm string // AlgorithmAES256GCM "aes-256-gcm"; a backend module may name its own
@@ -117,7 +123,7 @@ type CleanupError struct {
 	Causes  []error
 }
 
-type Capability string // "bytes", "freeze", "sign", "decrypt", "aead", "derive", "attest", "import", "sweep", "confine"
+type Capability string // "bytes", "freeze", "sign", "decrypt", "aead", "derive", "attest", "import", "sweep", "confine", "probe"
 ```
 
 `*Memory` satisfies `Handle`, `ByteAccess` and `Freezer`, asserted at compile
@@ -144,15 +150,16 @@ dereferenced copy ([architecture](architecture.md#lifetime-and-ownership)).
 | `NewImportSpec(opts ...ImportOption) (ImportSpec, error)` | Applies `opts` in order; `ErrInvalidImport` for a nil option, a missing or unknown purpose, an algorithm on `PurposeMaterial`, or a key purpose without a valid algorithm. |
 | `Sweeper` | Backend capability: `Sweep(ctx)` releases every handle and returns how many it could not. `ctx` bounds only waiting; a nil or done `ctx` still releases everything not held and is not an error. |
 | `Confiner` | Backend capability: `ConfinesProcess()` reports, fixed for the backend's life and without blocking, whether this whole process runs inside the backend's boundary. |
-| `Capability`, `CapabilityBytes` … `CapabilityConfine` | Names a capability in a `CapabilityError`; one constant per interface above and per standard opaque shape (`crypto.Signer`, `crypto.Decrypter`). |
+| `Prober` | Backend capability: `Rank()`, fixed for the backend's life and without blocking, reports how secure the backend is (higher is more; locked memory reports 0), and `Probe(ctx)` returns nil when the backend is usable on this host or its own typed error. `Detect` compares them ([backend detection](../backend-detection/engineering.md)). |
+| `Capability`, `CapabilityBytes` … `CapabilityConfine`, `CapabilityProbe` | Names a capability in a `CapabilityError`; one constant per interface above and per standard opaque shape (`crypto.Signer`, `crypto.Decrypter`). |
 | `LockedMemoryBackendName` | `"locked-memory"`: the default backend's name, always registered. |
-| `DefaultBackend() Backend` | The locked-memory backend. |
+| `DefaultBackend() Backend` | The locked-memory backend; a `Prober` of rank 0 whose `Probe` returns nil. |
 | `Register(b Backend) error` | Adds `b` under `b.Name()`. Never rebinds a name. |
 | `Lookup(name string) (Backend, error)` | The backend registered under `name`. |
 | `BackendNames() []string` | Every registered name, sorted, the default included. |
 | `As(v, target any) bool` | Sets `*target` to `v` when `v`'s dynamic type is assignable to it, else defers to `v`'s `As(any) bool` method. A nil or typed-nil `v` or a bad target returns `false` without panicking; a panic from `v`'s own `As` is not recovered. |
 | `(*Memory).Backend() Backend` | The `Allocator` that admitted the enclave, else `DefaultBackend()` (a nil enclave included); unchanged by `Destroy`. |
-| `Allocator` as `Backend` and `Importer` | Name `"locked-memory"`; `Import` is an admitted `New` that resolves `NewImportSpec` and refuses an `AlgorithmAES256GCM` key that is not 32 bytes with `ErrInvalidImport` ([budget](../locked-memory-budget/engineering.md)). Never registered. |
+| `Allocator` as `Backend`, `Importer` and `Prober` | Name `"locked-memory"`, ranked and probed as the default; `Import` is an admitted `New` that resolves `NewImportSpec` and refuses an `AlgorithmAES256GCM` key that is not 32 bytes with `ErrInvalidImport` ([budget](../locked-memory-budget/engineering.md)). Never registered. |
 | `SweepError.Backends`, `BackendSweepFailure{Backend; Err}` | `WipeAll`'s backend phase: one entry per registered `Sweeper` that failed, in name order ([shutdown-sweep](../shutdown-sweep/engineering.md)). |
 | `ErrBackendNotRegistered`, `BackendNotRegisteredError{Name}` | `Lookup` found no backend under `Name`. |
 | `ErrBackendExists`, `BackendExistsError{Name}` | `Register` found `Name` taken. |
@@ -233,8 +240,8 @@ on direct matches, interface targets, wrappers, typed-nil values (direct and
 wrapper) and every input that would make `errors.As` panic, `NewImportSpec`
 on every valid shape and every refusal, valid purpose and algorithm names,
 and each error's text and sentinel. Compile-time assertions
-in `backend.go` hold `*Memory` to `Handle`, `ByteAccess` and `Freezer`, and
-`Allocator` to `Backend` and `Importer`. `allocator_backend_test.go` covers
+in `backend.go` hold `*Memory` to `Handle`, `ByteAccess` and `Freezer`, the
+default to `Prober`, and `Allocator` to `Backend`, `Importer` and `Prober`. `allocator_backend_test.go` covers
 the admitting allocator as `Backend()`, `Import`, and copies of `Memory` and
 `Allocator` sharing state; `wipeall_backends_test.go` covers the sweep phase.
 

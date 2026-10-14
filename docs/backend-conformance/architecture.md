@@ -1,6 +1,6 @@
 # Backend conformance — architecture
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-12
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-14
 > The conformance suite for the [backend seam](../backends/architecture.md). Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Problem
@@ -29,7 +29,7 @@ flowchart TD
   V -- no --> CE["*ConfigError (ErrInvalidConfig)<br/>or *UncheckedCapabilityError"]
   V -- yes --> I["backend identity · exact capability claims"]
   I --> H["handle lifecycle, every case"]
-  H --> C["per capability: ByteAccess · Freezer · Deriver · Signer ·<br/>Decrypter · AEAD · Attester · Importer · Sweeper · Confiner"]
+  H --> C["per capability: ByteAccess · Freezer · Deriver · Signer ·<br/>Decrypter · AEAD · Attester · Importer · Sweeper · Confiner · Prober"]
   C --> U["concurrent use under Destroy"]
   U --> R["residue sweep (Linux)"]
   R --> O["result: nil, or *FindingsError"]

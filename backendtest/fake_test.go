@@ -29,6 +29,9 @@ import (
 // passes every check.
 type faults struct {
 	badName, noSweep, panicConfine, unstableConfine, sweepLeavesLive, sweepTwiceHeld bool
+	// unstableRank and unstableProbe make Rank and Probe alternate between
+	// two answers; panicProbe makes Probe panic.
+	unstableRank, unstableProbe, panicProbe bool
 	// sweepKeepsMaterial makes Sweep report every handle dead but keep its
 	// material, so Size and every capability still work.
 	sweepKeepsMaterial bool
@@ -113,6 +116,7 @@ func fakeConfig(flt faults) Config {
 		New: func() (enclave.Backend, error) { return newFake(flt), nil },
 		BackendCapabilities: []enclave.Capability{
 			enclave.CapabilityImport, enclave.CapabilitySweep, enclave.CapabilityConfine, enclave.CapabilityAttest,
+			enclave.CapabilityProbe,
 		},
 		Handles: []HandleCase{
 			{
@@ -192,6 +196,8 @@ type fakeBackend struct {
 	handles  []enclave.Handle
 	sweeps   int
 	confines int
+	ranks    int
+	probes   int
 	// inFlight counts WithBytes calls under way: one is held across Destroy
 	// only in the suite's concurrency check.
 	inFlight atomic.Int32
@@ -370,6 +376,29 @@ func (f *fakeBackend) ConfinesProcess() bool {
 	return !f.unstableConfine || f.confines%2 == 0
 }
 
+func (f *fakeBackend) Rank() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ranks++
+	if f.unstableRank && f.ranks%2 == 0 {
+		return 1
+	}
+	return 100
+}
+
+func (f *fakeBackend) Probe(context.Context) error {
+	if f.panicProbe {
+		panic("fake: Probe")
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.probes++
+	if f.unstableProbe && f.probes%2 == 0 {
+		return errFake
+	}
+	return nil
+}
+
 func (f *fakeBackend) Attest(ctx context.Context, nonce []byte) (enclave.Evidence, error) {
 	return f.attest(ctx, nonce, "backend")
 }
@@ -436,6 +465,10 @@ func (n *noSweepBackend) Import(ctx context.Context, material []byte, opts ...en
 	return n.f.Import(ctx, material, opts...)
 }
 func (n *noSweepBackend) ConfinesProcess() bool { return n.f.ConfinesProcess() }
+func (n *noSweepBackend) Rank() int             { return n.f.Rank() }
+func (n *noSweepBackend) Probe(ctx context.Context) error {
+	return n.f.Probe(ctx)
+}
 func (n *noSweepBackend) Attest(ctx context.Context, nonce []byte) (enclave.Evidence, error) {
 	return n.f.Attest(ctx, nonce)
 }

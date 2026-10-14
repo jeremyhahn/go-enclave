@@ -17,6 +17,7 @@ import (
 	"os"
 	"runtime"
 	"runtime/debug"
+	"sync"
 
 	enclave "github.com/jeremyhahn/go-enclave"
 )
@@ -733,6 +734,60 @@ func checkConfiner(r *report, cfg Config) {
 	for i := 0; i < 8; i++ {
 		if got := confiner.ConfinesProcess(); got != first {
 			r.fail(property, "ConfinesProcess changed from %v to %v", first, got)
+			return
+		}
+	}
+}
+
+// checkProber checks what enclave.Detect relies on: Rank is fixed, and Probe
+// gives one verdict, nil or an error, under a live and a nil context, called
+// again and called concurrently. It cannot check that the verdict matches the
+// host; the backend's own tests do that.
+func checkProber(r *report, cfg Config) {
+	const property = "Prober"
+	if !hasCap(cfg.BackendCapabilities, enclave.CapabilityProbe) {
+		return
+	}
+	b, err := newBackend(cfg)
+	if err != nil {
+		r.fail(property, "%v", err)
+		return
+	}
+	prober, ok := b.(enclave.Prober)
+	if !ok {
+		return
+	}
+	rank := prober.Rank()
+	for i := 0; i < 8; i++ {
+		if got := prober.Rank(); got != rank {
+			r.fail(property, "Rank changed from %d to %d", rank, got)
+			return
+		}
+	}
+	first := prober.Probe(r.ctx)
+	for _, ctx := range []context.Context{r.ctx, nil} {
+		if err := prober.Probe(ctx); (err == nil) != (first == nil) {
+			r.fail(property, "Probe(%s) = %v after Probe returned %v", contextName(ctx), err, first)
+			return
+		}
+	}
+	var wg sync.WaitGroup
+	errs := make([]error, concurrencyRuns)
+	for i := range errs {
+		wg.Go(func() {
+			defer func() {
+				if p := recover(); p != nil {
+					r.panicked(p)
+					errs[i] = first
+				}
+			}()
+			errs[i] = prober.Probe(r.ctx)
+		})
+	}
+	wg.Wait()
+	for _, err := range errs {
+		if (err == nil) != (first == nil) {
+			r.fail(property, "a concurrent Probe = %v after Probe returned %v", err, first)
 			return
 		}
 	}

@@ -63,7 +63,7 @@ type Handle interface {
 
 // Backend makes and holds the material behind handles. The core is its name;
 // everything else is an optional capability found by type assertion
-// ([Importer], [Sweeper], [Confiner], [Attester]). A backend reaches this package by
+// ([Importer], [Sweeper], [Confiner], [Attester], [Prober]). A backend reaches this package by
 // explicit injection or by [Register]; none registers itself at import.
 //
 // A backend's concrete type is its native interface. Callers reach it with a
@@ -316,6 +316,30 @@ type Confiner interface {
 	ConfinesProcess() bool
 }
 
+// Prober is the capability of a backend [Detect] can select: it ranks its own
+// security and probes this host for what it needs. Both are the backend's own
+// code; this package only compares ranks and records probe results, and
+// holds no table of backends or ranks. A registered backend without it is
+// never selected.
+type Prober interface {
+	Backend
+
+	// Rank reports how secure the backend is: [Detect] prefers the usable
+	// backend with the highest rank. The locked-memory backend reports 0; a
+	// backend that holds material beyond the reach of this process's own
+	// memory, such as a TEE or a secure element, reports more. It is fixed for
+	// the backend's life, and it never blocks.
+	Rank() int
+
+	// Probe reports whether the backend is usable on this host: nil, or the
+	// backend's own typed error saying what is missing, such as a device that
+	// is absent or refuses the process. It is safe to call repeatedly and
+	// concurrently, returns the same verdict while the host is unchanged,
+	// changes no process state that outlives the call, and never panics. ctx
+	// bounds only waiting, for a device or a service; a nil ctx never ends.
+	Probe(ctx context.Context) error
+}
+
 // Capability names an optional capability in a [CapabilityError].
 type Capability string
 
@@ -331,6 +355,7 @@ const (
 	CapabilityImport  Capability = "import"  // [Importer]
 	CapabilitySweep   Capability = "sweep"   // [Sweeper]
 	CapabilityConfine Capability = "confine" // [Confiner]
+	CapabilityProbe   Capability = "probe"   // [Prober]
 )
 
 // LockedMemoryBackendName is the name of the locked-memory backend, the
@@ -347,6 +372,18 @@ type lockedMemory struct{}
 // Name returns [LockedMemoryBackendName].
 func (lockedMemory) Name() string { return LockedMemoryBackendName }
 
+// lockedMemoryRank is the locked-memory backend's [Prober.Rank]: the floor a
+// backend must rank above to be selected in its place.
+const lockedMemoryRank = 0
+
+// Rank returns 0: locked memory keeps material out of swap and core dumps,
+// but in this process's own address space.
+func (lockedMemory) Rank() int { return lockedMemoryRank }
+
+// Probe returns nil: locked memory needs no device, and a refused lock is
+// reported by the constructor that asked for it.
+func (lockedMemory) Probe(context.Context) error { return nil }
+
 // The backend registry. It holds the default from the start, as a value, so
 // no import changes it; only Register adds to it.
 var (
@@ -358,8 +395,9 @@ var (
 	_ Handle     = (*Memory)(nil)
 	_ ByteAccess = (*Memory)(nil)
 	_ Freezer    = (*Memory)(nil)
-	_ Backend    = lockedMemory{}
+	_ Prober     = lockedMemory{}
 	_ Importer   = (*budgetAllocator)(nil)
+	_ Prober     = (*budgetAllocator)(nil)
 )
 
 // DefaultBackend returns the locked-memory backend, the one every constructor

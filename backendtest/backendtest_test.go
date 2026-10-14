@@ -18,7 +18,7 @@ func TestBackendConformance_Allocator(t *testing.T) {
 		New: func() (enclave.Backend, error) {
 			return enclave.NewAllocator(1 << 20)
 		},
-		BackendCapabilities: []enclave.Capability{enclave.CapabilityImport},
+		BackendCapabilities: []enclave.Capability{enclave.CapabilityImport, enclave.CapabilityProbe},
 		Handles: []HandleCase{
 			{
 				Name:       "material",
@@ -191,7 +191,10 @@ func TestBackendConformance_BrokenFakesFail(t *testing.T) {
 		{name: "Sweep keeps the material of handles it reports dead", property: "Sweeper", cfg: fakeConfig(faults{sweepKeepsMaterial: true})},
 		{name: "repeated sweep reports held", property: "Sweeper", cfg: fakeConfig(faults{sweepTwiceHeld: true})},
 		{name: "confiner unstable", property: "Confiner", cfg: fakeConfig(faults{unstableConfine: true})},
+		{name: "Rank unstable", property: "Prober", cfg: fakeConfig(faults{unstableRank: true})},
+		{name: "Probe unstable", property: "Prober", cfg: fakeConfig(faults{unstableProbe: true})},
 		{name: "panic", property: "panic safety", cfg: fakeConfig(faults{panicConfine: true})},
+		{name: "Probe panics", property: "panic safety", cfg: fakeConfig(faults{panicProbe: true})},
 		{name: "panic under concurrent use only", property: "panic safety", cfg: fakeConfig(faults{panicConcurrent: true})},
 		{name: "Config.New fails", property: "backend identity", cfg: edit(fakeConfig(faults{}), func(c *Config) {
 			c.New = func() (enclave.Backend, error) { return nil, errFake }

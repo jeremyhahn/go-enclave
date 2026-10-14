@@ -42,7 +42,8 @@ type Config struct {
 	// affect the next.
 	New func() (enclave.Backend, error)
 	// BackendCapabilities is exactly what the backend itself claims:
-	// CapabilityImport, CapabilitySweep, CapabilityConfine and CapabilityAttest.
+	// CapabilityImport, CapabilitySweep, CapabilityConfine, CapabilityAttest
+	// and CapabilityProbe.
 	BackendCapabilities []enclave.Capability
 	// Handles are the kinds of handle the backend makes; at least one.
 	Handles []HandleCase
@@ -104,6 +105,7 @@ func TestBackend(ctx context.Context, cfg Config) error {
 		checkImporter,
 		checkSweeper,
 		checkConfiner,
+		checkProber,
 		checkConcurrentUse,
 		checkResidue,
 	}
@@ -256,6 +258,7 @@ var backendCapabilitySet = map[enclave.Capability]bool{
 	enclave.CapabilitySweep:   true,
 	enclave.CapabilityConfine: true,
 	enclave.CapabilityAttest:  true,
+	enclave.CapabilityProbe:   true,
 }
 
 var handleCapabilitySet = map[enclave.Capability]bool{
@@ -296,6 +299,7 @@ func checkBackendCapabilities(r *report, cfg Config) {
 	checkBackendCapability[enclave.Sweeper](r, property, b, claimed, enclave.CapabilitySweep)
 	checkBackendCapability[enclave.Confiner](r, property, b, claimed, enclave.CapabilityConfine)
 	checkBackendCapability[enclave.Attester](r, property, b, claimed, enclave.CapabilityAttest)
+	checkBackendCapability[enclave.Prober](r, property, b, claimed, enclave.CapabilityProbe)
 }
 
 func checkBackendCapability[T any](r *report, property string, b enclave.Backend, claimed map[enclave.Capability]bool, c enclave.Capability) {
