@@ -60,7 +60,7 @@ func TestEqualBytes(t *testing.T) {
 // mappedRetainer conforms in every visible way and copies every key it
 // recovers into a mapping it owns, outside anonymous memory.
 type mappedRetainer struct {
-	inner  *enclave.SoftwareProvider
+	inner  enclave.SoftwareProvider
 	mu     sync.Mutex
 	region []byte // written through, when fd < 0
 	fd     int    // written through with pwrite, when >= 0

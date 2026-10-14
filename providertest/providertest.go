@@ -1163,7 +1163,7 @@ func checkUnsealRootFillsTheDestination(r *report, cfg Config) {
 // the check (a bounded one an ended run may abandon) must not be given these
 // buffers: they are unmapped when fn returns.
 func withLocked(n, size int, fn func(bufs [][]byte) error) error {
-	encs := make([]*enclave.Memory, 0, n)
+	encs := make([]enclave.ByteAccess, 0, n)
 	defer func() {
 		for _, e := range encs {
 			_ = e.Destroy()

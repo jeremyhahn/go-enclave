@@ -212,7 +212,7 @@ func (c *manualContext) end(err error) {
 // context to end, returning ctx.Err() — the conforming behavior). A nil
 // release channel means "do not block".
 type blockingProvider struct {
-	inner *SoftwareProvider
+	inner *softwareProvider
 
 	entered chan struct{}
 	release chan struct{}
@@ -230,7 +230,7 @@ type blockingProvider struct {
 
 func newBlockingProvider() *blockingProvider {
 	return &blockingProvider{
-		inner:   NewSoftwareProvider(),
+		inner:   newSoftwareProvider(),
 		entered: make(chan struct{}, 64),
 	}
 }
@@ -302,7 +302,7 @@ func (p *blockingProvider) UnsealRoot(ctx context.Context, dst []byte) error {
 // context before returning. With only openErr set it refuses every Unprotect
 // with that error and Protect delegates to the inner provider.
 type errorThenCancelProtector struct {
-	inner      *SoftwareProvider
+	inner      *softwareProvider
 	cancel     context.CancelFunc
 	protectErr error
 	openErr    error
@@ -324,7 +324,7 @@ func (p *errorThenCancelProtector) Unprotect(_ context.Context, _, _ []byte) err
 // parkingProtector parks every Unprotect until the test hands it a verdict on
 // the gate it publishes: nil to proceed, or an error to return instead.
 type parkingProtector struct {
-	inner    *SoftwareProvider
+	inner    *softwareProvider
 	arrivals chan chan error
 }
 
@@ -344,7 +344,7 @@ func (p *parkingProtector) Unprotect(ctx context.Context, blob, key []byte) erro
 // reusingProtector returns every blob in ONE buffer it owns and overwrites on
 // the next Protect — legal under the KeyProtector contract.
 type reusingProtector struct {
-	inner *SoftwareProvider
+	inner *softwareProvider
 	mu    sync.Mutex
 	buf   []byte
 }
@@ -443,7 +443,7 @@ type enclaveBackedProtector struct{ key *Memory }
 
 func newEnclaveBackedProtector(t *testing.T) *enclaveBackedProtector {
 	t.Helper()
-	k, err := NewMemorySized(32)
+	k, err := newMemorySized(32)
 	if err != nil {
 		t.Fatalf("NewMemorySized: %v", err)
 	}

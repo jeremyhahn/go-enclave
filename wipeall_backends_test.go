@@ -49,7 +49,7 @@ func (s *fakeSweeper) Sweep(ctx context.Context) (int, error) {
 // name order under the caller's ctx; held counts add up, and each failure is
 // one Backends entry reachable through errors.Is and errors.As.
 func TestWipeAll_SweepsRegisteredBackendsAfterLockedMemory(t *testing.T) {
-	e, err := NewMemory([]byte("reclaimed in phase one"))
+	e, err := newMemory([]byte("reclaimed in phase one"))
 	if err != nil {
 		t.Fatalf("NewMemory: %v", err)
 	}

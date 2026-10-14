@@ -57,7 +57,11 @@ if err := k.WithBytes(func(b []byte) error {
 }); err != nil {
 	return err
 }
-if err := k.Freeze(); err != nil { // a refused Freeze leaves it writable
+var f enclave.Freezer // NewMemorySized returns a ByteAccess; Freeze is a capability
+if !enclave.As(k, &f) {
+	return errors.New("not freezable")
+}
+if err := f.Freeze(); err != nil { // a refused Freeze leaves it writable
 	return err
 }
 ```

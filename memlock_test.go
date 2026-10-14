@@ -384,7 +384,7 @@ func hostCeiling(t *testing.T) (LockedMemoryLimit, error) {
 // is recorded on the allocator by NewAllocatorWithinRLimit and not by
 // NewAllocator.
 func TestAllocator_RLimitContract_OptInIsRecorded(t *testing.T) {
-	plain, err := NewAllocator(pageSize)
+	plain, err := newBudgetAllocator(pageSize)
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
@@ -400,10 +400,10 @@ func TestAllocator_RLimitContract_OptInIsRecorded(t *testing.T) {
 		t.Errorf("ceilingForRaise on an unbound allocator = %+v, want the zero limit", ceiling)
 	}
 
-	bound, err := NewAllocatorWithinRLimit(pageSize)
+	bound, err := newBudgetAllocatorWithinRLimit(pageSize)
 	if err != nil {
 		// Ceiling under one page, or discovery failed: no allocator to inspect.
-		t.Logf("NewAllocatorWithinRLimit(%d) refused on this host (%v); the flag assertion below cannot run", pageSize, err)
+		t.Logf("newBudgetAllocatorWithinRLimit(%d) refused on this host (%v); the flag assertion below cannot run", pageSize, err)
 		return
 	}
 	if !bound.rlimitBound {
@@ -417,7 +417,7 @@ func TestAllocator_RLimitContract_OptInIsRecorded(t *testing.T) {
 func TestAllocator_RLimitContract_UnboundIsNeverChecked(t *testing.T) {
 	hostCeiling(t)
 
-	a, err := NewAllocator(pageSize)
+	a, err := newBudgetAllocator(pageSize)
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
@@ -429,11 +429,11 @@ func TestAllocator_RLimitContract_UnboundIsNeverChecked(t *testing.T) {
 	}
 
 	// The same for the receiving side of a transfer.
-	src, err := NewAllocator(8 * pageSize)
+	src, err := newBudgetAllocator(8 * pageSize)
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
-	dst, err := NewAllocator(pageSize)
+	dst, err := newBudgetAllocator(pageSize)
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
@@ -451,17 +451,17 @@ func TestAllocator_RLimitContract_UnboundIsNeverChecked(t *testing.T) {
 func TestAllocator_RLimitContract_EntryPointsAgree(t *testing.T) {
 	hostCeiling(t)
 
-	a, err := NewAllocatorWithinRLimit(pageSize)
+	a, err := newBudgetAllocatorWithinRLimit(pageSize)
 	if err != nil {
 		// Whatever refused the small budget must refuse the large one too.
-		if _, big := NewAllocatorWithinRLimit(math.MaxInt64); !sameVerdictClass(err, big) {
+		if _, big := newBudgetAllocatorWithinRLimit(math.MaxInt64); !sameVerdictClass(err, big) {
 			t.Fatalf("constructor refused %d with %v but MaxInt64 with %v; the two disagree", pageSize, err, big)
 		}
 		t.Logf("this host refuses even a one-page checked budget (%v); the retune comparison cannot run", err)
 		return
 	}
 
-	_, ctorErr := NewAllocatorWithinRLimit(math.MaxInt64)
+	_, ctorErr := newBudgetAllocatorWithinRLimit(math.MaxInt64)
 	setErr := a.SetLimit(math.MaxInt64)
 
 	if !sameVerdictClass(ctorErr, setErr) {
@@ -491,19 +491,19 @@ func TestAllocator_RLimitContract_EntryPointsAgree(t *testing.T) {
 func TestAllocator_RLimitContract_TransferAgreesWithSetLimit(t *testing.T) {
 	host, _ := hostCeiling(t)
 
-	dst, err := NewAllocatorWithinRLimit(pageSize)
+	dst, err := newBudgetAllocatorWithinRLimit(pageSize)
 	if err != nil {
 		t.Logf("this host refuses a one-page checked budget (%v); the transfer comparison cannot run", err)
 		return
 	}
 	// A plain source contributes no verdict of its own.
-	src, err := NewAllocator(math.MaxInt64)
+	src, err := newBudgetAllocator(math.MaxInt64)
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
 
 	// The reference verdict for this exact resulting budget.
-	reference, err := NewAllocatorWithinRLimit(pageSize)
+	reference, err := newBudgetAllocatorWithinRLimit(pageSize)
 	if err != nil {
 		t.Fatalf("NewAllocatorWithinRLimit: %v", err)
 	}
@@ -528,12 +528,12 @@ func TestAllocator_RLimitContract_TransferAgreesWithSetLimit(t *testing.T) {
 	// Control: a transfer that leaves the destination within the ceiling
 	// must succeed. Figures come from the discovered ceiling, since a
 	// one-page host would correctly refuse a two-page transfer.
-	small, err := NewAllocatorWithinRLimit(pageSize)
+	small, err := newBudgetAllocatorWithinRLimit(pageSize)
 	if err != nil {
 		t.Logf("this host refuses a one-page checked budget (%v); the control cannot run", err)
 		return
 	}
-	feeder, err := NewAllocator(4 * pageSize)
+	feeder, err := newBudgetAllocator(4 * pageSize)
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
@@ -565,7 +565,7 @@ func TestAllocator_RLimitContract_TransferAgreesWithSetLimit(t *testing.T) {
 func TestAllocator_RLimitContract_ForceLimitOverrides(t *testing.T) {
 	hostCeiling(t)
 
-	a, err := NewAllocatorWithinRLimit(pageSize)
+	a, err := newBudgetAllocatorWithinRLimit(pageSize)
 	if err != nil {
 		t.Logf("this host refuses a one-page checked budget (%v); the override cannot be demonstrated", err)
 		return
@@ -591,7 +591,7 @@ func TestAllocator_RLimitContract_ForceLimitOverrides(t *testing.T) {
 	}
 
 	// Control: the allocator is still bound, so a raise is still judged.
-	_, ctorErr := NewAllocatorWithinRLimit(math.MaxInt64)
+	_, ctorErr := newBudgetAllocatorWithinRLimit(math.MaxInt64)
 	setErr := a.SetLimit(math.MaxInt64)
 	if !sameVerdictClass(ctorErr, setErr) {
 		t.Errorf("after a ForceLimit override the allocator stopped being bound: constructor says %v, SetLimit says %v", ctorErr, setErr)
@@ -661,7 +661,7 @@ func TestCheckRaise(t *testing.T) {
 func TestAllocator_RLimitContract_FailedDiscoveryStillLowers(t *testing.T) {
 	boom := errors.New("getrlimit refused by policy")
 
-	a, err := NewAllocator(8 * pageSize)
+	a, err := newBudgetAllocator(8 * pageSize)
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
@@ -691,7 +691,7 @@ func TestAllocator_RLimitContract_FailedDiscoveryStillLowers(t *testing.T) {
 
 	// A transfer is always a raise on the receiving side, so the failed
 	// reading always refuses it.
-	src, err := NewAllocator(8 * pageSize)
+	src, err := newBudgetAllocator(8 * pageSize)
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}

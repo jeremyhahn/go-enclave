@@ -64,7 +64,7 @@ func sealCleanupChild(t *testing.T) {
 
 	// One key's locked footprint, which every allocation below shares.
 	base := locked()
-	k, err := NewMemorySized(dekBytes)
+	k, err := newMemorySized(dekBytes)
 	if err != nil {
 		t.Fatalf("NewMemorySized: %v", err)
 	}
@@ -94,7 +94,7 @@ func sealCleanupChild(t *testing.T) {
 		t.Fatalf("NewSealer: %v", err)
 	}
 	defer s.Destroy()
-	v, err := s.Seal(ctx, append([]byte(nil), material...))
+	v, err := s.sealData(ctx, append([]byte(nil), material...))
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
@@ -124,7 +124,7 @@ func sealCleanupChild(t *testing.T) {
 		t.Fatalf("NewSealer: %v", err)
 	}
 	defer r.Destroy()
-	first, err := r.Seal(ctx, append([]byte(nil), material...))
+	first, err := r.sealData(ctx, append([]byte(nil), material...))
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
@@ -132,13 +132,13 @@ func sealCleanupChild(t *testing.T) {
 
 	before = allow(1)
 	data := append([]byte(nil), material...)
-	if w, err := r.Seal(ctx, data); !errors.Is(err, ErrLockedMemoryUnavailable) {
+	if w, err := r.sealData(ctx, data); !errors.Is(err, ErrLockedMemoryUnavailable) {
 		_ = w.Destroy()
 		t.Fatalf("a rotating Seal with room for one page set = %v, want ErrLockedMemoryUnavailable", err)
 	}
 	requireBaseline("Seal's refused KEK", before)
 	allow(2)
-	w, err := r.Seal(ctx, append([]byte(nil), material...))
+	w, err := r.sealData(ctx, append([]byte(nil), material...))
 	if err != nil {
 		t.Fatalf("a rotating Seal with room for the DEK and the KEK: %v (so the refusal above was not the KEK's)", err)
 	}
@@ -148,14 +148,14 @@ func sealCleanupChild(t *testing.T) {
 	// loadFrozen: the mapping fits and the freeze is refused.
 	before = allow(1)
 	lift := denyProtect(t)
-	m, err := NewMemory(append([]byte(nil), material...))
+	m, err := newMemory(append([]byte(nil), material...))
 	lift()
 	if !errors.Is(err, ErrLockedMemoryUnavailable) {
 		_ = m.Destroy()
 		t.Fatalf("NewMemory with its freeze refused = %v, want ErrLockedMemoryUnavailable", err)
 	}
 	requireBaseline("loadFrozen's refused freeze", before)
-	m, err = NewMemory(append([]byte(nil), material...))
+	m, err = newMemory(append([]byte(nil), material...))
 	if err != nil {
 		t.Fatalf("NewMemory with room for one page set: %v (so the refusal above was not the freeze's)", err)
 	}

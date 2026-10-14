@@ -51,7 +51,7 @@ func providerOption(p any, m enclave.Mode) enclave.SealerOption {
 //     the cryptography is never faked.
 //   - it counts, so a test can assert how often the Sealer reached it.
 type device struct {
-	soft *enclave.SoftwareProvider
+	soft enclave.SoftwareProvider
 
 	protects, unprotects    atomic.Int64
 	unsealAttempts, unseals atomic.Int64
@@ -135,7 +135,7 @@ func (d *device) UnsealRoot(ctx context.Context, dst []byte) error {
 }
 
 // rootOnly implements only the ModeRootKey half of the seam.
-type rootOnly struct{ soft *enclave.SoftwareProvider }
+type rootOnly struct{ soft enclave.SoftwareProvider }
 
 func (r rootOnly) UnsealRoot(ctx context.Context, dst []byte) error {
 	return r.soft.UnsealRoot(ctx, dst)

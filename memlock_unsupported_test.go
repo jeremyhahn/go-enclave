@@ -28,7 +28,7 @@ func TestDiscoverLockedMemoryLimit_ReportsUnsupported(t *testing.T) {
 		t.Fatal("Bounded is true with no ceiling to be bounded by")
 	}
 	// Nothing is refused.
-	a, err := NewAllocatorWithinRLimit(1 << 40)
+	a, err := newBudgetAllocatorWithinRLimit(1 << 40)
 	if err != nil {
 		t.Fatalf("NewAllocatorWithinRLimit refused a budget where no ceiling was read: %v", err)
 	}

@@ -1,32 +1,32 @@
 # Sealing and the provider seam — engineering contract
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-12
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-14
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Exported surface
 
 | Identifier | Contract |
 |---|---|
-| `NewSealed(ctx context.Context, data []byte) (*Sealed, error)` | Seals under the process sealer (lazily the software default). Wipes `data` on every path. |
+| `NewSealed(ctx context.Context, data []byte) (Sealed, error)` | Seals under the process sealer (lazily the software default). Wipes `data` on every path. `Sealed` is an interface whose implementation is internal; a failure returns a nil interface. |
 | `NewSealer(opts ...SealerOption) (*Sealer, error)` | No options: `SoftwareProvider`, `ModeRootKey`, cannot fail. Touches no provider and no locked memory until the first seal. |
 | `WithKeyProtector(kp KeyProtector) SealerOption` | Selects `ModePerOperation` over `kp`. Nil or typed-nil: `ErrInvalidProvider`. |
 | `WithRootUnsealer(ru RootUnsealer) SealerOption` | Selects `ModeRootKey` over `ru`. Nil or typed-nil: `ErrInvalidProvider`. Giving both provider options is `ErrInvalidProvider` too. |
 | `WithKEKRotationLimit(n uint64) SealerOption` | `ModeRootKey` only: DEK wraps per KEK generation before rotation, 1 to 2^31 (the default, half of crypto/cipher's 2^32 random-nonce bound). Out of range, or with `ModePerOperation`: `ErrInvalidRotationLimit`. |
 | `SetSealer(s *Sealer) error` | Installs the process sealer. One-shot. |
-| `(*Sealer).Seal(ctx, data) (*Sealed, error)` / `Mode() Mode` | `NewSealed` for an explicit sealer. |
+| `(*Sealer).Seal(ctx, data) (Sealed, error)` / `Mode() Mode` | `NewSealed` for an explicit sealer. |
 | `(*Sealer).Destroy() error` | Ends the sealer: later seals, opens and `Openable` report `ErrSealerDestroyed`, and a `Sealed` opens only through the sealer that sealed it, so this package cannot open its values again. `ModeRootKey` releases the root, wrapping key, current KEK, retained KEK blobs and any pending root or KEK, plus the default `SoftwareProvider` it created. `ModePerOperation` holds no key of its own and releases none. It never destroys an injected provider, so that provider's key outlives the sealer. Retries every handle a `CleanupError` reported. Idempotent, nil-safe. |
-| `(*Sealer).SealFrom(ctx, src Handle) (*Sealed, error)` / `NewSealedFrom(ctx, src Handle)` | `Seal` for material already in an enclave, such as a frozen `Memory` that `Seal` refuses with `ErrSealSourceReadOnly`. Reads `src` under its own borrow and leaves it unwiped and undestroyed; the caller keeps it. `src` needs `ByteAccess` (`*CapabilityError`, `CapabilityBytes`). Nil or destroyed: `ErrEnclaveDestroyed`. |
-| `(*Sealed).Open(ctx) (*Memory, error)` | Decrypts into a **new** enclave the caller owns and must `Destroy`. Unbudgeted. |
-| `(*Sealed).OpenIn(ctx, b Backend) (Handle, error)` | `Open` into any backend that can hold the material; the caller owns the handle. `DefaultBackend` is `Open`; an `*Allocator` admits the destination against its budget (typed-nil: `ErrNilAllocator`); another `Importer` receives the plaintext from a locked scratch enclave. Nil or typed-nil `b`: `ErrInvalidBackend`; not an `Importer`: `*CapabilityError` (`CapabilityImport`). Backend contract: [backends](../backends/engineering.md). |
-| `(*Sealed).Openable() error` | Diagnostic snapshot; takes no context and calls no provider other than a `ModePerOperation` provider's `HealthReporter.Health`. |
-| `(*Sealed).IsAlive() bool` | Ciphertext still held — **not** "can be opened". |
-| `(*Sealed).Destroy() error` / `String()` / `GoString()` | Idempotent, nil-safe; does not wait for in-flight opens; the error is always `nil`. `%v` and `%#v` print a redacted form. |
+| `(*Sealer).SealFrom(ctx, src Handle) (Sealed, error)` / `NewSealedFrom(ctx, src Handle)` | `Seal` for material already in an enclave, such as a frozen `Memory` that `Seal` refuses with `ErrSealSourceReadOnly`. Reads `src` under its own borrow and leaves it unwiped and undestroyed; the caller keeps it. `src` needs `ByteAccess` (`*CapabilityError`, `CapabilityBytes`). Nil or destroyed: `ErrEnclaveDestroyed`. |
+| `Sealed.Open(ctx) (ByteAccess, error)` | Decrypts into a **new** enclave the caller owns and must `Destroy`. Unbudgeted. |
+| `Sealed.OpenIn(ctx, b Backend) (Handle, error)` | `Open` into any backend that can hold the material; the caller owns the handle. `DefaultBackend` is `Open`; an `Allocator` from `NewAllocator` admits the destination against its budget; another `Importer` receives the plaintext from a locked scratch enclave. Nil or typed-nil `b`: `ErrInvalidBackend`; not an `Importer`: `*CapabilityError` (`CapabilityImport`). Backend contract: [backends](../backends/engineering.md). |
+| `Sealed.Openable() error` | Diagnostic snapshot; takes no context and calls no provider other than a `ModePerOperation` provider's `HealthReporter.Health`. |
+| `Sealed.IsAlive() bool` | Ciphertext still held — **not** "can be opened". |
+| `Sealed.Destroy() error` | Idempotent; does not wait for in-flight opens; the error is always `nil`. `%v` and `%#v` print a redacted form. |
 | `KeyProtector` | `Protect(ctx, key []byte) (blob []byte, err error)`; `Unprotect(ctx, blob, key []byte) error` |
 | `RootUnsealer` | `UnsealRoot(ctx, dst []byte) error` |
-| `HealthReporter` | `Health() error`: optional on a `KeyProtector`, found by type assertion. Non-blocking report of the provider's **in-process** sealing state: `nil` or `ErrSealerWiped`; `SoftwareProvider`'s also returns `ErrSealerDestroyed` after its `Destroy` and `ErrProviderNotConstructed` for a zero value. Believed and terminal. Not consulted in `ModeRootKey`. |
+| `HealthReporter` | `Health() error`: optional on a `KeyProtector`, found by type assertion. Non-blocking report of the provider's **in-process** sealing state: `nil` or `ErrSealerWiped`; `SoftwareProvider`'s also returns `ErrSealerDestroyed` after its `Destroy`. Believed and terminal. Not consulted in `ModeRootKey`. |
 | `RootKeyBytes = 32` | Length of every root and of every key handed to a provider. |
-| `SoftwareProvider`, `NewSoftwareProvider()` | Implements `KeyProtector`, `RootUnsealer` and `HealthReporter`; root generated into a locked enclave at first use. `Protect` wraps under HKDF-SHA256 of the root (info `go-enclave v1 SoftwareProvider Protect key`), never the root `UnsealRoot` exports. State is behind a pointer: a copy shares the original's root and lock. `Health` never generates a root. |
-| `(*SoftwareProvider).Destroy() error` | Releases the root and Protect key; later calls, on it or a copy, report `ErrSealerDestroyed`. Idempotent, nil-safe. |
+| `SoftwareProvider`, `NewSoftwareProvider() SoftwareProvider` | An interface: `KeyProtector`, `RootUnsealer` and `HealthReporter` plus `Destroy`; the implementation is internal. root generated into a locked enclave at first use. `Protect` wraps under HKDF-SHA256 of the root (info `go-enclave v1 SoftwareProvider Protect key`), never the root `UnsealRoot` exports. State is behind a pointer: a copy shares the original's root and lock. `Health` never generates a root. |
+| `SoftwareProvider.Destroy() error` | Releases the root and Protect key; later calls, on it or a copy, report `ErrSealerDestroyed`. Idempotent. |
 | `WithBackend(b Backend) SealerOption` | `ModeRootKey`: the wrapping key and every KEK are imported into `b` (`PurposeWrappingKey`, `AlgorithmAES256GCM`); a handle with `AEAD` wraps inside the device, one with only `ByteAccess` wraps here. Data keys stay in this process. In `ModePerOperation` it only answers `WithRequireKeyScheduleErasure`. Nil or typed-nil: `ErrInvalidBackend`; not an `Importer`: `*CapabilityError` (`CapabilityImport`). |
 | `WithRequireKeyScheduleErasure() SealerOption` | `NewSealer` refuses, with `*KeyScheduleExposedError` matching `ErrKeyScheduleExposed`, a configuration where an AES key schedule would stay on the heap: each key class must be covered by `KeyScheduleErasure()` or by a backend that is a `Confiner` confining this process. Checked once, in `NewSealer`. |
 | `KeyScheduleErasure() bool` | Whether this build erases AES key schedules (`GOEXPERIMENT=runtimesecret`, linux/amd64 or linux/arm64 (not Android)). See [Erasure under `runtime/secret`](#erasure-under-runtimesecret). |
@@ -172,10 +172,10 @@
 | `ErrOpenabilityUnknown` | `Openable` | A sweep ran since sealing (or during it), `ModePerOperation`, and the provider reports no health. Open the value to find out. |
 | `ErrEnclaveDestroyed` | `Open`, `OpenIn`, `Openable`; seal paths | From `Openable`, and from `Open`/`OpenIn` before any work: the `Sealed` was destroyed (or is nil). From later in a seal or open: an enclave **this call** allocated was destroyed by a concurrent `WipeAll`, and the sealed value may be intact — the DEK while sealing the material under it (either mode), the open's destination or DEK while decrypting into it (either mode), or the DEK while a `ModePerOperation` provider uses it. A provider returning it is passed through too. In `ModeRootKey` the same holds for a per-call key destroyed during the wrap or unwrap under the KEK; only when a **hierarchy** key (the root or the current KEK) is dead does the failure become `ErrSealerWiped` (see below). |
 | `ErrLockedMemoryUnavailable` | seal, open | Kernel refused a locked page; the sealed value survives an open failure. |
-| `ErrNilAllocator` / `ErrBudgetExhausted` | `OpenIn` | Nil allocator (never falls back) / over budget. Decided before any provider call. |
+| `ErrBudgetExhausted` | `OpenIn` | Over budget; never falls back to an unbudgeted open. Decided before any provider call. |
 | `ErrEmptyEnclave`, `ErrMaterialTooLarge` | seal | Empty input; input above AES-GCM's single-message limit, (2^32−2)·16 bytes, or whose sealed length would not fit in an `int` (about 2 GiB on 32-bit platforms). |
 | `ErrSealerDestroyed` | all sealing paths, `Openable`, `SoftwareProvider` | `Destroy` ran on the sealer (or on its software provider). Permanent. |
-| `ErrSealerNotConstructed` | `Seal`, `SealFrom`, `SetSealer` | The `Sealer` was not built by `NewSealer` (e.g. a zero value). `Open` never returns it: a `Sealed` always holds the sealer that built it, and a destroyed or zero `Sealed` reports `ErrEnclaveDestroyed`. |
+| `ErrSealerNotConstructed` | `Seal`, `SealFrom`, `SetSealer` | The `Sealer` was not built by `NewSealer` (e.g. a zero value). `Open` never returns it: a `Sealed` always holds the sealer that built it, and a destroyed `Sealed` reports `ErrEnclaveDestroyed`. |
 | `ErrInvalidProvider` | `NewSealer` | A provider option was given nil or a typed nil, or both provider options were given. |
 | `ErrSealerExhausted` | `Seal` (`ModeRootKey`), as the `Cause` of a `*SealError` | A rotation would need a KEK generation past 2^31, the bound on the sealer's own wrapping key. Nothing is minted; existing values keep opening; new seals need a new `Sealer`. |
 | `ErrInvalidSealerOption` | `NewSealer` | A `SealerOption` in the list was nil. |
@@ -184,7 +184,7 @@
 | `ErrInvalidRotationLimit` | `NewSealer` | `WithKEKRotationLimit` of zero, above 2^31, or given for `ModePerOperation`. |
 | `ErrSealerInstalled`, `ErrNilSealer` | `SetSealer`, nil `(*Sealer).Seal` | One-shot install; nil sealer. |
 | `ErrProviderMessageLimit` | `SoftwareProvider.Protect` | Per-key message bound reached. |
-| `ErrProviderNotConstructed` | Every `SoftwareProvider` method but `Destroy` | The provider was not built by `NewSoftwareProvider` (e.g. a zero value). |
+| `ErrProviderNotConstructed` | Every `SoftwareProvider` method but `Destroy` | The provider was not built by `NewSoftwareProvider`. Only this package can meet it: the implementation is internal. |
 | `ErrPlaintextEscaped` | open | Defensive; unreachable while destination capacity is exact. |
 | `ErrCleanupFailed` (`*CleanupError`) | `OpenIn` into an `Importer`, seals and `Destroy` of a `WithBackend` sealer | A handle the operation no longer needed refused its `Destroy` and still holds its material; the sealer keeps it for `(*Sealer).Destroy` to retry ([invariant 13](#invariants)). `Failure` is the operation's own error, reachable with `errors.Is`, or nil when only the cleanup failed; `Causes` holds what each refused `Destroy` or release returned. It is also how any failure that came with a failed cleanup is reported. |
 
@@ -278,7 +278,7 @@ first match:
 3. `ErrSealerDestroyed`, `ErrEnclaveDestroyed` — the sealer or the value was
    destroyed, or a sweep destroyed this call's working enclaves during
    shutdown; do not retry.
-4. `ErrNilAllocator`, `ErrBudgetExhausted`, `ErrLockedMemoryUnavailable` —
+4. `ErrBudgetExhausted`, `ErrLockedMemoryUnavailable` —
    resource refusals; the value is intact and a later retry can succeed.
 5. `ErrOpenFailed` — the context ended, or a provider failed with its own
    error. The value is intact, but `ErrOpenFailed` alone does not say the

@@ -47,8 +47,55 @@ are no deprecated aliases; rename with a search and replace.
 | `MemoryEnclave` | `Memory` |
 | `NewMemoryEnclave`, `NewMemoryEnclaveCopy`, `NewMemoryEnclaveSized` | `NewMemory`, `NewMemoryCopy`, `NewMemorySized` |
 | `SealedEnclave` | `Sealed` |
-| `(*SealedEnclave).OpenWith(ctx, a)` | `(*Sealed).OpenIn(ctx, a)` |
+| `(*SealedEnclave).OpenWith(ctx, a)` | `Sealed.OpenIn(ctx, a)` |
 | `providertest.AbortedError.Err` | `providertest.AbortedError.Cause` |
+
+#### Constructors return interfaces
+
+Every constructor hands out an interface, never a pointer to a concrete type.
+`Sealed`, `Allocator` and `SoftwareProvider` keep their names but are now
+interfaces; their implementations are internal. `Memory` stays exported.
+
+| Function (v0.9 name) | v0.8 returned | v0.9 returns |
+|---|---|---|
+| `NewMemory`, `NewMemoryCopy`, `NewMemorySized` | `*Memory` | `ByteAccess` |
+| `NewSealed`, `NewSealedFrom`, `(*Sealer).Seal`, `(*Sealer).SealFrom` | `*Sealed` | `Sealed` |
+| `Sealed.Open` | `*Memory` | `ByteAccess` |
+| `NewAllocator`, `NewAllocatorWithinRLimit`, `ProcessAllocator` | `*Allocator` | `Allocator` |
+| `Allocator.New`, `Allocator.NewSized` | `*Memory` | `ByteAccess` |
+| `NewSoftwareProvider` | `*SoftwareProvider` | `SoftwareProvider` |
+
+`SetAllocator` and `Allocator.TransferTo` take an `Allocator`. Replace
+`*enclave.Sealed`, `*enclave.Allocator` and `*enclave.SoftwareProvider` in
+declarations with the interface name, and `*enclave.Memory` with
+`enclave.ByteAccess`. A failed call returns a nil interface, so `x == nil`
+checks are unchanged.
+
+- **Freeze through `Freezer`.** `ByteAccess` has no `Freeze`; reach it with
+  `As`:
+
+  ```go
+  // v0.8
+  err := e.Freeze()
+
+  // v0.9
+  var f enclave.Freezer
+  if !enclave.As(e, &f) { return errors.New("not freezable") }
+  err := f.Freeze()
+  ```
+
+- **`String` and `GoString` are not interface methods.** Printing with `%v`,
+  `%s` or `%#v` is still redacted; replace a direct `s.String()` call on a
+  `Sealed` with `fmt.Sprint(s)`.
+- **Only this package's `Allocator` is accepted.** `SetAllocator` and
+  `TransferTo` refuse another implementation (a wrapper or a test fake) with
+  `ErrAllocatorNotConstructed`; nil is still `ErrNilAllocator` and
+  `ErrInvalidTransfer`.
+- **Zero values and nil receivers are gone.** No caller can declare a zero
+  `Sealed`, `Allocator` or `SoftwareProvider` any more, so
+  `ErrProviderNotConstructed` and a zero `Allocator{}`'s
+  `ErrAllocatorNotConstructed` no longer reach callers. Calling a method on a
+  nil interface panics, as for any Go interface.
 
 #### Locked memory
 
@@ -78,9 +125,8 @@ core limit, not the non-dumpable flag, must now weigh both.
 second, independent handle: `Destroy` through one left the other reporting a
 live enclave over unmapped pages, and a copied `Allocator` could admit the same
 headroom twice. A copy now reaches the same enclave or budget, and `go vet`
-reports it. A zero `Allocator{}` returns `ErrAllocatorNotConstructed` instead
-of admitting against a zero budget; build one with `NewAllocator`. Always pass
-`*Memory` and `*Allocator`.
+reports it. Build an `Allocator` with `NewAllocator` and pass the interface it
+returns.
 
 **`Destroy` of a writable enclave whose `mprotect` is refused returns `nil`**,
 not `ErrReleasedWithoutWipe`: its data was wiped before the `mprotect`, so
@@ -88,9 +134,10 @@ nothing was released unwiped. Only a frozen enclave reports it.
 
 #### Sealing
 
-**`OpenIn` takes a `Backend` and returns a `Handle`.** An `*Allocator` is a
-`Backend`, so a budgeted open keeps its argument; assert the result back to
-`*Memory`, or open with `DefaultBackend()` where you only wanted `Open`:
+**`OpenIn` takes a `Backend` and returns a `Handle`.** An `Allocator` is a
+`Backend`, so a budgeted open keeps its argument; reach the bytes through
+`ByteAccess` with `As`, or open with `DefaultBackend()` where you only wanted
+`Open`:
 
 ```go
 // v0.8
@@ -99,7 +146,8 @@ e, err := s.OpenWith(ctx, a)
 // v0.9
 h, err := s.OpenIn(ctx, a)
 if err != nil { return err }
-e := h.(*enclave.Memory)
+var e enclave.ByteAccess
+if !enclave.As(h, &e) { return errors.New("no byte access") }
 ```
 
 **Re-sealing an opened value seals from the handle.** `NewSealed(ctx, b)`
@@ -108,7 +156,7 @@ inside `e.WithBytes` used to crash on the read-only pages; it now fails with
 intact.
 
 **`Sealer` and `Sealed` values share their state too**, as `Memory` and
-`Allocator` do above. Always pass `*Sealer` and `*Sealed`.
+`Allocator` do above. Pass the `*Sealer` and the `Sealed` interface.
 
 **`SetSealer` refuses a zero-value or destroyed `Sealer`** with
 `ErrSealerNotConstructed` or `ErrSealerDestroyed`, and **`NewSealer` refuses a

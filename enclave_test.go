@@ -26,7 +26,7 @@ import (
 )
 
 func TestNewMemory_HoldsMaterial(t *testing.T) {
-	e, err := NewMemory([]byte("private-key-material"))
+	e, err := newMemory([]byte("private-key-material"))
 	if err != nil {
 		t.Fatalf("NewMemory: %v", err)
 	}
@@ -54,7 +54,7 @@ func TestNewMemory_WipesSource(t *testing.T) {
 	src := []byte("wipe-me-completely")
 	want := make([]byte, len(src))
 
-	e, err := NewMemory(src)
+	e, err := newMemory(src)
 	if err != nil {
 		t.Fatalf("NewMemory: %v", err)
 	}
@@ -68,12 +68,59 @@ func TestNewMemory_WipesSource(t *testing.T) {
 func TestNewMemory_Empty(t *testing.T) {
 	for name, in := range map[string][]byte{"nil": nil, "empty": {}} {
 		t.Run(name, func(t *testing.T) {
-			e, err := NewMemory(in)
+			e, err := newMemory(in)
 			if !errors.Is(err, ErrEmptyEnclave) {
 				t.Errorf("err = %v, want ErrEmptyEnclave", err)
 			}
 			if e != nil {
 				t.Error("enclave should be nil on error")
+			}
+		})
+	}
+}
+
+// TestNewMemory_ReturnsTheInterface pins the exported constructors' shape: a
+// *Memory handed out as a ByteAccess that is also a Freezer, and a nil
+// interface, never one holding a nil *Memory, on failure.
+func TestNewMemory_ReturnsTheInterface(t *testing.T) {
+	ctors := map[string]func() (ByteAccess, error){
+		"NewMemory":      func() (ByteAccess, error) { return NewMemory([]byte("material")) },
+		"NewMemoryCopy":  func() (ByteAccess, error) { return NewMemoryCopy([]byte("material")) },
+		"NewMemorySized": func() (ByteAccess, error) { return NewMemorySized(8) },
+	}
+	for name, ctor := range ctors {
+		t.Run(name, func(t *testing.T) {
+			e, err := ctor()
+			if err != nil {
+				t.Fatalf("%s: %v", name, err)
+			}
+			defer e.Destroy()
+			if _, ok := e.(*Memory); !ok {
+				t.Errorf("%s returned a %T, want *Memory", name, e)
+			}
+			var f Freezer
+			if !As(e, &f) {
+				t.Errorf("%s: As(Freezer) = false, want true", name)
+			}
+			if e.Backend().Name() != LockedMemoryBackendName {
+				t.Errorf("%s: Backend().Name() = %q, want %q", name, e.Backend().Name(), LockedMemoryBackendName)
+			}
+		})
+	}
+
+	failing := map[string]func() (ByteAccess, error){
+		"NewMemory":      func() (ByteAccess, error) { return NewMemory(nil) },
+		"NewMemoryCopy":  func() (ByteAccess, error) { return NewMemoryCopy(nil) },
+		"NewMemorySized": func() (ByteAccess, error) { return NewMemorySized(0) },
+	}
+	for name, ctor := range failing {
+		t.Run(name+"/failure", func(t *testing.T) {
+			e, err := ctor()
+			if err == nil {
+				t.Fatalf("%s: err = nil, want a failure", name)
+			}
+			if e != nil {
+				t.Errorf("%s returned %#v on failure, want a nil interface", name, e)
 			}
 		})
 	}
@@ -86,7 +133,7 @@ func TestNewMemoryCopy_LeavesTheSourceIntact(t *testing.T) {
 	const material = "caller-owned-credential"
 
 	copied := []byte(material)
-	e, err := NewMemoryCopy(copied)
+	e, err := newMemoryCopy(copied)
 	if err != nil {
 		t.Fatalf("NewMemoryCopy: %v", err)
 	}
@@ -103,7 +150,7 @@ func TestNewMemoryCopy_LeavesTheSourceIntact(t *testing.T) {
 	}
 
 	moved := []byte(material)
-	m, err := NewMemory(moved)
+	m, err := newMemory(moved)
 	if err != nil {
 		t.Fatalf("NewMemory: %v", err)
 	}
@@ -121,7 +168,7 @@ func TestNewMemoryCopy_IsIndependentOfTheSource(t *testing.T) {
 	material := []byte("independent-material")
 
 	src := append([]byte(nil), material...)
-	e, err := NewMemoryCopy(src)
+	e, err := newMemoryCopy(src)
 	if err != nil {
 		t.Fatalf("NewMemoryCopy: %v", err)
 	}
@@ -143,7 +190,7 @@ func TestNewMemoryCopy_IsIndependentOfTheSource(t *testing.T) {
 // exercised in a subprocess by TestMemory_CopyConstructedPagesAreReadOnly.
 // A sized enclave is the control, so the field is shown able to read true.
 func TestNewMemoryCopy_PagesAreFrozen(t *testing.T) {
-	e, err := NewMemoryCopy([]byte("frozen-after-copy"))
+	e, err := newMemoryCopy([]byte("frozen-after-copy"))
 	if err != nil {
 		t.Fatalf("NewMemoryCopy: %v", err)
 	}
@@ -154,7 +201,7 @@ func TestNewMemoryCopy_PagesAreFrozen(t *testing.T) {
 	}
 
 	// The control: a sized enclave must be writable or its fill would fault.
-	sized, err := NewMemorySized(16)
+	sized, err := newMemorySized(16)
 	if err != nil {
 		t.Fatalf("NewMemorySized: %v", err)
 	}
@@ -168,7 +215,7 @@ func TestNewMemoryCopy_PagesAreFrozen(t *testing.T) {
 func TestNewMemoryCopy_Empty(t *testing.T) {
 	for name, in := range map[string][]byte{"nil": nil, "empty": {}} {
 		t.Run(name, func(t *testing.T) {
-			e, err := NewMemoryCopy(in)
+			e, err := newMemoryCopy(in)
 			if !errors.Is(err, ErrEmptyEnclave) {
 				t.Errorf("err = %v, want ErrEmptyEnclave", err)
 			}
@@ -186,7 +233,7 @@ func TestNewMemoryCopy_IsPublishedToTheLedger(t *testing.T) {
 
 	before := liveCount()
 
-	e, err := NewMemoryCopy(material)
+	e, err := newMemoryCopy(material)
 	if err != nil {
 		t.Fatalf("NewMemoryCopy: %v", err)
 	}
@@ -203,7 +250,7 @@ func TestNewMemoryCopy_IsPublishedToTheLedger(t *testing.T) {
 }
 
 func TestMemory_Destroy(t *testing.T) {
-	e, err := NewMemory([]byte("transient"))
+	e, err := newMemory([]byte("transient"))
 	if err != nil {
 		t.Fatalf("NewMemory: %v", err)
 	}
@@ -248,7 +295,7 @@ func TestMemory_NilReceiver(t *testing.T) {
 }
 
 func TestMemory_WithBytes(t *testing.T) {
-	e, err := NewMemory([]byte("borrowed"))
+	e, err := newMemory([]byte("borrowed"))
 	if err != nil {
 		t.Fatalf("NewMemory: %v", err)
 	}
@@ -273,7 +320,7 @@ func TestMemory_WithBytes(t *testing.T) {
 }
 
 func TestMemory_EqualTo(t *testing.T) {
-	e, err := NewMemory([]byte("compare-me"))
+	e, err := newMemory([]byte("compare-me"))
 	if err != nil {
 		t.Fatalf("NewMemory: %v", err)
 	}
@@ -295,13 +342,13 @@ func TestMemory_EqualTo(t *testing.T) {
 }
 
 // holds reports whether e is alive and holds exactly b.
-func holds(e *Memory, b []byte) bool {
+func holds(e ByteAccess, b []byte) bool {
 	ok, err := e.EqualTo(b)
 	return err == nil && ok
 }
 
 func TestMemory_StringRedacts(t *testing.T) {
-	e, err := NewMemory([]byte("do-not-print-me"))
+	e, err := newMemory([]byte("do-not-print-me"))
 	if err != nil {
 		t.Fatalf("NewMemory: %v", err)
 	}
@@ -317,7 +364,7 @@ func TestMemory_StringRedacts(t *testing.T) {
 }
 
 func TestMemory_ConcurrentAccess(t *testing.T) {
-	e, err := NewMemory([]byte("concurrent"))
+	e, err := newMemory([]byte("concurrent"))
 	if err != nil {
 		t.Fatalf("NewMemory: %v", err)
 	}
@@ -352,7 +399,7 @@ func TestMemory_ConcurrentAccess(t *testing.T) {
 // until an in-flight scoped borrow returns. The property is the ordering, not
 // the IsAlive flag.
 func TestMemory_DestroyWaitsForInFlightReader(t *testing.T) {
-	e, err := NewMemory([]byte("private-key-material"))
+	e, err := newMemory([]byte("private-key-material"))
 	if err != nil {
 		t.Fatalf("NewMemory: %v", err)
 	}
@@ -412,7 +459,7 @@ func TestMemory_DestroyWaitsForInFlightReader(t *testing.T) {
 // dereferences a destroyed buffer.
 func TestMemory_ConcurrentReadersAndDestroy(t *testing.T) {
 	for i := 0; i < 50; i++ {
-		e, err := NewMemory([]byte("private-key-material"))
+		e, err := newMemory([]byte("private-key-material"))
 		if err != nil {
 			t.Fatalf("NewMemory: %v", err)
 		}
@@ -453,7 +500,7 @@ func TestEqualToSeparatesMismatchFromDestroyed(t *testing.T) {
 	const material = "the real material"
 
 	t.Run("match", func(t *testing.T) {
-		e, err := NewMemory([]byte(material))
+		e, err := newMemory([]byte(material))
 		if err != nil {
 			t.Fatalf("NewMemory: %v", err)
 		}
@@ -469,7 +516,7 @@ func TestEqualToSeparatesMismatchFromDestroyed(t *testing.T) {
 	})
 
 	t.Run("genuine mismatch is (false, nil)", func(t *testing.T) {
-		e, err := NewMemory([]byte(material))
+		e, err := newMemory([]byte(material))
 		if err != nil {
 			t.Fatalf("NewMemory: %v", err)
 		}
@@ -486,7 +533,7 @@ func TestEqualToSeparatesMismatchFromDestroyed(t *testing.T) {
 	})
 
 	t.Run("destroyed is (false, ErrEnclaveDestroyed)", func(t *testing.T) {
-		e, err := NewMemory([]byte(material))
+		e, err := newMemory([]byte(material))
 		if err != nil {
 			t.Fatalf("NewMemory: %v", err)
 		}
@@ -525,7 +572,7 @@ func panicValue(fn func()) (r any) {
 // yardstick.
 func generateInto(t *testing.T, e *Memory) *Memory {
 	t.Helper()
-	yardstick, err := NewMemorySized(e.Size())
+	yardstick, err := newMemorySized(e.Size())
 	if err != nil {
 		t.Fatalf("allocating the yardstick enclave: %v", err)
 	}
@@ -601,11 +648,11 @@ func isRegistered(e *Memory) bool {
 // successful unmap is a clean release, not ErrReleasedWithoutWipe, and the
 // reservation and ledger entry are settled.
 func TestDestroy_WipedWritableEnclaveIsNotUnwiped(t *testing.T) {
-	a, err := NewAllocator(LockedSize(1))
+	a, err := newBudgetAllocator(LockedSize(1))
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
-	e, err := a.NewSized(1)
+	e, err := a.admitSized(1)
 	if err != nil {
 		t.Fatalf("NewSized: %v", err)
 	}
@@ -630,11 +677,11 @@ func TestDestroy_WipedWritableEnclaveIsNotUnwiped(t *testing.T) {
 // destroyed, stays on the ledger, keeps the Allocator charge, and a retry once
 // the refusal lifts releases everything.
 func TestDestroy_ReleaseFailureIsReturnedNotPanicked(t *testing.T) {
-	a, err := NewAllocator(4 * pageSize)
+	a, err := newBudgetAllocator(4 * pageSize)
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
-	e, err := a.New([]byte("material whose pages the kernel will not take back"))
+	e, err := a.admitData([]byte("material whose pages the kernel will not take back"))
 	if err != nil {
 		t.Fatalf("Allocator.New: %v", err)
 	}
@@ -702,11 +749,11 @@ func TestDestroy_CorruptionIsReturnedAndReported(t *testing.T) {
 	requireCleanLedger(t)
 	forgetDestroyedCorruption(t)
 
-	a, err := NewAllocator(4 * pageSize)
+	a, err := newBudgetAllocator(4 * pageSize)
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
-	e, err := a.NewSized(64)
+	e, err := a.admitSized(64)
 	if err != nil {
 		t.Fatalf("Allocator.NewSized: %v", err)
 	}
@@ -752,11 +799,11 @@ func TestDestroy_CorruptionIsReturnedAndReported(t *testing.T) {
 func TestDestroy_CorruptionSurvivesAFailedRelease(t *testing.T) {
 	forgetDestroyedCorruption(t)
 
-	a, err := NewAllocator(4 * pageSize)
+	a, err := newBudgetAllocator(4 * pageSize)
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
-	e, err := a.NewSized(32)
+	e, err := a.admitSized(32)
 	if err != nil {
 		t.Fatalf("Allocator.NewSized: %v", err)
 	}
@@ -826,7 +873,7 @@ func forgetDestroyedCorruption(t *testing.T) {
 func TestNewMemorySized_ZeroedAndSized(t *testing.T) {
 	for _, n := range []int{1, 32, 4096, 8192} {
 		t.Run(fmt.Sprintf("%d", n), func(t *testing.T) {
-			e, err := NewMemorySized(n)
+			e, err := newMemorySized(n)
 			if err != nil {
 				t.Fatalf("NewMemorySized(%d): %v", n, err)
 			}
@@ -861,7 +908,7 @@ func TestNewMemorySized_ZeroedAndSized(t *testing.T) {
 func TestNewMemorySized_FillsInPlace(t *testing.T) {
 	const n = 32
 
-	e, err := NewMemorySized(n)
+	e, err := newMemorySized(n)
 	if err != nil {
 		t.Fatalf("NewMemorySized: %v", err)
 	}
@@ -898,7 +945,7 @@ func TestNewMemorySized_FillsInPlace(t *testing.T) {
 func TestNewMemorySized_RejectsNonPositive(t *testing.T) {
 	for _, n := range []int{0, -1, -4096} {
 		t.Run(fmt.Sprintf("%d", n), func(t *testing.T) {
-			e, err := NewMemorySized(n)
+			e, err := newMemorySized(n)
 			if !errors.Is(err, ErrInvalidSize) {
 				t.Errorf("err = %v, want ErrInvalidSize", err)
 			}
@@ -915,7 +962,7 @@ func TestNewMemorySized_RejectsNonPositive(t *testing.T) {
 // TestNewMemorySized_Lifecycle pins the destroyed contract for a filled
 // sized enclave: every accessor reports ErrEnclaveDestroyed.
 func TestNewMemorySized_Lifecycle(t *testing.T) {
-	e, err := NewMemorySized(16)
+	e, err := newMemorySized(16)
 	if err != nil {
 		t.Fatalf("NewMemorySized: %v", err)
 	}
@@ -955,7 +1002,7 @@ func TestNewMemorySized_ConcurrentBorrowsAndDestroy(t *testing.T) {
 	material := bytes.Repeat([]byte{0x5A}, 24)
 
 	for i := 0; i < 50; i++ {
-		e, err := NewMemorySized(len(material))
+		e, err := newMemorySized(len(material))
 		if err != nil {
 			t.Fatalf("NewMemorySized: %v", err)
 		}
@@ -1001,13 +1048,13 @@ func TestNewMemorySized_ConcurrentBorrowsAndDestroy(t *testing.T) {
 
 func TestAllocator_NewSized_Admits(t *testing.T) {
 	limit := 4 * pageSize
-	a, err := NewAllocator(limit)
+	a, err := newBudgetAllocator(limit)
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
 
 	const n = 48
-	e, err := a.NewSized(n)
+	e, err := a.admitSized(n)
 	if err != nil {
 		t.Fatalf("NewSized: %v", err)
 	}
@@ -1037,19 +1084,19 @@ func TestAllocator_NewSized_Admits(t *testing.T) {
 // the refusal precedes the mapping.
 func TestAllocator_NewSized_RefusesOverBudget(t *testing.T) {
 	// One page of budget holds exactly one enclave, however small.
-	a, err := NewAllocator(pageSize)
+	a, err := newBudgetAllocator(pageSize)
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
 
-	first, err := a.NewSized(24)
+	first, err := a.admitSized(24)
 	if err != nil {
 		t.Fatalf("first NewSized: %v", err)
 	}
 	defer first.Destroy()
 
 	before := a.InUse()
-	e, err := a.NewSized(16)
+	e, err := a.admitSized(16)
 	if !errors.Is(err, ErrBudgetExhausted) {
 		t.Fatalf("over-budget NewSized err = %v, want ErrBudgetExhausted", err)
 	}
@@ -1073,14 +1120,14 @@ func TestAllocator_NewSized_RefusesOverBudget(t *testing.T) {
 // TestAllocator_NewSized_RejectsNonPositive pins that an impossible size is
 // refused with ErrInvalidSize before admission: nothing is charged.
 func TestAllocator_NewSized_RejectsNonPositive(t *testing.T) {
-	a, err := NewAllocator(4 * pageSize)
+	a, err := newBudgetAllocator(4 * pageSize)
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
 
 	for _, n := range []int{0, -1, -4096} {
 		t.Run(fmt.Sprintf("%d", n), func(t *testing.T) {
-			e, err := a.NewSized(n)
+			e, err := a.admitSized(n)
 			if !errors.Is(err, ErrInvalidSize) {
 				t.Errorf("err = %v, want ErrInvalidSize", err)
 			}
@@ -1103,7 +1150,7 @@ func TestAllocator_NewSized_RejectsNonPositive(t *testing.T) {
 // concurrent allocation could overshoot the limit.
 func TestAllocator_reserve_RefusesNonPositive(t *testing.T) {
 	limit := 16 * pageSize
-	a, err := NewAllocator(limit)
+	a, err := newBudgetAllocator(limit)
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
@@ -1192,7 +1239,7 @@ func TestSizedConstructors_RefuseUnmappableSizes(t *testing.T) {
 	maxIntV := int(^uint(0) >> 1)
 
 	// A canary that must survive, observed alongside the error value.
-	canary, err := NewMemory([]byte("canary-key-material"))
+	canary, err := newMemory([]byte("canary-key-material"))
 	if err != nil {
 		t.Fatalf("could not allocate the canary enclave: %v", err)
 	}
@@ -1207,7 +1254,7 @@ func TestSizedConstructors_RefuseUnmappableSizes(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			// Unadmitted path: its own size check is the only guard.
-			e, err := NewMemorySized(tc.n)
+			e, err := newMemorySized(tc.n)
 			if !errors.Is(err, ErrInvalidSize) {
 				t.Errorf("NewMemorySized(%d) = %v, want ErrInvalidSize", tc.n, err)
 			}
@@ -1220,11 +1267,11 @@ func TestSizedConstructors_RefuseUnmappableSizes(t *testing.T) {
 			}
 
 			// Admitted path, with a budget admission cannot refuse on.
-			a, err := NewAllocator(maxInt)
+			a, err := newBudgetAllocator(maxInt)
 			if err != nil {
 				t.Fatalf("NewAllocator: %v", err)
 			}
-			e, err = a.NewSized(tc.n)
+			e, err = a.admitSized(tc.n)
 			if !errors.Is(err, ErrInvalidSize) {
 				t.Errorf("NewSized(%d) = %v, want ErrInvalidSize", tc.n, err)
 			}
@@ -1258,7 +1305,7 @@ func TestSizedConstructors_RefuseUnmappableSizes(t *testing.T) {
 func TestAllocator_reserve_DoesNotOverflow(t *testing.T) {
 	// Size guard: MaxInt64 has no representable mapping, so it is
 	// ErrInvalidSize before any budget comparison.
-	a, err := NewAllocator(math.MaxInt64)
+	a, err := newBudgetAllocator(math.MaxInt64)
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
@@ -1282,9 +1329,9 @@ func TestAllocator_reserve_DoesNotOverflow(t *testing.T) {
 		t.Fatalf("lockedSize(%d) refused; the test would never reach the budget predicate", widest)
 	}
 
-	w, err := NewAllocator(widest)
+	w, err := newBudgetAllocator(widest)
 	if err != nil {
-		t.Fatalf("NewAllocator(widest): %v", err)
+		t.Fatalf("newBudgetAllocator(widest): %v", err)
 	}
 	const spokenFor = 4
 	for i := 0; i < spokenFor; i++ {
@@ -1305,11 +1352,11 @@ func TestAllocator_reserve_DoesNotOverflow(t *testing.T) {
 
 	// Through NewSized: a failed guard would surface as
 	// ErrLockedMemoryUnavailable from the mapping instead of ErrBudgetExhausted.
-	small, err := NewAllocator(2 * pageSize)
+	small, err := newBudgetAllocator(2 * pageSize)
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
-	e, err := small.NewSized(int(widest))
+	e, err := small.admitSized(int(widest))
 	if !errors.Is(err, ErrBudgetExhausted) {
 		t.Errorf("NewSized(widest) against a two-page budget = %v, want ErrBudgetExhausted", err)
 	}
@@ -1329,12 +1376,12 @@ func TestAllocator_reserve_DoesNotOverflow(t *testing.T) {
 // NewSized reservation exactly once: a full budget admits again after Destroy,
 // and a double Destroy does not underflow.
 func TestAllocator_NewSized_DestroyReleasesReservation(t *testing.T) {
-	a, err := NewAllocator(pageSize)
+	a, err := newBudgetAllocator(pageSize)
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
 
-	e, err := a.NewSized(16)
+	e, err := a.admitSized(16)
 	if err != nil {
 		t.Fatalf("NewSized (full): %v", err)
 	}
@@ -1354,7 +1401,7 @@ func TestAllocator_NewSized_DestroyReleasesReservation(t *testing.T) {
 		t.Fatalf("InUse = %d Available = %d after a double Destroy, want 0 and %d", a.InUse(), a.Available(), pageSize)
 	}
 
-	e2, err := a.NewSized(16)
+	e2, err := a.admitSized(16)
 	if err != nil {
 		t.Fatalf("NewSized after release: %v (budget was not returned)", err)
 	}
@@ -1371,7 +1418,7 @@ func TestAllocator_NewSized_Concurrent(t *testing.T) {
 		size     = 40
 	)
 	limit := capacity * pageSize
-	a, err := NewAllocator(limit)
+	a, err := newBudgetAllocator(limit)
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
@@ -1384,7 +1431,7 @@ func TestAllocator_NewSized_Concurrent(t *testing.T) {
 			defer wg.Done()
 			want := bytes.Repeat([]byte{byte(g)}, size)
 			for i := 0; i < 200; i++ {
-				e, err := a.NewSized(size)
+				e, err := a.admitSized(size)
 				if err != nil {
 					if !errors.Is(err, ErrBudgetExhausted) {
 						t.Errorf("unexpected NewSized err: %v", err)
@@ -1429,7 +1476,7 @@ func TestAllocator_NewSized_Concurrent(t *testing.T) {
 func TestMemory_FreezeProtectsAfterTheFill(t *testing.T) {
 	material := bytes.Repeat([]byte{0xA5}, 32)
 
-	control, err := NewMemorySized(32)
+	control, err := newMemorySized(32)
 	if err != nil {
 		t.Fatalf("NewMemorySized: %v", err)
 	}
@@ -1438,7 +1485,7 @@ func TestMemory_FreezeProtectsAfterTheFill(t *testing.T) {
 		t.Fatal("a fresh sized enclave is already read-only; the fill would fault and this test would be vacuous")
 	}
 
-	e, err := NewMemorySized(32)
+	e, err := newMemorySized(32)
 	if err != nil {
 		t.Fatalf("NewMemorySized: %v", err)
 	}
@@ -1482,7 +1529,7 @@ func TestMemory_FreezeProtectsAfterTheFill(t *testing.T) {
 // enclave already frozen, whether by an earlier Freeze or by NewMemory
 // or NewMemoryCopy, which both return read-only enclaves.
 func TestMemory_FreezeIsIdempotent(t *testing.T) {
-	sized, err := NewMemorySized(32)
+	sized, err := newMemorySized(32)
 	if err != nil {
 		t.Fatalf("NewMemorySized: %v", err)
 	}
@@ -1499,7 +1546,7 @@ func TestMemory_FreezeIsIdempotent(t *testing.T) {
 	}
 
 	// A move-constructed enclave arrives frozen.
-	moved, err := NewMemory([]byte("private-key-material"))
+	moved, err := newMemory([]byte("private-key-material"))
 	if err != nil {
 		t.Fatalf("NewMemory: %v", err)
 	}
@@ -1516,7 +1563,7 @@ func TestMemory_FreezeIsIdempotent(t *testing.T) {
 
 	// So does a copy-constructed one.
 	src := []byte("material the caller keeps")
-	copied, err := NewMemoryCopy(src)
+	copied, err := newMemoryCopy(src)
 	if err != nil {
 		t.Fatalf("NewMemoryCopy: %v", err)
 	}
@@ -1543,7 +1590,7 @@ func TestMemory_FreezeReportsDestroyed(t *testing.T) {
 		t.Errorf("(nil).Freeze() = %v, want ErrEnclaveDestroyed", err)
 	}
 
-	e, err := NewMemorySized(32)
+	e, err := newMemorySized(32)
 	if err != nil {
 		t.Fatalf("NewMemorySized: %v", err)
 	}
@@ -1568,7 +1615,7 @@ func TestMemory_FreezeRefusesAWipedMapping(t *testing.T) {
 	// deregisters, and a ledger entry would leak into every WipeAll test.
 	e, err := unpublishedSized(32)
 	if err != nil {
-		t.Fatalf("newMemorySized: %v", err)
+		t.Fatalf("NewMemorySized: %v", err)
 	}
 	t.Cleanup(func() {
 		if e.m != nil {
@@ -1617,7 +1664,7 @@ func TestMemory_FreezeRefusesAWipedMapping(t *testing.T) {
 // does return once the borrow ends. Under a read lock the mprotect could land
 // mid-fill and fault the filling goroutine.
 func TestMemory_FreezeWaitsForBorrows(t *testing.T) {
-	e, err := NewMemorySized(32)
+	e, err := newMemorySized(32)
 	if err != nil {
 		t.Fatalf("NewMemorySized: %v", err)
 	}
@@ -1682,7 +1729,7 @@ func TestMemory_FreezeWaitsForBorrows(t *testing.T) {
 // writable and holding its material (unlike a constructor, which releases), and
 // that a retry succeeds. The refusal is injected through the protectMemory seam.
 func TestMemory_FreezeFailureLeavesTheEnclaveUsable(t *testing.T) {
-	e, err := NewMemorySized(32)
+	e, err := newMemorySized(32)
 	if err != nil {
 		t.Fatalf("NewMemorySized: %v", err)
 	}
@@ -1742,7 +1789,7 @@ func TestMemory_FreezeFailureLeavesTheEnclaveUsable(t *testing.T) {
 func TestWipeAll_ReclaimsAFrozenEnclave(t *testing.T) {
 	requireCleanLedger(t)
 
-	e, err := NewMemorySized(64)
+	e, err := newMemorySized(64)
 	if err != nil {
 		t.Fatalf("NewMemorySized: %v", err)
 	}
@@ -1773,12 +1820,12 @@ func TestWipeAll_ReclaimsAFrozenEnclave(t *testing.T) {
 // TestAllocator_FreezeKeepsTheReservation pins that Freeze does not move the
 // Allocator charge and that Destroy of a frozen enclave returns it.
 func TestAllocator_FreezeKeepsTheReservation(t *testing.T) {
-	a, err := NewAllocator(4 * pageSize)
+	a, err := newBudgetAllocator(4 * pageSize)
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
 
-	e, err := a.NewSized(32)
+	e, err := a.admitSized(32)
 	if err != nil {
 		t.Fatalf("NewSized: %v", err)
 	}
@@ -1809,7 +1856,7 @@ func TestAllocator_FreezeKeepsTheReservation(t *testing.T) {
 // newBenchEnclave returns a small frozen enclave, destroyed at cleanup.
 func newBenchEnclave(b *testing.B) *Memory {
 	b.Helper()
-	e, err := NewMemoryCopy(make([]byte, 32))
+	e, err := newMemoryCopy(make([]byte, 32))
 	if err != nil {
 		b.Fatalf("NewMemoryCopy: %v", err)
 	}
@@ -1861,7 +1908,7 @@ func BenchmarkBorrowParallelDistinct(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
-		e, err := NewMemoryCopy(make([]byte, 32))
+		e, err := newMemoryCopy(make([]byte, 32))
 		if err != nil {
 			b.Error(err)
 			return
@@ -1927,11 +1974,11 @@ func TestRelease_RetryReturnsTheReservationUnderStrictUnlock(t *testing.T) {
 			if remaining := sweep(t); remaining != 0 {
 				t.Fatalf("the process already holds %d unwipeable enclaves; this test needs a clean ledger", remaining)
 			}
-			a, err := NewAllocator(4 * pageSize)
+			a, err := newBudgetAllocator(4 * pageSize)
 			if err != nil {
 				t.Fatalf("NewAllocator: %v", err)
 			}
-			e, err := a.NewSized(32)
+			e, err := a.admitSized(32)
 			if err != nil {
 				t.Fatalf("Allocator.NewSized: %v", err)
 			}

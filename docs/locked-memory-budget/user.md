@@ -1,6 +1,6 @@
 # Locked-memory budget and admission — user guide
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-11
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-14
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Who does what
@@ -92,7 +92,7 @@ refused there and authenticated work keeps its headroom.
 | Raise or lower the budget | `a.SetLimit(n)` | `ErrBudgetInUse` (below reservations), `ErrBudgetExceedsRLimit` (raise above the ceiling, checked allocators) — nothing changes |
 | Record a ceiling that already moved | `excess, err := a.ForceLimit(n)` | Only a negative `n` (`ErrInvalidBudget`). `excess > 0` is how far reservations exceed the new budget; a request is admitted again only once reservations fall by `excess` plus that request's page-rounded size |
 | Stop admitting, keep live enclaves | `excess, _ := a.ForceLimit(0)` | Cannot fail (only a negative budget is refused); `excess` is the reservations still live. `SetLimit(0)` is **not** this: lowering a positive budget to 0 with any live reservation returns `ErrBudgetInUse` and changes nothing. (On a budget that is already 0, `SetLimit(0)` is a no-op returning `nil` — equal limits change nothing.) |
-| Move headroom between two budgets | `src.TransferTo(dst, n)` | `ErrBudgetInUse` if `src` cannot spare it; `ErrInvalidTransfer` for `n <= 0`, nil or same `dst` |
+| Move headroom between two budgets | `src.TransferTo(dst, n)` | `ErrBudgetInUse` if `src` cannot spare it; `ErrInvalidTransfer` for `n <= 0`, nil or same `dst`; `ErrAllocatorNotConstructed` for a `dst` this package did not build |
 
 ## Troubleshooting
 
@@ -103,8 +103,8 @@ refused there and authenticated work keeps its headroom.
 | `ErrBudgetExceedsRLimit` at startup | Configured budget above `ulimit -l` | Lower the budget or raise the limit. |
 | `ErrAllocatorInstalled` | `SetAllocator` after a library's `ProcessAllocator` call succeeded and installed the default | Install earlier in `main`. |
 | `Available()` is 0, `InUse() > Limit()` | `ForceLimit` over-subscribed the allocator | Wait for enclaves to be destroyed, or raise the budget. |
-| `ErrNilAllocator` from `New`, `NewSized` or a retune | The `*Allocator` is nil: an unset field or a skipped configuration step | Construct the allocator, or use `ProcessAllocator()`. `New` has already wiped the data. |
-| `ErrAllocatorNotConstructed` from any call | An `enclave.Allocator{}` declared by value instead of built by a constructor | Use `NewAllocator`, `NewAllocatorWithinRLimit` or `ProcessAllocator()`, and pass the `*Allocator` around; a copied value shares the original's budget. |
+| `ErrNilAllocator` from `SetAllocator` | The `Allocator` is nil: an unset field or a skipped configuration step | Construct the allocator, or use `ProcessAllocator()`. |
+| `ErrAllocatorNotConstructed` from `SetAllocator` or `TransferTo` | An `Allocator` implemented outside this package (a wrapper or a fake) | Pass the `Allocator` that `NewAllocator`, `NewAllocatorWithinRLimit` or `ProcessAllocator()` returned; every copy of it shares the same budget. |
 | Budget not returned after a failed allocation | The kernel refused to unlock the rolled-back pages; the charge is kept until a `WipeAll` reclaims them | Expected; the shutdown sweep refunds it. |
 
 ## Upgrading

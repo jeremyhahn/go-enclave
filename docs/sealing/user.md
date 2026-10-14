@@ -1,6 +1,6 @@
 # Sealing and the provider seam — user guide
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-11
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-14
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Choose the type by access pattern
@@ -150,7 +150,7 @@ Afterwards every seal, open and `Openable` through it reports
 it. The `SoftwareProvider` that `NewSealer` creates by
 default releases its root as soon as the first unseal has derived the wrapping
 key; a provider you inject is never released by the sealer. Release that with
-its own lifecycle (`(*SoftwareProvider).Destroy` for the software one).
+its own lifecycle (`SoftwareProvider.Destroy` for the software one).
 
 ## Install a hardware provider
 
@@ -212,7 +212,6 @@ A wiped sealer never re-keys. Construct a new `Sealer` and re-seal from source.
 | `ErrSealSourceReadOnly` | `Seal` or `NewSealed` was given a read-only view, such as the slice an opened `Memory` lends | Use `SealFrom` or `NewSealedFrom` with the handle. |
 | `*CapabilityError` from `NewSealer`, `OpenIn` or `SealFrom` | The backend cannot import or does not return the imported bytes, or the source handle does not expose its bytes | Use a backend that implements `Importer`; seal from a handle with `ByteAccess`. |
 | `ErrProviderMessageLimit` | `SoftwareProvider` used in `ModePerOperation` past 2^31 seals | Use `ModeRootKey` (rotates KEKs) or a hardware provider. |
-| `ErrProviderNotConstructed` | A `SoftwareProvider` not built by `NewSoftwareProvider` (for example a zero value) | Construct it with `NewSoftwareProvider`. |
 | Locked memory grows with traffic | Each `Open` takes a locked page | Destroy opened enclaves promptly; use `OpenIn` so the budget sees it. |
 
 ## Upgrading

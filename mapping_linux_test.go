@@ -121,7 +121,7 @@ func allocLeakChild(t *testing.T) {
 	const attempts = 256
 	failures := 0
 	for i := 0; i < attempts; i++ {
-		e, err := NewMemorySized(64)
+		e, err := newMemorySized(64)
 		if err == nil {
 			e.Destroy()
 			continue
@@ -193,7 +193,7 @@ func copyRollbackChild(t *testing.T) {
 	requireCleanLedger(t)
 
 	// A budget large enough that only the OS can refuse.
-	a, err := NewAllocator(1 << 20)
+	a, err := newBudgetAllocator(1 << 20)
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
@@ -201,9 +201,9 @@ func copyRollbackChild(t *testing.T) {
 		name  string
 		build func([]byte) (*Memory, error)
 	}{
-		{"NewMemory", NewMemory},
-		{"NewMemoryCopy", NewMemoryCopy},
-		{"Allocator.New", a.New},
+		{"NewMemory", newMemory},
+		{"NewMemoryCopy", newMemoryCopy},
+		{"Allocator.New", a.admitData},
 	}
 
 	setCeiling, original := injectMemlockCeiling(t)
@@ -295,7 +295,7 @@ func TestMemory_MoveConstructedPagesAreReadOnly(t *testing.T) {
 		return
 	}
 
-	sized, err := NewMemorySized(32)
+	sized, err := newMemorySized(32)
 	if err != nil {
 		t.Fatalf("NewMemorySized: %v", err)
 	}
@@ -318,7 +318,7 @@ func TestMemory_MoveConstructedPagesAreReadOnly(t *testing.T) {
 func frozenWriteChild(t *testing.T) {
 	t.Helper()
 
-	e, err := NewMemory([]byte("private-key-material"))
+	e, err := newMemory([]byte("private-key-material"))
 	if err != nil {
 		t.Fatalf("NewMemory: %v", err)
 	}
@@ -364,7 +364,7 @@ func copyFrozenWriteChild(t *testing.T) {
 	t.Helper()
 
 	src := []byte("private-key-material")
-	e, err := NewMemoryCopy(src)
+	e, err := newMemoryCopy(src)
 	if err != nil {
 		t.Fatalf("NewMemoryCopy: %v", err)
 	}
@@ -550,7 +550,7 @@ func TestFrozenReleaseUnmapsWhenMprotectIsDenied(t *testing.T) {
 	// every WipeAll test.
 	e, err := unpublishedCopy(append([]byte(nil), secret...))
 	if err != nil {
-		t.Fatalf("newMemory: %v", err)
+		t.Fatalf("NewMemory: %v", err)
 	}
 
 	if e.m.mutable {
@@ -596,7 +596,7 @@ func TestFrozenReleaseUnmapsWhenMprotectIsDenied(t *testing.T) {
 func TestFrozenReleaseKeepsTheMappingWhenTheBypassAlsoFails(t *testing.T) {
 	e, err := unpublishedCopy([]byte("material"))
 	if err != nil {
-		t.Fatalf("newMemory: %v", err)
+		t.Fatalf("NewMemory: %v", err)
 	}
 	t.Cleanup(func() {
 		if e.m != nil {
@@ -627,7 +627,7 @@ func TestFrozenReleaseKeepsTheMappingWhenTheBypassAlsoFails(t *testing.T) {
 func TestKeptMappingReadsAsDestroyedOnceWiped(t *testing.T) {
 	e, err := unpublishedCopy([]byte("material that is about to be wiped"))
 	if err != nil {
-		t.Fatalf("newMemory: %v", err)
+		t.Fatalf("NewMemory: %v", err)
 	}
 	t.Cleanup(func() {
 		if e.m != nil {
@@ -671,7 +671,7 @@ func TestKeptMappingReadsAsDestroyedOnceWiped(t *testing.T) {
 func TestReleaseNeverUnmapsMaterialItCouldNotWipe(t *testing.T) {
 	e, err := unpublishedCopy([]byte("material that must not be handed back unwiped"))
 	if err != nil {
-		t.Fatalf("newMemory: %v", err)
+		t.Fatalf("NewMemory: %v", err)
 	}
 	t.Cleanup(func() {
 		if e.m != nil {
@@ -725,7 +725,7 @@ func TestReleaseNeverUnmapsMaterialItCouldNotWipe(t *testing.T) {
 func TestKeptMutableMappingReadsAsDestroyedOnceWiped(t *testing.T) {
 	e, err := unpublishedSized(32)
 	if err != nil {
-		t.Fatalf("newMemorySized: %v", err)
+		t.Fatalf("NewMemorySized: %v", err)
 	}
 	t.Cleanup(func() {
 		if e.m != nil {

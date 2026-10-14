@@ -133,8 +133,8 @@ would repeat the package.
 | `AEAD`, `crypto.Signer`, `crypto.Decrypter` | handle | no | no (byte access suffices) | per key type |
 | `Deriver` | handle | no | no | where the device has a KDF |
 | `Attester` | handle or backend | no | backend: platform evidence | handle: key attestation |
-| `Importer` | backend | yes (`*Allocator`) | yes | where policy allows import, per purpose |
-| `Sweeper` | backend | no: `WipeAll`'s first phase sweeps every locked-memory enclave, an `*Allocator`'s included | yes | releases sessions and transient objects |
+| `Importer` | backend | yes (`Allocator`) | yes | where policy allows import, per purpose |
+| `Sweeper` | backend | no: `WipeAll`'s first phase sweeps every locked-memory enclave, an `Allocator`'s included | yes | releases sessions and transient objects |
 | `Confiner` | backend | no | yes, when this process runs inside the TEE | no: the process is outside the device |
 
 ### Opaque operations
@@ -219,7 +219,7 @@ purpose fixes the contract of the handle `Import` returns:
 | Unknown name | `*BackendNotRegisteredError{Name}`, matching `ErrBackendNotRegistered`. |
 | Invalid backend | `ErrInvalidBackend` for a nil or typed-nil backend or an invalid name, as `ErrInvalidProvider` treats a nil provider: a lost configuration step, never a request for the default. |
 | Default | `"locked-memory"` (`LockedMemoryBackendName`), in the map from the start as a static value, not through `init`. It cannot be registered again. |
-| Name | A configuration and registry label, not an instance identity. Two instances may share a name (two devices of one module; an `*Allocator` and the default), and at most one is registered. A handle's identity is the value `h.Backend()` returns; `Lookup(h.Backend().Name())` returns it only when the registered instance made `h`. |
+| Name | A configuration and registry label, not an instance identity. Two instances may share a name (two devices of one module; an `Allocator` and the default), and at most one is registered. A handle's identity is the value `h.Backend()` returns; `Lookup(h.Backend().Name())` returns it only when the registered instance made `h`. |
 | Unregister | None, so a configuration binding is stable: once `main` registers a backend, every `Lookup` of that name, from any subsystem and at any time, resolves to the same instance, and a component that read `backend: tdx` at startup cannot later be handed a different backend under it. A backend's lifetime is its owner's: closing it is the module's own API, after which its handles report destroyed; the registry keeps only the reference. Tests use injection, or a unique name. |
 | Cost | A map read under a read lock. Selection happens at configuration time, never on a borrow. |
 
@@ -232,7 +232,7 @@ equal a registered one's; nothing compares them.
 
 | Type | Role in the seam |
 |---|---|
-| `Memory` | The locked-memory backend's handle: `Handle`, `ByteAccess`, `Freezer`. Its `Backend()` returns the admitting `*Allocator`, else `DefaultBackend()`. |
+| `Memory` | The locked-memory backend's handle: `Handle`, `ByteAccess`, `Freezer`. Its `Backend()` returns the admitting `Allocator`, else `DefaultBackend()`. |
 | `Allocator` | The locked-memory backend's budget, and the locked-memory backend type itself (below). |
 | `Sealer`, `Sealed` | Open into a chosen backend; seal from any handle with byte access. |
 | `KeyProtector`, `RootUnsealer`, `HealthReporter` | A separate seam a hardware module may also implement. |
@@ -241,7 +241,7 @@ equal a registered one's; nothing compares them.
 
 The default backend's type stays unexported: callers name it by
 `DefaultBackend()` or `LockedMemoryBackendName`, and the exported
-locked-memory backend type is `*Allocator`.
+locked-memory backend type is `Allocator`.
 
 ### `Allocator`: a locked-memory budget
 
@@ -254,13 +254,13 @@ or need a per-backend cost function, and its `NewAllocatorWithinRLimit` would
 mean nothing outside locked memory. A backend with a scarce resource budgets
 it in its own module, in its own unit.
 
-`*Allocator` is the locked-memory backend: it implements `Backend`
+`Allocator` is the locked-memory backend: it implements `Backend`
 (name `"locked-memory"`) and `Importer`, so a budgeted locked memory is
 injected like any other backend, `WithBackend(a)`. `(*Memory).Backend()`
-then returns the admitting `*Allocator`, or `DefaultBackend()` for an
-unbudgeted enclave. An `*Allocator` is not registered: the registered
+then returns the admitting `Allocator`, or `DefaultBackend()` for an
+unbudgeted enclave. An `Allocator` is not registered: the registered
 `"locked-memory"` stays the unbudgeted default, so `Lookup("locked-memory")`
-for a budgeted enclave returns the default, not its `*Allocator`; the name is
+for a budgeted enclave returns the default, not its `Allocator`; the name is
 a label ([registry semantics](#registry-semantics)). The budget's own design is
 in [locked-memory-budget](../locked-memory-budget/architecture.md).
 
@@ -269,7 +269,7 @@ in [locked-memory-budget](../locked-memory-budget/architecture.md).
 - **Open into a backend.** `(*Sealed).Open(ctx)` returns a locked-memory
   enclave, the common case, statically typed. Beside it,
   `OpenIn(ctx, b Backend) (Handle, error)` opens into any backend. For locked
-  memory (`DefaultBackend()` or an `*Allocator`) it decrypts in place, as
+  memory (`DefaultBackend()` or an `Allocator`) it decrypts in place, as
   `Open` does. For any other backend that implements `Importer` it decrypts
   into a locked scratch enclave, left writable (never frozen) because the
   importer wipes it, and imports from inside a borrow of it:
@@ -332,7 +332,7 @@ on, which is a sealing question.
 
 `WipeAll(ctx)` runs in two phases, inside the one sweep slot it already takes:
 
-1. **Locked memory**: every `Memory` in the ledger, an `*Allocator`'s
+1. **Locked memory**: every `Memory` in the ledger, an `Allocator`'s
    included. The built-in backend does not implement `Sweeper`, so it is never
    swept twice and `WipeAll` never recurses.
 2. **Registered sweepers.** Under the registry's read lock, `WipeAll`
@@ -646,7 +646,7 @@ appraises it.
 | Require every backend to implement `As` | Boilerplate for the common unwrapped case, where a type assertion suffices. |
 | Use `errors.As` for backends | It panics on a bad target and is about error chains. |
 | `cipher.AEAD` as the AEAD capability, or exempting it from the lifecycle rule | Its `Seal` has no error result: a destroyed device key could only panic, fail silently or stay usable. |
-| Nil-receiver safety on every `Handle` | A nil pointer cannot recover the instance that made it (two devices, an `*Allocator`). |
+| Nil-receiver safety on every `Handle` | A nil pointer cannot recover the instance that made it (two devices, an `Allocator`). |
 | `Import(ctx, material)` with no intent | A secure element cannot tell material from a key, nor which algorithm and usage. |
 | A `Backend` method declaring its future handles' capabilities | A second list that can drift from the method set, as `Capabilities()` would. |
 | Recovering a panic from a custom `As` | Hides a backend defect; `As` refuses only the malformed inputs it can see. |

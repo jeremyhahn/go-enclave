@@ -64,7 +64,7 @@ func TestDefaultBackend_IsLockedMemoryAndAlwaysRegistered(t *testing.T) {
 }
 
 func TestMemory_BackendIsTheDefault(t *testing.T) {
-	e, err := NewMemoryCopy([]byte("material"))
+	e, err := newMemoryCopy([]byte("material"))
 	if err != nil {
 		t.Fatal(err)
 	}

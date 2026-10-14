@@ -109,7 +109,7 @@ func rootOnly(new func() (any, error)) Config {
 
 // software is a fresh conforming provider, which most violators wrap so that
 // the ONLY thing wrong with them is the property under test.
-func software() *enclave.SoftwareProvider { return enclave.NewSoftwareProvider() }
+func software() enclave.SoftwareProvider { return enclave.NewSoftwareProvider() }
 
 // ---------------------------------------------------------------------------
 // THE HEADLINE CONTROL: a provider that retains a copy on purpose
@@ -119,7 +119,7 @@ func software() *enclave.SoftwareProvider { return enclave.NewSoftwareProvider()
 // key it recovers. Only the residue sweep can catch it: the spy watches the
 // caller's slices, which this provider never touches after it returns.
 type retainingProtector struct {
-	inner *enclave.SoftwareProvider
+	inner enclave.SoftwareProvider
 	mu    sync.Mutex
 	kept  [][]byte
 }
@@ -276,7 +276,7 @@ func TestSuiteCatchesProtectRetainingTheCallersSlice(t *testing.T) {
 // it again on the next call — the "reuse the buffer" optimisation, aimed at
 // pages the caller has already wiped and released.
 type writeBackProtector struct {
-	inner *enclave.SoftwareProvider
+	inner enclave.SoftwareProvider
 	mu    sync.Mutex
 	last  []byte
 	val   []byte
@@ -311,7 +311,7 @@ func TestSuiteCatchesAWriteBackIntoAWipedDestination(t *testing.T) {
 // the mirror defect, invisible to a zero-stays-zero check, and a fail-open in
 // the caller, which is left holding zeros where its key was.
 type wipingProtector struct {
-	inner *enclave.SoftwareProvider
+	inner enclave.SoftwareProvider
 	mu    sync.Mutex
 	last  []byte
 }
@@ -345,7 +345,7 @@ func TestSuiteCatchesALaterCallWipingAnEarlierDestination(t *testing.T) {
 // reports success with zeros on every later one, the second call the spy
 // checks make to disturb the first destination.
 type onlyFirstUnprotectProtector struct {
-	inner *enclave.SoftwareProvider
+	inner enclave.SoftwareProvider
 	mu    sync.Mutex
 	n     int
 }
@@ -379,7 +379,7 @@ func TestSuiteCatchesASecondUnprotectWithoutTheKey(t *testing.T) {
 // that one buffer serves every call, so a concurrent Unprotect overwrites or
 // wipes it during the pause and the caller receives what another call left.
 type sharedBufferProtector struct {
-	inner *enclave.SoftwareProvider
+	inner enclave.SoftwareProvider
 	mu    sync.Mutex
 	buf   [keyBytes]byte
 }
@@ -418,7 +418,7 @@ func TestSuiteCatchesAProviderSharingABufferAcrossCalls(t *testing.T) {
 // silentProtector returns nil from Unprotect and writes nothing, so it passes
 // every retention assertion for the wrong reason. Only the at-return-time
 // control separates it from a conforming provider.
-type silentProtector struct{ inner *enclave.SoftwareProvider }
+type silentProtector struct{ inner enclave.SoftwareProvider }
 
 func (p *silentProtector) Protect(ctx context.Context, key []byte) ([]byte, error) {
 	return p.inner.Protect(ctx, key)
@@ -790,7 +790,7 @@ func TestSuiteCatchesAnUnauthenticatedProvider(t *testing.T) {
 
 // wrongErrorProtector refuses forgeries but reports them as infrastructure
 // faults rather than ErrSealedAuthentication.
-type wrongErrorProtector struct{ inner *enclave.SoftwareProvider }
+type wrongErrorProtector struct{ inner enclave.SoftwareProvider }
 
 func (p *wrongErrorProtector) Protect(ctx context.Context, key []byte) ([]byte, error) {
 	return p.inner.Protect(ctx, key)
@@ -821,7 +821,7 @@ func TestSuiteCatchesAForgeryReportedAsADeviceFault(t *testing.T) {
 // decryptBeforeAuthenticateProtector leaves the recovered key in the caller's
 // destination and then reports failure.
 type decryptBeforeAuthenticateProtector struct {
-	inner *enclave.SoftwareProvider
+	inner enclave.SoftwareProvider
 	mu    sync.Mutex
 	last  []byte
 }
@@ -882,7 +882,7 @@ func TestSuiteCatchesABlobThatIsThePlaintext(t *testing.T) {
 
 // mutatingProtector overwrites the caller's key slice in place, which aliases
 // locked pages the caller still owns.
-type mutatingProtector struct{ inner *enclave.SoftwareProvider }
+type mutatingProtector struct{ inner enclave.SoftwareProvider }
 
 func (p *mutatingProtector) Protect(ctx context.Context, key []byte) ([]byte, error) {
 	blob, err := p.inner.Protect(ctx, key)
@@ -942,7 +942,7 @@ func (p *looseLengthProtector) Unprotect(ctx context.Context, blob, key []byte) 
 // reports success. It is the only violator that pins the "Unprotect accepted
 // a wrong-length destination" arm: looseLengthProtector is also caught by the
 // plaintext-in-destination check.
-type silentLengthProtector struct{ inner *enclave.SoftwareProvider }
+type silentLengthProtector struct{ inner enclave.SoftwareProvider }
 
 func (p *silentLengthProtector) Protect(ctx context.Context, key []byte) ([]byte, error) {
 	return p.inner.Protect(ctx, key)
@@ -962,7 +962,7 @@ func (p *silentLengthProtector) Unprotect(ctx context.Context, blob, key []byte)
 // ErrSealedAuthentication after it has already written the key into it. It
 // pins the plaintext-in-destination check on the length path.
 type shortDestinationLeakProtector struct {
-	inner *enclave.SoftwareProvider
+	inner enclave.SoftwareProvider
 	mu    sync.Mutex
 	last  []byte
 }
@@ -1010,7 +1010,7 @@ func TestSuiteCatchesASilentlyTruncatingDestination(t *testing.T) {
 // stubRootProvider is a correct KeyProtector carrying a placeholder
 // UnsealRoot. A Sealer cannot tell the placeholder from an unseal, so in
 // ModeRootKey it would seal everything under a constant.
-type stubRootProvider struct{ inner *enclave.SoftwareProvider }
+type stubRootProvider struct{ inner enclave.SoftwareProvider }
 
 func (p *stubRootProvider) Protect(ctx context.Context, key []byte) ([]byte, error) {
 	return p.inner.Protect(ctx, key)
@@ -1032,7 +1032,7 @@ func TestSuiteCatchesAnUnclaimedModeTheProviderStillSatisfies(t *testing.T) {
 }
 
 // keyProtectorOnly claims a mode its method set cannot serve.
-type keyProtectorOnly struct{ inner *enclave.SoftwareProvider }
+type keyProtectorOnly struct{ inner enclave.SoftwareProvider }
 
 func (p *keyProtectorOnly) Protect(ctx context.Context, key []byte) ([]byte, error) {
 	return p.inner.Protect(ctx, key)
@@ -1059,7 +1059,7 @@ func TestSuiteCatchesAClaimedModeTheProviderCannotServe(t *testing.T) {
 
 // halfWritingUnsealer writes only the first half of the destination, leaving
 // the rest as whatever the caller's pages held.
-type halfWritingUnsealer struct{ inner *enclave.SoftwareProvider }
+type halfWritingUnsealer struct{ inner enclave.SoftwareProvider }
 
 func (p *halfWritingUnsealer) UnsealRoot(ctx context.Context, dst []byte) error {
 	// The full root comes from a locked scratch enclave, so a partial write is
@@ -1129,7 +1129,7 @@ func TestSuiteCatchesANondeterministicRoot(t *testing.T) {
 // rootDestRetainer keeps the destination it was handed and wipes it on the next
 // call, leaving a Sealer running its whole KEK hierarchy under zeros.
 type rootDestRetainer struct {
-	inner *enclave.SoftwareProvider
+	inner enclave.SoftwareProvider
 	mu    sync.Mutex
 	last  []byte
 }
@@ -1162,7 +1162,7 @@ func TestSuiteCatchesARootUnsealerRetainingTheDestination(t *testing.T) {
 // call after the first. It satisfies the seam, which guarantees only that a
 // Sealer calls UnsealRoot at most once.
 type oneShotUnsealer struct {
-	inner *enclave.SoftwareProvider
+	inner enclave.SoftwareProvider
 	mu    sync.Mutex
 	spent bool
 }
@@ -1351,7 +1351,7 @@ func TestPropertyFailuresAreTyped(t *testing.T) {
 	}
 }
 
-// TestSuiteRefusesATypedNilProvider pins that a (*SoftwareProvider)(nil),
+// TestSuiteRefusesATypedNilProvider pins that a (*stubRootProvider)(nil),
 // which satisfies both seam interfaces, is reported as a failure rather than
 // panicking inside the suite. The subtests cover both the KeyProtector and the
 // RootUnsealer entry paths.
@@ -1362,11 +1362,11 @@ func TestSuiteRefusesATypedNilProvider(t *testing.T) {
 	}{
 		{
 			name: "typed nil, ModePerOperation",
-			cfg:  perOp(func() (any, error) { return (*enclave.SoftwareProvider)(nil), nil }),
+			cfg:  perOp(func() (any, error) { return (*stubRootProvider)(nil), nil }),
 		},
 		{
 			name: "typed nil, ModeRootKey",
-			cfg:  rootOnly(func() (any, error) { return (*enclave.SoftwareProvider)(nil), nil }),
+			cfg:  rootOnly(func() (any, error) { return (*stubRootProvider)(nil), nil }),
 		},
 		{
 			name: "an untyped nil",
@@ -1410,7 +1410,7 @@ func TestConstructionFailureIsReported(t *testing.T) {
 
 // TestIsNilProvider pins the classifier in both directions.
 func TestIsNilProvider(t *testing.T) {
-	var nilPtr *enclave.SoftwareProvider
+	var nilPtr *stubRootProvider
 	var nilMap map[string][]byte
 	var nilFunc func()
 	var nilIface enclave.KeyProtector
@@ -1504,7 +1504,7 @@ func TestFlipPositions(t *testing.T) {
 // is handed has ended, does exactly the one wrong thing its fields select.
 // Each defect kills exactly one assertion of the ended-context check.
 type endedContextProtector struct {
-	inner *enclave.SoftwareProvider
+	inner enclave.SoftwareProvider
 
 	ignoreOnProtect   bool  // complete Protect as if the context were live
 	ignoreOnUnprotect bool  // complete Unprotect as if the context were live
@@ -1586,7 +1586,7 @@ func TestSuiteRequiresAnEndedContextToBeRefused(t *testing.T) {
 
 // endedContextUnsealer is endedContextProtector's RootUnsealer counterpart.
 type endedContextUnsealer struct {
-	inner *enclave.SoftwareProvider
+	inner enclave.SoftwareProvider
 
 	ignore          bool // complete UnsealRoot as if the context were live
 	spendOnRefuse   bool // a one-shot handle consumed by a call it refused
@@ -1645,7 +1645,7 @@ func TestSuiteRequiresUnsealRootToRefuseAnEndedContext(t *testing.T) {
 // and keeps the slice, so a test can read what the suite left in it. When
 // hold is set, an ended-context call blocks until release is closed.
 type rootKeepingUnsealer struct {
-	inner   *enclave.SoftwareProvider
+	inner   enclave.SoftwareProvider
 	accept  bool
 	hold    bool
 	entered chan struct{}
@@ -1747,7 +1747,7 @@ func TestEndedContextRootDestinationsAreWiped(t *testing.T) {
 // ended-context call, a violation the suite observes before the hang. entered
 // is closed when the first hanging call arrives.
 type hangingOnEndedContext struct {
-	inner         *enclave.SoftwareProvider
+	inner         enclave.SoftwareProvider
 	acceptProtect bool
 	entered       chan struct{}
 	release       chan struct{}
@@ -1890,7 +1890,7 @@ func TestAnAbortedRunIsNeverAPass(t *testing.T) {
 // cancellingProtector ends the run's context during its first Unprotect and
 // then honors it.
 type cancellingProtector struct {
-	inner  *enclave.SoftwareProvider
+	inner  enclave.SoftwareProvider
 	cancel context.CancelFunc
 }
 
@@ -1937,7 +1937,7 @@ var errDeviceFault = errors.New("device: transient fault")
 // failProtect-th Protect or the failUnprotect-th Unprotect on this instance,
 // counting from 1 and including ended-context calls. Zero refuses nothing.
 type failingProtector struct {
-	inner                      *enclave.SoftwareProvider
+	inner                      enclave.SoftwareProvider
 	failProtect, failUnprotect int
 
 	mu                   sync.Mutex
@@ -1968,7 +1968,7 @@ func (p *failingProtector) Unprotect(ctx context.Context, blob, key []byte) erro
 
 // failingUnsealer is failingProtector's RootUnsealer counterpart.
 type failingUnsealer struct {
-	inner  *enclave.SoftwareProvider
+	inner  enclave.SoftwareProvider
 	failAt int
 
 	mu    sync.Mutex
@@ -2194,7 +2194,7 @@ func TestSuiteReportsAKeyProtectorClaimTheProviderCannotServe(t *testing.T) {
 }
 
 // emptyBlobProtector "protects" every key into an empty blob.
-type emptyBlobProtector struct{ inner *enclave.SoftwareProvider }
+type emptyBlobProtector struct{ inner enclave.SoftwareProvider }
 
 func (emptyBlobProtector) Protect(ctx context.Context, _ []byte) ([]byte, error) {
 	return []byte{}, ctx.Err()
@@ -2217,7 +2217,7 @@ func TestSuiteCatchesAnEmptyBlob(t *testing.T) {
 // writes the root into it again on every later call. The root is
 // deterministic, so only the caller-wiped direction of the spy can see it.
 type firstDestinationRewriter struct {
-	inner *enclave.SoftwareProvider
+	inner enclave.SoftwareProvider
 	mu    sync.Mutex
 	first []byte
 }
@@ -2256,7 +2256,7 @@ func TestSuiteCatchesARootWrittenIntoAWipedDestination(t *testing.T) {
 // hangingUnsealer blocks, until released, on any UnsealRoot made with an
 // ended context. entered is closed when the first such call arrives.
 type hangingUnsealer struct {
-	inner   *enclave.SoftwareProvider
+	inner   enclave.SoftwareProvider
 	entered chan struct{}
 	release chan struct{}
 	once    sync.Once

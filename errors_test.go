@@ -296,7 +296,7 @@ func TestCanceledSealIsATypedSealError(t *testing.T) {
 	why := errors.New("shutting down")
 	cancel(why)
 
-	_, err := NewSealed(ctx, []byte("material"))
+	_, err := newSealed(ctx, []byte("material"))
 	var se *SealError
 	if !errors.As(err, &se) {
 		t.Fatalf("NewSealed(canceled) = %v, want a *SealError", err)

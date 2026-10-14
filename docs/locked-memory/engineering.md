@@ -1,6 +1,6 @@
 # Locked-memory enclaves — engineering contract
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-12
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-14
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Exported surface
@@ -9,15 +9,15 @@ All in package `enclave` (import path `github.com/jeremyhahn/go-enclave`).
 
 | Identifier | Contract |
 |---|---|
-| `NewMemory(data []byte) (*Memory, error)` | Moves `data` in and **wipes the caller's slice on every return path**. Result is frozen read-only. |
-| `NewMemoryCopy(src []byte) (*Memory, error)` | Copies `src` in and leaves it **untouched on every path**. Result is frozen. The heap copy in `src` is the caller's to wipe. |
-| `NewMemorySized(n int) (*Memory, error)` | `n` zeroed, **writable** bytes to fill through `WithBytes`; call `Freeze` when the fill is done. |
+| `NewMemory(data []byte) (ByteAccess, error)` | Moves `data` in and **wipes the caller's slice on every return path**. Result is frozen read-only. Each constructor returns its `*Memory` as a `ByteAccess`, and a nil interface on failure. |
+| `NewMemoryCopy(src []byte) (ByteAccess, error)` | Copies `src` in and leaves it **untouched on every path**. Result is frozen. The heap copy in `src` is the caller's to wipe. |
+| `NewMemorySized(n int) (ByteAccess, error)` | `n` zeroed, **writable** bytes to fill through `WithBytes`; call `Freeze`, through the `Freezer` capability (`As`), when the fill is done. |
 | `(*Memory).WithBytes(fn func([]byte) error) error` | The only access. Holds the read lock across `fn`; returns `fn`'s error. A nil `fn` is `ErrNilFunc`. |
 | `(*Memory).EqualTo(other []byte) (bool, error)` | Compare under the read lock; a destroyed or nil enclave returns `ErrEnclaveDestroyed`. Time does not depend on the contents but does reveal whether the lengths differ. |
 | `(*Memory).Size() int` / `IsAlive() bool` / `String() string` | Locked accessors; `String` never prints the material. |
 | `(*Memory).Freeze() error` | `mprotect` the data read-only. Idempotent, irreversible, waits out borrows. |
 | `(*Memory).Destroy() error` | Wipe, verify, unlock, unmap; idempotent, nil-safe. See below. |
-| `(*Memory).Backend() Backend` | The `*Allocator` that admitted the enclave, else `DefaultBackend()` ([backends](../backends/engineering.md)). |
+| `(*Memory).Backend() Backend` | The `Allocator` that admitted the enclave, else `DefaultBackend()` ([backends](../backends/engineering.md)). |
 | `LockedSize(n int) int64` | Locked bytes an `n`-byte enclave costs (page-rounded); `0` for an impossible size. |
 | `CoreDumpsDisabled() error` | What the last `HardenProcess` did to `RLIMIT_CORE`: `nil` when lowered to zero (soft and hard), else a `*CoreDumpLimitError`; `ErrCoreDumpLimitNotApplied` before one has run. |
 | `HardenProcess() (ProcessHardening, error)` | Opt-in, never called by the package. Lowers `RLIMIT_CORE` to 0/0 where it exists (all but Windows) and, on Linux, sets `prctl(PR_SET_DUMPABLE, 0)`; each read back. Windows: `ErrProcessHardeningUnsupported`. |

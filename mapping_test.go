@@ -32,7 +32,7 @@ import (
 func TestMemory_AllocateInsideBorrow(t *testing.T) {
 	const outerMaterial = "outer-private-key-material"
 
-	outer, err := NewMemory([]byte(outerMaterial))
+	outer, err := newMemory([]byte(outerMaterial))
 	if err != nil {
 		t.Fatalf("NewMemory: %v", err)
 	}
@@ -50,7 +50,7 @@ func TestMemory_AllocateInsideBorrow(t *testing.T) {
 	go func() {
 		done <- outer.WithBytes(func(b []byte) error {
 			// Everything below runs while the outer borrow is live.
-			inner, ierr := NewMemorySized(32)
+			inner, ierr := newMemorySized(32)
 			if ierr != nil {
 				return ierr
 			}
@@ -92,7 +92,7 @@ func TestMemory_ConcurrentAllocationDuringBorrows(t *testing.T) {
 		iterations = 200
 	)
 
-	held, err := NewMemory([]byte(material))
+	held, err := newMemory([]byte(material))
 	if err != nil {
 		t.Fatalf("NewMemory: %v", err)
 	}
@@ -111,7 +111,7 @@ func TestMemory_ConcurrentAllocationDuringBorrows(t *testing.T) {
 			defer wg.Done()
 			for i := 0; i < iterations; i++ {
 				if err := held.WithBytes(func(b []byte) error {
-					e, aerr := NewMemorySized(64)
+					e, aerr := newMemorySized(64)
 					if aerr != nil {
 						return aerr
 					}
@@ -444,11 +444,11 @@ func TestMapping_ReleaseKeepsStateWhenUnmapFails(t *testing.T) {
 // reservation while the kernel holds the pages, and that a retried Destroy
 // refunds it exactly once.
 func TestMemory_FailedReleaseKeepsTheReservation(t *testing.T) {
-	a, err := NewAllocator(4 * pageSize)
+	a, err := newBudgetAllocator(4 * pageSize)
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
-	e, err := a.NewSized(64)
+	e, err := a.admitSized(64)
 	if err != nil {
 		t.Fatalf("NewSized: %v", err)
 	}
@@ -959,7 +959,7 @@ func TestNewMapping_EveryConstructionStepRollsBack(t *testing.T) {
 					return saved.unmap(b)
 				})
 
-				e, err := NewMemorySized(64)
+				e, err := newMemorySized(64)
 				restore()
 
 				if e != nil {

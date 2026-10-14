@@ -120,7 +120,7 @@ func userNamespaceChild(t *testing.T) {
 		t.Fatalf("DiscoverLockedMemoryLimit = %+v, want a bounded LimitRLimit of %d: CAP_IPC_LOCK in a "+
 			"child namespace does not lift the limit", limit, ceiling)
 	}
-	if _, err := NewAllocatorWithinRLimit(int64(over)); !errors.Is(err, ErrBudgetExceedsRLimit) {
+	if _, err := newBudgetAllocatorWithinRLimit(int64(over)); !errors.Is(err, ErrBudgetExceedsRLimit) {
 		t.Fatalf("NewAllocatorWithinRLimit over the ceiling = %v, want ErrBudgetExceedsRLimit", err)
 	}
 

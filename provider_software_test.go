@@ -23,7 +23,7 @@ import (
 // bare KeyProtector: round trip, the authenticated-by-contract refusals with
 // their controls, and the framing checks.
 func TestSoftwareProvider_ProtectUnprotect(t *testing.T) {
-	p := NewSoftwareProvider()
+	p := newSoftwareProvider()
 
 	key := bytes.Repeat([]byte{0x3C}, RootKeyBytes)
 	blob, err := p.Protect(t.Context(), append([]byte(nil), key...))
@@ -40,7 +40,7 @@ func TestSoftwareProvider_ProtectUnprotect(t *testing.T) {
 	}
 
 	// Foreign: a blob from a different provider instance must be refused.
-	other := NewSoftwareProvider()
+	other := newSoftwareProvider()
 	otherBlob, err := other.Protect(t.Context(), append([]byte(nil), key...))
 	if err != nil {
 		t.Fatalf("Protect (other): %v", err)
@@ -50,7 +50,7 @@ func TestSoftwareProvider_ProtectUnprotect(t *testing.T) {
 	}
 
 	// A provider that has protected nothing owns no blobs at all.
-	if err := NewSoftwareProvider().Unprotect(t.Context(), blob, got); !errors.Is(err, ErrSealedAuthentication) {
+	if err := newSoftwareProvider().Unprotect(t.Context(), blob, got); !errors.Is(err, ErrSealedAuthentication) {
 		t.Errorf("Unprotect on a fresh provider = %v, want ErrSealedAuthentication", err)
 	}
 
@@ -86,7 +86,7 @@ func TestSoftwareProvider_ProtectUnprotect(t *testing.T) {
 // TestSoftwareProvider_MessageLimit pins the provider's refusal at its
 // per-key encryption budget, driving the counter directly.
 func TestSoftwareProvider_MessageLimit(t *testing.T) {
-	p := NewSoftwareProvider()
+	p := newSoftwareProvider()
 	key := make([]byte, RootKeyBytes)
 
 	blob, err := p.Protect(t.Context(), append([]byte(nil), key...))
@@ -115,7 +115,7 @@ func TestSoftwareProvider_MessageLimit(t *testing.T) {
 // must receive the same root, or "the provider's root" would not be a
 // meaningful phrase.
 func TestSoftwareProvider_UnsealRoot(t *testing.T) {
-	p := NewSoftwareProvider()
+	p := newSoftwareProvider()
 
 	if err := p.UnsealRoot(t.Context(), make([]byte, RootKeyBytes-1)); !errors.Is(err, ErrInvalidSize) {
 		t.Errorf("UnsealRoot(short dst) = %v, want ErrInvalidSize", err)
@@ -126,12 +126,12 @@ func TestSoftwareProvider_UnsealRoot(t *testing.T) {
 
 	// Generated key material: unsealed into locked destinations and compared
 	// inside their borrows, never copied onto the heap.
-	a, err := NewMemorySized(RootKeyBytes)
+	a, err := newMemorySized(RootKeyBytes)
 	if err != nil {
 		t.Fatalf("allocating a: %v", err)
 	}
 	defer func() { _ = a.Destroy() }()
-	b, err := NewMemorySized(RootKeyBytes)
+	b, err := newMemorySized(RootKeyBytes)
 	if err != nil {
 		t.Fatalf("allocating b: %v", err)
 	}
@@ -167,7 +167,7 @@ func TestSoftwareProvider_UnsealRoot(t *testing.T) {
 func TestSoftwareProvider_RefusesAnEndedContext(t *testing.T) {
 	for name, ec := range endedContexts(t) {
 		t.Run(name, func(t *testing.T) {
-			p := NewSoftwareProvider()
+			p := newSoftwareProvider()
 			key := bytes.Repeat([]byte{0x3C}, RootKeyBytes)
 
 			if _, err := p.Protect(ec.ctx, key); !errors.Is(err, ec.want) {
@@ -211,7 +211,7 @@ func TestSoftwareProvider_Destroy(t *testing.T) {
 	ctx := t.Context()
 	base := ledgerCount()
 
-	p := NewSoftwareProvider()
+	p := newSoftwareProvider()
 	blob, err := p.Protect(ctx, make([]byte, RootKeyBytes))
 	if err != nil {
 		t.Fatalf("Protect: %v", err)
@@ -239,7 +239,7 @@ func TestSoftwareProvider_Destroy(t *testing.T) {
 	}
 
 	// A provider destroyed before first use never generates a root.
-	fresh := NewSoftwareProvider()
+	fresh := newSoftwareProvider()
 	if err := fresh.Destroy(); err != nil {
 		t.Fatalf("Destroy of an unused provider: %v", err)
 	}
@@ -250,7 +250,7 @@ func TestSoftwareProvider_Destroy(t *testing.T) {
 		t.Error("a destroyed provider generated a root")
 	}
 
-	var nilProvider *SoftwareProvider
+	var nilProvider *softwareProvider
 	if err := nilProvider.Destroy(); err != nil {
 		t.Errorf("nil provider Destroy = %v, want nil", err)
 	}
@@ -260,7 +260,7 @@ func TestSoftwareProvider_Destroy(t *testing.T) {
 // side effects: it does not generate a root for a provider that sealed
 // nothing.
 func TestSoftwareProvider_OpenableDoesNotGenerateARoot(t *testing.T) {
-	p := NewSoftwareProvider()
+	p := newSoftwareProvider()
 
 	if err := p.Health(); err != nil {
 		t.Errorf("Health on a fresh provider = %v, want nil: nothing was sealed through it, "+
@@ -280,7 +280,7 @@ func TestSoftwareProvider_OpenableDoesNotGenerateARoot(t *testing.T) {
 // wraps under HKDF-SHA256 of the root under softwareProtectKeyInfo, never under
 // the root UnsealRoot exports.
 func TestSoftwareProvider_ProtectKeyIsNotTheRoot(t *testing.T) {
-	p := NewSoftwareProvider()
+	p := newSoftwareProvider()
 	t.Cleanup(func() { _ = p.Destroy() })
 
 	if _, err := p.Protect(t.Context(), make([]byte, RootKeyBytes)); err != nil {
@@ -313,11 +313,11 @@ func TestSoftwareProvider_ProtectKeyIsNotTheRoot(t *testing.T) {
 // TestSoftwareProvider_CopySharesState pins that a copy of a provider is the
 // same provider: one root, one lock, one Destroy.
 func TestSoftwareProvider_CopySharesState(t *testing.T) {
-	p := NewSoftwareProvider()
+	p := newSoftwareProvider()
 	t.Cleanup(func() { _ = p.Destroy() })
 
 	// Copied through reflect, as vet's copylocks would refuse a plain copy.
-	cp := new(SoftwareProvider)
+	cp := new(softwareProvider)
 	reflect.ValueOf(cp).Elem().Set(reflect.ValueOf(p).Elem())
 
 	key := bytes.Repeat([]byte{0x5a}, RootKeyBytes)
@@ -344,7 +344,7 @@ func TestSoftwareProvider_CopySharesState(t *testing.T) {
 // TestSoftwareProvider_ZeroValue pins that a provider NewSoftwareProvider did
 // not build is refused, not used.
 func TestSoftwareProvider_ZeroValue(t *testing.T) {
-	var p SoftwareProvider
+	var p softwareProvider
 	ctx := t.Context()
 
 	if _, err := p.Protect(ctx, make([]byte, RootKeyBytes)); !errors.Is(err, ErrProviderNotConstructed) {
@@ -361,5 +361,37 @@ func TestSoftwareProvider_ZeroValue(t *testing.T) {
 	}
 	if err := p.Destroy(); err != nil {
 		t.Errorf("zero-value Destroy = %v, want nil", err)
+	}
+}
+
+// TestNewSoftwareProvider_ReturnsTheInterface pins that NewSoftwareProvider
+// hands out the [SoftwareProvider] interface, never a pointer a caller could
+// hold as a concrete type, and that the interface carries every seam a
+// [Sealer] consults and the Destroy that releases the root.
+func TestNewSoftwareProvider_ReturnsTheInterface(t *testing.T) {
+	p := NewSoftwareProvider()
+	if _, ok := p.(*softwareProvider); !ok {
+		t.Fatalf("NewSoftwareProvider returned a %T, want *softwareProvider", p)
+	}
+	s, err := NewSealer(WithKeyProtector(p))
+	if err != nil {
+		t.Fatalf("NewSealer(WithKeyProtector): %v", err)
+	}
+	defer s.Destroy()
+	v, err := s.sealData(t.Context(), []byte("material"))
+	if err != nil {
+		t.Fatalf("Seal: %v", err)
+	}
+	if err := v.Openable(); err != nil {
+		t.Errorf("Openable = %v, want nil while the provider is healthy", err)
+	}
+	if err := p.Destroy(); err != nil {
+		t.Fatalf("Destroy: %v", err)
+	}
+	if err := p.Health(); !errors.Is(err, ErrSealerDestroyed) {
+		t.Errorf("Health after Destroy = %v, want ErrSealerDestroyed", err)
+	}
+	if err := p.UnsealRoot(t.Context(), make([]byte, RootKeyBytes)); !errors.Is(err, ErrSealerDestroyed) {
+		t.Errorf("UnsealRoot after Destroy = %v, want ErrSealerDestroyed", err)
 	}
 }

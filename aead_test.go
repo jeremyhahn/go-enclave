@@ -217,7 +217,7 @@ func FuzzSealOpenRoundTrip(f *testing.F) {
 			p = p[:fuzzSealMax]
 		}
 		want := bytes.Clone(p)
-		v, err := s.Seal(t.Context(), p)
+		v, err := s.sealData(t.Context(), p)
 		if len(want) == 0 {
 			if !errors.Is(err, ErrEmptyEnclave) {
 				t.Fatalf("Seal(empty) = %v, want ErrEmptyEnclave", err)

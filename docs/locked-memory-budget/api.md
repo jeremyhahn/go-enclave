@@ -1,6 +1,6 @@
 # Locked-memory budget and admission — API
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-12
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-14
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Transports
@@ -11,15 +11,15 @@ why a bottom-layer library has none).
 
 | Capability | Embedded Go call | REST / gRPC / QUIC / MCP / Unix socket |
 |---|---|---|
-| Create a budget | `enclave.NewAllocator(maxBytes)` | N/A |
-| Create a budget checked against `RLIMIT_MEMLOCK` | `enclave.NewAllocatorWithinRLimit(maxBytes)` | N/A |
-| Admitted allocation (move / generate) | `(*Allocator).New(data)`, `(*Allocator).NewSized(n)` | N/A |
-| Admitted open of a sealed value | `(*Sealed).OpenIn(ctx, a)` ([sealing](../sealing/api.md)) | N/A |
-| Admitted import as the locked-memory backend | `(*Allocator).Name()`, `(*Allocator).Import(ctx, material, opts...)` ([backends](../backends/api.md)) | N/A |
-| Retune | `(*Allocator).SetLimit(n)`, `(*Allocator).ForceLimit(n)` | N/A |
-| Rebalance | `(*Allocator).TransferTo(dst, n)` | N/A |
-| Observe | `(*Allocator).InUse()`, `Limit()`, `Available()` | N/A |
-| Install / use the process budget | `enclave.SetAllocator(a)`, `enclave.ProcessAllocator()` | N/A |
+| Create a budget | `enclave.NewAllocator(maxBytes) (Allocator, error)` | N/A |
+| Create a budget checked against `RLIMIT_MEMLOCK` | `enclave.NewAllocatorWithinRLimit(maxBytes) (Allocator, error)` | N/A |
+| Admitted allocation (move / generate) | `Allocator.New(data)`, `Allocator.NewSized(n)`, each returning a `ByteAccess` | N/A |
+| Admitted open of a sealed value | `Sealed.OpenIn(ctx, a)` ([sealing](../sealing/api.md)) | N/A |
+| Admitted import as the locked-memory backend | `Allocator.Name()`, `Allocator.Import(ctx, material, opts...)` ([backends](../backends/api.md)) | N/A |
+| Retune | `Allocator.SetLimit(n)`, `Allocator.ForceLimit(n)` | N/A |
+| Rebalance | `Allocator.TransferTo(dst, n)` | N/A |
+| Observe | `Allocator.InUse()`, `Limit()`, `Available()` | N/A |
+| Install / use the process budget | `enclave.SetAllocator(a)`, `enclave.ProcessAllocator() (Allocator, error)` | N/A |
 | Read the ceiling | `enclave.DiscoverLockedMemoryLimit()` | N/A |
 | Cost of one enclave | `enclave.LockedSize(n)` | N/A |
 
@@ -28,8 +28,10 @@ scope; no pagination.
 
 ## Types
 
-`Allocator`, `LockedMemoryLimit` and `LimitSource`; their contracts are in
-[engineering.md](engineering.md#exported-surface).
+`Allocator` (an interface: an `Importer` with the budget methods; the
+implementation is internal, and `SetAllocator` and `TransferTo` accept only an
+`Allocator` this package built), `LockedMemoryLimit` and `LimitSource`; their
+contracts are in [engineering.md](engineering.md#exported-surface).
 
 ### `LimitSource` values
 

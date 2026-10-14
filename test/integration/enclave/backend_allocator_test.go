@@ -20,7 +20,7 @@ import (
 	"github.com/jeremyhahn/go-enclave/internal/memscan"
 )
 
-// The *Allocator as a backend: it names the default, reports itself as the
+// An Allocator as a backend: it names the default, reports itself as the
 // backend of what it admits and imports key material into its budget.
 
 func TestBackends_AnAllocatorNamesTheDefaultBackendAndOwnsWhatItAdmits(t *testing.T) {
@@ -28,14 +28,8 @@ func TestBackends_AnAllocatorNamesTheDefaultBackendAndOwnsWhatItAdmits(t *testin
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
-	var (
-		nilAllocator *enclave.Allocator
-		zero         enclave.Allocator
-	)
-	for name, b := range map[string]enclave.Backend{"constructed": a, "nil": nilAllocator, "zero": &zero} {
-		if got := b.Name(); got != enclave.LockedMemoryBackendName {
-			t.Errorf("%s allocator: Name = %q, want %q", name, got, enclave.LockedMemoryBackendName)
-		}
+	if got := a.Name(); got != enclave.LockedMemoryBackendName {
+		t.Errorf("allocator: Name = %q, want %q", got, enclave.LockedMemoryBackendName)
 	}
 	var importer enclave.Importer
 	if !enclave.As(a, &importer) {
@@ -145,12 +139,9 @@ func TestBackends_AnAllocatorRefusesAnImportItCannotHonour(t *testing.T) {
 		}
 		return b
 	}
-	var zero enclave.Allocator
-	var nilAllocator *enclave.Allocator
-
 	for _, tc := range []struct {
 		name string
-		with *enclave.Allocator
+		with enclave.Allocator
 		ctx  context.Context
 		size int
 		opts []enclave.ImportOption
@@ -162,8 +153,6 @@ func TestBackends_AnAllocatorRefusesAnImportItCannotHonour(t *testing.T) {
 		{"ShortKey", a, ctx, 16, key(), enclave.ErrInvalidImport},
 		{"LongKey", a, ctx, 48, key(), enclave.ErrInvalidImport},
 		{"EndedContext", a, ended, enclave.RootKeyBytes, key(), context.Canceled},
-		{"NilAllocator", nilAllocator, ctx, enclave.RootKeyBytes, key(), enclave.ErrNilAllocator},
-		{"ZeroAllocator", &zero, ctx, enclave.RootKeyBytes, key(), enclave.ErrAllocatorNotConstructed},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			buf := fill(tc.size)

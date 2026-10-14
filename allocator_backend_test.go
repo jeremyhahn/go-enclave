@@ -29,7 +29,7 @@ func shallowCopy[T any](p *T) *T {
 // the same enclave, so one Destroy releases it for every copy and settles its
 // one ledger entry.
 func TestMemory_DestroyThroughACopyReachesEveryCopy(t *testing.T) {
-	e, err := NewMemory([]byte("shared by every copy"))
+	e, err := newMemory([]byte("shared by every copy"))
 	if err != nil {
 		t.Fatalf("NewMemory: %v", err)
 	}
@@ -60,17 +60,17 @@ func TestMemory_DestroyThroughACopyReachesEveryCopy(t *testing.T) {
 // spent, and a release through either is seen by both.
 func TestAllocator_CopySharesTheBudget(t *testing.T) {
 	page := LockedSize(1)
-	a, err := NewAllocator(page)
+	a, err := newBudgetAllocator(page)
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
 	c := shallowCopy(a)
 
-	e, err := a.NewSized(1)
+	e, err := a.admitSized(1)
 	if err != nil {
 		t.Fatalf("NewSized: %v", err)
 	}
-	if extra, err := c.NewSized(1); !errors.Is(err, ErrBudgetExhausted) {
+	if extra, err := c.admitSized(1); !errors.Is(err, ErrBudgetExhausted) {
 		if err == nil {
 			_ = extra.Destroy()
 		}
@@ -91,12 +91,12 @@ func TestAllocator_CopySharesTheBudget(t *testing.T) {
 }
 
 // TestAllocator_ZeroValueIsNotConstructed pins L2: every function that takes
-// an *Allocator refuses the zero value with ErrAllocatorNotConstructed, changes
+// an *budgetAllocator refuses the zero value with ErrAllocatorNotConstructed, changes
 // nothing, and still wipes the data it was handed.
 func TestAllocator_ZeroValueIsNotConstructed(t *testing.T) {
-	var zero Allocator
+	var zero budgetAllocator
 	z := &zero
-	a, err := NewAllocator(LockedSize(1))
+	a, err := newBudgetAllocator(LockedSize(1))
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
@@ -155,7 +155,7 @@ func TestAllocator_ZeroValueIsNotConstructed(t *testing.T) {
 // TestMemory_WithBytesRefusesANilFunc pins L6: a nil callback is a typed error
 // on a live enclave, and a nil or zero receiver stays ErrEnclaveDestroyed.
 func TestMemory_WithBytesRefusesANilFunc(t *testing.T) {
-	e, err := NewMemory([]byte("unchanged by a nil func"))
+	e, err := newMemory([]byte("unchanged by a nil func"))
 	if err != nil {
 		t.Fatalf("NewMemory: %v", err)
 	}
@@ -184,23 +184,23 @@ func TestMemory_WithBytesRefusesANilFunc(t *testing.T) {
 }
 
 // TestMemory_BackendIsTheAdmittingAllocator pins the backend seam: a budgeted
-// enclave reports the *Allocator that admitted it, an unbudgeted or nil one
-// the default, and no *Allocator ever takes the default's registry name.
+// enclave reports the *budgetAllocator that admitted it, an unbudgeted or nil one
+// the default, and no *budgetAllocator ever takes the default's registry name.
 func TestMemory_BackendIsTheAdmittingAllocator(t *testing.T) {
-	a, err := NewAllocator(LockedSize(1))
+	a, err := newBudgetAllocator(LockedSize(1))
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
-	budgeted, err := a.NewSized(1)
+	budgeted, err := a.admitSized(1)
 	if err != nil {
 		t.Fatalf("NewSized: %v", err)
 	}
 	t.Cleanup(func() { _ = budgeted.Destroy() })
-	if got, ok := budgeted.Backend().(*Allocator); !ok || got != a {
-		t.Errorf("budgeted Backend() = %#v, want the admitting *Allocator", budgeted.Backend())
+	if got, ok := budgeted.Backend().(*budgetAllocator); !ok || got != a {
+		t.Errorf("budgeted Backend() = %#v, want the admitting *budgetAllocator", budgeted.Backend())
 	}
 
-	plain, err := NewMemorySized(1)
+	plain, err := newMemorySized(1)
 	if err != nil {
 		t.Fatalf("NewMemorySized: %v", err)
 	}
@@ -216,7 +216,7 @@ func TestMemory_BackendIsTheAdmittingAllocator(t *testing.T) {
 		t.Errorf("Allocator Name = %q, want %q", got, LockedMemoryBackendName)
 	}
 	if err := Register(a); !errors.Is(err, ErrBackendExists) {
-		t.Errorf("Register(*Allocator) = %v, want ErrBackendExists", err)
+		t.Errorf("Register(*budgetAllocator) = %v, want ErrBackendExists", err)
 	}
 	if got, err := Lookup(LockedMemoryBackendName); err != nil || got != DefaultBackend() {
 		t.Errorf("Lookup(%q) = (%#v, %v), want the unbudgeted default", LockedMemoryBackendName, got, err)
@@ -255,7 +255,7 @@ func TestAllocator_Import(t *testing.T) {
 
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			a, err := NewAllocator(LockedSize(len(tc.material) + 1))
+			a, err := newBudgetAllocator(LockedSize(len(tc.material) + 1))
 			if err != nil {
 				t.Fatalf("NewAllocator: %v", err)
 			}
@@ -284,7 +284,7 @@ func TestAllocator_Import(t *testing.T) {
 				t.Fatalf("Import returned a %T, want *Memory", h)
 			}
 			if got := e.Backend(); got != Backend(a) {
-				t.Errorf("imported Backend() = %#v, want the importing *Allocator", got)
+				t.Errorf("imported Backend() = %#v, want the importing *budgetAllocator", got)
 			}
 			if got := a.InUse(); got != LockedSize(len(want)) {
 				t.Errorf("InUse after Import = %d, want %d", got, LockedSize(len(want)))
@@ -300,7 +300,7 @@ func TestAllocator_Import(t *testing.T) {
 		})
 	}
 
-	var nilAllocator *Allocator
+	var nilAllocator *budgetAllocator
 	if _, err := nilAllocator.Import(t.Context(), []byte("x"), WithPurpose(PurposeMaterial)); !errors.Is(err, ErrNilAllocator) {
 		t.Errorf("nil Allocator Import = %v, want ErrNilAllocator", err)
 	}

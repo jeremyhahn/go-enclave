@@ -1,6 +1,6 @@
 # Locked-memory enclaves — user guide
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-11
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-14
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Prerequisites
@@ -52,8 +52,13 @@ if err := e.WithBytes(func(key []byte) error {
 }
 
 // Make the pages read-only. A refused Freeze leaves the enclave WRITABLE,
-// so check the error.
-if err := e.Freeze(); err != nil {
+// so check the error. The constructor returns a ByteAccess; Freeze is the
+// Freezer capability of the enclave behind it.
+var f enclave.Freezer
+if !enclave.As(e, &f) {
+	return errors.New("enclave cannot be frozen")
+}
+if err := f.Freeze(); err != nil {
 	return err
 }
 ```
@@ -77,9 +82,9 @@ String material comes in as `NewMemory([]byte(s))`.
 
 ## Release
 
-`defer e.Destroy()` is the right default. Pass `*Memory` around; a copied
-`Memory` value is the same enclave, so `Destroy` through either ends both
-(`go vet` flags the copy). When you want to know what happened:
+`defer e.Destroy()` is the right default. Pass the `ByteAccess` the constructor
+returned around; every copy of it is the same enclave, so `Destroy` through
+any one ends them all. When you want to know what happened:
 
 ```go
 if err := e.Destroy(); err != nil {

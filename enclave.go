@@ -16,7 +16,8 @@ import (
 
 // Memory is a region of locked, guarded memory holding sensitive
 // material. Construct one with [NewMemory], [NewMemoryCopy] or
-// [NewMemorySized]. A nil *Memory is a valid receiver: not
+// [NewMemorySized], which hand it out as a [ByteAccess]; it is also a
+// [Freezer]. A nil *Memory is a valid receiver: not
 // alive, borrows fail with [ErrEnclaveDestroyed], and Destroy returns nil. The
 // zero Memory behaves as a nil one.
 //
@@ -48,7 +49,7 @@ type memoryState struct {
 	releaseOnce sync.Once
 
 	// admitter is the Allocator that admitted the enclave, or nil.
-	admitter *Allocator
+	admitter *budgetAllocator
 }
 
 // unset reports whether e is nil or the zero Memory: no enclave at all.
@@ -62,7 +63,16 @@ func (e *Memory) unset() bool { return e == nil || e.memoryState == nil }
 // the rollback had to unmap unwiped); a failure touches no other enclave. A
 // concurrent [WipeAll] can make a successful return an already-destroyed
 // enclave, so callers constructing during shutdown must check IsAlive.
-func NewMemory(data []byte) (*Memory, error) {
+//
+// The enclave is a [*Memory] handed out as a [ByteAccess]; reach its
+// [Freezer] capability by type assertion or [As]. On failure the result is a
+// nil interface.
+func NewMemory(data []byte) (ByteAccess, error) {
+	return byteAccess(newMemory(data))
+}
+
+// newMemory is [NewMemory] as a *Memory, for this package's own callers.
+func newMemory(data []byte) (*Memory, error) {
 	defer Wipe(data)
 	if len(data) == 0 {
 		return nil, ErrEmptyEnclave
@@ -75,7 +85,12 @@ func NewMemory(data []byte) (*Memory, error) {
 // untouched on every path. Prefer NewMemory; the src kept here is an
 // unprotected heap copy the caller must [Wipe] when done. The result is frozen
 // and the errors are NewMemory's.
-func NewMemoryCopy(src []byte) (*Memory, error) {
+func NewMemoryCopy(src []byte) (ByteAccess, error) {
+	return byteAccess(newMemoryCopy(src))
+}
+
+// newMemoryCopy is [NewMemoryCopy] as a *Memory.
+func newMemoryCopy(src []byte) (*Memory, error) {
 	if len(src) == 0 {
 		return nil, ErrEmptyEnclave
 	}
@@ -97,7 +112,7 @@ func NewMemoryCopy(src []byte) (*Memory, error) {
 //	}); err != nil {
 //	    return err
 //	}
-//	if err := e.Freeze(); err != nil { // a refused Freeze leaves it writable
+//	if err := e.(enclave.Freezer).Freeze(); err != nil { // a refused Freeze leaves it writable
 //	    return err
 //	}
 //
@@ -105,7 +120,12 @@ func NewMemoryCopy(src []byte) (*Memory, error) {
 // that a retained slice silently corrupts the material instead of faulting.
 // It returns [ErrInvalidSize] or [ErrLockedMemoryUnavailable], otherwise as
 // [NewMemory].
-func NewMemorySized(n int) (*Memory, error) {
+func NewMemorySized(n int) (ByteAccess, error) {
+	return byteAccess(newMemorySized(n))
+}
+
+// newMemorySized is [NewMemorySized] as a *Memory.
+func newMemorySized(n int) (*Memory, error) {
 	// newMapping is the size check: it refuses n with ErrInvalidSize.
 	m, err := newMapping(n)
 	return publish(m, err, nil, nil)
@@ -147,7 +167,7 @@ func (m *mapping) loadFrozen(src []byte) (*mapping, error) {
 // release, so release must be nil unless those pages are still locked: an
 // admitted caller refunds a charge nothing holds itself, at once. admitter is
 // the Allocator that admitted it, nil for an unbudgeted constructor.
-func publish(m *mapping, err error, release func(), admitter *Allocator) (*Memory, error) {
+func publish(m *mapping, err error, release func(), admitter *budgetAllocator) (*Memory, error) {
 	if err != nil {
 		adoptOrphan(err, release)
 		return nil, err
@@ -156,6 +176,15 @@ func publish(m *mapping, err error, release func(), admitter *Allocator) (*Memor
 	// first: otherwise a sweep could unmap the pages while the budget kept the
 	// charge.
 	return register(&memoryState{m: m, release: release, admitter: admitter}), nil
+}
+
+// byteAccess hands e out as a [ByteAccess], keeping a failed construction a
+// nil interface rather than one holding a nil *Memory.
+func byteAccess(e *Memory, err error) (ByteAccess, error) {
+	if e == nil {
+		return nil, err
+	}
+	return e, err
 }
 
 // WithBytes calls fn with a view of the locked pages and returns fn's error,
@@ -323,7 +352,7 @@ func (e *Memory) GoString() string {
 	return e.String()
 }
 
-// Backend returns the backend that made the enclave: the [*Allocator] that
+// Backend returns the backend that made the enclave: the [Allocator] that
 // admitted it, or [DefaultBackend] for an unbudgeted one. It is nil-safe, and
 // the same once destroyed.
 func (e *Memory) Backend() Backend {

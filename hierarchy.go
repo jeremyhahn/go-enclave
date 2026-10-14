@@ -253,7 +253,7 @@ func (s *sealerState) withDeadHierarchyCleanup(err error) error {
 // WithBackend: importing would be a blocking device call under mu, for one
 // unwrap of a generation that was itself minted in locked memory.
 func (s *sealerState) unwrapRetiredKEKLocked(kekBlob []byte) (*Memory, error) {
-	kek, err := NewMemorySized(kekBytes)
+	kek, err := newMemorySized(kekBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -468,7 +468,7 @@ func (s *sealerState) wrappingKey(ctx context.Context, root *Memory) (Handle, er
 	if s.importer == nil {
 		return root, nil
 	}
-	cp, err := NewMemorySized(root.Size())
+	cp, err := newMemorySized(root.Size())
 	if err != nil {
 		return nil, err
 	}
@@ -514,7 +514,7 @@ func (s *sealerState) unsealRoot(ctx context.Context) (*Memory, error) {
 	if err := fillRandom(salt); err != nil {
 		return nil, &SealError{Cause: err}
 	}
-	root, err := NewMemorySized(RootKeyBytes)
+	root, err := newMemorySized(RootKeyBytes)
 	if err != nil {
 		return nil, err
 	}

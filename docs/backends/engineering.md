@@ -151,8 +151,8 @@ dereferenced copy ([architecture](architecture.md#lifetime-and-ownership)).
 | `Lookup(name string) (Backend, error)` | The backend registered under `name`. |
 | `BackendNames() []string` | Every registered name, sorted, the default included. |
 | `As(v, target any) bool` | Sets `*target` to `v` when `v`'s dynamic type is assignable to it, else defers to `v`'s `As(any) bool` method. A nil or typed-nil `v` or a bad target returns `false` without panicking; a panic from `v`'s own `As` is not recovered. |
-| `(*Memory).Backend() Backend` | The `*Allocator` that admitted the enclave, else `DefaultBackend()` (a nil enclave included); unchanged by `Destroy`. |
-| `*Allocator` as `Backend` and `Importer` | Name `"locked-memory"`; `Import` is an admitted `New` that resolves `NewImportSpec` and refuses an `AlgorithmAES256GCM` key that is not 32 bytes with `ErrInvalidImport` ([budget](../locked-memory-budget/engineering.md)). Never registered. |
+| `(*Memory).Backend() Backend` | The `Allocator` that admitted the enclave, else `DefaultBackend()` (a nil enclave included); unchanged by `Destroy`. |
+| `Allocator` as `Backend` and `Importer` | Name `"locked-memory"`; `Import` is an admitted `New` that resolves `NewImportSpec` and refuses an `AlgorithmAES256GCM` key that is not 32 bytes with `ErrInvalidImport` ([budget](../locked-memory-budget/engineering.md)). Never registered. |
 | `SweepError.Backends`, `BackendSweepFailure{Backend; Err}` | `WipeAll`'s backend phase: one entry per registered `Sweeper` that failed, in name order ([shutdown-sweep](../shutdown-sweep/engineering.md)). |
 | `ErrBackendNotRegistered`, `BackendNotRegisteredError{Name}` | `Lookup` found no backend under `Name`. |
 | `ErrBackendExists`, `BackendExistsError{Name}` | `Register` found `Name` taken. |
@@ -172,7 +172,7 @@ dereferenced copy ([architecture](architecture.md#lifetime-and-ownership)).
    backend resolves to the same instance for the process's life. A name is a
    label, not an instance identity: `Lookup(h.Backend().Name())` returns the
    backend that made `h` only when the registered instance made it, never
-   for an injected, unregistered backend or a budgeted `*Allocator`. A
+   for an injected, unregistered backend or a budgeted `Allocator`. A
    refused `Register` changes nothing.
 3. **Backend code never runs under the registry lock.** `Register` calls
    `b.Name()` before taking the lock; `Lookup` and `BackendNames` call no
@@ -217,7 +217,7 @@ Texts are the sentinel's, then the detail with every name quoted
 `Lookup` and `BackendNames` take a read lock; `Register` a write lock. Each is
 a configuration-time call, never on a borrow. `As` uses reflection once per
 call. `(*Memory).Backend()` takes no lock: it returns the admitting
-`*Allocator` or a zero-size default.
+`Allocator` or a zero-size default.
 
 ## Configuration and persistence
 
@@ -234,7 +234,7 @@ wrapper) and every input that would make `errors.As` panic, `NewImportSpec`
 on every valid shape and every refusal, valid purpose and algorithm names,
 and each error's text and sentinel. Compile-time assertions
 in `backend.go` hold `*Memory` to `Handle`, `ByteAccess` and `Freezer`, and
-`*Allocator` to `Backend` and `Importer`. `allocator_backend_test.go` covers
+`Allocator` to `Backend` and `Importer`. `allocator_backend_test.go` covers
 the admitting allocator as `Backend()`, `Import`, and copies of `Memory` and
 `Allocator` sharing state; `wipeall_backends_test.go` covers the sweep phase.
 
@@ -242,7 +242,7 @@ Tests that register a backend remove it in `t.Cleanup` by editing the registry
 map directly; that is the only place a name is ever unbound.
 `make integration-test-backends` runs the `TestBackends_` tests in
 `test/integration/enclave`: registration, lookup and `As` through the public
-API, `NewImportSpec`, and the `*Allocator` as a backend that names itself,
+API, `NewImportSpec`, and the `Allocator` as a backend that names itself,
 imports into its budget and refuses an import it cannot honour.
 
 ## Testing a backend

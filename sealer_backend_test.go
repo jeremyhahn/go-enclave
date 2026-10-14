@@ -80,7 +80,7 @@ func (b *fakeImporter) Import(_ context.Context, material []byte, opts ...Import
 	if mode == importNil {
 		return nil, nil
 	}
-	m, err := NewMemoryCopy(material)
+	m, err := newMemoryCopy(material)
 	if err != nil {
 		return nil, err
 	}
@@ -194,14 +194,14 @@ type namedBackend struct{}
 
 func (namedBackend) Name() string { return "named-backend" }
 
-func sealForSeamTest(t *testing.T, material []byte) *Sealed {
+func sealForSeamTest(t *testing.T, material []byte) *sealedValue {
 	t.Helper()
 	s, err := NewSealer()
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
 	t.Cleanup(func() { _ = s.Destroy() })
-	v, err := s.Seal(t.Context(), append([]byte(nil), material...))
+	v, err := s.sealData(t.Context(), append([]byte(nil), material...))
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
@@ -325,7 +325,7 @@ func TestSealer_WithBackendIsValidated(t *testing.T) {
 		t.Fatalf("WithBackend(DefaultBackend()): %v", err)
 	}
 	defer s.Destroy()
-	v, err := s.Seal(t.Context(), []byte("default-backend-keys"))
+	v, err := s.sealData(t.Context(), []byte("default-backend-keys"))
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
@@ -349,9 +349,9 @@ func TestSealer_KeysLiveInTheBackend(t *testing.T) {
 				t.Fatalf("NewSealer: %v", err)
 			}
 
-			var vals []*Sealed
+			var vals []*sealedValue
 			for i := range 6 {
-				v, err := s.Seal(ctx, fmt.Appendf(nil, "backend-value-%d", i))
+				v, err := s.sealData(ctx, fmt.Appendf(nil, "backend-value-%d", i))
 				if err != nil {
 					t.Fatalf("Seal %d: %v", i, err)
 				}
@@ -408,7 +408,7 @@ func TestSealer_KeyHandleWithoutAEADOrBytesIsRefused(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewSealer: %v", err)
 		}
-		_, err = s.Seal(t.Context(), []byte("refused-key"))
+		_, err = s.sealData(t.Context(), []byte("refused-key"))
 		requireCapability(t, err, fakeImporterName, CapabilityAEAD)
 		_, handles := b.imported()
 		for _, h := range handles {

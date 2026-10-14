@@ -19,7 +19,7 @@ a peer choose where the process keeps its keys.
 | Use a handle | `h.Size()`, `h.IsAlive()`, `h.Destroy() error`, `h.Backend()` | N/A |
 | Where a handle's material is held | `h.Backend().Name()` | N/A |
 | Hold a sealer's keys in a backend | `enclave.WithBackend(b)`: see [sealing/api.md](../sealing/api.md) | N/A |
-| Open sealed material into a backend | `(*Sealed).OpenIn(ctx, b) (Handle, error)`: see [sealing/api.md](../sealing/api.md) | N/A |
+| Open sealed material into a backend | `Sealed.OpenIn(ctx, b) (Handle, error)`: see [sealing/api.md](../sealing/api.md) | N/A |
 | Test a handle for a capability | `ba, ok := h.(enclave.ByteAccess)` (likewise `Freezer`, `Deriver`, `AEAD`, `crypto.Signer`, `crypto.Decrypter`) | N/A |
 | Test a backend for a capability | `imp, ok := b.(enclave.Importer)` (likewise `Sweeper`, `Confiner`) | N/A |
 | Test for attestation, on either | `a, ok := h.(enclave.Attester)` (key evidence) or `a, ok := b.(enclave.Attester)` (platform evidence) | N/A |

@@ -13,6 +13,7 @@ package enclave_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -38,7 +39,7 @@ func TestLockedMemory_EnclaveMaterialLivesOnlyInItsEnclaveAndIsGoneAfterDestroy(
 		t.Run("NewMemorySized", func(t *testing.T) {
 			n := newNeedle(t)
 			e := enclaveFromNeedle(t, n)
-			if err := e.Freeze(); err != nil {
+			if err := e.(enclave.Freezer).Freeze(); err != nil {
 				t.Fatalf("Freeze: %v", err)
 			}
 			hits, scanned := sweep(t, n)
@@ -157,7 +158,7 @@ func TestLockedMemory_DestroyedEnclaveRefusesEveryAccess(t *testing.T) {
 		if err := e.WithBytes(func([]byte) error { called = true; return nil }); !errors.Is(err, enclave.ErrEnclaveDestroyed) || called {
 			t.Errorf("WithBytes after Destroy: err %v, callback ran %t; want ErrEnclaveDestroyed and no call", err, called)
 		}
-		if err := e.Freeze(); !errors.Is(err, enclave.ErrEnclaveDestroyed) {
+		if err := e.(enclave.Freezer).Freeze(); !errors.Is(err, enclave.ErrEnclaveDestroyed) {
 			t.Errorf("Freeze after Destroy: err %v, want ErrEnclaveDestroyed", err)
 		}
 		if ok, err := e.EqualTo([]byte{0}); ok || !errors.Is(err, enclave.ErrEnclaveDestroyed) {
@@ -171,7 +172,7 @@ func TestLockedMemory_DestroyedEnclaveRefusesEveryAccess(t *testing.T) {
 
 // destroyAndRequireGone destroys e and requires the material to be absent
 // from every readable mapping of the process afterwards.
-func destroyAndRequireGone(t *testing.T, e *enclave.Memory, n needle) {
+func destroyAndRequireGone(t *testing.T, e enclave.ByteAccess, n needle) {
 	t.Helper()
 	if err := e.Destroy(); err != nil {
 		t.Fatalf("Destroy: %v", err)
@@ -204,7 +205,7 @@ func TestLockedMemory_EnclaveAccessorsTellTheTruth(t *testing.T) {
 			t.Fatal("NewMemoryCopy changed its source; it must leave the caller's buffer as it found it")
 		}
 
-		for name, e := range map[string]*enclave.Memory{"Move": moved, "Copy": copied} {
+		for name, e := range map[string]enclave.ByteAccess{"Move": moved, "Copy": copied} {
 			if e.Size() != len(secret) {
 				t.Errorf("%s: Size = %d, want %d", name, e.Size(), len(secret))
 			}
@@ -217,7 +218,7 @@ func TestLockedMemory_EnclaveAccessorsTellTheTruth(t *testing.T) {
 			if ok, err := e.EqualTo([]byte("short")); ok || err != nil {
 				t.Errorf("%s: EqualTo(different length) = (%t, %v), want (false, nil)", name, ok, err)
 			}
-			if s := e.String(); strings.Contains(s, secret) || strings.Contains(s, secret[:8]) {
+			if s := fmt.Sprint(e); strings.Contains(s, secret) || strings.Contains(s, secret[:8]) {
 				t.Errorf("%s: String() leaks the material: %q", name, s)
 			}
 			// The borrow aliases the enclave's read-only pages (a write would fault).
@@ -241,7 +242,7 @@ func TestLockedMemory_EnclaveAccessorsTellTheTruth(t *testing.T) {
 			if err := e.WithBytes(func([]byte) error { return nil }); !errors.Is(err, enclave.ErrEnclaveDestroyed) {
 				t.Errorf("%s: WithBytes after Destroy = %v, want ErrEnclaveDestroyed", name, err)
 			}
-			if s := e.String(); !strings.Contains(strings.ToLower(s), "destroyed") {
+			if s := fmt.Sprint(e); !strings.Contains(strings.ToLower(s), "destroyed") {
 				t.Errorf("%s: String() after Destroy = %q, want it to say so", name, s)
 			}
 		}
@@ -316,7 +317,7 @@ func TestLockedMemory_DestroyedAndNilEnclavesAnswerSafely(t *testing.T) {
 		if err := e.Destroy(); err != nil {
 			t.Errorf("a second Destroy = %v, want nil (idempotent)", err)
 		}
-		if err := e.Freeze(); !errors.Is(err, enclave.ErrEnclaveDestroyed) {
+		if err := e.(enclave.Freezer).Freeze(); !errors.Is(err, enclave.ErrEnclaveDestroyed) {
 			t.Errorf("Freeze of a destroyed enclave = %v, want ErrEnclaveDestroyed", err)
 		}
 		if err := e.WithBytes(func([]byte) error { return nil }); !errors.Is(err, enclave.ErrEnclaveDestroyed) {

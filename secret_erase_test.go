@@ -34,15 +34,15 @@ func TestWithAEAD_ErasesTheKeyScheduleUnderRuntimeSecret(t *testing.T) {
 	// both stored forms so the needle is never a heap value.
 	sealOnce := func(t *testing.T, run func(ByteAccess, func(cipher.AEAD) error) error) (exact, swapped *Memory) {
 		t.Helper()
-		key, err := NewMemorySized(dekBytes)
+		key, err := newMemorySized(dekBytes)
 		if err != nil {
 			t.Fatalf("allocating the key: %v", err)
 		}
-		exact, err = NewMemorySized(dekBytes)
+		exact, err = newMemorySized(dekBytes)
 		if err != nil {
 			t.Fatalf("allocating a probe: %v", err)
 		}
-		swapped, err = NewMemorySized(dekBytes)
+		swapped, err = newMemorySized(dekBytes)
 		if err != nil {
 			t.Fatalf("allocating a probe: %v", err)
 		}

@@ -1,6 +1,6 @@
 # Locked-memory enclaves — API
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-12
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-14
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Transports
@@ -14,23 +14,25 @@ transport own those surfaces.
 
 | Capability | Embedded Go call | REST / gRPC / QUIC / MCP / Unix socket |
 |---|---|---|
-| Bring existing material into locked memory (move) | `enclave.NewMemory(data)` | N/A |
-| Bring existing material in (copy, source kept) | `enclave.NewMemoryCopy(src)` | N/A |
-| Generate in place | `enclave.NewMemorySized(n)` then `WithBytes`, `Freeze` | N/A |
-| Read under lock | `(*Memory).WithBytes(fn)`, `EqualTo(b) (bool, error)` | N/A |
-| Make read-only | `(*Memory).Freeze()` | N/A |
-| Inspect | `(*Memory).Size()`, `(*Memory).IsAlive()`, `(*Memory).String()` | N/A |
-| Mask under `%#v` | `(*Memory).GoString()` | N/A |
-| Release | `(*Memory).Destroy() error` | N/A |
-| Which backend holds it | `(*Memory).Backend() Backend` | N/A |
+| Bring existing material into locked memory (move) | `enclave.NewMemory(data) (ByteAccess, error)` | N/A |
+| Bring existing material in (copy, source kept) | `enclave.NewMemoryCopy(src) (ByteAccess, error)` | N/A |
+| Generate in place | `enclave.NewMemorySized(n) (ByteAccess, error)` then `WithBytes`, and `Freeze` through `Freezer` | N/A |
+| Read under lock | `ByteAccess.WithBytes(fn)`, `EqualTo(b) (bool, error)` | N/A |
+| Make read-only | `Freezer.Freeze()`: `enclave.As(e, &f)` or `e.(enclave.Freezer)` | N/A |
+| Inspect | `Handle.Size()`, `Handle.IsAlive()`; `%v` and `%s` print it redacted | N/A |
+| Mask under `%#v` | prints the same redacted text | N/A |
+| Release | `Handle.Destroy() error` | N/A |
+| Which backend holds it | `Handle.Backend() Backend` | N/A |
 | Cost of an enclave | `enclave.LockedSize(n) int64` | N/A |
 | Core-dump limit status (after `HardenProcess`) | `enclave.CoreDumpsDisabled() error` | N/A |
 | Opt-in process hardening | `enclave.HardenProcess() (ProcessHardening, error)` | N/A |
 | Zero a heap slice | `enclave.Wipe(b)` | N/A |
 
-`(*Memory).String()` returns `Memory(redacted)` for a live enclave and
-`Memory(destroyed)` once it is destroyed; `(*Memory).GoString()` returns the same
-text, so `%v`, `%s` and `%#v` never print the contents.
+The constructors return the `ByteAccess` interface; the enclave behind it is a
+`*Memory`, which is also a `Freezer`. Its `String()` returns `Memory(redacted)`
+for a live enclave and `Memory(destroyed)` once it is destroyed, and its
+`GoString()` returns the same text, so `%v`, `%s` and `%#v` never print the
+contents. A failed constructor returns a nil interface.
 
 ## Process hardening
 
@@ -57,7 +59,7 @@ caller does about it: [engineering.md](engineering.md#error-semantics).
 Request and response schemas are the Go signatures in
 [engineering.md](engineering.md#exported-surface); error mapping is in
 [engineering.md](engineering.md#error-semantics). There is no authentication or
-permission scope: anything in the process that holds the `*Memory` can
+permission scope: anything in the process that holds the enclave can
 use it. No result set is unbounded, so there is no pagination.
 
 ## Versioning

@@ -1,23 +1,23 @@
 # Locked-memory budget and admission — engineering contract
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-12
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-14
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Exported surface
 
 | Identifier | Contract |
 |---|---|
-| `NewAllocator(maxBytes int64) (*Allocator, error)` | Budget in locked bytes. Never checks a ceiling, on any path. |
-| `NewAllocatorWithinRLimit(maxBytes int64) (*Allocator, error)` | As `NewAllocator`, but refuses a budget above a **bounded** ceiling, and keeps that check for life on every raise. |
-| `(*Allocator).New(data []byte) (*Memory, error)` | Admitted `NewMemory`; wipes `data` on every path, including refusal. |
-| `(*Allocator).NewSized(n int) (*Memory, error)` | Admitted `NewMemorySized`. |
-| `(*Allocator).SetLimit(newLimit int64) error` | Raise, or lower without going below reservations. All-or-nothing. |
-| `(*Allocator).ForceLimit(newLimit int64) (int64, error)` | Accepts any non-negative budget; returns the over-subscription in bytes. |
-| `(*Allocator).TransferTo(dst *Allocator, n int64) error` | Moves `n` bytes of headroom to `dst` in one operation. |
-| `(*Allocator).InUse() int64` / `Limit() int64` / `Available() int64` | Observability snapshots; never an admission gate. `Available` clamps at 0. A nil or zero `Allocator` reports 0. |
-| `(*Allocator).Name() string` / `Import(ctx, material, opts...) (Handle, error)` | The locked-memory `Backend` (name `"locked-memory"`) and `Importer`: `Import` is an admitted `New` under the [backends](../backends/engineering.md) contract. An `*Allocator` is never registered; `(*Memory).Backend()` returns the one that admitted the enclave. |
-| `SetAllocator(a *Allocator) error` | Installs the process allocator. One-shot. Binary only. |
-| `ProcessAllocator() (*Allocator, error)` | Returns the installed allocator, lazily installing the default. Libraries call this. |
+| `NewAllocator(maxBytes int64) (Allocator, error)` | Budget in locked bytes. Never checks a ceiling, on any path. `Allocator` is an interface whose implementation is internal; a failure returns a nil interface. |
+| `NewAllocatorWithinRLimit(maxBytes int64) (Allocator, error)` | As `NewAllocator`, but refuses a budget above a **bounded** ceiling, and keeps that check for life on every raise. |
+| `Allocator.New(data []byte) (ByteAccess, error)` | Admitted `NewMemory`; wipes `data` on every path, including refusal. |
+| `Allocator.NewSized(n int) (ByteAccess, error)` | Admitted `NewMemorySized`; the enclave is also a `Freezer`. |
+| `Allocator.SetLimit(newLimit int64) error` | Raise, or lower without going below reservations. All-or-nothing. |
+| `Allocator.ForceLimit(newLimit int64) (int64, error)` | Accepts any non-negative budget; returns the over-subscription in bytes. |
+| `Allocator.TransferTo(dst Allocator, n int64) error` | Moves `n` bytes of headroom to `dst` in one operation. A `dst` this package did not build: `ErrAllocatorNotConstructed`. |
+| `Allocator.InUse() int64` / `Limit() int64` / `Available() int64` | Observability snapshots; never an admission gate. `Available` clamps at 0. |
+| `Allocator.Name() string` / `Import(ctx, material, opts...) (Handle, error)` | The locked-memory `Backend` (name `"locked-memory"`) and `Importer`: `Import` is an admitted `New` under the [backends](../backends/engineering.md) contract. An `Allocator` is never registered; `(*Memory).Backend()` returns the one that admitted the enclave. |
+| `SetAllocator(a Allocator) error` | Installs the process allocator. One-shot. Binary only. Nil: `ErrNilAllocator`; an `Allocator` this package did not build: `ErrAllocatorNotConstructed`. |
+| `ProcessAllocator() (Allocator, error)` | Returns the installed allocator, lazily installing the default. Libraries call this. |
 | `DiscoverLockedMemoryLimit() (LockedMemoryLimit, error)` | Snapshot of the ceiling and its source. |
 | `LockedMemoryLimit{Bytes int64; Bounded bool; Source LimitSource}` | `Bytes` is a ceiling only when `Bounded`; it is populated for `LimitNotEnforced` and zero when nothing was read. |
 | `LimitSource`: `LimitUnknown`, `LimitRLimit`, `LimitUnlimited`, `LimitNotEnforced`, `LimitUnsupported` | Where the figure came from; each value: [api.md](api.md#limitsource-values). Only `LimitRLimit` is `Bounded`. |
@@ -92,10 +92,11 @@
    gives `free > limit`. `budgetSnapshot` rejects any negative difference and
    re-reads under the read lock, so `BudgetError.InUse` is never negative while
    the ordinary refusal takes no lock.
-10. **A copy is the same allocator.** `Allocator` is a handle on one
-    unexported state; a copied value admits against the same budget, so it
-    can never admit the same headroom twice (`go vet` flags the copy). A zero
-    `Allocator{}` has no state and refuses every call with
+10. **A copy is the same allocator.** `Allocator` is an interface over one
+    internal implementation holding one unexported state; every copy admits
+    against the same budget, so it can never admit the same headroom twice.
+    `SetAllocator` and `TransferTo` need that state, so they refuse an
+    `Allocator` implemented outside this package with
     `ErrAllocatorNotConstructed`.
 
 ## Error semantics
@@ -108,8 +109,8 @@
 | `ErrInvalidTransfer` | `n <= 0`, `dst == nil`, or `dst` is the source or a copy of it | Yes |
 | `ErrBudgetExceedsRLimit` (`*RLimitError`) | Budget or raise above a bounded ceiling (opted-in allocators) | Yes |
 | `ErrLimitDiscoveryFailed` (`*LimitDiscoveryError`) | `getrlimit` failed: construction, an opted-in raise, or the lazy default | Yes — nothing was compared, so nothing passed. |
-| `ErrNilAllocator` | `SetAllocator(nil)`; `OpenIn` given a nil `*Allocator` (a bare nil `Backend` is `ErrInvalidBackend`); `New`, `NewSized`, `SetLimit`, `ForceLimit`, `TransferTo` on a nil `*Allocator` (`New` still wipes `data`) | Yes — never falls back to unbudgeted. |
-| `ErrAllocatorNotConstructed` | The same calls (and `Import`) on a zero `Allocator{}`, which no constructor returned; `New` and `Import` still wipe their input | Yes — a zero value has no budget to admit against. |
+| `ErrNilAllocator` | `SetAllocator(nil)` (a nil `Backend` given to `OpenIn` is `ErrInvalidBackend`) | Yes — never falls back to unbudgeted. |
+| `ErrAllocatorNotConstructed` | `SetAllocator` or `TransferTo` given an `Allocator` this package did not build | Yes — it has no budget to admit against. |
 | `ErrAllocatorInstalled` | Second `SetAllocator`, or `SetAllocator` after a `ProcessAllocator` call that installed the lazy default (a discovery failure installs nothing) | Yes |
 | `ErrLockedMemoryUnavailable` | Admitted, but the kernel refused | Reservation refunded unless locked pages were left behind (invariant 4). |
 

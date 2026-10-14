@@ -359,7 +359,7 @@ var (
 	_ ByteAccess = (*Memory)(nil)
 	_ Freezer    = (*Memory)(nil)
 	_ Backend    = lockedMemory{}
-	_ Importer   = (*Allocator)(nil)
+	_ Importer   = (*budgetAllocator)(nil)
 )
 
 // DefaultBackend returns the locked-memory backend, the one every constructor

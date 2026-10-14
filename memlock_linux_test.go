@@ -166,15 +166,15 @@ func enforcedContract(t *testing.T, target uint64) {
 	t.Log(limitDiscovered)
 
 	// Control: a budget equal to the ceiling is accepted and usable.
-	a, err := NewAllocatorWithinRLimit(int64(target))
+	a, err := newBudgetAllocatorWithinRLimit(int64(target))
 	if err != nil {
-		t.Fatalf("NewAllocatorWithinRLimit(%d) refused a budget equal to the ceiling: %v", target, err)
+		t.Fatalf("newBudgetAllocatorWithinRLimit(%d) refused a budget equal to the ceiling: %v", target, err)
 	}
 	if a.Limit() != int64(target) {
 		t.Fatalf("Limit = %d, want the budget asked for (%d)", a.Limit(), target)
 	}
 	const material = "material-under-an-injected-ceiling"
-	e, err := a.New([]byte(material))
+	e, err := a.admitData([]byte(material))
 	if err != nil {
 		t.Fatalf("allocating through the accepted allocator: %v", err)
 	}
@@ -187,12 +187,12 @@ func enforcedContract(t *testing.T, target uint64) {
 	// One byte over: with the control, pins the comparison at the exact
 	// discovered figure.
 	for _, over := range []int64{int64(target) + 1, int64(target) * 2} {
-		bad, err := NewAllocatorWithinRLimit(over)
+		bad, err := newBudgetAllocatorWithinRLimit(over)
 		if bad != nil {
-			t.Fatalf("NewAllocatorWithinRLimit(%d) returned an allocator despite a %d-byte ceiling", over, target)
+			t.Fatalf("newBudgetAllocatorWithinRLimit(%d) returned an allocator despite a %d-byte ceiling", over, target)
 		}
 		if !errors.Is(err, ErrBudgetExceedsRLimit) {
-			t.Fatalf("NewAllocatorWithinRLimit(%d) err = %v, want ErrBudgetExceedsRLimit", over, err)
+			t.Fatalf("newBudgetAllocatorWithinRLimit(%d) err = %v, want ErrBudgetExceedsRLimit", over, err)
 		}
 		// Distinguishable from its neighbors on the real path.
 		if errors.Is(err, ErrInvalidBudget) || errors.Is(err, ErrLockedMemoryUnavailable) || errors.Is(err, ErrBudgetExhausted) {
@@ -227,7 +227,7 @@ func unenforcedContract(t *testing.T, target uint64) {
 		t.Fatalf("discovered %+v, want the injected %d bytes as an unenforced, unbounded limit", limit, target)
 	}
 
-	a, err := NewAllocatorWithinRLimit(int64(target) * 2)
+	a, err := newBudgetAllocatorWithinRLimit(int64(target) * 2)
 	if err != nil {
 		t.Fatalf("NewAllocatorWithinRLimit refused a budget against a limit the kernel will not enforce: %v", err)
 	}
@@ -378,9 +378,9 @@ func retuneEnforcedContract(t *testing.T, high, low uint64, setCeiling func(uint
 	hi := int64(high)
 	lo := int64(low)
 
-	a, err := NewAllocatorWithinRLimit(hi / 2)
+	a, err := newBudgetAllocatorWithinRLimit(hi / 2)
 	if err != nil {
-		t.Fatalf("NewAllocatorWithinRLimit(%d) under a %d-byte ceiling: %v", hi/2, hi, err)
+		t.Fatalf("newBudgetAllocatorWithinRLimit(%d) under a %d-byte ceiling: %v", hi/2, hi, err)
 	}
 
 	// Control: a raise that fits is accepted and the allocator still works.
@@ -391,7 +391,7 @@ func retuneEnforcedContract(t *testing.T, high, low uint64, setCeiling func(uint
 		t.Fatalf("Limit = %d, want the raised %d", a.Limit(), hi-pageSize)
 	}
 	const material = "material-under-a-retuned-ceiling"
-	e, err := a.New([]byte(material))
+	e, err := a.admitData([]byte(material))
 	if err != nil {
 		t.Fatalf("allocating after an accepted raise: %v", err)
 	}
@@ -484,11 +484,11 @@ func retuneEnforcedContract(t *testing.T, high, low uint64, setCeiling func(uint
 	t.Log(retuneForceOverrode)
 
 	// A transfer is a raise on the receiving side and is judged the same way.
-	dst, err := NewAllocatorWithinRLimit(hi / 8)
+	dst, err := newBudgetAllocatorWithinRLimit(hi / 8)
 	if err != nil {
-		t.Fatalf("NewAllocatorWithinRLimit(%d): %v", hi/8, err)
+		t.Fatalf("newBudgetAllocatorWithinRLimit(%d): %v", hi/8, err)
 	}
-	src, err := NewAllocator(hi * 8)
+	src, err := newBudgetAllocator(hi * 8)
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
@@ -512,7 +512,7 @@ func retuneEnforcedContract(t *testing.T, high, low uint64, setCeiling func(uint
 	t.Log(retuneTransferJudged)
 
 	// An allocator that never opted in is never judged by the ceiling.
-	plain, err := NewAllocator(hi / 8)
+	plain, err := newBudgetAllocator(hi / 8)
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
@@ -522,7 +522,7 @@ func retuneEnforcedContract(t *testing.T, high, low uint64, setCeiling func(uint
 	if plain.Limit() != math.MaxInt64 {
 		t.Fatalf("plain.Limit = %d, want %d", plain.Limit(), int64(math.MaxInt64))
 	}
-	plainDst, err := NewAllocator(pageSize)
+	plainDst, err := newBudgetAllocator(pageSize)
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
@@ -545,7 +545,7 @@ func retuneUnenforcedContract(t *testing.T, high uint64) {
 		t.Fatalf("discovered %+v, want an unenforced, unbounded limit", limit)
 	}
 
-	a, err := NewAllocatorWithinRLimit(int64(high))
+	a, err := newBudgetAllocatorWithinRLimit(int64(high))
 	if err != nil {
 		t.Fatalf("NewAllocatorWithinRLimit under an unenforced limit: %v", err)
 	}

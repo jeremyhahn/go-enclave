@@ -56,12 +56,12 @@ func TestLockedMemory_EnclaveMappingsAreLockedUndumpableAndGuarded(t *testing.T)
 
 		type subject struct {
 			name     string
-			e        *enclave.Memory
+			e        enclave.ByteAccess
 			size     int
 			writable bool
 		}
 		var subjects []subject
-		add := func(name string, size int, writable bool, e *enclave.Memory, err error) {
+		add := func(name string, size int, writable bool, e enclave.ByteAccess, err error) {
 			t.Helper()
 			if err != nil {
 				t.Fatalf("%s: %v", name, err)
@@ -78,7 +78,7 @@ func TestLockedMemory_EnclaveMappingsAreLockedUndumpableAndGuarded(t *testing.T)
 		add("NewMemorySized (unfrozen)", 64, true, e, err)
 		e, err = enclave.NewMemorySized(64)
 		if err == nil {
-			err = e.Freeze()
+			err = e.(enclave.Freezer).Freeze()
 		}
 		add("NewMemorySized + Freeze", 64, false, e, err)
 		large := 3*page + 1

@@ -48,7 +48,7 @@ func TestSealed_RoundTrip(t *testing.T) {
 	freshProcessSealer(t)
 	src := append([]byte(nil), sealedMaterial...)
 
-	s, err := NewSealed(t.Context(), src)
+	s, err := newSealed(t.Context(), src)
 	if err != nil {
 		t.Fatalf("NewSealed: %v", err)
 	}
@@ -80,13 +80,93 @@ func TestSealed_RoundTrip(t *testing.T) {
 	}
 }
 
+// TestNewSealed_ReturnsTheInterface pins the shape of every exported seal
+// constructor: a [Sealed] backed by this package's implementation, an Open
+// that hands out a [ByteAccess], and a nil interface on failure.
+func TestNewSealed_ReturnsTheInterface(t *testing.T) {
+	freshProcessSealer(t)
+	s, err := NewSealer()
+	if err != nil {
+		t.Fatalf("NewSealer: %v", err)
+	}
+	defer s.Destroy()
+	ctx := t.Context()
+	src := func(t *testing.T) Handle {
+		m, err := newMemory([]byte("material"))
+		if err != nil {
+			t.Fatalf("NewMemory: %v", err)
+		}
+		t.Cleanup(func() { _ = m.Destroy() })
+		return m
+	}
+
+	ctors := map[string]func(t *testing.T) (Sealed, error){
+		"NewSealed":     func(*testing.T) (Sealed, error) { return NewSealed(ctx, []byte("material")) },
+		"NewSealedFrom": func(t *testing.T) (Sealed, error) { return NewSealedFrom(ctx, src(t)) },
+		"Sealer.Seal":   func(*testing.T) (Sealed, error) { return s.Seal(ctx, []byte("material")) },
+		"SealFrom":      func(t *testing.T) (Sealed, error) { return s.SealFrom(ctx, src(t)) },
+	}
+	for name, ctor := range ctors {
+		t.Run(name, func(t *testing.T) {
+			v, err := ctor(t)
+			if err != nil {
+				t.Fatalf("%s: %v", name, err)
+			}
+			defer v.Destroy()
+			if _, ok := v.(*sealedValue); !ok {
+				t.Errorf("%s returned a %T, want *sealedValue", name, v)
+			}
+			e, err := v.Open(ctx)
+			if err != nil {
+				t.Fatalf("%s: Open: %v", name, err)
+			}
+			defer e.Destroy()
+			if _, ok := e.(*Memory); !ok {
+				t.Errorf("%s: Open returned a %T, want *Memory", name, e)
+			}
+			if !holds(e, []byte("material")) {
+				t.Errorf("%s: the opened enclave does not hold the material", name)
+			}
+		})
+	}
+
+	failing := map[string]func() (Sealed, error){
+		"NewSealed":     func() (Sealed, error) { return NewSealed(ctx, nil) },
+		"NewSealedFrom": func() (Sealed, error) { return NewSealedFrom(ctx, nil) },
+		"Sealer.Seal":   func() (Sealed, error) { return (*Sealer)(nil).Seal(ctx, []byte("material")) },
+		"SealFrom":      func() (Sealed, error) { return s.SealFrom(ctx, nil) },
+	}
+	for name, ctor := range failing {
+		t.Run(name+"/failure", func(t *testing.T) {
+			v, err := ctor()
+			if err == nil {
+				t.Fatalf("%s: err = nil, want a failure", name)
+			}
+			if v != nil {
+				t.Errorf("%s returned %#v on failure, want a nil interface", name, v)
+			}
+		})
+	}
+
+	v, err := s.sealData(ctx, []byte("material"))
+	if err != nil {
+		t.Fatalf("Seal: %v", err)
+	}
+	if err := v.Destroy(); err != nil {
+		t.Fatalf("Destroy: %v", err)
+	}
+	if e, err := Sealed(v).Open(ctx); !errors.Is(err, ErrEnclaveDestroyed) || e != nil {
+		t.Errorf("Open of a destroyed value = (%#v, %v), want a nil interface and ErrEnclaveDestroyed", e, err)
+	}
+}
+
 // TestSealed_NoPlaintextAtRest pins that between Opens the material is
 // not readable: neither envelope half contains the plaintext or any long
 // prefix of it.
 func TestSealed_NoPlaintextAtRest(t *testing.T) {
 	freshProcessSealer(t)
 	src := append([]byte(nil), sealedMaterial...)
-	s, err := NewSealed(t.Context(), src)
+	s, err := newSealed(t.Context(), src)
 	if err != nil {
 		t.Fatalf("NewSealed: %v", err)
 	}
@@ -117,13 +197,13 @@ func TestSealed_NoPlaintextAtRest(t *testing.T) {
 // break. A zeroed-nonce mutant passes every other test in this file.
 func TestSealed_SealIsNonDeterministic(t *testing.T) {
 	freshProcessSealer(t)
-	first, err := NewSealed(t.Context(), append([]byte(nil), sealedMaterial...))
+	first, err := newSealed(t.Context(), append([]byte(nil), sealedMaterial...))
 	if err != nil {
 		t.Fatalf("NewSealed: %v", err)
 	}
 	defer first.Destroy()
 
-	second, err := NewSealed(t.Context(), append([]byte(nil), sealedMaterial...))
+	second, err := newSealed(t.Context(), append([]byte(nil), sealedMaterial...))
 	if err != nil {
 		t.Fatalf("NewSealed: %v", err)
 	}
@@ -139,7 +219,7 @@ func TestSealed_SealIsNonDeterministic(t *testing.T) {
 	}
 
 	// Both must still open to the same material — different bytes, same value.
-	for _, s := range []*Sealed{first, second} {
+	for _, s := range []*sealedValue{first, second} {
 		e, err := s.Open(t.Context())
 		if err != nil {
 			t.Fatalf("Open: %v", err)
@@ -158,7 +238,7 @@ func TestSealed_SealIsNonDeterministic(t *testing.T) {
 // show up as a position that opens successfully after being altered.
 func TestSealed_DetectsTampering(t *testing.T) {
 	freshProcessSealer(t)
-	half := func(s *Sealed, sealed bool) []byte {
+	half := func(s *sealedValue, sealed bool) []byte {
 		if sealed {
 			return s.sealed
 		}
@@ -179,7 +259,7 @@ func TestSealed_DetectsTampering(t *testing.T) {
 		{"blob last byte", false, func(n int) int { return n - 1 }},
 	} {
 		t.Run(pos.name, func(t *testing.T) {
-			s, err := NewSealed(t.Context(), append([]byte(nil), sealedMaterial...))
+			s, err := newSealed(t.Context(), append([]byte(nil), sealedMaterial...))
 			if err != nil {
 				t.Fatalf("NewSealed: %v", err)
 			}
@@ -220,7 +300,7 @@ func TestSealed_DetectsTampering(t *testing.T) {
 // frame cannot even be parsed. All must be refused rather than indexed into.
 func TestSealed_TruncationIsRejected(t *testing.T) {
 	freshProcessSealer(t)
-	s, err := NewSealed(t.Context(), append([]byte(nil), sealedMaterial...))
+	s, err := newSealed(t.Context(), append([]byte(nil), sealedMaterial...))
 	if err != nil {
 		t.Fatalf("NewSealed: %v", err)
 	}
@@ -269,7 +349,7 @@ func TestSealed_TruncationIsRejected(t *testing.T) {
 // one affects neither the other nor the sealed value it came from.
 func TestSealed_OpensAreIndependent(t *testing.T) {
 	freshProcessSealer(t)
-	s, err := NewSealed(t.Context(), append([]byte(nil), sealedMaterial...))
+	s, err := newSealed(t.Context(), append([]byte(nil), sealedMaterial...))
 	if err != nil {
 		t.Fatalf("NewSealed: %v", err)
 	}
@@ -317,7 +397,7 @@ func TestSealed_OpensAreIndependent(t *testing.T) {
 // `defer s.Destroy()` without thinking about it.
 func TestSealed_Lifecycle(t *testing.T) {
 	freshProcessSealer(t)
-	s, err := NewSealed(t.Context(), append([]byte(nil), sealedMaterial...))
+	s, err := newSealed(t.Context(), append([]byte(nil), sealedMaterial...))
 	if err != nil {
 		t.Fatalf("NewSealed: %v", err)
 	}
@@ -349,7 +429,7 @@ func TestSealed_Lifecycle(t *testing.T) {
 		t.Errorf("String = %q after Destroy", got)
 	}
 
-	var nilSealed *Sealed
+	var nilSealed *sealedValue
 	nilSealed.Destroy() // must not panic
 	if nilSealed.IsAlive() {
 		t.Error("IsAlive = true on a nil sealed enclave")
@@ -366,7 +446,7 @@ func TestSealed_Lifecycle(t *testing.T) {
 func TestSealed_Empty(t *testing.T) {
 	for name, in := range map[string][]byte{"nil": nil, "empty": {}} {
 		t.Run(name, func(t *testing.T) {
-			s, err := NewSealed(t.Context(), in)
+			s, err := newSealed(t.Context(), in)
 			if !errors.Is(err, ErrEmptyEnclave) {
 				t.Errorf("NewSealed(t.Context(), %s) = %v, want ErrEmptyEnclave", name, err)
 			}
@@ -388,7 +468,7 @@ func TestSealed_Sizes(t *testing.T) {
 		t.Run(fmt.Sprintf("%d", n), func(t *testing.T) {
 			want := bytes.Repeat([]byte{byte(n % 251)}, n)
 
-			s, err := NewSealed(t.Context(), append([]byte(nil), want...))
+			s, err := newSealed(t.Context(), append([]byte(nil), want...))
 			if err != nil {
 				t.Fatalf("NewSealed(t.Context(), %d): %v", n, err)
 			}
@@ -423,7 +503,7 @@ func TestSealed_Concurrent(t *testing.T) {
 	freshProcessSealer(t)
 	const goroutines, iterations = 16, 50
 
-	s, err := NewSealed(t.Context(), append([]byte(nil), sealedMaterial...))
+	s, err := newSealed(t.Context(), append([]byte(nil), sealedMaterial...))
 	if err != nil {
 		t.Fatalf("NewSealed: %v", err)
 	}
@@ -469,7 +549,7 @@ func TestSealed_Concurrent(t *testing.T) {
 func TestSealed_SizeMismatchIsRejected(t *testing.T) {
 	freshProcessSealer(t)
 	for _, delta := range []int{+1, +64, -1} {
-		s, err := NewSealed(t.Context(), append([]byte(nil), sealedMaterial...))
+		s, err := newSealed(t.Context(), append([]byte(nil), sealedMaterial...))
 		if err != nil {
 			t.Fatalf("NewSealed: %v", err)
 		}
@@ -528,7 +608,7 @@ func TestEnclaves_GoStringIsRedacted(t *testing.T) {
 		t.Fatalf("NewSealer: %v", err)
 	}
 	t.Cleanup(func() { _ = s.Destroy() })
-	v, err := s.Seal(ctx, []byte("gostring-material"))
+	v, err := s.sealData(ctx, []byte("gostring-material"))
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
@@ -556,7 +636,7 @@ func TestEnclaves_GoStringIsRedacted(t *testing.T) {
 func TestSealed_WipeAllFailsClosed(t *testing.T) {
 	freshProcessSealer(t)
 
-	s, err := NewSealed(t.Context(), append([]byte(nil), sealedMaterial...))
+	s, err := newSealed(t.Context(), append([]byte(nil), sealedMaterial...))
 	if err != nil {
 		t.Fatalf("NewSealed: %v", err)
 	}
@@ -597,7 +677,7 @@ func TestSealed_WipeAllFailsClosed(t *testing.T) {
 
 	// And sealing does NOT resume: no silent regeneration, ever. This is the
 	// assertion the regeneration mutant fails.
-	if fresh, err := NewSealed(t.Context(), append([]byte(nil), sealedMaterial...)); !errors.Is(err, ErrSealerWiped) {
+	if fresh, err := newSealed(t.Context(), append([]byte(nil), sealedMaterial...)); !errors.Is(err, ErrSealerWiped) {
 		t.Errorf("NewSealed after the sweep = %v, want ErrSealerWiped: the sealer must fail closed, never re-key", err)
 		if fresh != nil {
 			fresh.Destroy()
@@ -616,7 +696,7 @@ func TestSealed_WipeAllFailsClosed(t *testing.T) {
 
 	// Explicit re-initialization is a NEW Sealer, and it works: the sweep
 	// retired this process's keys, not the machinery.
-	v, err := replacement.Seal(t.Context(), append([]byte(nil), sealedMaterial...))
+	v, err := replacement.sealData(t.Context(), append([]byte(nil), sealedMaterial...))
 	if err != nil {
 		t.Fatalf("Seal on a fresh explicit Sealer after the sweep: %v", err)
 	}
@@ -647,7 +727,7 @@ func TestSealed_OpenableReportsTheSweep(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
-	v, err := s.Seal(t.Context(), append([]byte(nil), sealedMaterial...))
+	v, err := s.sealData(t.Context(), append([]byte(nil), sealedMaterial...))
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
@@ -694,13 +774,13 @@ func TestSealed_OpenableSeparatesASweepFromADestroy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
-	swept, err := s.Seal(t.Context(), append([]byte(nil), sealedMaterial...))
+	swept, err := s.sealData(t.Context(), append([]byte(nil), sealedMaterial...))
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
 	defer swept.Destroy()
 
-	destroyed, err := s.Seal(t.Context(), append([]byte(nil), sealedMaterial...))
+	destroyed, err := s.sealData(t.Context(), append([]byte(nil), sealedMaterial...))
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
@@ -727,7 +807,7 @@ func TestSealed_OpenableOnDestroyedAndNilValues(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
-	v, err := s.Seal(t.Context(), append([]byte(nil), sealedMaterial...))
+	v, err := s.sealData(t.Context(), append([]byte(nil), sealedMaterial...))
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
@@ -746,9 +826,9 @@ func TestSealed_OpenableOnDestroyedAndNilValues(t *testing.T) {
 		t.Errorf("Openable after a second Destroy = %v, want ErrEnclaveDestroyed", err)
 	}
 
-	var nilValue *Sealed
+	var nilValue *sealedValue
 	if err := nilValue.Openable(); !errors.Is(err, ErrEnclaveDestroyed) {
-		t.Errorf("(*Sealed)(nil).Openable() = %v, want ErrEnclaveDestroyed", err)
+		t.Errorf("(*sealedValue)(nil).Openable() = %v, want ErrEnclaveDestroyed", err)
 	}
 }
 
@@ -766,7 +846,7 @@ func TestSealed_OpenableSplitsByMode(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewSealer: %v", err)
 		}
-		v, err := s.Seal(t.Context(), append([]byte(nil), sealedMaterial...))
+		v, err := s.sealData(t.Context(), append([]byte(nil), sealedMaterial...))
 		if err != nil {
 			t.Fatalf("Seal: %v", err)
 		}
@@ -792,11 +872,11 @@ func TestSealed_OpenableSplitsByMode(t *testing.T) {
 	})
 
 	t.Run("softwareProviderRootDoesNot", func(t *testing.T) {
-		s, err := NewSealer(WithKeyProtector(NewSoftwareProvider()))
+		s, err := NewSealer(WithKeyProtector(newSoftwareProvider()))
 		if err != nil {
 			t.Fatalf("NewSealer: %v", err)
 		}
-		v, err := s.Seal(t.Context(), append([]byte(nil), sealedMaterial...))
+		v, err := s.sealData(t.Context(), append([]byte(nil), sealedMaterial...))
 		if err != nil {
 			t.Fatalf("Seal: %v", err)
 		}
@@ -829,9 +909,9 @@ func TestWipeAll_DoesNotSweepSealeds(t *testing.T) {
 	}
 
 	const n = 5
-	values := make([]*Sealed, 0, n)
+	values := make([]*sealedValue, 0, n)
 	for i := 0; i < n; i++ {
-		v, err := s.Seal(t.Context(), append([]byte(nil), sealedMaterial...))
+		v, err := s.sealData(t.Context(), append([]byte(nil), sealedMaterial...))
 		if err != nil {
 			t.Fatalf("Seal %d: %v", i, err)
 		}
@@ -882,7 +962,7 @@ func TestSealed_OpenableClosesTheExternalProviderFailOpen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
-	v, err := s.Seal(t.Context(), append([]byte(nil), sealedMaterial...))
+	v, err := s.sealData(t.Context(), append([]byte(nil), sealedMaterial...))
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
@@ -925,7 +1005,7 @@ func TestSealed_OpenableBelievesAProviderThatReports(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewSealer: %v", err)
 		}
-		v, err := s.Seal(t.Context(), append([]byte(nil), sealedMaterial...))
+		v, err := s.sealData(t.Context(), append([]byte(nil), sealedMaterial...))
 		if err != nil {
 			t.Fatalf("Seal: %v", err)
 		}
@@ -954,7 +1034,7 @@ func TestSealed_OpenableBelievesAProviderThatReports(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewSealer: %v", err)
 		}
-		v, err := s.Seal(t.Context(), append([]byte(nil), sealedMaterial...))
+		v, err := s.sealData(t.Context(), append([]byte(nil), sealedMaterial...))
 		if err != nil {
 			t.Fatalf("Seal: %v", err)
 		}
@@ -988,7 +1068,7 @@ func TestSealed_OpenableUnknownOnlyAfterASweep(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
-	v, err := s.Seal(t.Context(), append([]byte(nil), sealedMaterial...))
+	v, err := s.sealData(t.Context(), append([]byte(nil), sealedMaterial...))
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
@@ -1029,7 +1109,7 @@ func TestSealed_OpenableGenerationDoesNotAffectModeRootKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
-	v, err := s.Seal(t.Context(), append([]byte(nil), sealedMaterial...))
+	v, err := s.sealData(t.Context(), append([]byte(nil), sealedMaterial...))
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
@@ -1057,7 +1137,7 @@ func TestSealed_OpenableGenerationDoesNotAffectModeRootKey(t *testing.T) {
 func TestWipeAll_BumpsTheGenerationBeforeDestroying(t *testing.T) {
 	freshProcessSealer(t)
 
-	e, err := NewMemoryCopy([]byte("material that the sweep will destroy"))
+	e, err := newMemoryCopy([]byte("material that the sweep will destroy"))
 	if err != nil {
 		t.Fatalf("NewMemoryCopy: %v", err)
 	}
@@ -1138,7 +1218,7 @@ func TestSealed_OpenableSuspectsASealThatOverlappedASweep(t *testing.T) {
 
 	var (
 		mu               sync.Mutex
-		v                *Sealed
+		v                *sealedValue
 		sealErr          error
 		parked           bool
 		genAtSeal        uint64
@@ -1151,7 +1231,7 @@ func TestSealed_OpenableSuspectsASealThatOverlappedASweep(t *testing.T) {
 		defer mu.Unlock()
 		parked = true
 		genAtSeal = sweepGeneration()
-		v, sealErr = s.Seal(t.Context(), append([]byte(nil), sealedMaterial...))
+		v, sealErr = s.sealData(t.Context(), append([]byte(nil), sealedMaterial...))
 
 		// Asked inside the window: the count still equals what the seal
 		// recorded, so only the odd generation shows a sweep was underway.
@@ -1207,11 +1287,11 @@ func TestSealer_ProviderHealthIsIgnoredInRootKeyMode(t *testing.T) {
 	freshProcessSealer(t)
 
 	called := false
-	s, err := NewSealer(WithRootUnsealer(wipedReportingUnsealer{NewSoftwareProvider(), &called}))
+	s, err := NewSealer(WithRootUnsealer(wipedReportingUnsealer{newSoftwareProvider(), &called}))
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
-	v, err := s.Seal(t.Context(), append([]byte(nil), sealedMaterial...))
+	v, err := s.sealData(t.Context(), append([]byte(nil), sealedMaterial...))
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
@@ -1295,8 +1375,8 @@ func openBudget(pages int64) int64 {
 }
 
 // openInAllocator is v.OpenIn(ctx, a), as the *Memory it returns for an
-// *Allocator.
-func openInAllocator(ctx context.Context, v *Sealed, a *Allocator) (*Memory, error) {
+// *budgetAllocator.
+func openInAllocator(ctx context.Context, v *sealedValue, a *budgetAllocator) (*Memory, error) {
 	h, err := v.OpenIn(ctx, a)
 	if err != nil {
 		return nil, err
@@ -1306,13 +1386,13 @@ func openInAllocator(ctx context.Context, v *Sealed, a *Allocator) (*Memory, err
 
 // sealForBudgetTest returns a sealed value under a private ModeRootKey sealer,
 // so nothing here depends on (or disturbs) the process sealer.
-func sealForBudgetTest(t *testing.T) *Sealed {
+func sealForBudgetTest(t *testing.T) *sealedValue {
 	t.Helper()
 	s, err := NewSealer()
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
-	v, err := s.Seal(t.Context(), append([]byte(nil), sealedMaterial...))
+	v, err := s.sealData(t.Context(), append([]byte(nil), sealedMaterial...))
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
@@ -1326,7 +1406,7 @@ func sealForBudgetTest(t *testing.T) *Sealed {
 func TestSealed_OpenInAdmitsTheDestination(t *testing.T) {
 	v := sealForBudgetTest(t)
 
-	a, err := NewAllocator(openBudget(8))
+	a, err := newBudgetAllocator(openBudget(8))
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
@@ -1360,7 +1440,7 @@ func TestSealed_OpenInAdmitsTheDestination(t *testing.T) {
 func TestSealed_OpenInReturnsTheReservationOnDestroy(t *testing.T) {
 	v := sealForBudgetTest(t)
 
-	a, err := NewAllocator(openBudget(8))
+	a, err := newBudgetAllocator(openBudget(8))
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
@@ -1410,9 +1490,9 @@ func TestSealed_OpenInRefusesANilAllocator(t *testing.T) {
 	}
 
 	// A nil RECEIVER is a different mistake and keeps its own answer.
-	var nilValue *Sealed
+	var nilValue *sealedValue
 	if _, err := openInAllocator(t.Context(), nilValue, nil); !errors.Is(err, ErrEnclaveDestroyed) {
-		t.Errorf("(*Sealed)(nil).OpenIn(ctx, (*Allocator)(nil)) = %v, want ErrEnclaveDestroyed", err)
+		t.Errorf("(*sealedValue)(nil).OpenIn(ctx, (*budgetAllocator)(nil)) = %v, want ErrEnclaveDestroyed", err)
 	}
 
 	// And Open — the unbudgeted path — is unaffected: it has nothing to
@@ -1429,7 +1509,7 @@ func TestSealed_OpenInRefusesANilAllocator(t *testing.T) {
 func TestSealed_OpenAllocatesOutsideAnyBudget(t *testing.T) {
 	v := sealForBudgetTest(t)
 
-	a, err := NewAllocator(openBudget(8))
+	a, err := newBudgetAllocator(openBudget(8))
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
@@ -1454,7 +1534,7 @@ func TestSealed_OpenInRefusesWhatTheBudgetCannotCover(t *testing.T) {
 
 	// A sub-page budget constructs but admits nothing, reaching the refusal
 	// without depending on the page size.
-	a, err := NewAllocator(1)
+	a, err := newBudgetAllocator(1)
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
@@ -1499,7 +1579,7 @@ func TestSealed_OpenInRefusesWhatTheBudgetCannotCover(t *testing.T) {
 
 	// And a budget that CAN cover the open admits it, so the refusal above was
 	// the budget's doing and not a value that never opened.
-	roomy, err := NewAllocator(openBudget(4))
+	roomy, err := newBudgetAllocator(openBudget(4))
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
@@ -1525,13 +1605,13 @@ func TestSealed_OpenInGatesOnTheDestination(t *testing.T) {
 	// destination and the refusal is unambiguous.
 	page := LockedSize(1)
 	material := bytes.Repeat([]byte{0x5B}, int(3*page))
-	v, err := s.Seal(t.Context(), append([]byte(nil), material...))
+	v, err := s.sealData(t.Context(), append([]byte(nil), material...))
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
 	defer v.Destroy()
 
-	tooSmall, err := NewAllocator(page)
+	tooSmall, err := newBudgetAllocator(page)
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
@@ -1568,7 +1648,7 @@ func TestSealed_OpenInGatesOnTheDestination(t *testing.T) {
 	// of EXACTLY the destination admits the open. Charging the DEK as a second
 	// reservation would refuse this, so the two halves of this test also pin
 	// that an open costs the budget one reservation and not two.
-	exact, err := NewAllocator(LockedSize(len(material)))
+	exact, err := newBudgetAllocator(LockedSize(len(material)))
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
@@ -1599,7 +1679,7 @@ func TestSealed_OpenInConcurrentCallersDoNotStarveEachOther(t *testing.T) {
 
 	// Exactly one destination: every open but one must be refused, and one
 	// must succeed.
-	a, err := NewAllocator(LockedSize(len(sealedMaterial)))
+	a, err := newBudgetAllocator(LockedSize(len(sealedMaterial)))
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
@@ -1668,7 +1748,7 @@ func TestSealed_OpenInOnARetiredGeneration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
-	v, err := s.Seal(t.Context(), append([]byte(nil), short...))
+	v, err := s.sealData(t.Context(), append([]byte(nil), short...))
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
@@ -1681,7 +1761,7 @@ func TestSealed_OpenInOnARetiredGeneration(t *testing.T) {
 	// Force the rotation, exactly as TestSealer_KEKRotatesAtTheMessageLimit
 	// does: park the counter at the bound and seal past it.
 	s.kekUsed.Store(kekMessageLimit)
-	throwaway, err := s.Seal(t.Context(), append([]byte(nil), short...))
+	throwaway, err := s.sealData(t.Context(), append([]byte(nil), short...))
 	if err != nil {
 		t.Fatalf("Seal past the message limit: %v", err)
 	}
@@ -1697,7 +1777,7 @@ func TestSealed_OpenInOnARetiredGeneration(t *testing.T) {
 
 	// One destination, and that is all it takes — rotation must never strand a
 	// value, and it must not silently raise what a caller has to budget either.
-	a, err := NewAllocator(LockedSize(len(short)))
+	a, err := newBudgetAllocator(LockedSize(len(short)))
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
@@ -1724,7 +1804,7 @@ func TestSealed_OpenInIsConcurrencySafe(t *testing.T) {
 	v := sealForBudgetTest(t)
 
 	const goroutines = 16
-	a, err := NewAllocator(openBudget(int64(goroutines) * 4))
+	a, err := newBudgetAllocator(openBudget(int64(goroutines) * 4))
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
@@ -1764,7 +1844,7 @@ func TestSealed_OpenInOnADestroyedValue(t *testing.T) {
 	v := sealForBudgetTest(t)
 	v.Destroy()
 
-	a, err := NewAllocator(openBudget(8))
+	a, err := newBudgetAllocator(openBudget(8))
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
@@ -1775,9 +1855,9 @@ func TestSealed_OpenInOnADestroyedValue(t *testing.T) {
 		t.Errorf("a refused OpenIn reserved %d bytes, want 0", got)
 	}
 
-	var nilValue *Sealed
+	var nilValue *sealedValue
 	if _, err := openInAllocator(t.Context(), nilValue, a); !errors.Is(err, ErrEnclaveDestroyed) {
-		t.Errorf("(*Sealed)(nil).OpenIn = %v, want ErrEnclaveDestroyed", err)
+		t.Errorf("(*sealedValue)(nil).OpenIn = %v, want ErrEnclaveDestroyed", err)
 	}
 }
 
@@ -1790,13 +1870,13 @@ func TestSealed_OpenInPerOperationMode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
-	v, err := s.Seal(t.Context(), append([]byte(nil), sealedMaterial...))
+	v, err := s.sealData(t.Context(), append([]byte(nil), sealedMaterial...))
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
 	defer v.Destroy()
 
-	a, err := NewAllocator(openBudget(8))
+	a, err := newBudgetAllocator(openBudget(8))
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
@@ -1817,7 +1897,7 @@ func TestSealed_OpenInPerOperationMode(t *testing.T) {
 }
 
 // TestSealed_NoForeignBytesConstructor pins that no exported API turns
-// caller-supplied bytes into an openable *Sealed besides the plaintext
+// caller-supplied bytes into an openable *sealedValue besides the plaintext
 // constructors. The envelope format is internal, unversioned and keyed to a
 // process-lifetime Sealer; an unmarshaller would make it accidentally
 // permanent. If persistence is ever designed, amend this test as part of that
@@ -1825,7 +1905,7 @@ func TestSealed_OpenInPerOperationMode(t *testing.T) {
 func TestSealed_NoForeignBytesConstructor(t *testing.T) {
 	// The sanctioned constructors: both take PLAINTEXT and produce a sealed
 	// value, which is the direction the contract permits. Nothing else may
-	// combine bytes-in with *Sealed-out.
+	// combine bytes-in with *sealedValue-out.
 	allowed := map[string]bool{
 		"NewSealed": true, // package-level, process sealer
 		"Seal":      true, // (*Sealer), explicit sealer
@@ -1859,7 +1939,7 @@ func TestSealed_NoForeignBytesConstructor(t *testing.T) {
 			// whatever their signature: these are the interfaces (encoding,
 			// gob, json) through which foreign bytes arrive implicitly, where
 			// no reviewer sees a call site at all.
-			if recv := receiverTypeName(fn); recv == "Sealed" || recv == "Sealer" {
+			if recv := receiverTypeName(fn); recv == "sealedValue" || recv == "Sealer" {
 				switch fn.Name.Name {
 				case "UnmarshalBinary", "UnmarshalText", "UnmarshalJSON", "GobDecode", "DecodeMsgpack", "UnmarshalCBOR":
 					flagged++
@@ -1875,7 +1955,7 @@ func TestSealed_NoForeignBytesConstructor(t *testing.T) {
 				continue
 			}
 			flagged++
-			t.Errorf("%s: exported %s takes caller bytes and returns a *Sealed. "+
+			t.Errorf("%s: exported %s takes caller bytes and returns a Sealed. "+
 				"If those bytes are PLAINTEXT, add it to this test's allowlist with a comment. "+
 				"If they are SEALED bytes, stop: sealed values have no persistence contract — no "+
 				"stable format, no versioning, keys that die with the process — and this "+
@@ -1915,7 +1995,7 @@ func receiverTypeName(fn *ast.FuncDecl) string {
 	return ""
 }
 
-// returnsSealed reports whether any result is *Sealed or
+// returnsSealed reports whether any result is *sealedValue or
 // Sealed.
 func returnsSealed(fn *ast.FuncDecl) bool {
 	if fn.Type.Results == nil {

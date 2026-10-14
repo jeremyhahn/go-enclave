@@ -47,13 +47,13 @@ func TestWipeAll_LeavesNoResidentMaterial(t *testing.T) {
 	for i := 0; i < copies; i++ {
 		// From a locked transfer enclave, never a heap copy: NewMemory
 		// wipes its input, and that wipe must land in locked pages.
-		transfer, err := NewMemorySized(len(m.data))
+		transfer, err := newMemorySized(len(m.data))
 		if err != nil {
 			t.Fatalf("allocating the transfer enclave: %v", err)
 		}
 		if err := transfer.WithBytes(func(dst []byte) error {
 			copy(dst, m.data)
-			_, nerr := NewMemory(dst)
+			_, nerr := newMemory(dst)
 			return nerr
 		}); err != nil {
 			t.Fatalf("NewMemory: %v", err)
@@ -102,7 +102,7 @@ func TestWipeAll_ReturnsLockedMemoryToTheKernel(t *testing.T) {
 
 	const n = 6
 	for i := 0; i < n; i++ {
-		if _, err := NewMemorySized(64); err != nil {
+		if _, err := newMemorySized(64); err != nil {
 			t.Fatalf("NewMemorySized: %v", err)
 		}
 	}
@@ -138,12 +138,12 @@ func TestWipeAll_ReturnsLockedMemoryToTheKernel(t *testing.T) {
 // wipe (mprotect denied) counts as released: the enclave is deregistered, its
 // reservation returned, and the condition reported as ErrReleasedWithoutWipe.
 func TestWipeAllAccountsAnUnwipedRelease(t *testing.T) {
-	a, err := NewAllocator(1 << 20)
+	a, err := newBudgetAllocator(1 << 20)
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
 
-	e, err := a.New([]byte("material the sweep must account for"))
+	e, err := a.admitData([]byte("material the sweep must account for"))
 	if err != nil {
 		t.Fatalf("Allocator.New: %v", err)
 	}

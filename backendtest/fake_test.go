@@ -240,7 +240,7 @@ func (f *fakeBackend) track(h enclave.Handle) enclave.Handle {
 // faults' among them, go back before the next run.
 var fakeMemory struct {
 	mu   sync.Mutex
-	mems []*enclave.Memory
+	mems []enclave.ByteAccess
 	// unmaps release the freezeHeadOnly views.
 	unmaps []func() error
 }
@@ -451,7 +451,7 @@ func ended(ctx context.Context, ignore bool) error {
 // handleCore is a handle's lifecycle over locked memory, with no capability.
 type handleCore struct {
 	backend *fakeBackend
-	mem     *enclave.Memory
+	mem     enclave.ByteAccess
 }
 
 // strayBackend is a backend no handle under test belongs to.
@@ -512,7 +512,7 @@ func (h *handleCore) Destroy() error {
 		return nil
 	case f.racingDestroyKeepsWorking && racing:
 		// Freeze waits out the borrows, as Destroy must.
-		if err := h.mem.Freeze(); err != nil {
+		if err := h.mem.(enclave.Freezer).Freeze(); err != nil {
 			return err
 		}
 		h.retire()
@@ -638,7 +638,7 @@ func (h *memHandle) Freeze() error {
 		if h.frozen.Do(func() { err = h.freezeHead() }); err != nil {
 			return err
 		}
-		return h.mem.Freeze()
+		return h.mem.(enclave.Freezer).Freeze()
 	case h.backend.freezeAfterDestroy && !h.IsAlive():
 		return nil
 	case h.backend.freezeRefuses:
@@ -648,7 +648,7 @@ func (h *memHandle) Freeze() error {
 	case h.backend.freezeDestroys:
 		return h.mem.Destroy()
 	}
-	return h.mem.Freeze()
+	return h.mem.(enclave.Freezer).Freeze()
 }
 
 // freezeHead is the freezeHeadOnly fault: it copies the material into a

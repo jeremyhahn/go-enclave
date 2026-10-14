@@ -54,7 +54,7 @@ func vmLckBytes() (int64, error) {
 // page rounding, so only this one would notice if guard pages started being
 // locked or the rounding were wrong.
 func TestAllocator_ChargesWhatTheKernelLocks(t *testing.T) {
-	a, err := NewAllocator(64 * pageSize)
+	a, err := newBudgetAllocator(64 * pageSize)
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
@@ -65,7 +65,7 @@ func TestAllocator_ChargesWhatTheKernelLocks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("VmLck: %v", err)
 	}
-	probe, err := a.NewSized(1)
+	probe, err := a.admitSized(1)
 	if err != nil {
 		t.Fatalf("probe NewSized(1): %v", err)
 	}
@@ -88,7 +88,7 @@ func TestAllocator_ChargesWhatTheKernelLocks(t *testing.T) {
 			}
 			usedBefore := a.InUse()
 
-			e, err := a.NewSized(size)
+			e, err := a.admitSized(size)
 			if err != nil {
 				t.Fatalf("NewSized(%d): %v", size, err)
 			}
@@ -125,7 +125,7 @@ func TestAllocator_ChargesWhatTheKernelLocks(t *testing.T) {
 // holds N enclaves and refuses the next, whatever their material's size.
 func TestAllocator_BudgetHoldsTheEnclavesItPromises(t *testing.T) {
 	const capacity = 5
-	a, err := NewAllocator(capacity * pageSize)
+	a, err := newBudgetAllocator(capacity * pageSize)
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
@@ -138,7 +138,7 @@ func TestAllocator_BudgetHoldsTheEnclavesItPromises(t *testing.T) {
 	}()
 
 	for i := 0; i < capacity; i++ {
-		e, err := a.NewSized(32)
+		e, err := a.admitSized(32)
 		if err != nil {
 			t.Fatalf("NewSized #%d of %d: %v (the budget does not hold what it promises)", i+1, capacity, err)
 		}

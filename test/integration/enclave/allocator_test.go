@@ -21,7 +21,6 @@ import (
 	"golang.org/x/sys/unix"
 
 	enclave "github.com/jeremyhahn/go-enclave"
-	"github.com/jeremyhahn/go-enclave/internal/memscan"
 )
 
 // Covers allocator.go and memlock.go against a REAL
@@ -106,7 +105,7 @@ func TestLockedMemoryBudget_AdmissionUnderRealMemlockCeiling(t *testing.T) {
 		}
 
 		// Fill to the ceiling, through the allocator.
-		var live []*enclave.Memory
+		var live []enclave.ByteAccess
 		for i := int64(0); i < admissionPages; i++ {
 			e, err := a.NewSized(1)
 			if err != nil {
@@ -303,7 +302,7 @@ func TestLockedMemoryBudget_AdmissionHoldsTheKernelCeilingUnderContention(t *tes
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				var held []*enclave.Memory
+				var held []enclave.ByteAccess
 				for i := 0; i < iterations; i++ {
 					e, err := a.NewSized(1)
 					var be *enclave.BudgetError
@@ -383,7 +382,7 @@ func TestLockedMemoryBudget_ProcessAllocatorDefaultsToTheKernelCeiling(t *testin
 		if a.Limit() != ceiling {
 			t.Fatalf("default budget %d, want the discovered ceiling %d", a.Limit(), ceiling)
 		}
-		var live []*enclave.Memory
+		var live []enclave.ByteAccess
 		for i := 0; i < pages; i++ {
 			e, err := a.NewSized(1)
 			if err != nil {
@@ -442,7 +441,7 @@ func TestLockedMemoryBudget_SetAllocatorIsTheBinarysOneShotDecision(t *testing.T
 		if err != nil || lib != budget {
 			t.Fatalf("ProcessAllocator = (%p, %v), want the installed allocator %p", lib, err, budget)
 		}
-		var live []*enclave.Memory
+		var live []enclave.ByteAccess
 		for i := 0; i < 4; i++ {
 			e, err := lib.NewSized(1)
 			if err != nil {
@@ -663,42 +662,42 @@ func TestLockedMemoryBudget_AllocatorRefusesInvalidArguments(t *testing.T) {
 	})
 }
 
-// TestLockedMemoryBudget_NilAllocatorRefusesEverywhere: a nil *Allocator is a lost configuration
-// step, so every method that can fail refuses with ErrNilAllocator, New still
-// wipes the data it took, nothing is locked, and the observers report zero.
-func TestLockedMemoryBudget_NilAllocatorRefusesEverywhere(t *testing.T) {
+// TestLockedMemoryBudget_OnlyAConstructedAllocatorIsAccepted: an Allocator
+// is built only by NewAllocator or NewAllocatorWithinRLimit, so SetAllocator
+// refuses a nil one with ErrNilAllocator and another implementation of the
+// interface with ErrAllocatorNotConstructed, TransferTo refuses either as its
+// destination, and nothing is locked. A nil or zero implementation cannot be
+// built outside the package; the unit tests cover its receiver.
+func TestLockedMemoryBudget_OnlyAConstructedAllocatorIsAccepted(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		before := vmLck(t)
-		var a *enclave.Allocator
-
-		data := []byte("handed to a nil allocator")
-		if e, err := a.New(data); e != nil || !errors.Is(err, enclave.ErrNilAllocator) {
-			t.Errorf("New = (%v, %v), want (nil, ErrNilAllocator)", e, err)
-		}
-		if !memscan.AllZero(data) {
-			t.Error("New on a nil Allocator left the caller's data unwiped")
-		}
-		if e, err := a.NewSized(32); e != nil || !errors.Is(err, enclave.ErrNilAllocator) {
-			t.Errorf("NewSized = (%v, %v), want (nil, ErrNilAllocator)", e, err)
-		}
-		if err := a.SetLimit(1); !errors.Is(err, enclave.ErrNilAllocator) {
-			t.Errorf("SetLimit = %v, want ErrNilAllocator", err)
-		}
-		if excess, err := a.ForceLimit(1); excess != 0 || !errors.Is(err, enclave.ErrNilAllocator) {
-			t.Errorf("ForceLimit = (%d, %v), want (0, ErrNilAllocator)", excess, err)
-		}
-		dst, err := enclave.NewAllocator(enclave.LockedSize(1))
+		a, err := enclave.NewAllocator(enclave.LockedSize(1))
 		if err != nil {
 			t.Fatalf("NewAllocator: %v", err)
 		}
-		if err := a.TransferTo(dst, 1); !errors.Is(err, enclave.ErrNilAllocator) {
-			t.Errorf("TransferTo = %v, want ErrNilAllocator", err)
+		foreign := foreignAllocator{a}
+
+		if err := enclave.SetAllocator(nil); !errors.Is(err, enclave.ErrNilAllocator) {
+			t.Errorf("SetAllocator(nil) = %v, want ErrNilAllocator", err)
 		}
-		if a.InUse() != 0 || a.Limit() != 0 || a.Available() != 0 {
-			t.Errorf("InUse, Limit, Available = %d, %d, %d; want 0, 0, 0", a.InUse(), a.Limit(), a.Available())
+		if err := enclave.SetAllocator(foreign); !errors.Is(err, enclave.ErrAllocatorNotConstructed) {
+			t.Errorf("SetAllocator(foreign) = %v, want ErrAllocatorNotConstructed", err)
+		}
+		if err := a.TransferTo(nil, 1); !errors.Is(err, enclave.ErrInvalidTransfer) {
+			t.Errorf("TransferTo(nil) = %v, want ErrInvalidTransfer", err)
+		}
+		if err := a.TransferTo(foreign, 1); !errors.Is(err, enclave.ErrAllocatorNotConstructed) {
+			t.Errorf("TransferTo(foreign) = %v, want ErrAllocatorNotConstructed", err)
+		}
+		if a.Limit() != enclave.LockedSize(1) || a.InUse() != 0 {
+			t.Errorf("Limit, InUse = %d, %d after only refusals; want %d, 0", a.Limit(), a.InUse(), enclave.LockedSize(1))
 		}
 		if after := vmLck(t); after != before {
 			t.Errorf("VmLck = %d after only refusals, want %d", after, before)
 		}
 	})
 }
+
+// foreignAllocator is an Allocator this package did not build. It forwards
+// to a constructed one, so every method answers, but it is another type.
+type foreignAllocator struct{ enclave.Allocator }

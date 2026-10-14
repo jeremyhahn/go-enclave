@@ -39,10 +39,10 @@ func rootSealerOn(t *testing.T, b enclave.Backend, opts ...enclave.SealerOption)
 }
 
 // frozenNeedle is an enclave holding n, frozen read-only.
-func frozenNeedle(t *testing.T, n needle) *enclave.Memory {
+func frozenNeedle(t *testing.T, n needle) enclave.ByteAccess {
 	t.Helper()
 	m := enclaveFromNeedle(t, n)
-	if err := m.Freeze(); err != nil {
+	if err := m.(enclave.Freezer).Freeze(); err != nil {
 		t.Fatalf("Freeze: %v", err)
 	}
 	t.Cleanup(func() { _ = m.Destroy() })
@@ -242,7 +242,7 @@ func TestSealing_ADeviceHoldsTheKeyHierarchy(t *testing.T) {
 
 			const values = 7
 			needles := make([]needle, values)
-			sealed := make([]*enclave.Sealed, values)
+			sealed := make([]enclave.Sealed, values)
 			for i := range sealed {
 				needles[i] = newNeedle(t)
 				sealed[i] = sealNeedle(t, ctx, s, needles[i])
@@ -387,7 +387,7 @@ func TestSealing_ADeviceFailureInItsAEADIsTyped(t *testing.T) {
 
 	// A sealer past its first seal, so the hierarchy is built and only the
 	// AEAD calls of the next seal or open are left to fail.
-	setup := func(t *testing.T) (*deviceBackend, *enclave.Sealer, *enclave.Sealed) {
+	setup := func(t *testing.T) (*deviceBackend, *enclave.Sealer, enclave.Sealed) {
 		dev := newDeviceBackend()
 		s := rootSealerOn(t, dev)
 		v := sealNeedle(t, ctx, s, n)
@@ -523,10 +523,6 @@ func TestSealing_OpenInRefusesWhatCannotHoldTheValue(t *testing.T) {
 		if _, err := v.OpenIn(ctx, typedNil); !errors.Is(err, enclave.ErrInvalidBackend) {
 			t.Fatalf("OpenIn a typed-nil backend: %v, want ErrInvalidBackend", err)
 		}
-		var nilAllocator *enclave.Allocator
-		if _, err := v.OpenIn(ctx, nilAllocator); !errors.Is(err, enclave.ErrNilAllocator) {
-			t.Fatalf("OpenIn a nil *Allocator: %v, want ErrNilAllocator", err)
-		}
 	})
 	t.Run("TheDefaultBackendOpensAnEnclave", func(t *testing.T) {
 		h, err := v.OpenIn(ctx, enclave.DefaultBackend())
@@ -548,10 +544,6 @@ func TestSealing_OpenInRefusesWhatCannotHoldTheValue(t *testing.T) {
 		}
 		plain := &fakeBackend{name: uniqueBackendName("plain")}
 		requireCapabilityError(t, "OpenIn a destroyed value into a backend that cannot import", firstErr(gone.OpenIn(ctx, plain)), enclave.CapabilityImport)
-		var none *enclave.Sealed
-		if _, err := none.OpenIn(ctx, dev); !errors.Is(err, enclave.ErrEnclaveDestroyed) {
-			t.Fatalf("OpenIn a nil value: %v, want ErrEnclaveDestroyed", err)
-		}
 	})
 	t.Run("ImportFailure", func(t *testing.T) {
 		target := newDeviceBackend()
@@ -684,7 +676,7 @@ func TestSealing_ARotationThatLosesTheRaceDestroysItsKey(t *testing.T) {
 	s := rootSealerOn(t, dev, enclave.WithKEKRotationLimit(1))
 
 	needles := []needle{newNeedle(t), newNeedle(t), newNeedle(t)}
-	sealed := make([]*enclave.Sealed, len(needles))
+	sealed := make([]enclave.Sealed, len(needles))
 	sealed[0] = sealNeedle(t, ctx, s, needles[0])
 
 	// The second seal outlives the generation's limit and parks in the import
@@ -771,7 +763,7 @@ func TestSealing_ASealerOnABudgetedAllocatorReturnsItsBudget(t *testing.T) {
 		}
 		s := rootSealerOn(t, a, enclave.WithKEKRotationLimit(2))
 		n := newNeedle(t)
-		var sealed []*enclave.Sealed
+		var sealed []enclave.Sealed
 		for range 7 {
 			sealed = append(sealed, sealNeedle(t, ctx, s, n))
 		}

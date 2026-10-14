@@ -41,16 +41,111 @@ import (
 // [Sealed.Open] fails with [ErrSealerWiped]; [Sealed.Openable]
 // reports which.
 //
-// The zero value is not usable; construct one with [NewSealed] or
-// [Sealer.Seal]. A nil *Sealed is a valid receiver for every method.
-// A Sealed is safe for concurrent use. It must not be copied; its state sits
-// behind one pointer, so even a copy is the same value, and destroying
-// either destroys both.
-type Sealed struct {
+// Construct one with [NewSealed], [NewSealedFrom], [Sealer.Seal] or
+// [Sealer.SealFrom]; the implementation is internal to this package. A Sealed
+// is safe for concurrent use, and Destroy reaches every reference to it.
+type Sealed interface {
+	// Open decrypts the material directly into a new [Memory] and returns
+	// it as a [ByteAccess]. The caller owns the result and must Destroy it;
+	// each call returns an independent enclave. Open late and destroy early.
+	//
+	// The destination and the transient key pages are allocated outside any
+	// [Allocator] budget; callers holding a budget, or opening into another
+	// backend, use [Sealed.OpenIn].
+	//
+	// It returns ErrEnclaveDestroyed once Destroy has run, ErrSealedAuthentication
+	// if the envelope does not authenticate, ErrLockedMemoryUnavailable when the
+	// kernel refuses a locked page (the value survives and the open can be
+	// retried), ErrSealerWiped when a shutdown sweep destroyed the sealer's keys,
+	// and ErrSealerDestroyed after [Sealer.Destroy]. In [ModePerOperation] a
+	// provider's own failure is joined under ErrOpenFailed. A failed open
+	// returns a nil interface.
+	//
+	// ctx bounds the open. In [ModePerOperation] it is passed to the provider's
+	// Unprotect; in [ModeRootKey] the open makes no provider call and ctx is
+	// checked on entry only. An ended context fails the open with an error
+	// matching both ErrOpenFailed and ctx.Err(), and not ErrSealedAuthentication
+	// unless the provider reported that first (see [ErrOpenFailed]). The value is
+	// left intact, and a destination recovered for an abandoned caller is
+	// destroyed.
+	Open(ctx context.Context) (ByteAccess, error)
+
+	// OpenIn is [Sealed.Open] into b, any backend that can hold the material.
+	//
+	// For locked memory it decrypts in place, as Open does: [DefaultBackend] is
+	// Open itself, and an [Allocator] from [NewAllocator] or
+	// [NewAllocatorWithinRLimit] admits the destination against its budget, as
+	// below. For any other backend that implements [Importer] it decrypts into
+	// a locked scratch enclave and imports from it with [PurposeMaterial]; the
+	// importer wipes the scratch, which is then destroyed, so the plaintext never
+	// reaches the heap. The caller owns the returned handle and must Destroy it.
+	//
+	// It returns [ErrInvalidBackend] for a nil or typed-nil b, a
+	// [*CapabilityError] naming [CapabilityImport] for a backend that cannot
+	// import, before anything is decrypted, and one naming [CapabilityBytes]
+	// when the handle the backend returned has no [ByteAccess], which is
+	// destroyed. These checks precede the destroyed check. A backend's own
+	// failure is joined under [ErrOpenFailed], except [ErrInvalidImport] and the
+	// capability refusals, which are returned as they are. Otherwise it returns
+	// what Open returns.
+	//
+	// Into an Allocator, the destination is admitted against its budget,
+	// reserved before any locked memory is requested and returned when the
+	// caller destroys the result. Only the destination is admitted, in one
+	// reservation taken first, so an open the budget refuses allocates nothing.
+	// The transient DEK page (and, for a value under a retired [ModeRootKey]
+	// generation, a KEK page) are not charged, so peak use can exceed the budget
+	// by one page (two) per open in flight. A budget refusal, ErrBudgetExhausted
+	// as a [BudgetError], leaves the value intact and is retryable. A context
+	// already ended is refused before the reservation. Sealing is never
+	// budgeted.
+	OpenIn(ctx context.Context, b Backend) (Handle, error)
+
+	// IsAlive reports whether this value still holds its ciphertext, that is,
+	// whether [Sealed.Destroy] has not run. It does not mean the value can
+	// be opened: after a shutdown [WipeAll] a value can report IsAlive while
+	// [Sealed.Open] fails with [ErrSealerWiped]. Use
+	// [Sealed.Openable] for that.
+	IsAlive() bool
+
+	// Openable reports whether [Sealed.Open] could still recover this
+	// material, without recovering it. It returns nil if nothing known prevents
+	// it, [ErrEnclaveDestroyed] if this value was destroyed,
+	// [ErrSealerWiped] if a shutdown [WipeAll] destroyed in-process keys the
+	// sealer needs, [ErrSealerDestroyed] after [Sealer.Destroy], and
+	// [ErrOpenabilityUnknown] if a sweep has run since this value was sealed and
+	// a [ModePerOperation] provider does not implement [HealthReporter]. A
+	// provider's HealthReporter answer is believed.
+	//
+	// The answer is a snapshot for diagnostics, not a reservation, and nil is
+	// narrower than "will succeed": it does not predict
+	// [ErrSealedAuthentication], [ErrLockedMemoryUnavailable] or a device's own
+	// failures. It takes no context and calls no provider other than
+	// HealthReporter.Health, and holds no lock of this value's while consulting
+	// the sealer.
+	Openable() error
+
+	// Destroy wipes the sealed material and releases it. It is idempotent.
+	// Enclaves already returned by [Sealed.Open] are unaffected.
+	//
+	// It does not wait for opens in flight: they complete against the envelope
+	// they pinned, the last one wipes it, and every Open starting afterwards
+	// returns [ErrEnclaveDestroyed]. The error is always nil today; it matches
+	// [Memory.Destroy] and [Sealer.Destroy].
+	Destroy() error
+}
+
+// sealedValue is this package's [Sealed]. A nil *sealedValue is a valid
+// receiver for every method. It must not be copied; its state sits behind one
+// pointer, so even a copy is the same value, and destroying either destroys
+// both.
+type sealedValue struct {
 	_ noCopy
 
 	*sealedState
 }
+
+var _ Sealed = (*sealedValue)(nil)
 
 // sealedState is everything a [Sealed] holds; nil in a zero Sealed.
 type sealedState struct {
@@ -104,8 +199,14 @@ type sealedState struct {
 // A root unsealed for a caller that then gave up is kept and used by the next
 // seal.
 //
-// On a GOEXPERIMENT=boringcrypto build it always returns ErrSealFailed.
-func NewSealed(ctx context.Context, data []byte) (*Sealed, error) {
+// On a GOEXPERIMENT=boringcrypto build it always returns ErrSealFailed. A
+// failed seal returns a nil interface.
+func NewSealed(ctx context.Context, data []byte) (Sealed, error) {
+	return sealedOut(newSealed(ctx, data))
+}
+
+// newSealed is [NewSealed] as a *sealedValue, for this package's own callers.
+func newSealed(ctx context.Context, data []byte) (*sealedValue, error) {
 	// First: every path below wipes data, and wiping a frozen view faults.
 	if readOnly(data) {
 		return nil, ErrSealSourceReadOnly
@@ -123,14 +224,28 @@ func NewSealed(ctx context.Context, data []byte) (*Sealed, error) {
 		Wipe(data)
 		return nil, err
 	}
-	return s.Seal(ctx, data)
+	return s.sealData(ctx, data)
+}
+
+// sealedOut hands v out as a [Sealed], keeping a failed seal a nil interface
+// rather than one holding a nil *sealedValue.
+func sealedOut(v *sealedValue, err error) (Sealed, error) {
+	if v == nil {
+		return nil, err
+	}
+	return v, err
 }
 
 // NewSealedFrom is [Sealer.SealFrom] under the process [Sealer], as
 // [NewSealed] is [Sealer.Seal]: it seals the material src holds and leaves
 // src as it was. A context already ended on entry is refused before the
 // process Sealer is looked up.
-func NewSealedFrom(ctx context.Context, src Handle) (*Sealed, error) {
+func NewSealedFrom(ctx context.Context, src Handle) (Sealed, error) {
+	return sealedOut(newSealedFrom(ctx, src))
+}
+
+// newSealedFrom is [NewSealedFrom] as a *sealedValue.
+func newSealedFrom(ctx context.Context, src Handle) (*sealedValue, error) {
 	if err := contextFailure[SealError](ctx, nil); err != nil {
 		return nil, err
 	}
@@ -139,68 +254,20 @@ func NewSealedFrom(ctx context.Context, src Handle) (*Sealed, error) {
 	if err != nil {
 		return nil, err
 	}
-	return s.SealFrom(ctx, src)
+	return s.sealFromHandle(ctx, src)
 }
 
-// Open decrypts the material directly into a new [Memory] and returns
-// it. The caller owns the result and must Destroy it; each call returns an
-// independent enclave. Open late and destroy early.
-//
-// The destination and the transient key pages are allocated outside any
-// [Allocator] budget; callers holding a budget, or opening into another
-// backend, use [Sealed.OpenIn].
-//
-// It returns ErrEnclaveDestroyed once Destroy has run, ErrSealedAuthentication
-// if the envelope does not authenticate, ErrLockedMemoryUnavailable when the
-// kernel refuses a locked page (the value survives and the open can be
-// retried), ErrSealerWiped when a shutdown sweep destroyed the sealer's keys,
-// and ErrSealerDestroyed after [Sealer.Destroy]. In [ModePerOperation] a
-// provider's own failure is joined under ErrOpenFailed.
-//
-// ctx bounds the open. In [ModePerOperation] it is passed to the provider's
-// Unprotect; in [ModeRootKey] the open makes no provider call and ctx is
-// checked on entry only. An ended context fails the open with an error
-// matching both ErrOpenFailed and ctx.Err(), and not ErrSealedAuthentication
-// unless the provider reported that first (see [ErrOpenFailed]). The value is
-// left intact, and a destination recovered for an abandoned caller is
-// destroyed.
-func (s *Sealed) Open(ctx context.Context) (*Memory, error) {
-	return s.openIn(ctx, NewMemorySized)
+// Open implements [Sealed.Open].
+func (s *sealedValue) Open(ctx context.Context) (ByteAccess, error) {
+	return byteAccess(s.openIn(ctx, newMemorySized))
 }
 
-// OpenIn is [Sealed.Open] into b, any backend that can hold the material.
-//
-// For locked memory it decrypts in place, as Open does: [DefaultBackend] is
-// Open itself, and an [Allocator] admits the destination against its budget,
-// as below. For any other backend that implements [Importer] it decrypts into
-// a locked scratch enclave and imports from it with [PurposeMaterial]; the
-// importer wipes the scratch, which is then destroyed, so the plaintext never
-// reaches the heap. The caller owns the returned handle and must Destroy it.
-//
-// It returns [ErrInvalidBackend] for a nil or typed-nil b, a
-// [*CapabilityError] naming [CapabilityImport] for a backend that cannot
-// import, before anything is decrypted, and one naming [CapabilityBytes]
-// when the handle the backend returned has no [ByteAccess], which is
-// destroyed. These checks precede the destroyed check. A backend's own
-// failure is joined under [ErrOpenFailed], except [ErrInvalidImport] and the
-// capability refusals, which are returned as they are. Otherwise it returns
-// what Open returns.
-//
-// Into an Allocator, the destination is admitted against its budget,
-// reserved before any locked memory is requested and returned when the
-// caller destroys the result. A typed-nil *Allocator returns
+// OpenIn implements [Sealed.OpenIn]. A typed-nil *budgetAllocator returns
 // [ErrNilAllocator] and never falls back to an unbudgeted open; that check
-// precedes the destroyed check. Only the destination is admitted, in one
-// reservation taken first, so an open the budget refuses allocates nothing.
-// The transient DEK page (and, for a value under a retired [ModeRootKey]
-// generation, a KEK page) are not charged, so peak use can exceed the budget
-// by one page (two) per open in flight. A budget refusal, ErrBudgetExhausted
-// as a [BudgetError], leaves the value intact and is retryable. A context
-// already ended is refused before the reservation. Sealing is never
-// budgeted.
-func (s *Sealed) OpenIn(ctx context.Context, b Backend) (Handle, error) {
-	// First: a typed-nil *Allocator is ErrNilAllocator, not ErrInvalidBackend.
-	if a, ok := b.(*Allocator); ok {
+// precedes the destroyed check.
+func (s *sealedValue) OpenIn(ctx context.Context, b Backend) (Handle, error) {
+	// First: a typed-nil *budgetAllocator is ErrNilAllocator, not ErrInvalidBackend.
+	if a, ok := b.(*budgetAllocator); ok {
 		m, err := s.openAdmitted(ctx, a)
 		if err != nil {
 			return nil, err
@@ -225,17 +292,17 @@ func (s *Sealed) OpenIn(ctx context.Context, b Backend) (Handle, error) {
 }
 
 // openAdmitted is OpenIn into a, as a *Memory.
-func (s *Sealed) openAdmitted(ctx context.Context, a *Allocator) (*Memory, error) {
+func (s *sealedValue) openAdmitted(ctx context.Context, a *budgetAllocator) (*Memory, error) {
 	// A nil receiver keeps openIn's answer; a nil allocator is refused
 	// whatever the value's state.
 	if s != nil && a == nil {
 		return nil, ErrNilAllocator
 	}
-	return s.openIn(ctx, a.NewSized)
+	return s.openIn(ctx, a.admitSized)
 }
 
 // openImported is OpenIn into an importing backend other than locked memory.
-func (s *Sealed) openImported(ctx context.Context, imp Importer) (Handle, error) {
+func (s *sealedValue) openImported(ctx context.Context, imp Importer) (Handle, error) {
 	if s == nil || s.sealedState == nil {
 		return nil, ErrEnclaveDestroyed
 	}
@@ -247,7 +314,7 @@ func (s *Sealed) openImported(ctx context.Context, imp Importer) (Handle, error)
 	defer s.unpin(sealer, blob, sealed)
 
 	// Left writable, never frozen: the importer wipes it.
-	scratch, err := sealer.open(ctx, blob, sealed, size, NewMemorySized, false)
+	scratch, err := sealer.open(ctx, blob, sealed, size, newMemorySized, false)
 	if err != nil {
 		return nil, err
 	}
@@ -291,7 +358,7 @@ func (s *Sealed) openImported(ctx context.Context, imp Importer) (Handle, error)
 // destination. The value's lock only pins and unpins the envelope and is
 // not held across Sealer.open, which may block in a provider; Destroy takes
 // no context and must not wait on that.
-func (s *Sealed) openIn(ctx context.Context, dst func(int) (*Memory, error)) (*Memory, error) {
+func (s *sealedValue) openIn(ctx context.Context, dst func(int) (*Memory, error)) (*Memory, error) {
 	if s == nil || s.sealedState == nil {
 		return nil, ErrEnclaveDestroyed
 	}
@@ -307,7 +374,7 @@ func (s *Sealed) openIn(ctx context.Context, dst func(int) (*Memory, error)) (*M
 
 // pin registers an open in flight and returns the envelope it may read with
 // the lock released, or ok false if the value is destroyed.
-func (s *Sealed) pin() (sealer *Sealer, blob, sealed []byte, size int, ok bool) {
+func (s *sealedValue) pin() (sealer *Sealer, blob, sealed []byte, size int, ok bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -321,7 +388,7 @@ func (s *Sealed) pin() (sealer *Sealer, blob, sealed []byte, size int, ok bool) 
 // unpin ends an open in flight. The last open out after a Destroy wipes the
 // envelope halves Destroy left for it, and releases the value's hold on its
 // sealer's KEK generation.
-func (s *Sealed) unpin(sealer *Sealer, blob, sealed []byte) {
+func (s *sealedValue) unpin(sealer *Sealer, blob, sealed []byte) {
 	s.mu.Lock()
 	s.opens--
 	last := s.opens == 0 && s.sealed == nil
@@ -337,12 +404,8 @@ func (s *Sealed) unpin(sealer *Sealer, blob, sealed []byte) {
 	}
 }
 
-// IsAlive reports whether this value still holds its ciphertext, that is,
-// whether [Sealed.Destroy] has not run. It does not mean the value can
-// be opened: after a shutdown [WipeAll] a value can report IsAlive while
-// [Sealed.Open] fails with [ErrSealerWiped]. Use
-// [Sealed.Openable] for that.
-func (s *Sealed) IsAlive() bool {
+// IsAlive implements [Sealed.IsAlive].
+func (s *sealedValue) IsAlive() bool {
 	if s == nil || s.sealedState == nil {
 		return false
 	}
@@ -351,22 +414,9 @@ func (s *Sealed) IsAlive() bool {
 	return s.sealed != nil
 }
 
-// Openable reports whether [Sealed.Open] could still recover this
-// material, without recovering it. It returns nil if nothing known prevents
-// it, [ErrEnclaveDestroyed] if this value was destroyed (or is nil),
-// [ErrSealerWiped] if a shutdown [WipeAll] destroyed in-process keys the
-// sealer needs, [ErrSealerDestroyed] after [Sealer.Destroy], and
-// [ErrOpenabilityUnknown] if a sweep has run since this value was sealed and
-// a [ModePerOperation] provider does not implement [HealthReporter]. A
-// provider's HealthReporter answer is believed.
-//
-// The answer is a snapshot for diagnostics, not a reservation, and nil is
-// narrower than "will succeed": it does not predict
-// [ErrSealedAuthentication], [ErrLockedMemoryUnavailable] or a device's own
-// failures. It takes no context and calls no provider other than
-// HealthReporter.Health, and holds no lock of this value's while consulting
-// the sealer.
-func (s *Sealed) Openable() error {
+// Openable implements [Sealed.Openable]; a nil value returns
+// [ErrEnclaveDestroyed].
+func (s *sealedValue) Openable() error {
 	if s == nil || s.sealedState == nil {
 		return ErrEnclaveDestroyed
 	}
@@ -380,7 +430,7 @@ func (s *Sealed) Openable() error {
 
 // openableSnapshot reads what Openable needs under the lock, reporting ok
 // false for the destroyed state.
-func (s *Sealed) openableSnapshot() (*Sealer, uint64, bool) {
+func (s *sealedValue) openableSnapshot() (*Sealer, uint64, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -392,15 +442,8 @@ func (s *Sealed) openableSnapshot() (*Sealer, uint64, bool) {
 	return s.sealer, s.sealedAtGen, true
 }
 
-// Destroy wipes the sealed material and releases it. It is idempotent and
-// safe on a nil enclave. Enclaves already returned by [Sealed.Open]
-// are unaffected.
-//
-// It does not wait for opens in flight: they complete against the envelope
-// they pinned, the last one wipes it, and every Open starting afterwards
-// returns [ErrEnclaveDestroyed]. The error is always nil today; it matches
-// [Memory.Destroy] and [Sealer.Destroy].
-func (s *Sealed) Destroy() error {
+// Destroy implements [Sealed.Destroy]; it is safe on a nil value.
+func (s *sealedValue) Destroy() error {
 	if s == nil || s.sealedState == nil {
 		return nil
 	}
@@ -435,12 +478,12 @@ func (s *Sealed) Destroy() error {
 
 // String returns a redacted form, so an accidental %v or %s never prints the
 // ciphertext.
-func (s *Sealed) String() string {
+func (s *sealedValue) String() string {
 	return redacted("Sealed", s.IsAlive(), "sealed")
 }
 
 // GoString returns the same redacted form as String under %#v.
-func (s *Sealed) GoString() string {
+func (s *sealedValue) GoString() string {
 	return redacted("Sealed", s.IsAlive(), "sealed")
 }
 

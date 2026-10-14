@@ -210,7 +210,7 @@ None beyond `Config`. The suite persists nothing.
 
 ## Test strategy
 
-`backendtest/backendtest_test.go` runs the suite against the `*Allocator` (the
+`backendtest/backendtest_test.go` runs the suite against the `Allocator` (the
 locked-memory backend) and against well-behaved fakes, and drives the invalid
 config, unchecked capability, aborted run and residue paths.
 `backendtest/fake_test.go` holds a deliberately broken fake for each check, and
@@ -221,7 +221,7 @@ per-platform probes of a frozen mapping's first page. `make test-backend-conform
 runs them and `make coverage-backendtest` holds the package to the coverage
 floor. `make integration-test-backend-conformance` selects the integration
 tests named `TestBackendConformance_` in
-`test/integration/enclave/backend_conformance_test.go`: the `*Allocator`
+`test/integration/enclave/backend_conformance_test.go`: the `Allocator`
 passes, a backend that under-claims a capability is a finding, and an invalid
 config is refused.
 

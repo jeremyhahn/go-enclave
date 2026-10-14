@@ -38,7 +38,7 @@ func TestNewSealed_RefusesAFrozenView(t *testing.T) {
 	ctx := t.Context()
 	material := []byte("frozen-view-material")
 
-	v, err := NewSealed(ctx, append([]byte(nil), material...))
+	v, err := newSealed(ctx, append([]byte(nil), material...))
 	if err != nil {
 		t.Fatalf("NewSealed: %v", err)
 	}
@@ -50,7 +50,7 @@ func TestNewSealed_RefusesAFrozenView(t *testing.T) {
 	defer opened.Destroy()
 
 	err = opened.WithBytes(func(b []byte) error {
-		_, err := NewSealed(ctx, b)
+		_, err := newSealed(ctx, b)
 		return err
 	})
 	if !errors.Is(err, ErrSealSourceReadOnly) {
@@ -63,7 +63,7 @@ func TestNewSealed_RefusesAFrozenView(t *testing.T) {
 	}
 	defer s.Destroy()
 	err = opened.WithBytes(func(b []byte) error {
-		_, err := s.Seal(ctx, b)
+		_, err := s.sealData(ctx, b)
 		return err
 	})
 	if !errors.Is(err, ErrSealSourceReadOnly) {
@@ -75,7 +75,7 @@ func TestNewSealed_RefusesAFrozenView(t *testing.T) {
 
 	// A writable source is still sealed and wiped.
 	data := append([]byte(nil), material...)
-	w, err := s.Seal(ctx, data)
+	w, err := s.sealData(ctx, data)
 	if err != nil {
 		t.Fatalf("Seal over writable data: %v", err)
 	}
@@ -92,7 +92,7 @@ func TestSealFrom_LeavesTheSourceIntact(t *testing.T) {
 	ctx := t.Context()
 	material := []byte("seal-from-material")
 
-	src, err := NewMemoryCopy(material)
+	src, err := newMemoryCopy(material)
 	if err != nil {
 		t.Fatalf("NewMemoryCopy: %v", err)
 	}
@@ -104,9 +104,9 @@ func TestSealFrom_LeavesTheSourceIntact(t *testing.T) {
 	}
 	defer s.Destroy()
 
-	for name, seal := range map[string]func() (*Sealed, error){
-		"SealFrom":      func() (*Sealed, error) { return s.SealFrom(ctx, src) },
-		"NewSealedFrom": func() (*Sealed, error) { return NewSealedFrom(ctx, src) },
+	for name, seal := range map[string]func() (*sealedValue, error){
+		"SealFrom":      func() (*sealedValue, error) { return s.sealFromHandle(ctx, src) },
+		"NewSealedFrom": func() (*sealedValue, error) { return newSealedFrom(ctx, src) },
 	} {
 		v, err := seal()
 		if err != nil {
@@ -136,30 +136,30 @@ func TestSealFrom_Refusals(t *testing.T) {
 	}
 	defer s.Destroy()
 
-	if _, err := (*Sealer)(nil).SealFrom(ctx, nil); !errors.Is(err, ErrNilSealer) {
+	if _, err := (*Sealer)(nil).sealFromHandle(ctx, nil); !errors.Is(err, ErrNilSealer) {
 		t.Errorf("nil Sealer: %v, want ErrNilSealer", err)
 	}
-	if _, err := s.SealFrom(ctx, nil); !errors.Is(err, ErrEnclaveDestroyed) {
+	if _, err := s.sealFromHandle(ctx, nil); !errors.Is(err, ErrEnclaveDestroyed) {
 		t.Errorf("nil source: %v, want ErrEnclaveDestroyed", err)
 	}
-	if _, err := s.SealFrom(ctx, (*Memory)(nil)); !errors.Is(err, ErrEnclaveDestroyed) {
+	if _, err := s.sealFromHandle(ctx, (*Memory)(nil)); !errors.Is(err, ErrEnclaveDestroyed) {
 		t.Errorf("typed-nil source: %v, want ErrEnclaveDestroyed", err)
 	}
-	dead, err := NewMemoryCopy([]byte("dead"))
+	dead, err := newMemoryCopy([]byte("dead"))
 	if err != nil {
 		t.Fatalf("NewMemoryCopy: %v", err)
 	}
 	_ = dead.Destroy()
-	if _, err := s.SealFrom(ctx, dead); !errors.Is(err, ErrEnclaveDestroyed) {
+	if _, err := s.sealFromHandle(ctx, dead); !errors.Is(err, ErrEnclaveDestroyed) {
 		t.Errorf("destroyed source: %v, want ErrEnclaveDestroyed", err)
 	}
 
-	m, err := NewMemoryCopy([]byte("device-only-material"))
+	m, err := newMemoryCopy([]byte("device-only-material"))
 	if err != nil {
 		t.Fatalf("NewMemoryCopy: %v", err)
 	}
 	defer m.Destroy()
-	_, err = s.SealFrom(ctx, &opaqueHandle{m: m, b: &fakeImporter{}})
+	_, err = s.sealFromHandle(ctx, &opaqueHandle{m: m, b: &fakeImporter{}})
 	requireCapability(t, err, fakeImporterName, CapabilityBytes)
 }
 
@@ -181,7 +181,7 @@ func TestSealer_CopiesShareState(t *testing.T) {
 	}
 	c := copyOf(s)
 
-	v, err := c.Seal(ctx, []byte("sealed-by-the-copy"))
+	v, err := c.sealData(ctx, []byte("sealed-by-the-copy"))
 	if err != nil {
 		t.Fatalf("Seal through the copy: %v", err)
 	}
@@ -189,7 +189,7 @@ func TestSealer_CopiesShareState(t *testing.T) {
 	if err := c.Destroy(); err != nil {
 		t.Fatalf("Destroy through the copy: %v", err)
 	}
-	if _, err := s.Seal(ctx, []byte("after")); !errors.Is(err, ErrSealerDestroyed) {
+	if _, err := s.sealData(ctx, []byte("after")); !errors.Is(err, ErrSealerDestroyed) {
 		t.Fatalf("Seal through the original after the copy's Destroy = %v, want ErrSealerDestroyed", err)
 	}
 }
@@ -203,7 +203,7 @@ func TestSealed_CopiesShareState(t *testing.T) {
 		t.Fatalf("NewSealer: %v", err)
 	}
 	defer s.Destroy()
-	v, err := s.Seal(ctx, []byte("copied-value"))
+	v, err := s.sealData(ctx, []byte("copied-value"))
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
@@ -293,7 +293,7 @@ func TestSealer_RetiredGenerationsAreDropped(t *testing.T) {
 
 	const n = 64
 	for i := range n {
-		v, err := s.Seal(ctx, fmt.Appendf(nil, "value-%02d", i))
+		v, err := s.sealData(ctx, fmt.Appendf(nil, "value-%02d", i))
 		if err != nil {
 			t.Fatalf("Seal %d: %v", i, err)
 		}
@@ -310,9 +310,9 @@ func TestSealer_RetiredGenerationsAreDropped(t *testing.T) {
 	}
 
 	// Live values keep their generations, and each goes with its last value.
-	var live []*Sealed
+	var live []*sealedValue
 	for i := range 4 {
-		v, err := s.Seal(ctx, fmt.Appendf(nil, "live-%d", i))
+		v, err := s.sealData(ctx, fmt.Appendf(nil, "live-%d", i))
 		if err != nil {
 			t.Fatalf("Seal: %v", err)
 		}
@@ -346,7 +346,7 @@ func TestSealer_AnOpenInFlightKeepsItsGeneration(t *testing.T) {
 	}
 	defer s.Destroy()
 
-	v, err := s.Seal(ctx, append([]byte(nil), material...))
+	v, err := s.sealData(ctx, append([]byte(nil), material...))
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
@@ -358,13 +358,13 @@ func TestSealer_AnOpenInFlightKeepsItsGeneration(t *testing.T) {
 		t.Fatalf("Destroy: %v", err)
 	}
 	// Rotate past the value's generation.
-	w, err := s.Seal(ctx, []byte("rotates"))
+	w, err := s.sealData(ctx, []byte("rotates"))
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
 	defer w.Destroy()
 
-	e, err := sealer.open(ctx, blob, sealed, size, NewMemorySized, true)
+	e, err := sealer.open(ctx, blob, sealed, size, newMemorySized, true)
 	if err != nil {
 		t.Fatalf("the open in flight lost its generation to the value's Destroy: %v", err)
 	}
@@ -428,7 +428,7 @@ func TestSealer_DataAEADRunsOutsideTheLock(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
-	m, err := NewMemoryCopy([]byte("straddles-destroy"))
+	m, err := newMemoryCopy([]byte("straddles-destroy"))
 	if err != nil {
 		t.Fatalf("NewMemoryCopy: %v", err)
 	}
@@ -446,7 +446,7 @@ func TestSealer_DataAEADRunsOutsideTheLock(t *testing.T) {
 			t.Error("Destroy waited for the data AEAD: the sealer's lock is held across it")
 		}
 	}}
-	v, err := s.SealFrom(ctx, src)
+	v, err := s.sealFromHandle(ctx, src)
 	if !errors.Is(err, ErrSealerDestroyed) {
 		_ = v.Destroy()
 		t.Fatalf("a seal Destroy overlapped = %v, want ErrSealerDestroyed", err)
@@ -481,7 +481,7 @@ func TestSealer_DefaultProviderIsReleasedAfterTheUnseal(t *testing.T) {
 		t.Fatalf("NewSealer: %v", err)
 	}
 	defer s.Destroy()
-	v, err := s.Seal(ctx, []byte("first-seal"))
+	v, err := s.sealData(ctx, []byte("first-seal"))
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}

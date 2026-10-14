@@ -72,7 +72,7 @@ func sealLimitChild(t *testing.T) {
 	// first, before any of them exists.
 	setCeiling(0)
 
-	s, err := NewSealed(t.Context(), append([]byte(nil), material...))
+	s, err := newSealed(t.Context(), append([]byte(nil), material...))
 	if err == nil {
 		s.Destroy()
 		t.Fatal("NewSealed succeeded under a zero RLIMIT_MEMLOCK: the ceiling did not bind, no fault " +
@@ -86,7 +86,7 @@ func sealLimitChild(t *testing.T) {
 	// Lift the ceiling and seal for real; the failed first seal must not have
 	// latched the failure.
 	setCeiling(original.Cur)
-	s, err = NewSealed(t.Context(), append([]byte(nil), material...))
+	s, err = newSealed(t.Context(), append([]byte(nil), material...))
 	if err != nil {
 		t.Fatalf("NewSealed with the ceiling restored: %v (the failed first seal must not have latched "+
 			"its failure)", err)
@@ -140,7 +140,7 @@ func sealLimitChild(t *testing.T) {
 func TestSealed_OpenedPlaintextIsLocked(t *testing.T) {
 	freshProcessSealer(t)
 
-	s, err := NewSealed(t.Context(), append([]byte(nil), sealedMaterial...))
+	s, err := newSealed(t.Context(), append([]byte(nil), sealedMaterial...))
 	if err != nil {
 		t.Fatalf("NewSealed: %v", err)
 	}
@@ -194,7 +194,7 @@ func TestSealed_NoPlaintextInProcessMemory(t *testing.T) {
 	// The needle is generated straight into locked memory. A []byte literal
 	// would put a copy on the heap and the sweep would find the test's own
 	// constant in every run.
-	needleEnclave, err := NewMemorySized(64)
+	needleEnclave, err := newMemorySized(64)
 	if err != nil {
 		t.Fatalf("NewMemorySized: %v", err)
 	}
@@ -276,7 +276,7 @@ func findNeedle(probe *Memory, home uintptr) ([]string, error) {
 func TestSealed_FailedOpenLeaksNoLockedMemory(t *testing.T) {
 	freshProcessSealer(t)
 
-	s, err := NewSealed(t.Context(), append([]byte(nil), sealedMaterial...))
+	s, err := newSealed(t.Context(), append([]byte(nil), sealedMaterial...))
 	if err != nil {
 		t.Fatalf("NewSealed: %v", err)
 	}
@@ -345,7 +345,7 @@ func TestSealed_SizeMismatchDoesNotDecryptOntoTheHeap(t *testing.T) {
 	freshProcessSealer(t)
 	// Generated into locked memory: a literal would put the test's own constant
 	// on the heap.
-	needleEnclave, err := NewMemorySized(64)
+	needleEnclave, err := newMemorySized(64)
 	if err != nil {
 		t.Fatalf("NewMemorySized: %v", err)
 	}
@@ -425,20 +425,20 @@ func TestSealed_SizeMismatchDoesNotDecryptOntoTheHeap(t *testing.T) {
 // sealFromEnclave seals a copy of src's material without the plaintext
 // touching the ordinary heap: NewSealed is called on a borrow of a locked
 // transfer enclave, so the input it wipes is locked memory.
-func sealFromEnclave(t *testing.T, src *Memory) *Sealed {
+func sealFromEnclave(t *testing.T, src *Memory) *sealedValue {
 	t.Helper()
-	transfer, err := NewMemorySized(src.Size())
+	transfer, err := newMemorySized(src.Size())
 	if err != nil {
 		t.Fatalf("allocating the transfer enclave: %v", err)
 	}
 	defer func() { _ = transfer.Destroy() }()
-	var sealed *Sealed
+	var sealed *sealedValue
 	if err := transfer.WithBytes(func(dst []byte) error {
 		if err := src.WithBytes(func(b []byte) error { copy(dst, b); return nil }); err != nil {
 			return err
 		}
 		var serr error
-		sealed, serr = NewSealed(t.Context(), dst)
+		sealed, serr = newSealed(t.Context(), dst)
 		if serr != nil {
 			return serr
 		}

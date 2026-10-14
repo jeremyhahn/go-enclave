@@ -13,6 +13,7 @@ package enclave_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -160,34 +161,19 @@ func TestLockedMemoryBudget_OpenInAdmitsAgainstTheBudget(t *testing.T) {
 	})
 }
 
-// TestSealing_DestroyedAndNilSealedValuesAnswerSafely covers what every accessor of a
-// destroyed — or nil — Sealed reports: each answers with the
-// documented sentinel, Destroy is idempotent, and String never prints the
-// material.
-func TestSealing_DestroyedAndNilSealedValuesAnswerSafely(t *testing.T) {
+// TestSealing_DestroyedSealedValuesAnswerSafely covers what every accessor of a
+// destroyed Sealed reports: each answers with the documented sentinel,
+// Destroy is idempotent, and String never prints the material. A nil Sealed
+// cannot be built outside the package; the unit tests cover its receiver.
+func TestSealing_DestroyedSealedValuesAnswerSafely(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		ctx := context.Background()
-
-		var nilSealed *enclave.Sealed
-		if nilSealed.IsAlive() {
-			t.Error("a nil *Sealed reports itself alive")
-		}
-		if err := nilSealed.Openable(); !errors.Is(err, enclave.ErrEnclaveDestroyed) {
-			t.Errorf("Openable of a nil *Sealed = %v, want ErrEnclaveDestroyed", err)
-		}
-		nilSealed.Destroy()
-		if _, err := nilSealed.Open(ctx); !errors.Is(err, enclave.ErrEnclaveDestroyed) {
-			t.Errorf("Open of a nil *Sealed = %v, want ErrEnclaveDestroyed", err)
-		}
-		if _, err := nilSealed.OpenIn(ctx, enclave.DefaultBackend()); !errors.Is(err, enclave.ErrEnclaveDestroyed) {
-			t.Errorf("OpenIn of a nil *Sealed = %v, want ErrEnclaveDestroyed", err)
-		}
 
 		v, err := enclave.NewSealed(ctx, []byte("a value to destroy"))
 		if err != nil {
 			t.Fatalf("NewSealed: %v", err)
 		}
-		if s := v.String(); s == "" || strings.Contains(s, "a value to destroy") {
+		if s := fmt.Sprint(v); s == "" || strings.Contains(s, "a value to destroy") {
 			t.Errorf("Sealed.String() = %q: empty, or it prints the material", s)
 		}
 		v.Destroy()
@@ -204,7 +190,7 @@ func TestSealing_DestroyedAndNilSealedValuesAnswerSafely(t *testing.T) {
 		if _, err := v.OpenIn(ctx, enclave.DefaultBackend()); !errors.Is(err, enclave.ErrEnclaveDestroyed) {
 			t.Errorf("OpenIn after Destroy = %v, want ErrEnclaveDestroyed", err)
 		}
-		if s := v.String(); !strings.Contains(strings.ToLower(s), "destroyed") {
+		if s := fmt.Sprint(v); !strings.Contains(strings.ToLower(s), "destroyed") {
 			t.Errorf("Sealed.String() after Destroy = %q, want it to say so", s)
 		}
 	})

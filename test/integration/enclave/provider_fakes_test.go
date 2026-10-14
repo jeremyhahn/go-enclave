@@ -82,18 +82,18 @@ func fillBytes(b []byte, v byte) {
 // they stay resident for the residue sweep to find.
 type lab struct {
 	mu    sync.Mutex
-	softs []*enclave.SoftwareProvider
+	softs []enclave.SoftwareProvider
 	hoard [][]byte
 }
 
-func (l *lab) adopt(s *enclave.SoftwareProvider) *enclave.SoftwareProvider {
+func (l *lab) adopt(s enclave.SoftwareProvider) enclave.SoftwareProvider {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.softs = append(l.softs, s)
 	return s
 }
 
-func (l *lab) newSoft() *enclave.SoftwareProvider { return l.adopt(enclave.NewSoftwareProvider()) }
+func (l *lab) newSoft() enclave.SoftwareProvider { return l.adopt(enclave.NewSoftwareProvider()) }
 
 func (l *lab) keep(b []byte) {
 	l.mu.Lock()
@@ -119,7 +119,7 @@ func (l *lab) release(t *testing.T) {
 // keyFault is a KeyProtector (and only that): a SoftwareProvider whose Protect
 // and Unprotect a test replaces. A nil hook is the honest provider.
 type keyFault struct {
-	soft      *enclave.SoftwareProvider
+	soft      enclave.SoftwareProvider
 	protect   func(ctx context.Context, key []byte) ([]byte, error)
 	unprotect func(ctx context.Context, blob, dst []byte) error
 }
@@ -140,7 +140,7 @@ func (f *keyFault) Unprotect(ctx context.Context, blob, dst []byte) error {
 
 // rootFault is a RootUnsealer (and only that) over a SoftwareProvider.
 type rootFault struct {
-	soft   *enclave.SoftwareProvider
+	soft   enclave.SoftwareProvider
 	unseal func(ctx context.Context, dst []byte) error
 }
 

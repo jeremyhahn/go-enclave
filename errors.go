@@ -139,15 +139,16 @@ var (
 	// that is the source.
 	ErrInvalidTransfer = errors.New("enclave: invalid headroom transfer")
 
-	// ErrNilAllocator is returned for a nil *Allocator by [SetAllocator],
-	// [Sealed.OpenIn] (which never falls back to the unbudgeted
-	// [Sealed.Open]), and the Allocator methods that can fail. New
-	// still wipes the data it was handed.
+	// ErrNilAllocator is returned for a nil [Allocator] by [SetAllocator]
+	// and, for a nil implementation inside this package, by [Sealed.OpenIn]
+	// (which never falls back to the unbudgeted [Sealed.Open]) and the
+	// Allocator methods that can fail. New still wipes the data it was handed.
 	ErrNilAllocator = errors.New("enclave: allocator is nil")
 
 	// ErrAllocatorNotConstructed is returned for an [Allocator] that was not
-	// built by [NewAllocator] or [NewAllocatorWithinRLimit], such as the zero
-	// value, by [SetAllocator] (which installs nothing), by [Sealed.OpenIn],
+	// built by [NewAllocator] or [NewAllocatorWithinRLimit] (another
+	// implementation of the interface, or this package's zero value) by
+	// [SetAllocator] (which installs nothing), by [Sealed.OpenIn],
 	// and by the Allocator methods that can fail, as either side of
 	// [Allocator.TransferTo]. Nothing is admitted or changed; New and Import
 	// still wipe the data they were handed.
@@ -478,8 +479,10 @@ var (
 	// [KeyProtector].
 	ErrProviderMessageLimit = errors.New("enclave: software provider reached its per-key message bound; use ModeRootKey or a hardware provider")
 
-	// ErrProviderNotConstructed reports a [SoftwareProvider] that was not
-	// built by [NewSoftwareProvider], such as the zero value.
+	// ErrProviderNotConstructed reports a software provider that was not
+	// built by [NewSoftwareProvider], such as the zero value of the internal
+	// implementation. Every [SoftwareProvider] that NewSoftwareProvider hands
+	// out is constructed, so only this package can meet it.
 	ErrProviderNotConstructed = errors.New("enclave: software provider was not constructed with NewSoftwareProvider")
 
 	// errHierarchyUninitialized marks a ModeRootKey hierarchy not yet built:

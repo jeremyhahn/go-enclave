@@ -143,7 +143,7 @@ type sealerState struct {
 
 	// owned is the default provider NewSealer created, which the first
 	// successful unseal and Destroy release; nil for an injected provider.
-	owned *SoftwareProvider
+	owned *softwareProvider
 
 	// backend is what WithBackend named, or nil. importer is it when keys are
 	// imported into it, and nil when they stay in this process's locked
@@ -334,7 +334,7 @@ func NewSealer(opts ...SealerOption) (*Sealer, error) {
 
 	// Created last, so a refused configuration leaves no root behind.
 	if s.mode == ModeRootKey && s.ru == nil {
-		s.owned = NewSoftwareProvider()
+		s.owned = newSoftwareProvider()
 		s.ru = s.owned
 	}
 	return &Sealer{sealerState: s}, nil
@@ -522,7 +522,12 @@ func (s *Sealer) Destroy() error {
 // there and on [Sealed]. It returns [ErrNilSealer] on a nil receiver, and
 // [ErrSealSourceReadOnly], wiping nothing, for data this process cannot
 // write.
-func (s *Sealer) Seal(ctx context.Context, data []byte) (*Sealed, error) {
+func (s *Sealer) Seal(ctx context.Context, data []byte) (Sealed, error) {
+	return sealedOut(s.sealData(ctx, data))
+}
+
+// sealData is [Sealer.Seal] as a *sealedValue, for this package's own callers.
+func (s *Sealer) sealData(ctx context.Context, data []byte) (*sealedValue, error) {
 	// First: every path below wipes data, and wiping a frozen view faults.
 	if readOnly(data) {
 		return nil, ErrSealSourceReadOnly
@@ -546,7 +551,12 @@ func (s *Sealer) Seal(ctx context.Context, data []byte) (*Sealed, error) {
 // [CapabilityBytes], since material that never leaves its device cannot be
 // sealed here. A nil or destroyed src returns [ErrEnclaveDestroyed]. It
 // returns [ErrNilSealer] on a nil receiver, and otherwise what Seal returns.
-func (s *Sealer) SealFrom(ctx context.Context, src Handle) (*Sealed, error) {
+func (s *Sealer) SealFrom(ctx context.Context, src Handle) (Sealed, error) {
+	return sealedOut(s.sealFromHandle(ctx, src))
+}
+
+// sealFromHandle is [Sealer.SealFrom] as a *sealedValue.
+func (s *Sealer) sealFromHandle(ctx context.Context, src Handle) (*sealedValue, error) {
 	if s == nil {
 		return nil, ErrNilSealer
 	}
@@ -576,7 +586,7 @@ func backendName(h Handle) string {
 
 // seal is the shared body of Seal and SealFrom. read lends the size bytes of
 // material to its argument for one call.
-func (s *Sealer) seal(ctx context.Context, size int, read func(func([]byte) error) error) (*Sealed, error) {
+func (s *Sealer) seal(ctx context.Context, size int, read func(func([]byte) error) error) (*sealedValue, error) {
 	// Before any key is touched, so an empty or oversized input costs nothing.
 	// SealFrom's size comes from a ByteAccess, so a negative one is refused
 	// as empty too.
@@ -634,7 +644,7 @@ func (s *Sealer) seal(ctx context.Context, size int, read func(func([]byte) erro
 		return nil, err
 	}
 
-	return &Sealed{sealedState: &sealedState{
+	return &sealedValue{sealedState: &sealedState{
 		sealer: s, sealed: sealed, blob: blob, size: size,
 		sealedAtGen: sealedAtGen,
 	}}, nil
@@ -704,7 +714,7 @@ func (s *Sealer) open(ctx context.Context, blob, sealed []byte, size int, dst fu
 
 	// Locked before the provider fills it, so a capable provider writes the
 	// key straight into locked pages. Not admitted; see [Sealed.OpenIn].
-	dek, err := NewMemorySized(dekBytes)
+	dek, err := newMemorySized(dekBytes)
 	if err != nil {
 		return nil, destroyOnFailure(err, out)
 	}

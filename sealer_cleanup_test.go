@@ -150,7 +150,7 @@ func TestSealed_OpenInRechecksTheSealerAfterImport(t *testing.T) {
 			if err != nil {
 				t.Fatalf("NewSealer: %v", err)
 			}
-			v, err := s.Seal(t.Context(), []byte("opened-across-destroy"))
+			v, err := s.sealData(t.Context(), []byte("opened-across-destroy"))
 			if err != nil {
 				t.Fatalf("Seal: %v", err)
 			}
@@ -204,7 +204,7 @@ func TestSealed_OpenInKeepsAFailedImportsRefusedCleanup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
-	v, err := s.Seal(t.Context(), []byte("failed-import"))
+	v, err := s.sealData(t.Context(), []byte("failed-import"))
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
@@ -234,7 +234,7 @@ func TestSealer_ImportKeyKeepsARefusedCleanup(t *testing.T) {
 	}
 	b.fail.Store(true)
 	b.refuse.Store(true)
-	if _, err := s.Seal(t.Context(), []byte("failed-key-import")); err == nil {
+	if _, err := s.sealData(t.Context(), []byte("failed-key-import")); err == nil {
 		t.Fatal("Seal over a failing import succeeded")
 	} else {
 		requireCleanupFailure(t, err, ErrSealFailed, errImportFailed)
@@ -255,7 +255,7 @@ func TestSealer_RotationKeepsARefusedOutgoingKEK(t *testing.T) {
 		t.Fatalf("NewSealer: %v", err)
 	}
 	ctx := t.Context()
-	first, err := s.Seal(ctx, []byte("before-rotation"))
+	first, err := s.sealData(ctx, []byte("before-rotation"))
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
@@ -263,7 +263,7 @@ func TestSealer_RotationKeepsARefusedOutgoingKEK(t *testing.T) {
 	keys := len(b.live()) // the wrapping key and generation 1
 
 	b.refuse.Store(true)
-	if _, err := s.Seal(ctx, []byte("rotating")); err == nil {
+	if _, err := s.sealData(ctx, []byte("rotating")); err == nil {
 		t.Fatal("a rotation whose outgoing KEK refused Destroy reported success")
 	} else {
 		requireCleanupFailure(t, err)
@@ -275,7 +275,7 @@ func TestSealer_RotationKeepsARefusedOutgoingKEK(t *testing.T) {
 	// The new generation is published: sealing goes on under it, and the
 	// value sealed before the rotation still opens.
 	b.refuse.Store(false)
-	second, err := s.Seal(ctx, []byte("after-rotation"))
+	second, err := s.sealData(ctx, []byte("after-rotation"))
 	if err != nil {
 		t.Fatalf("Seal after the refused rotation: %v", err)
 	}
@@ -327,7 +327,7 @@ func TestReadOnly_ProbesEveryPage(t *testing.T) {
 		t.Fatalf("NewSealer: %v", err)
 	}
 	defer s.Destroy()
-	if _, err := s.Seal(t.Context(), b); !errors.Is(err, ErrSealSourceReadOnly) {
+	if _, err := s.sealData(t.Context(), b); !errors.Is(err, ErrSealSourceReadOnly) {
 		t.Fatalf("Seal over a read-only interior page = %v, want ErrSealSourceReadOnly", err)
 	}
 }

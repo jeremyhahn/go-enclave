@@ -47,7 +47,7 @@ func fillRandom(b []byte) error {
 //
 //nolint:unparam // n is always 32 today because dekBytes, kekBytes and RootKeyBytes are three independent decisions that happen to agree; folding them into one constant here would couple them.
 func newKeyEnclave(n int) (*Memory, error) {
-	e, err := NewMemorySized(n)
+	e, err := newMemorySized(n)
 	if err != nil {
 		return nil, err
 	}

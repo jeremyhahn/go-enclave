@@ -111,7 +111,7 @@ func TestWipeAll_DestroysEveryLiveEnclave(t *testing.T) {
 
 	held := make([]*Memory, 0, n)
 	for i := 0; i < n; i++ {
-		e, err := NewMemory(append([]byte(nil), material...))
+		e, err := newMemory(append([]byte(nil), material...))
 		if err != nil {
 			t.Fatalf("NewMemory: %v", err)
 		}
@@ -149,7 +149,7 @@ func TestWipeAll_IsIdempotentAndEmptySafe(t *testing.T) {
 		t.Errorf("WipeAll on an empty ledger = %d, want 0", remaining)
 	}
 
-	e, err := NewMemorySized(32)
+	e, err := newMemorySized(32)
 	if err != nil {
 		t.Fatalf("NewMemorySized: %v", err)
 	}
@@ -174,7 +174,7 @@ func TestWipeAll_IsIdempotentAndEmptySafe(t *testing.T) {
 func TestWipeAll_AlreadyDestroyedIsANoOp(t *testing.T) {
 	before := liveCount()
 
-	e, err := NewMemorySized(32)
+	e, err := newMemorySized(32)
 	if err != nil {
 		t.Fatalf("NewMemorySized: %v", err)
 	}
@@ -199,11 +199,11 @@ func TestWipeAll_AlreadyDestroyedIsANoOp(t *testing.T) {
 func TestWipeAll_ABorrowThatOutlastsCtxIsCountedNotUnmapped(t *testing.T) {
 	material := bytes.Repeat([]byte{0x3C}, 40)
 
-	borrowed, err := NewMemory(append([]byte(nil), material...))
+	borrowed, err := newMemory(append([]byte(nil), material...))
 	if err != nil {
 		t.Fatalf("NewMemory: %v", err)
 	}
-	other, err := NewMemorySized(32)
+	other, err := newMemorySized(32)
 	if err != nil {
 		t.Fatalf("NewMemorySized: %v", err)
 	}
@@ -278,7 +278,7 @@ func TestWipeAll_ABorrowThatOutlastsCtxIsCountedNotUnmapped(t *testing.T) {
 // TestWipeAll_ReturnsTheAllocatorReservations pins that the sweep settles the
 // Allocator budget on the same terms Destroy does.
 func TestWipeAll_ReturnsTheAllocatorReservations(t *testing.T) {
-	a, err := NewAllocator(8 * pageSize)
+	a, err := newBudgetAllocator(8 * pageSize)
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
@@ -332,7 +332,7 @@ func TestWipeAll_ConcurrentWithConstructionAndDestruction(t *testing.T) {
 					return
 				default:
 				}
-				e, err := NewMemorySized(64)
+				e, err := newMemorySized(64)
 				if err != nil {
 					t.Errorf("NewMemorySized: %v", err)
 					return
@@ -394,7 +394,7 @@ func TestWipeAll_ConcurrentWithConstructionAndDestruction(t *testing.T) {
 func TestWipeAll_DoesNotReturnZeroWhileAnEnclaveIsAlive(t *testing.T) {
 	requireCleanLedger(t)
 
-	trigger, err := NewMemorySized(32)
+	trigger, err := newMemorySized(32)
 	if err != nil {
 		t.Fatalf("NewMemorySized: %v", err)
 	}
@@ -405,7 +405,7 @@ func TestWipeAll_DoesNotReturnZeroWhileAnEnclaveIsAlive(t *testing.T) {
 	)
 	// Runs inside WipeAll, after the snapshot that will never contain `late`.
 	trigger.release = func() {
-		e, cerr := NewMemorySized(32)
+		e, cerr := newMemorySized(32)
 		lateMu.Lock()
 		late = e
 		lateMu.Unlock()
@@ -464,7 +464,7 @@ func TestWipeAll_ConcurrentWithAllocatorConstructionKeepsTheBudgetExact(t *testi
 		budget     = 8 << 20
 	)
 
-	a, err := NewAllocator(budget)
+	a, err := newBudgetAllocator(budget)
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
@@ -476,7 +476,7 @@ func TestWipeAll_ConcurrentWithAllocatorConstructionKeepsTheBudgetExact(t *testi
 	// exactly its material. Checked with no sweeper running, because it is a
 	// property of construction rather than of the race.
 	func() {
-		e, err := a.New(append([]byte(nil), material...))
+		e, err := a.admitData(append([]byte(nil), material...))
 		if err != nil {
 			t.Fatalf("Allocator.New with no sweep running: %v (a refused lock means the runner's "+
 				"RLIMIT_MEMLOCK is below one page — a provisioning defect, not a skip)", err)
@@ -539,7 +539,7 @@ func TestWipeAll_ConcurrentWithAllocatorConstructionKeepsTheBudgetExact(t *testi
 				default:
 				}
 
-				e, err := a.New(append([]byte(nil), material...))
+				e, err := a.admitData(append([]byte(nil), material...))
 				if err != nil {
 					t.Errorf("Allocator.New: %v (ErrLockedMemoryUnavailable here means the runner's "+
 						"RLIMIT_MEMLOCK cannot hold %d one-page enclaves at once — provision it)", err, goroutines)
@@ -635,18 +635,18 @@ func TestWipeAll_RetriesAReaderRatherThanAbandoningIt(t *testing.T) {
 	const trials = 16
 
 	for trial := 0; trial < trials; trial++ {
-		a, err := NewAllocator(16 * pageSize)
+		a, err := newBudgetAllocator(16 * pageSize)
 		if err != nil {
 			t.Fatalf("NewAllocator: %v", err)
 		}
 
 		// held is the enclave a reader is touching when the sweep arrives.
-		held, err := NewMemorySized(64)
+		held, err := newMemorySized(64)
 		if err != nil {
 			t.Fatalf("trial %d: NewMemorySized: %v", trial, err)
 		}
 		// gate runs code INSIDE the sweep, after the batch has been taken.
-		gate, err := a.NewSized(64)
+		gate, err := a.admitSized(64)
 		if err != nil {
 			held.Destroy()
 			t.Fatalf("trial %d: Allocator.NewSized: %v", trial, err)
@@ -717,7 +717,7 @@ func TestWipeAll_DoesNotPanicOnACorruptCanaryAndFinishesTheSweep(t *testing.T) {
 
 	const count, corruptAt = 5, 2
 
-	a, err := NewAllocator(16 * pageSize)
+	a, err := newBudgetAllocator(16 * pageSize)
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
@@ -726,7 +726,7 @@ func TestWipeAll_DoesNotPanicOnACorruptCanaryAndFinishesTheSweep(t *testing.T) {
 	for i := 0; i < count; i++ {
 		// Sized, so the pages stay writable; a frozen enclave would fault on the
 		// canary write below.
-		e, err := a.NewSized(64)
+		e, err := a.admitSized(64)
 		if err != nil {
 			t.Fatalf("NewSized: %v", err)
 		}
@@ -812,7 +812,7 @@ func TestWipeAll_ReportsHowManyEnclavesWereCorrupt(t *testing.T) {
 	const total, corruptCount = 5, 3
 
 	for i := 0; i < total; i++ {
-		e, err := NewMemorySized(64)
+		e, err := newMemorySized(64)
 		if err != nil {
 			t.Fatalf("NewMemorySized: %v", err)
 		}
@@ -844,7 +844,7 @@ func TestWipeAll_ReportsHowManyEnclavesWereCorrupt(t *testing.T) {
 func TestWipeAll_ReportsCorruptionWhoseReleaseWasRefused(t *testing.T) {
 	requireCleanLedger(t)
 
-	e, err := NewMemorySized(64)
+	e, err := newMemorySized(64)
 	if err != nil {
 		t.Fatalf("NewMemorySized: %v", err)
 	}
@@ -852,7 +852,7 @@ func TestWipeAll_ReportsCorruptionWhoseReleaseWasRefused(t *testing.T) {
 		t.Fatal("no canary slack at this size; the test would be vacuous")
 	}
 	e.m.canary[0] ^= 0xFF
-	companion, err := NewMemorySized(64)
+	companion, err := newMemorySized(64)
 	if err != nil {
 		t.Fatalf("NewMemorySized: %v", err)
 	}
@@ -906,7 +906,7 @@ func TestWipeAll_ReportsNoErrorWhenNothingIsCorrupt(t *testing.T) {
 	requireCleanLedger(t)
 
 	for i := 0; i < 4; i++ {
-		if _, err := NewMemorySized(64); err != nil {
+		if _, err := newMemorySized(64); err != nil {
 			t.Fatalf("NewMemorySized: %v", err)
 		}
 	}
@@ -930,11 +930,11 @@ func TestWipeAll_AFailedReleaseKeepsBothTheChargeAndTheLedgerEntry(t *testing.T)
 		t.Fatalf("this test needs a clean ledger; WipeAll = %d, %v", remaining, err)
 	}
 
-	a, err := NewAllocator(16 * pageSize)
+	a, err := newBudgetAllocator(16 * pageSize)
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
-	e, err := a.NewSized(64)
+	e, err := a.admitSized(64)
 	if err != nil {
 		t.Fatalf("could not allocate: %v", err)
 	}
@@ -995,7 +995,7 @@ func TestWipeAll_ABorrowEndingWakesTheSweep(t *testing.T) {
 		t.Fatalf("this test needs a clean ledger; WipeAll = %d", remaining)
 	}
 
-	e, err := NewMemorySized(64)
+	e, err := newMemorySized(64)
 	if err != nil {
 		t.Fatalf("NewMemorySized: %v", err)
 	}
@@ -1120,11 +1120,11 @@ func sweepAsync(t *testing.T, ctx context.Context, hang string) sweepResult {
 func TestWipeAll_ACanceledCtxStillSweepsWhatIsFree(t *testing.T) {
 	requireCleanLedger(t)
 
-	free, err := NewMemorySized(32)
+	free, err := newMemorySized(32)
 	if err != nil {
 		t.Fatalf("NewMemorySized: %v", err)
 	}
-	held, err := NewMemorySized(32)
+	held, err := newMemorySized(32)
 	if err != nil {
 		t.Fatalf("NewMemorySized: %v", err)
 	}
@@ -1166,11 +1166,11 @@ func TestWipeAll_ACanceledCtxStillSweepsWhatIsFree(t *testing.T) {
 func TestWipeAll_ANilCtxNeverWaitsAndNeverPanics(t *testing.T) {
 	requireCleanLedger(t)
 
-	free, err := NewMemorySized(32)
+	free, err := newMemorySized(32)
 	if err != nil {
 		t.Fatalf("NewMemorySized: %v", err)
 	}
-	held, err := NewMemorySized(32)
+	held, err := newMemorySized(32)
 	if err != nil {
 		t.Fatalf("NewMemorySized: %v", err)
 	}
@@ -1214,7 +1214,7 @@ func TestWipeAll_AConstructorThatNeverStopsCannotKeepTheSweepRunning(t *testing.
 	)
 	var link func() *Memory
 	link = func() *Memory {
-		e, err := NewMemorySized(32)
+		e, err := newMemorySized(32)
 		if err != nil {
 			select {
 			case cerrs <- err:
@@ -1294,7 +1294,7 @@ func TestWipeAll_TerminatesAgainstALiveConstructorUnderBackground(t *testing.T) 
 			case ack = <-want:
 			default:
 			}
-			e, err := NewMemorySized(32)
+			e, err := newMemorySized(32)
 			if err != nil {
 				cerr <- err
 				return
@@ -1331,7 +1331,7 @@ func TestWipeAll_TerminatesAgainstALiveConstructorUnderBackground(t *testing.T) 
 		t.Fatalf("the constructor failed before the sweep began: %v", err)
 	}
 
-	trigger, err := NewMemorySized(32)
+	trigger, err := newMemorySized(32)
 	if err != nil {
 		t.Fatalf("NewMemorySized: %v", err)
 	}
@@ -1387,7 +1387,7 @@ func TestWipeAll_TerminatesAgainstALiveConstructorUnderBackground(t *testing.T) 
 func TestWipeAll_ALateBorrowIsNeverWaitedFor(t *testing.T) {
 	requireCleanLedger(t)
 
-	trigger, err := NewMemorySized(32)
+	trigger, err := newMemorySized(32)
 	if err != nil {
 		t.Fatalf("NewMemorySized: %v", err)
 	}
@@ -1398,7 +1398,7 @@ func TestWipeAll_ALateBorrowIsNeverWaitedFor(t *testing.T) {
 		lateOK = make(chan error, 1)
 	)
 	trigger.release = func() {
-		e, cerr := NewMemorySized(32)
+		e, cerr := newMemorySized(32)
 		if cerr != nil {
 			lateOK <- cerr
 			return
@@ -1445,7 +1445,7 @@ func TestWipeAll_ALateBorrowIsNeverWaitedFor(t *testing.T) {
 func TestWipeAll_RetriesAContendedLockAtOnce(t *testing.T) {
 	requireCleanLedger(t)
 
-	e, err := NewMemorySized(32)
+	e, err := newMemorySized(32)
 	if err != nil {
 		t.Fatalf("NewMemorySized: %v", err)
 	}
@@ -1484,7 +1484,7 @@ func TestWipeAll_RetriesAContendedLockAtOnce(t *testing.T) {
 func TestTryReleaseMapping_ClassifiesTheLock(t *testing.T) {
 	newEnclave := func(t *testing.T) *Memory {
 		t.Helper()
-		e, err := NewMemorySized(32)
+		e, err := newMemorySized(32)
 		if err != nil {
 			t.Fatalf("NewMemorySized: %v", err)
 		}
@@ -1546,7 +1546,7 @@ func drainWake() bool {
 // release that takes the count to zero does, and wake-ups coalesce in the
 // one-slot channel rather than blocking a releaser.
 func TestHolders_TheLastReleaseWakesOnlyAnArmedSweep(t *testing.T) {
-	e, err := NewMemorySized(32)
+	e, err := newMemorySized(32)
 	if err != nil {
 		t.Fatalf("NewMemorySized: %v", err)
 	}
@@ -1594,7 +1594,7 @@ func TestHolders_TheLastReleaseWakesOnlyAnArmedSweep(t *testing.T) {
 // stuck above zero makes a Background sweep wait forever, one below zero lets
 // it wait with no holder to wake it.
 func TestHolders_EveryMethodLeavesTheCountBalanced(t *testing.T) {
-	e, err := NewMemorySized(32)
+	e, err := newMemorySized(32)
 	if err != nil {
 		t.Fatalf("NewMemorySized: %v", err)
 	}
@@ -1632,7 +1632,7 @@ func TestDestroy_NilAndRepeatedReturnNil(t *testing.T) {
 		t.Errorf("Destroy on a nil enclave = %v, want nil", err)
 	}
 
-	e, err := NewMemorySized(32)
+	e, err := newMemorySized(32)
 	if err != nil {
 		t.Fatalf("NewMemorySized: %v", err)
 	}
@@ -1719,7 +1719,7 @@ func TestWipeAll_SweepErrorCountsAreReadableWithErrorsAs(t *testing.T) {
 
 	const total, corrupt = 4, 2
 	for i := 0; i < total; i++ {
-		e, err := NewMemorySized(64)
+		e, err := newMemorySized(64)
 		if err != nil {
 			t.Fatalf("NewMemorySized: %v", err)
 		}
@@ -1781,7 +1781,7 @@ func parkSweepOnABorrow(t *testing.T, e *Memory) (end func(), result <-chan swee
 func TestWipeAll_AParkedSweepDoesNotHoldASecondCallerHostage(t *testing.T) {
 	requireCleanLedger(t)
 
-	e, err := NewMemorySized(32)
+	e, err := newMemorySized(32)
 	if err != nil {
 		t.Fatalf("NewMemorySized: %v", err)
 	}
@@ -1848,7 +1848,7 @@ func TestWipeAll_AParkedSweepDoesNotHoldASecondCallerHostage(t *testing.T) {
 func TestWipeAll_ContentionRetriesHonorCtx(t *testing.T) {
 	requireCleanLedger(t)
 
-	e, err := NewMemorySized(32)
+	e, err := newMemorySized(32)
 	if err != nil {
 		t.Fatalf("NewMemorySized: %v", err)
 	}
@@ -1945,14 +1945,14 @@ func denyProtectAndUnmap(t *testing.T) (lift func()) {
 // lifts reclaims it and refunds once, and a further sweep refunds nothing.
 func TestAllocator_New_FailedConstructionIsReclaimedByWipeAll(t *testing.T) {
 	requireCleanLedger(t)
-	a, err := NewAllocator(4 * pageSize)
+	a, err := newBudgetAllocator(4 * pageSize)
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
 	t.Cleanup(func() { _, _ = WipeAll(context.Background()) })
 	restore := denyProtectAndUnmap(t)
 
-	e, err := a.New(material())
+	e, err := a.admitData(material())
 	if err == nil {
 		e.Destroy()
 		t.Fatal("Allocator.New succeeded although its freeze was refused")
@@ -2006,7 +2006,7 @@ func TestAllocator_New_FailedConstructionIsReclaimedByWipeAll(t *testing.T) {
 // still-mapped orphan must carry no refund of its own.
 func TestAllocator_NewSized_UnlockedOrphanIsReclaimedWithoutASecondRefund(t *testing.T) {
 	requireCleanLedger(t)
-	a, err := NewAllocator(4 * pageSize)
+	a, err := newBudgetAllocator(4 * pageSize)
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
@@ -2048,7 +2048,7 @@ func TestNewMemoryCopy_FailedConstructionIsReclaimedByWipeAll(t *testing.T) {
 	t.Cleanup(func() { _, _ = WipeAll(context.Background()) })
 	restore := denyProtectAndUnmap(t)
 
-	if _, err := NewMemoryCopy(material()); !lockedPagesHeld(err) {
+	if _, err := newMemoryCopy(material()); !lockedPagesHeld(err) {
 		t.Fatalf("NewMemoryCopy = %v, want locked pages held", err)
 	}
 	if got := orphanCount(); got != 1 {
@@ -2121,7 +2121,7 @@ func TestWipeAll_ReclaimsOrphansAddedConcurrently(t *testing.T) {
 	const workers, perWorker = 4, 16
 	// Room for every construction's charge at once, so no failure below can be
 	// a budget refusal instead of the orphan path under test.
-	a, err := NewAllocator(workers * perWorker * pageSize)
+	a, err := newBudgetAllocator(workers * perWorker * pageSize)
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
@@ -2198,7 +2198,7 @@ func TestWipeAll_ReclaimsOrphansAddedConcurrently(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for i := 0; i < perWorker; i++ {
-				e, err := a.New(material())
+				e, err := a.admitData(material())
 				if err == nil {
 					e.Destroy()
 					t.Errorf("Allocator.New succeeded although every freeze is refused")

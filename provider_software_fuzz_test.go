@@ -24,7 +24,7 @@ import (
 // key Protect was given; every other blob is refused with
 // ErrSealedAuthentication, leaving key untouched or wiped.
 func FuzzSoftwareProviderUnprotect(f *testing.F) {
-	p := NewSoftwareProvider()
+	p := newSoftwareProvider()
 	f.Cleanup(func() { _ = p.Destroy() })
 	key := make([]byte, RootKeyBytes)
 	if _, err := rand.Read(key); err != nil {
@@ -34,7 +34,7 @@ func FuzzSoftwareProviderUnprotect(f *testing.F) {
 	if err != nil {
 		f.Fatalf("Protect: %v", err)
 	}
-	other := NewSoftwareProvider()
+	other := newSoftwareProvider()
 	foreign, err := other.Protect(f.Context(), bytes.Clone(key))
 	if err != nil {
 		f.Fatalf("Protect (foreign): %v", err)
@@ -91,7 +91,7 @@ func FuzzSoftwareProviderUnprotect(f *testing.F) {
 // FuzzSoftwareProviderRoundTrip checks that Unprotect of a Protect blob returns
 // the protected key exactly, for any 32-byte key.
 func FuzzSoftwareProviderRoundTrip(f *testing.F) {
-	p := NewSoftwareProvider()
+	p := newSoftwareProvider()
 	f.Cleanup(func() { _ = p.Destroy() })
 	seed := make([]byte, RootKeyBytes)
 	if _, err := rand.Read(seed); err != nil {

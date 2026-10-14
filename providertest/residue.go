@@ -166,7 +166,7 @@ var sweepProcess = memscan.Find
 
 // sweepOutsideHome returns the mappings, other than the one containing home,
 // in which the material held in probe is byte-exact resident.
-func sweepOutsideHome(probe *enclave.Memory, home uintptr) ([]string, error) {
+func sweepOutsideHome(probe enclave.ByteAccess, home uintptr) ([]string, error) {
 	var hits []string
 	var scanErr error
 	if err := probe.WithBytes(func(needle []byte) error {
@@ -195,7 +195,7 @@ func equalBytes(a, b []byte) bool {
 // release destroys a locked mapping the residue check made for itself. A
 // refusal is the environment's doing, not the provider's, so it is noted
 // rather than failed.
-func release(r *report, what string, e *enclave.Memory) {
+func release(r *report, what string, e enclave.Handle) {
 	if err := e.Destroy(); err != nil {
 		r.note("providertest: releasing the residue check's %s was refused: %v", what, err)
 	}

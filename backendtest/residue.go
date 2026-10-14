@@ -184,7 +184,7 @@ func residueHandle(r *report, b enclave.Backend, hc HandleCase) (enclave.Handle,
 var sweepProcess = memscan.Find
 
 // sweepOutsideHome reports every mapping outside home that holds the needle.
-func sweepOutsideHome(probe *enclave.Memory, home uintptr) ([]string, error) {
+func sweepOutsideHome(probe enclave.ByteAccess, home uintptr) ([]string, error) {
 	var hits []string
 	var scanErr error
 	if err := probe.WithBytes(func(needle []byte) error {
@@ -196,7 +196,7 @@ func sweepOutsideHome(probe *enclave.Memory, home uintptr) ([]string, error) {
 	return hits, scanErr
 }
 
-func release(r *report, what string, m *enclave.Memory) {
+func release(r *report, what string, m enclave.Handle) {
 	if err := m.Destroy(); err != nil {
 		r.note("backendtest: releasing the residue check's %s was refused: %v", what, err)
 	}

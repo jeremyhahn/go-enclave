@@ -43,9 +43,9 @@ func TestShutdownSweep_WipeAllReclaimsEverythingAndLeavesNoResidue(t *testing.T)
 			t.Fatalf("NewAllocator: %v", err)
 		}
 
-		var held []*enclave.Memory
+		var held []enclave.ByteAccess
 		frozen := enclaveFromNeedle(t, n)
-		if err := frozen.Freeze(); err != nil {
+		if err := frozen.(enclave.Freezer).Freeze(); err != nil {
 			t.Fatalf("Freeze: %v", err)
 		}
 		held = append(held, frozen)
@@ -67,7 +67,7 @@ func TestShutdownSweep_WipeAllReclaimsEverythingAndLeavesNoResidue(t *testing.T)
 		}
 		held = append(held, admitted)
 
-		var sealedValues []*enclave.Sealed
+		var sealedValues []enclave.Sealed
 		for _, mode := range sealerModes {
 			s, err := enclave.NewSealer(providerOption(enclave.NewSoftwareProvider(), mode))
 			if err != nil {
@@ -141,7 +141,7 @@ func TestShutdownSweep_WipeAllWaitsForLiveBorrowsUntilItsDeadline(t *testing.T) 
 	isolated(t, childOpts{}, func(t *testing.T) {
 		n := newNeedle(t)
 		borrowed := enclaveFromNeedle(t, n)
-		others := []*enclave.Memory{enclaveFromNeedle(t, newNeedle(t)), enclaveFromNeedle(t, newNeedle(t))}
+		others := []enclave.ByteAccess{enclaveFromNeedle(t, newNeedle(t)), enclaveFromNeedle(t, newNeedle(t))}
 		page := enclave.LockedSize(needleLen)
 
 		entered := make(chan struct{})
@@ -454,7 +454,7 @@ func TestShutdownSweep_DestroyReturnsCanaryCorruptionAfterWiping(t *testing.T) {
 // underflowOneByte writes the canary's last byte, just before the data, through
 // the writable pages of an unfrozen sized enclave, as a consumer's off-by-one
 // underflow would. A frozen enclave would fault instead.
-func underflowOneByte(t *testing.T, e *enclave.Memory) {
+func underflowOneByte(t *testing.T, e enclave.ByteAccess) {
 	t.Helper()
 	if err := e.WithBytes(func(b []byte) error {
 		p := (*byte)(unsafe.Add(unsafe.Pointer(unsafe.SliceData(b)), -1)) //#nosec G103 -- deliberate underflow to corrupt the canary

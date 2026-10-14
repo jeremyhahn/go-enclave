@@ -185,7 +185,7 @@ func lockedMemoryExhaustionChild(t *testing.T) {
 	var failedSource []byte
 	for i := 0; i < 64; i++ {
 		source := []byte(fmt.Sprintf("key-material-%d", i))
-		e, err := NewMemory(source)
+		e, err := newMemory(source)
 		if err != nil {
 			lastErr = err
 			failedSource = source
@@ -216,7 +216,7 @@ func lockedMemoryExhaustionChild(t *testing.T) {
 	copySrc := []byte("copy-material-under-a-ceiling")
 	want := append([]byte(nil), copySrc...)
 
-	if _, err := NewMemoryCopy(copySrc); !errors.Is(err, ErrLockedMemoryUnavailable) {
+	if _, err := newMemoryCopy(copySrc); !errors.Is(err, ErrLockedMemoryUnavailable) {
 		t.Fatalf("NewMemoryCopy err = %v, want ErrLockedMemoryUnavailable under the injected ceiling", err)
 	}
 	if !bytes.Equal(copySrc, want) {
@@ -270,7 +270,7 @@ func foreignFailureChild(t *testing.T) {
 	const material = "server-private-key-material"
 
 	// Allocated before the ceiling; nothing below touches it.
-	a, err := NewMemory([]byte(material))
+	a, err := newMemory([]byte(material))
 	if err != nil {
 		t.Fatalf("could not allocate the enclave under test before any ceiling was injected: %v", err)
 	}
@@ -300,7 +300,7 @@ func foreignFailureChild(t *testing.T) {
 	// The borrow is parked; the failing allocation must complete on its own.
 	var lastErr error
 	for i := 0; i < 64; i++ {
-		e, ferr := NewMemory([]byte(fmt.Sprintf("foreign-material-%d", i)))
+		e, ferr := newMemory([]byte(fmt.Sprintf("foreign-material-%d", i)))
 		if ferr != nil {
 			lastErr = ferr
 			break
@@ -372,7 +372,7 @@ func allocReleaseChild(t *testing.T) {
 	t.Helper()
 
 	// A budget large enough that only the OS lock can fail.
-	a, err := NewAllocator(1 << 20)
+	a, err := newBudgetAllocator(1 << 20)
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
@@ -385,7 +385,7 @@ func allocReleaseChild(t *testing.T) {
 	var survivors []*Memory
 	var lastErr error
 	for i := 0; i < 64; i++ {
-		e, err := a.New([]byte(fmt.Sprintf("key-material-%d", i)))
+		e, err := a.admitData([]byte(fmt.Sprintf("key-material-%d", i)))
 		if err != nil {
 			lastErr = err
 			break
@@ -439,7 +439,7 @@ func TestNewMemorySized_MemoryIsLocked(t *testing.T) {
 	}
 	runtime.KeepAlive(heap)
 
-	e, err := NewMemorySized(64)
+	e, err := newMemorySized(64)
 	if err != nil {
 		t.Fatalf("NewMemorySized: %v", err)
 	}
@@ -550,13 +550,13 @@ func sizedAdmissionChild(t *testing.T) {
 	const material = "canary-key-material"
 
 	// Allocated before the ceiling.
-	canary, err := NewMemory([]byte(material))
+	canary, err := newMemory([]byte(material))
 	if err != nil {
 		t.Fatalf("could not allocate the canary enclave before any ceiling was injected: %v", err)
 	}
 
 	// A budget far below the request, so admission refuses.
-	a, err := NewAllocator(16)
+	a, err := newBudgetAllocator(16)
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
@@ -567,7 +567,7 @@ func sizedAdmissionChild(t *testing.T) {
 
 	const request = 4096
 
-	e, err := a.NewSized(request)
+	e, err := a.admitSized(request)
 	if e != nil {
 		t.Fatal("over-budget NewSized returned a non-nil enclave")
 	}
@@ -584,7 +584,7 @@ func sizedAdmissionChild(t *testing.T) {
 
 	// Non-vacuity: the same allocation without admission must be refused by
 	// the kernel, showing the ceiling was live.
-	if _, err := NewMemorySized(request); !errors.Is(err, ErrLockedMemoryUnavailable) {
+	if _, err := newMemorySized(request); !errors.Is(err, ErrLockedMemoryUnavailable) {
 		t.Fatalf("unadmitted NewMemorySized err = %v, want ErrLockedMemoryUnavailable; "+
 			"the ceiling was not live and the refusal above proves nothing", err)
 	}
@@ -601,7 +601,7 @@ func sizedAdmissionChild(t *testing.T) {
 
 	// An admitted sized allocation the OS then refuses must give its
 	// reservation back; only the counter can show it.
-	big, err := NewAllocator(1 << 24)
+	big, err := newBudgetAllocator(1 << 24)
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
@@ -639,7 +639,7 @@ func TestMemory_FrozenSizedPagesFault(t *testing.T) {
 	}
 
 	// Control: unfrozen, the same write succeeds. This is the fill path.
-	unfrozen, err := NewMemorySized(32)
+	unfrozen, err := newMemorySized(32)
 	if err != nil {
 		t.Fatalf("NewMemorySized: %v", err)
 	}
@@ -658,7 +658,7 @@ func TestMemory_FrozenSizedPagesFault(t *testing.T) {
 func sealedWriteChild(t *testing.T) {
 	t.Helper()
 
-	e, err := NewMemorySized(32)
+	e, err := newMemorySized(32)
 	if err != nil {
 		t.Fatalf("NewMemorySized: %v", err)
 	}
@@ -684,7 +684,7 @@ func sealedWriteChild(t *testing.T) {
 // ErrReleasedWithoutWipe, the pages leave the process's mappings, the Allocator
 // reservation is returned, and the kernel's VmLck does not grow.
 func TestMemory_FrozenDestroyFallsBackToUnmap(t *testing.T) {
-	a, err := NewAllocator(8 * pageSize)
+	a, err := newBudgetAllocator(8 * pageSize)
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
 	}
@@ -694,7 +694,7 @@ func TestMemory_FrozenDestroyFallsBackToUnmap(t *testing.T) {
 		t.Fatalf("cannot read VmLck: %v", err)
 	}
 
-	e, err := a.NewSized(64)
+	e, err := a.admitSized(64)
 	if err != nil {
 		t.Fatalf("NewSized: %v", err)
 	}
@@ -775,7 +775,7 @@ func TestMemory_FreezeIsWhatPutsMaterialOnTheFallbackPath(t *testing.T) {
 			// exported one would leak a ledger entry into every WipeAll test.
 			e, err := unpublishedSized(len(material))
 			if err != nil {
-				t.Fatalf("newMemorySized: %v", err)
+				t.Fatalf("NewMemorySized: %v", err)
 			}
 			copy(e.m.data, material)
 			if tc.freeze {
@@ -830,7 +830,7 @@ func TestMemory_FreezeIsWhatPutsMaterialOnTheFallbackPath(t *testing.T) {
 // *UnwipedReleaseError carrying the raw refusal, disjoint from
 // ErrLockedMemoryUnavailable.
 func TestDestroyReportsTheDeniedMprotect(t *testing.T) {
-	e, err := NewMemory([]byte("material for the public teardown path"))
+	e, err := newMemory([]byte("material for the public teardown path"))
 	if err != nil {
 		t.Fatalf("NewMemory: %v", err)
 	}
@@ -866,7 +866,7 @@ func TestDestroyReportsTheDeniedMprotect(t *testing.T) {
 
 // TestDestroyIsNilOnAnOrdinaryTeardown is the control for the test above.
 func TestDestroyIsNilOnAnOrdinaryTeardown(t *testing.T) {
-	e, err := NewMemory([]byte("material"))
+	e, err := newMemory([]byte("material"))
 	if err != nil {
 		t.Fatalf("NewMemory: %v", err)
 	}

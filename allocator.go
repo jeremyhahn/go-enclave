@@ -27,28 +27,125 @@ var allocatorIDs atomic.Uint64
 // pre-authentication buffers) through an Allocator sized well below the ceiling
 // turns that denial of service into a local [ErrBudgetExhausted].
 //
-// [Memory.Destroy] returns an enclave's reservation. The zero value is
-// not usable; construct one with [NewAllocator] or [NewAllocatorWithinRLimit].
-// A nil *Allocator returns [ErrNilAllocator], and a zero one
-// [ErrAllocatorNotConstructed], from every method that can fail, and both
-// report zero from InUse, Limit and Available. An Allocator is safe for
-// concurrent use; admission and release are lock-free. It holds only a pointer
-// to its budget, so every copy of one shares the budget.
+// Destroying an enclave returns its reservation. Construct an Allocator with
+// [NewAllocator] or [NewAllocatorWithinRLimit]; the implementation is internal
+// to this package, and [SetAllocator] and [Allocator.TransferTo] refuse any
+// other with [ErrAllocatorNotConstructed]. An Allocator is safe for concurrent
+// use; admission and release are lock-free.
 //
 // It does not bound locked memory allocated elsewhere in the process, so an
 // admitted allocation can still fail with [ErrLockedMemoryUnavailable]; callers
 // must handle both errors. Budgets can be changed at runtime with
 // [Allocator.SetLimit], [Allocator.ForceLimit] and [Allocator.TransferTo].
 //
-// An *Allocator is the locked-memory [Backend] with a budget: it is an
-// [Importer], and every enclave it admits reports it from [Memory.Backend].
-// Its name is [LockedMemoryBackendName], which the unbudgeted default holds
-// in the registry, so an Allocator is never registered; pass it where a
-// backend is injected.
-type Allocator struct {
+// An Allocator is the locked-memory [Importer] with a budget, and every
+// enclave it admits reports it from [Handle.Backend]. Its name is
+// [LockedMemoryBackendName], which the unbudgeted default holds in the
+// registry, so an Allocator is never registered; pass it where a backend is
+// injected.
+type Allocator interface {
+	// Import is New behind the [Importer] contract: it resolves opts with
+	// [NewImportSpec] and admits material into a new frozen enclave, wiping
+	// material on every path. Locked memory holds every purpose, since the
+	// enclave's [ByteAccess] meets each purpose's contract; a key for
+	// [AlgorithmAES256GCM] must be 32 bytes. Nothing is admitted once ctx has
+	// ended; a nil ctx never ends.
+	//
+	// It returns [ErrInvalidImport] for options NewImportSpec refuses or a key
+	// of the wrong length, ctx's error, and otherwise what New returns.
+	Importer
+
+	// New admits [LockedSize](len(data)) bytes and moves data into a new
+	// frozen enclave holding that reservation until its Destroy runs; callers
+	// must Destroy it or the reservation leaks. data is wiped before New
+	// returns, on every path. On failure the enclave is a nil interface.
+	//
+	// Errors, each leaving the budget unchanged unless noted:
+	//   - [ErrEmptyEnclave] when data is empty;
+	//   - [ErrBudgetExhausted] (as a [BudgetError]), before any syscall;
+	//   - [ErrLockedMemoryUnavailable] when the kernel refuses the lock. If
+	//     cleanup also failed and left pages locked, the charge stays until
+	//     [WipeAll] reclaims them, and the error carries both failures.
+	New(data []byte) (ByteAccess, error)
+
+	// NewSized is the admitted form of [NewMemorySized]: it admits
+	// [LockedSize](n) bytes and returns an enclave over n zeroed locked bytes
+	// that holds the reservation until its Destroy runs. The enclave is also a
+	// [Freezer]. Errors are as for New, with [ErrInvalidSize] for a
+	// non-positive or unmappable n in place of ErrEmptyEnclave.
+	NewSized(n int) (ByteAccess, error)
+
+	// InUse reports the page-rounded locked bytes reserved through this
+	// Allocator. It is a snapshot, not an admission gate. It exceeds Limit
+	// only after ForceLimit.
+	InUse() int64
+
+	// Limit reports the total budget in locked bytes, as last set by
+	// [NewAllocator], SetLimit, ForceLimit or TransferTo.
+	Limit() int64
+
+	// Available reports the locked bytes still admissible, clamped at zero.
+	// It is a snapshot and an upper bound: a remainder below one page admits
+	// nothing.
+	Available() int64
+
+	// SetLimit changes the budget to newLimit locked bytes, refusing to
+	// shrink below the memory already reserved.
+	//
+	// A raise is admissible immediately. A lowering that reservations do not
+	// fit under returns a [BudgetInUseError] and changes nothing; zero is
+	// legal, and ForceLimit lowers regardless. A negative newLimit returns
+	// [ErrInvalidBudget]. Safe for concurrent use with allocation and release:
+	// a lowering and an in-flight admission never both get the same bytes.
+	//
+	// On an allocator built by [NewAllocatorWithinRLimit], a raise re-reads
+	// RLIMIT_MEMLOCK and is refused with [ErrBudgetExceedsRLimit] (an
+	// [RLimitError]) above it, or [ErrLimitDiscoveryFailed] if it cannot be
+	// read. Lowerings are never refused on a ceiling. Passing the check does
+	// not rule out [ErrLockedMemoryUnavailable].
+	SetLimit(newLimit int64) error
+
+	// ForceLimit sets the budget to newLimit locked bytes even below current
+	// reservations, and returns the bytes by which reservations exceed it (0
+	// if none). Live enclaves are untouched and release normally; nothing is
+	// admitted until they drain. Zero quiesces the allocator. A negative
+	// newLimit returns [ErrInvalidBudget] and changes nothing.
+	//
+	// It overrides both SetLimit refusals, including raising a
+	// [NewAllocatorWithinRLimit] allocator above RLIMIT_MEMLOCK without
+	// reading it; allocations beyond the real ceiling then fail with
+	// [ErrLockedMemoryUnavailable].
+	ForceLimit(newLimit int64) (int64, error)
+
+	// TransferTo moves n locked bytes of budget headroom to dst in one call.
+	// Live enclaves on both sides are untouched. Concurrent and opposing
+	// transfers are safe; at worst one causes a brief refusal on either side,
+	// never over-commit.
+	//
+	// It refuses, changing nothing, with:
+	//   - [ErrInvalidTransfer] when n <= 0, dst is nil, or dst is this
+	//     Allocator;
+	//   - [ErrAllocatorNotConstructed] when dst is not an Allocator this
+	//     package built;
+	//   - a [BudgetInUseError] when the source's reservations would not fit,
+	//     with Requested the budget the source would have been left with;
+	//   - [ErrInvalidBudget] when dst's budget would overflow int64;
+	//   - the SetLimit raise errors when dst was built by
+	//     [NewAllocatorWithinRLimit]. Only dst is checked.
+	TransferTo(dst Allocator, n int64) error
+}
+
+// budgetAllocator is this package's [Allocator]. A nil *budgetAllocator
+// returns [ErrNilAllocator], and a zero one [ErrAllocatorNotConstructed], from
+// every method that can fail, and both report zero from InUse, Limit and
+// Available. It holds only a pointer to its budget, so every copy of one
+// shares the budget.
+type budgetAllocator struct {
 	_ noCopy
 	*allocatorState
 }
+
+var _ Allocator = (*budgetAllocator)(nil)
 
 // allocatorState is the budget itself, shared by every copy of its Allocator.
 type allocatorState struct {
@@ -73,8 +170,14 @@ type allocatorState struct {
 // (see [NewAllocatorWithinRLimit]). Size it in pages: every enclave costs at
 // least one ([LockedSize]); guard pages are never locked and do not count.
 //
-// It returns [ErrInvalidBudget] when maxBytes is not positive.
-func NewAllocator(maxBytes int64) (*Allocator, error) {
+// It returns [ErrInvalidBudget] when maxBytes is not positive, with a nil
+// interface.
+func NewAllocator(maxBytes int64) (Allocator, error) {
+	return allocatorOut(newBudgetAllocator(maxBytes))
+}
+
+// newBudgetAllocator is [NewAllocator] returning the implementation.
+func newBudgetAllocator(maxBytes int64) (*budgetAllocator, error) {
 	if maxBytes <= 0 {
 		return nil, ErrInvalidBudget
 	}
@@ -105,7 +208,14 @@ func NewAllocator(maxBytes int64) (*Allocator, error) {
 // raise this allocator's budget above it, and [Allocator.TransferTo] does the
 // same for the allocator it credits, both with [ErrBudgetExceedsRLimit].
 // Lowering is never checked; [Allocator.ForceLimit] is the deliberate override.
-func NewAllocatorWithinRLimit(maxBytes int64) (*Allocator, error) {
+// On failure the Allocator is a nil interface.
+func NewAllocatorWithinRLimit(maxBytes int64) (Allocator, error) {
+	return allocatorOut(newBudgetAllocatorWithinRLimit(maxBytes))
+}
+
+// newBudgetAllocatorWithinRLimit is [NewAllocatorWithinRLimit] returning the
+// implementation.
+func newBudgetAllocatorWithinRLimit(maxBytes int64) (*budgetAllocator, error) {
 	if maxBytes <= 0 {
 		return nil, ErrInvalidBudget
 	}
@@ -125,16 +235,39 @@ func NewAllocatorWithinRLimit(maxBytes int64) (*Allocator, error) {
 
 // newAllocator trusts its caller to have validated maxBytes: the process
 // default may have a zero budget.
-func newAllocator(maxBytes int64, rlimitBound bool) *Allocator {
-	a := &Allocator{allocatorState: &allocatorState{id: allocatorIDs.Add(1), rlimitBound: rlimitBound}}
+func newAllocator(maxBytes int64, rlimitBound bool) *budgetAllocator {
+	a := &budgetAllocator{allocatorState: &allocatorState{id: allocatorIDs.Add(1), rlimitBound: rlimitBound}}
 	a.limit.Store(maxBytes)
 	a.free.Store(maxBytes)
 	return a
 }
 
+// allocatorOut hands an implementation out as an [Allocator], keeping a
+// failure a nil interface rather than one holding a nil pointer.
+func allocatorOut(a *budgetAllocator, err error) (Allocator, error) {
+	if a == nil {
+		return nil, err
+	}
+	return a, err
+}
+
+// budgetOf returns the implementation behind a: [ErrNilAllocator] for a nil
+// one, and [ErrAllocatorNotConstructed] for one this package did not build or
+// for the zero value.
+func budgetOf(a Allocator) (*budgetAllocator, error) {
+	if a == nil {
+		return nil, ErrNilAllocator
+	}
+	b, ok := a.(*budgetAllocator)
+	if !ok {
+		return nil, ErrAllocatorNotConstructed
+	}
+	return b, b.usable()
+}
+
 // usable returns nil for an Allocator built by a constructor, and otherwise
 // [ErrNilAllocator] or, for the zero value, [ErrAllocatorNotConstructed].
-func (a *Allocator) usable() error {
+func (a *budgetAllocator) usable() error {
 	switch {
 	case a == nil:
 		return ErrNilAllocator
@@ -146,26 +279,21 @@ func (a *Allocator) usable() error {
 
 // ceilingForRaise reads the current ceiling, or returns the zero (non-refusing)
 // limit when not rlimitBound. Call it before taking mu: it may be a syscall.
-func (a *Allocator) ceilingForRaise() (LockedMemoryLimit, error) {
+func (a *budgetAllocator) ceilingForRaise() (LockedMemoryLimit, error) {
 	if !a.rlimitBound {
 		return LockedMemoryLimit{}, nil
 	}
 	return DiscoverLockedMemoryLimit()
 }
 
-// New admits [LockedSize](len(data)) bytes and moves data into a new enclave
-// holding that reservation until its Destroy runs; callers must Destroy it or
-// the reservation leaks. data is wiped before New returns, on every path.
-//
-// Errors, each leaving the budget unchanged unless noted:
-//   - [ErrNilAllocator] when a is nil, [ErrAllocatorNotConstructed] when it
-//     is the zero value;
-//   - [ErrEmptyEnclave] when data is empty;
-//   - [ErrBudgetExhausted] (as a [BudgetError]), before any syscall;
-//   - [ErrLockedMemoryUnavailable] when the kernel refuses the lock. If cleanup
-//     also failed and left pages locked, the charge stays until [WipeAll]
-//     reclaims them, and the error carries both failures.
-func (a *Allocator) New(data []byte) (*Memory, error) {
+// New implements [Allocator.New]. It returns [ErrNilAllocator] when a is
+// nil and [ErrAllocatorNotConstructed] when it is the zero value.
+func (a *budgetAllocator) New(data []byte) (ByteAccess, error) {
+	return byteAccess(a.admitData(data))
+}
+
+// admitData is [Allocator.New] returning the implementation.
+func (a *budgetAllocator) admitData(data []byte) (*Memory, error) {
 	defer Wipe(data)
 	if err := a.usable(); err != nil {
 		return nil, err
@@ -182,12 +310,13 @@ func (a *Allocator) New(data []byte) (*Memory, error) {
 	})
 }
 
-// NewSized is the admitted form of [NewMemorySized]: it admits
-// [LockedSize](n) bytes and returns an enclave over n zeroed locked bytes that
-// holds the reservation until its Destroy runs. Errors are as for
-// [Allocator.New], with [ErrInvalidSize] for a non-positive or unmappable n in
-// place of ErrEmptyEnclave.
-func (a *Allocator) NewSized(n int) (*Memory, error) {
+// NewSized implements [Allocator.NewSized], with the receiver errors of New.
+func (a *budgetAllocator) NewSized(n int) (ByteAccess, error) {
+	return byteAccess(a.admitSized(n))
+}
+
+// admitSized is [Allocator.NewSized] returning the implementation.
+func (a *budgetAllocator) admitSized(n int) (*Memory, error) {
 	if err := a.usable(); err != nil {
 		return nil, err
 	}
@@ -202,18 +331,11 @@ const aes256KeyBytes = 32
 
 // Name returns [LockedMemoryBackendName]: an Allocator is the locked-memory
 // backend with a budget. It is nil-safe.
-func (a *Allocator) Name() string { return LockedMemoryBackendName }
+func (a *budgetAllocator) Name() string { return LockedMemoryBackendName }
 
-// Import is [Allocator.New] behind the [Importer] contract: it resolves opts
-// with [NewImportSpec] and admits material into a new frozen enclave, wiping
-// material on every path. Locked memory holds every purpose, since the
-// enclave's [ByteAccess] meets each purpose's contract; a key for
-// [AlgorithmAES256GCM] must be 32 bytes. Nothing is admitted once ctx has
-// ended; a nil ctx never ends.
-//
-// It returns [ErrInvalidImport] for options NewImportSpec refuses or a key of
-// the wrong length, ctx's error, and otherwise what New returns.
-func (a *Allocator) Import(ctx context.Context, material []byte, opts ...ImportOption) (Handle, error) {
+// Import implements [Importer.Import] as [Allocator] describes it, with the
+// receiver errors of New.
+func (a *budgetAllocator) Import(ctx context.Context, material []byte, opts ...ImportOption) (Handle, error) {
 	defer Wipe(material)
 	if err := a.usable(); err != nil {
 		return nil, err
@@ -242,7 +364,7 @@ func (a *Allocator) Import(ctx context.Context, material []byte, opts ...ImportO
 // the refund as its release. A failed build is refunded at once, unless it
 // left pages locked: then the orphan carries the refund until a sweep
 // releases them.
-func (a *Allocator) admit(n int64, build func(locked int64) (*mapping, error)) (*Memory, error) {
+func (a *budgetAllocator) admit(n int64, build func(locked int64) (*mapping, error)) (*Memory, error) {
 	charge, err := a.reserve(n)
 	if err != nil {
 		return nil, err
@@ -261,7 +383,7 @@ func (a *Allocator) admit(n int64, build func(locked int64) (*mapping, error)) (
 // the release must return exactly, or [ErrInvalidSize] for an n lockedSize
 // refuses. `charge > free` has no addition, so a huge n cannot overflow into
 // admission.
-func (a *Allocator) reserve(n int64) (int64, error) {
+func (a *budgetAllocator) reserve(n int64) (int64, error) {
 	charge, ok := lockedSize(n)
 	if !ok {
 		return 0, ErrInvalidSize
@@ -292,7 +414,7 @@ func inUseFrom(limit, free int64) (int64, bool) {
 
 // budgetSnapshot returns (limit, inUse) for a refusal decided on free, re-reading
 // under the read lock only when the lock-free pair straddles a retune.
-func (a *Allocator) budgetSnapshot(free int64) (int64, int64) {
+func (a *budgetAllocator) budgetSnapshot(free int64) (int64, int64) {
 	limit := a.limit.Load()
 	if inUse, ok := inUseFrom(limit, free); ok {
 		return limit, inUse
@@ -307,10 +429,8 @@ func (a *Allocator) budgetSnapshot(free int64) (int64, int64) {
 	return limit, inUse
 }
 
-// InUse reports the page-rounded locked bytes reserved through this Allocator.
-// It is a snapshot, not an admission gate. It exceeds [Allocator.Limit] only
-// after [Allocator.ForceLimit]. A nil or zero Allocator reports 0.
-func (a *Allocator) InUse() int64 {
+// InUse implements [Allocator.InUse]; a nil or zero value reports 0.
+func (a *budgetAllocator) InUse() int64 {
 	if a.usable() != nil {
 		return 0
 	}
@@ -319,20 +439,16 @@ func (a *Allocator) InUse() int64 {
 	return a.limit.Load() - a.free.Load()
 }
 
-// Limit reports the Allocator's total budget in locked bytes, as last set by
-// [NewAllocator], [Allocator.SetLimit], [Allocator.ForceLimit] or
-// [Allocator.TransferTo]. A nil or zero Allocator reports 0.
-func (a *Allocator) Limit() int64 {
+// Limit implements [Allocator.Limit]; a nil or zero value reports 0.
+func (a *budgetAllocator) Limit() int64 {
 	if a.usable() != nil {
 		return 0
 	}
 	return a.limit.Load()
 }
 
-// Available reports the locked bytes still admissible, clamped at zero. It is a
-// snapshot and an upper bound: a remainder below one page admits nothing. A nil
-// or zero Allocator reports 0.
-func (a *Allocator) Available() int64 {
+// Available implements [Allocator.Available]; a nil or zero value reports 0.
+func (a *budgetAllocator) Available() int64 {
 	if a.usable() != nil {
 		return 0
 	}
@@ -343,21 +459,8 @@ func (a *Allocator) Available() int64 {
 	return free
 }
 
-// SetLimit changes the budget to newLimit locked bytes, refusing to shrink below
-// the memory already reserved.
-//
-// A raise is admissible immediately. A lowering that reservations do not fit
-// under returns a [BudgetInUseError] and changes nothing; zero is legal, and
-// [Allocator.ForceLimit] lowers regardless. A negative newLimit returns
-// [ErrInvalidBudget]. Safe for concurrent use with allocation and release: a
-// lowering and an in-flight admission never both get the same bytes.
-//
-// On an allocator built by [NewAllocatorWithinRLimit], a raise re-reads
-// RLIMIT_MEMLOCK and is refused with [ErrBudgetExceedsRLimit] (an [RLimitError])
-// above it, or [ErrLimitDiscoveryFailed] if it cannot be read. Lowerings are
-// never refused on a ceiling. Passing the check does not rule out
-// [ErrLockedMemoryUnavailable].
-func (a *Allocator) SetLimit(newLimit int64) error {
+// SetLimit implements [Allocator.SetLimit], with the receiver errors of New.
+func (a *budgetAllocator) SetLimit(newLimit int64) error {
 	if err := a.usable(); err != nil {
 		return err
 	}
@@ -372,7 +475,7 @@ func (a *Allocator) SetLimit(newLimit int64) error {
 
 // setLimit is SetLimit with the ceiling reading supplied, so a test can inject a
 // discovery failure. cerr is consulted only on the raise branch.
-func (a *Allocator) setLimit(newLimit int64, ceiling LockedMemoryLimit, cerr error) error {
+func (a *budgetAllocator) setLimit(newLimit int64, ceiling LockedMemoryLimit, cerr error) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
@@ -393,16 +496,9 @@ func (a *Allocator) setLimit(newLimit int64, ceiling LockedMemoryLimit, cerr err
 	return nil
 }
 
-// ForceLimit sets the budget to newLimit locked bytes even below current
-// reservations, and returns the bytes by which reservations exceed it (0 if
-// none). Live enclaves are untouched and release normally; nothing is admitted
-// until they drain. Zero quiesces the allocator. A negative newLimit returns
-// [ErrInvalidBudget] and changes nothing.
-//
-// It overrides both [Allocator.SetLimit] refusals, including raising an
-// [NewAllocatorWithinRLimit] allocator above RLIMIT_MEMLOCK without reading it;
-// allocations beyond the real ceiling then fail with [ErrLockedMemoryUnavailable].
-func (a *Allocator) ForceLimit(newLimit int64) (int64, error) {
+// ForceLimit implements [Allocator.ForceLimit], with the receiver errors of
+// New.
+func (a *budgetAllocator) ForceLimit(newLimit int64) (int64, error) {
 	if err := a.usable(); err != nil {
 		return 0, err
 	}
@@ -433,43 +529,41 @@ func (a *Allocator) ForceLimit(newLimit int64) (int64, error) {
 	return 0, nil
 }
 
-// TransferTo moves n locked bytes of budget headroom to dst in one call. Live
-// enclaves on both sides are untouched. Concurrent and opposing transfers are
-// safe; at worst one causes a brief refusal on either side, never over-commit.
-//
-// It refuses, changing nothing, with:
-//   - [ErrNilAllocator] when a is nil;
-//   - [ErrAllocatorNotConstructed] when a or dst is the zero value;
-//   - [ErrInvalidTransfer] when n <= 0, dst is nil, or dst is a or a copy of it;
-//   - a [BudgetInUseError] when the source's reservations would not fit, with
-//     Requested the budget the source would have been left with;
-//   - [ErrInvalidBudget] when dst's budget would overflow int64;
-//   - the [Allocator.SetLimit] raise errors when dst was built by
-//     [NewAllocatorWithinRLimit]. Only dst is checked.
-func (a *Allocator) TransferTo(dst *Allocator, n int64) error {
+// TransferTo implements [Allocator.TransferTo], with the receiver errors of
+// New. A zero dst is [ErrAllocatorNotConstructed], and a nil *budgetAllocator
+// dst [ErrInvalidTransfer].
+func (a *budgetAllocator) TransferTo(dst Allocator, n int64) error {
 	if err := a.usable(); err != nil {
 		return err
 	}
 	if n <= 0 || dst == nil {
 		return ErrInvalidTransfer
 	}
-	if err := dst.usable(); err != nil {
+	d, ok := dst.(*budgetAllocator)
+	switch {
+	case !ok:
+		// Another implementation has no budget this package can credit.
+		return ErrAllocatorNotConstructed
+	case d == nil:
+		return ErrInvalidTransfer
+	}
+	if err := d.usable(); err != nil {
 		// A zero value has no budget to credit and no rank to lock by.
 		return err
 	}
-	if dst.allocatorState == a.allocatorState {
+	if d.allocatorState == a.allocatorState {
 		// A copy shares the mutex, and would deadlock on it.
 		return ErrInvalidTransfer
 	}
 
 	// Before either lock, so a syscall never stalls both allocators.
-	dstCeiling, cerr := dst.ceilingForRaise()
-	return a.transferTo(dst, n, dstCeiling, cerr)
+	dstCeiling, cerr := d.ceilingForRaise()
+	return a.transferTo(d, n, dstCeiling, cerr)
 }
 
 // transferTo is TransferTo with dst's ceiling supplied, for tests. Locks are
 // taken in ascending id order so opposing transfers cannot deadlock.
-func (a *Allocator) transferTo(dst *Allocator, n int64, dstCeiling LockedMemoryLimit, cerr error) error {
+func (a *budgetAllocator) transferTo(dst *budgetAllocator, n int64, dstCeiling LockedMemoryLimit, cerr error) error {
 	first, second := a, dst
 	if second.id < first.id {
 		first, second = second, first
@@ -510,7 +604,7 @@ func checkRaise(ceiling LockedMemoryLimit, cerr error, newLimit int64) error {
 // raiseLocked grows the budget from old to newLimit; the caller holds a.mu
 // exclusively and newLimit > old. limit is stored before free is credited, so a
 // lock-free reader may overstate usage but never sees ungranted headroom.
-func (a *Allocator) raiseLocked(old, newLimit int64) {
+func (a *budgetAllocator) raiseLocked(old, newLimit int64) {
 	a.limit.Store(newLimit)
 	a.free.Add(newLimit - old)
 }
@@ -519,7 +613,7 @@ func (a *Allocator) raiseLocked(old, newLimit int64) {
 // nothing, and reports whether it could; the caller holds a.mu exclusively. It
 // is the same compare-and-swap as reserve, so a lowering racing an admission
 // cannot double-spend the last page.
-func (a *Allocator) withdrawLocked(d int64) bool {
+func (a *budgetAllocator) withdrawLocked(d int64) bool {
 	for {
 		free := a.free.Load()
 		if d > free {
@@ -535,10 +629,10 @@ func (a *Allocator) withdrawLocked(d int64) bool {
 }
 
 // processAllocatorSlot holds the process allocator.
-var processAllocatorSlot = processSingleton[Allocator]{
+var processAllocatorSlot = processSingleton[budgetAllocator]{
 	errNil:   ErrNilAllocator,
 	errTaken: ErrAllocatorInstalled,
-	build: func() (*Allocator, error) {
+	build: func() (*budgetAllocator, error) {
 		limit, err := discoverProcessLimit()
 		if err != nil {
 			// An unread ceiling is not "no ceiling"; install nothing.
@@ -563,13 +657,14 @@ var discoverProcessLimit = DiscoverLockedMemoryLimit
 // Build a with [NewAllocatorWithinRLimit] so a budget above the ceiling fails
 // at startup, and leave headroom below the ceiling for locked memory taken
 // outside the allocator, such as [Sealed.Open]. It returns [ErrNilAllocator]
-// for a nil allocator and [ErrAllocatorNotConstructed] for a zero one,
-// installing nothing.
-func SetAllocator(a *Allocator) error {
-	if err := a.usable(); err != nil {
+// for a nil allocator and [ErrAllocatorNotConstructed] for one this package
+// did not build, installing nothing.
+func SetAllocator(a Allocator) error {
+	b, err := budgetOf(a)
+	if err != nil {
 		return err
 	}
-	return processAllocatorSlot.install(a)
+	return processAllocatorSlot.install(b)
 }
 
 // ProcessAllocator returns the process allocator: the one [SetAllocator]
@@ -586,13 +681,14 @@ func SetAllocator(a *Allocator) error {
 //
 // If the ceiling cannot be read it returns [ErrLimitDiscoveryFailed] (as a
 // [LimitDiscoveryError]), installs nothing, and a later call retries. Once an
-// allocator is installed it never fails.
-func ProcessAllocator() (*Allocator, error) {
-	return processAllocatorSlot.get()
+// allocator is installed it never fails. On failure the Allocator is a nil
+// interface.
+func ProcessAllocator() (Allocator, error) {
+	return allocatorOut(processAllocatorSlot.get())
 }
 
 // defaultProcessAllocator is split out so every ceiling shape can be tested.
-func defaultProcessAllocator(limit LockedMemoryLimit) *Allocator {
+func defaultProcessAllocator(limit LockedMemoryLimit) *budgetAllocator {
 	if !limit.Bounded {
 		return newAllocator(math.MaxInt64, false)
 	}

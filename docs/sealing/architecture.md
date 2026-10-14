@@ -123,7 +123,7 @@ sequenceDiagram
   S->>S: mu.Lock: publish root + KEK; mu.Unlock
   S->>S: release initSlot; re-check ctx
   S->>S: wrap DEK under KEK (mu.RLock); seal data under DEK, blob as AAD
-  S-->>C: *Sealed (data wiped on every path)
+  S-->>C: Sealed (data wiped on every path)
 ```
 
 ## Backends and enclave sources
@@ -144,7 +144,7 @@ points carry the [backend seam](../backends/architecture.md) into sealing:
   refuses: `Seal` wipes its input, and writing to a read-only page kills the
   process.
 - **`OpenIn(ctx, b)`** opens into any backend that can hold the material
-  instead of only a new `Memory`. Locked memory and an `*Allocator` are
+  instead of only a new `Memory`. Locked memory and an `Allocator` are
   decrypted into directly (the allocator admits the destination against its
   budget). Any other `Importer` receives the plaintext from a locked scratch
   enclave that is destroyed once the import returns, so plaintext still never

@@ -19,7 +19,7 @@ import (
 	"github.com/jeremyhahn/go-enclave/backendtest"
 )
 
-// Covers backendtest: the shipped locked-memory backend (an *Allocator) run
+// Covers backendtest: the shipped locked-memory backend (an Allocator) run
 // through the conformance suite a backend author is told to use, inside the
 // devcontainer, where its residue sweep can run.
 

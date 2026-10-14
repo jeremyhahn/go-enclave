@@ -1,6 +1,6 @@
 # Provider conformance — API
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-12
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-14
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Transports
@@ -25,8 +25,9 @@ types `ConfigError`, `AbortedError`, `NotMeasuredError`, `PropertyError`,
 `FindingsError`. Contracts and error mapping:
 [engineering.md](engineering.md#exported-surface).
 
-The reference provider is `enclave.SoftwareProvider`, which `providertest`'s own
-tests hold to the suite; its contract is in
+The reference provider is the `enclave.SoftwareProvider` interface that
+`enclave.NewSoftwareProvider()` returns, which `providertest`'s own tests hold
+to the suite; its contract is in
 [sealing/engineering.md](../sealing/engineering.md#exported-surface).
 
 ## Versioning
