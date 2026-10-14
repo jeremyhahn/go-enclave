@@ -1,6 +1,6 @@
 # go-enclave roadmap
 
-> **Status: REFERENCE** · Owner: Software Department · Last verified: 2026-10-13
+> **Status: REFERENCE** · Owner: Software Department · Last verified: 2026-10-14
 > Changes are proposed by docs-only PR. Agrees with [docs/SPEC.md](docs/SPEC.md), which lists every feature named below.
 
 ## Mission
@@ -8,6 +8,7 @@
 go-enclave is the enclave abstraction layer plus the default software memory enclave for hosts without hardware.
 Upstream projects consume one clearly defined interface and never a concrete implementation or a pointer to one.
 `Sealed` keeps contents encrypted at rest and opens them into a fresh `Memory`.
+Its layer is the base of the stack, under go-quicraft: [SPEC purpose](docs/SPEC.md#purpose).
 What it owns and never does: [SPEC boundaries](docs/SPEC.md#boundaries).
 
 ## Milestones
@@ -78,8 +79,8 @@ Directions in no milestone.
 
 ## Dependencies
 
-- Up: none in-house; the only module dependency is `golang.org/x/sys` v0.48.0 — memory-enclave.
-- Down: Upstream projects consume the enclave interface (enclave-interface). Today luks2, xkms, quicraft, qrdb and quicbaas hold concrete pointers — memory-enclave, sealing, enclave-interface.
+- Up: none in-house, as the base layer it embeds no project; the only module dependency is `golang.org/x/sys` v0.48.0 — memory-enclave.
+- Down: Every layer above, from go-quicraft up, consumes the enclave interface (enclave-interface) and re-exports it through its own SDK. Today luks2, xkms, quicraft, qrdb and quicbaas hold concrete pointers — memory-enclave, sealing, enclave-interface.
 - Out of tree: the hardware backend rows depend on go-enclave, never the reverse; TPM, HSM and KMS providers belong to go-xkms — the hardware backend rows, sealing.
 - trusted-firmware: owns the on-device C driver for the NXP EdgeLock SE052F as its element tier, and the on-device driver for the Infineon OPTIGA Trust M; go-enclave's backends for the same parts are the host-side Go backends — se052f-secure-element, optiga-trust-m.
 - trusted-imx95: owns the i.MX 95 secure world and its secure key handling code; go-enclave's backend binds xkmsd to it through that repo's interface, and nothing device-specific is implemented here — imx-edgelock-enclave.

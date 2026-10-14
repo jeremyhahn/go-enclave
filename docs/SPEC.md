@@ -15,6 +15,16 @@ Secure Enclave, Intel SGX, AMD SEV and any other hardware or software enclave.
 Today the memory enclave is the only backend. It is a Layer 0 Go library with
 one dependency, `golang.org/x/sys`.
 
+Its layer is the base of the stack, under go-quicraft and every project above
+it. It embeds no in-house project as a library, so it inherits nothing and
+re-exports nothing. Its SDK is the enclave interface (enclave-interface). Each
+layer above takes that interface in and re-exports it through its own SDK; none
+wraps it or re-models it under its own name.
+
+One cluster engine and one datastore serve each deployment, and they are
+go-qrdb's. go-enclave is no cluster engine, database or datastore, and holds no
+store, service or client of its own.
+
 ## Boundaries
 
 go-enclave owns:
@@ -33,6 +43,8 @@ go-enclave owns:
 - **The process-wide teardown**, `WipeAll`, which the consuming binary calls
   ([shutdown sweep](shutdown-sweep/architecture.md#component-boundaries)).
 - **The conformance suites** it ships to provider and backend authors.
+- **The enclave interface** as the SDK of the base layer, which every layer
+  above re-exports ([purpose](#purpose)).
 
 go-enclave never:
 
@@ -47,6 +59,10 @@ go-enclave never:
   modules, and TPM, PKCS#11 and cloud KMS crypto belongs to go-xkms.
 - **Persists or transports material.** No persistence or transport format, no
   cross-process sharing.
+- **Is a database, cluster, engine, store, service or network client**
+  ([purpose](#purpose)).
+- **Imports an in-house project.** Each layer above imports go-enclave and
+  re-exports its interface; none carries a second copy of it.
 - **Destroys automatically.** No finalizer, fault handler or garbage
   collection of enclaves; nothing is destroyed except by its owner's
   `Destroy` or an explicit `WipeAll`.
