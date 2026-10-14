@@ -121,8 +121,8 @@ func TestLockedMemoryBudget_OpenInAdmitsAgainstTheBudget(t *testing.T) {
 		n := newNeedle(t)
 		v := sealNeedle(t, ctx, s, n)
 
-		if _, err := openInAllocator(t, ctx, v, nil); !errors.Is(err, enclave.ErrNilAllocator) {
-			t.Fatalf("OpenIn(nil): %v, want ErrNilAllocator", err)
+		if _, err := openInAllocator(t, ctx, v, nil); !errors.Is(err, enclave.ErrInvalidBackend) {
+			t.Fatalf("OpenIn(nil): %v, want ErrInvalidBackend", err)
 		}
 		a, err := enclave.NewAllocator(page)
 		if err != nil {

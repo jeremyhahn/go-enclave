@@ -91,7 +91,8 @@ checks are unchanged.
 - **Only this package's `Allocator` is accepted.** `SetAllocator` and
   `TransferTo` refuse another implementation (a wrapper or a test fake) with
   `ErrAllocatorNotConstructed`; nil is still `ErrNilAllocator` and
-  `ErrInvalidTransfer`.
+  `ErrInvalidTransfer`. A nil `Allocator` given to `Sealed.OpenIn` is a nil
+  `Backend` and returns `ErrInvalidBackend`, was `ErrNilAllocator`.
 - **Zero values and nil receivers are gone.** No caller can declare a zero
   `Sealed`, `Allocator` or `SoftwareProvider` any more, so
   `ErrProviderNotConstructed` and a zero `Allocator{}`'s
