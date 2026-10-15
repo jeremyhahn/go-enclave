@@ -51,11 +51,15 @@
 # reaches for a module fails instead of fetching it.
 #
 # THE TOOLCHAIN adds, for the Makefile and scripts/:
-#   * bash, make, git, curl, jq, and the GNU userland (coreutils, grep, sed,
-#     gawk, findutils, diffutils, tar, xz) the CI runners have, so a script
-#     behaves here as it does there. The base digest fixes the Alpine branch,
-#     and a branch moves a package only by security rebuilds, so these follow
-#     the branch rather than a revision.
+#   * bash, make, git, curl, jq, node, and the GNU userland (coreutils, grep,
+#     sed, gawk, findutils, diffutils, tar, xz) the CI runners have, so a
+#     script behaves here as it does there. The base digest fixes the Alpine
+#     branch, and a branch moves a package only by security rebuilds, so these
+#     follow the branch rather than a revision.
+#
+# BOTH STAGES carry node, git, bash and tar: CI runs each stage's jobs with
+# `container:` set to this image, so the runner's JavaScript actions
+# (checkout, cache, upload) execute inside it (handbook ci-standard.md §2).
 #   * Every tool scripts/tool-pins.sh pins, in /usr/local/bin, installed by
 #     scripts/install-tools.sh through scripts/tool.sh: the same pins, hashes
 #     and verification `make lint` uses, and no second copy of either.
@@ -174,7 +178,7 @@ ARG GO_BUILD_PROXY
 ENV HOME=/tmp
 
 RUN apk add --no-cache \
-        bash make git curl jq \
+        bash make git curl jq nodejs \
         coreutils grep sed gawk findutils diffutils tar xz
 
 COPY --from=tools /out/ /usr/local/bin/
@@ -200,6 +204,9 @@ FROM base AS integration
 # the source baked in and owned by root.
 ENV HOME=/home/dev
 RUN install -d -o dev -g dev -m 0700 /home/dev
+# For the CI `container:` job's actions only (see the header); the suite's
+# scripts are /bin/sh and use none of them.
+RUN apk add --no-cache bash git tar nodejs
 USER dev:dev
 WORKDIR /src
 
