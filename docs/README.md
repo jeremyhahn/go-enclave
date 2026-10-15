@@ -29,6 +29,9 @@ ruling on #188 ([runtime testing](memory-enclave/runtime-testing.md)).
 | [backends](backends/user.md) | The seam for hardware enclaves: `Handle`, `Backend`, capabilities, the named registry, `As`, the sealing wiring (`WithBackend`, `OpenIn`, `SealFrom`) |
 | [backend-detection](backend-detection/user.md) | `Detect(ctx)`: the `Prober` rank and probe, selecting the most secure usable registered backend with locked memory as the floor, and why each other was passed over |
 
+How a change is built and gated, and how a signed release is cut, verified and
+published: [build and release](build-and-release.md).
+
 ## Upgrading
 
 This is the only place migration guidance is written; each feature's `user.md`
