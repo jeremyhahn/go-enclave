@@ -1,6 +1,6 @@
 # go-enclave specification
 
-> **Status: NORMATIVE** · Scope: go-enclave · Owner: Software Department
+> **Status: NORMATIVE** · Scope: go-enclave · Owner: Software Department · Last verified: 2026-10-15
 > What the project is and every feature it has. [ROADMAP.md](../ROADMAP.md) carries what is complete and what remains; the two agree.
 > A feature listed here, in any status, is never deleted: not its docs, code or issues; only the owner removes or re-scopes one, by changing this file.
 
@@ -89,10 +89,10 @@ go-enclave never:
 | provider-conformance | shipped | `providertest.TestProvider(ctx, cfg)` checks that a provider retains nothing, refuses tampered and forged blobs, honors its context and implements only the modes it claims; it fails closed where it cannot measure. [Architecture](provider-conformance/architecture.md). | [provider-conformance/](provider-conformance/user.md) |
 | backends | shipped | A small core (`Handle`, `Backend`) plus optional capabilities found by type assertion; a named registry beside explicit injection, with nothing registered at import; a missing capability is a `*CapabilityError`, never a fallback. Sealing opens into and seals from any backend. [Architecture](backends/architecture.md). | [backends/](backends/user.md) |
 | backend-conformance | shipped | `backendtest.TestBackend(ctx, cfg)` holds a backend to the seam: handle lifecycle, exact capability claims in both directions, import wiping, nonce binding through the author's `VerifyEvidence`; it fails closed. [Architecture](backend-conformance/architecture.md). | [backend-conformance/](backend-conformance/user.md) |
-| build and release | shipped | Every gate is a Makefile target that passes offline in the devcontainer, with pinned, checksum-verified tools. A change adds a changelog fragment. `make release`, `make release-candidate` and `make release-alpha` each cut one kind of release from `main`; the tag's workflow runs the full gate (FIPS and trivy included) and a consumer check, and the artifacts are signed. [Development](../README.md#development). | none |
+| build-and-release | shipped | Every gate is a Makefile target that passes offline in the devcontainer, with pinned, checksum-verified tools. A change adds a changelog fragment. `make release`, `make release-candidate` and `make release-alpha` each cut one kind of release from `main`; the tag's workflow runs the full gate (FIPS and trivy included) and a consumer check, and the artifacts are signed. [Development](../README.md#development). | none |
 | enclave-interface | in progress | The one public interface upstream consumes: the handle plus capabilities. Constructors return it; concrete types are backend-internal. No upstream project depends on a concrete type. [#138](../../../issues/138), milestone v0.9.0 dev complete. | none |
 | backend-detection | shipped | Detection runs only on an explicit call from `main`; importing the package changes no process state. It covers only the backends the binary registered, and probing the host is each backend's own code. Each backend reports its rank; go-enclave compares the ranks and fixes no ranking of its own. It selects the most secure usable backend, the memory enclave when nothing else is usable; the selection is observable and testable. [#190](../../../issues/190), milestone v0.9.0 dev complete. [Architecture](backend-detection/architecture.md). | [backend-detection/](backend-detection/user.md) |
-| BSD and Windows runtime testing | planned | The BSDs and Windows run the test suite, not only compile; until then they are build-only ([test status](memory-enclave/engineering.md#test-status)). [#188](../../../issues/188), milestone v0.9.0 dev complete. | none |
+| bsd-windows-runtime-testing | future | The BSDs and Windows run the test suite, not only compile. Until then they are build-only and tests run on Linux only ([runtime testing](memory-enclave/runtime-testing.md)). [#188](../../../issues/188). | none |
 | se052f-secure-element | future | A backend on the EdgeLock SE052F secure element that implements the backend seam and passes `backendtest` ([out-of-tree backend](backends/architecture.md#an-out-of-tree-backend)). It is the host-side Go backend; trusted-firmware owns the on-device C driver for the same part as its element tier. [#191](../../../issues/191). | [backends/](backends/user.md) |
 | optiga-trust-m | future | A backend on the Infineon OPTIGA Trust M I2C element that implements the backend seam and passes `backendtest` ([out-of-tree backend](backends/architecture.md#an-out-of-tree-backend)). It is the host-side Go backend; trusted-firmware owns the on-device driver for the same part. [#196](../../../issues/196). | [backends/](backends/user.md) |
 | mac-secure-enclave | future | A backend on the Mac Secure Enclave that implements the backend seam and passes `backendtest` ([out-of-tree backend](backends/architecture.md#an-out-of-tree-backend)). [#192](../../../issues/192). | [backends/](backends/user.md) |
@@ -130,3 +130,8 @@ The next milestone, [v0.9.0 dev complete](../../../milestone/34) (see
 6. The tag's release workflow passes: `make release-verify`, the full gate
    (FIPS and trivy included) and `make consumer-check`.
 7. The version is confirmed at the owner's publish approval.
+8. CI conforms to the handbook's CI standard,
+   `software/conventions/ci-standard.md`:
+   build, unit, integration, security and the latest-version check
+   (`make build`, `make test`, `make integration-test`, `make security`,
+   `make deps-check`), all in the project devcontainer image.

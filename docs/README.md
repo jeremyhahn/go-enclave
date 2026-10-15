@@ -1,6 +1,6 @@
 # go-enclave documentation
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-14
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-15
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 One folder per capability, each with these files: `architecture.md`
@@ -15,8 +15,8 @@ legacy documents to migrate. The generated API reference is on
 
 Platforms: tests run on Linux only. The BSDs and Windows are build-only:
 they compile, and no test runs on them
-([test status](memory-enclave/engineering.md#test-status)); how they would
-run is a proposal in [runtime testing](memory-enclave/runtime-testing.md).
+([test status](memory-enclave/engineering.md#test-status)), by the owner's
+ruling on #188 ([runtime testing](memory-enclave/runtime-testing.md)).
 
 | Feature | What it covers |
 |---|---|
