@@ -226,7 +226,7 @@ TPM, HSM and KMS providers live in higher layers and are injected through
 `SetSealer`.
 
 Sealing is built on go-enclave's
-[locked memory](../locked-memory/architecture.md#component-boundaries); no
+[locked memory](../memory-enclave/architecture.md#component-boundaries); no
 consumer hand-rolls locked-memory handling. Hardware and cloud crypto belongs to
 go-xkms, which is why this package ships only `SoftwareProvider` and injects the
 rest through the seam. `Sealer` is not the `SealingStrategy` seam of go-quicraft

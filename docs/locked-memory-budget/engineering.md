@@ -118,7 +118,7 @@ All of these are declared in [errors.go](../../errors.go). `BudgetError` and
 `BudgetInUseError` render as `<sentinel>: <Requested> bytes requested, <InUse>
 of <Limit> bytes in use`, and `RLimitError` as `<sentinel>: <Requested> bytes
 requested, <Source> is <Bytes> bytes`. `LimitDiscoveryError` has the shared
-cause shape of [locked-memory](../locked-memory/engineering.md#error-semantics):
+cause shape of [memory-enclave](../memory-enclave/engineering.md#error-semantics):
 the sentinel's text, `": "` and the cause.
 
 ## Platform contract for discovery

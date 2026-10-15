@@ -6,7 +6,7 @@
 ## Transports
 
 The embedded Go call is the only transport; other transports are not
-applicable (see [locked-memory/api.md](../locked-memory/api.md#transports)).
+applicable (see [memory-enclave/api.md](../memory-enclave/api.md#transports)).
 A backend is code linked into the process; registering one remotely would let
 a peer choose where the process keeps its keys.
 
@@ -45,7 +45,7 @@ Errors: `ErrBackendNotRegistered` (`*BackendNotRegisteredError`),
 `ErrCapabilityUnsupported` (`*CapabilityError`), `ErrInvalidImport`,
 `ErrInvalidNonce`, `ErrAEADAuthentication`, `ErrCleanupFailed`
 (`*CleanupError`); `ErrEnclaveDestroyed` is the lifecycle sentinel for every
-backend's handles ([locked-memory](../locked-memory/api.md#errors)).
+backend's handles ([memory-enclave](../memory-enclave/api.md#errors)).
 
 Exact signatures: [engineering.md](engineering.md#interface-signatures);
 contracts: [engineering.md](engineering.md#exported-surface); when each error

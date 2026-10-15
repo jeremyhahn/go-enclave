@@ -143,7 +143,7 @@ Contracts and error mapping: [engineering.md](engineering.md).
 | Orphan ledger the refund rides on | [registry.go](../../registry.go) |
 
 No other project hand-rolls an admission budget: the bounded `Allocator` is part
-of go-enclave's [ownership of locked memory](../locked-memory/architecture.md#component-boundaries).
+of go-enclave's [ownership of locked memory](../memory-enclave/architecture.md#component-boundaries).
 
 ## Trust boundaries
 

@@ -6,7 +6,7 @@
 ## Transports
 
 The embedded Go call is the only transport; other transports are not
-applicable (see [locked-memory/api.md](../locked-memory/api.md#transports) for
+applicable (see [memory-enclave/api.md](../memory-enclave/api.md#transports) for
 why a bottom-layer library has none).
 
 | Capability | Embedded Go call | REST / gRPC / QUIC / MCP / Unix socket |
@@ -54,7 +54,7 @@ Types: `*BudgetError`, `*BudgetInUseError`, `*RLimitError`,
 `*LimitDiscoveryError`. Match with `errors.Is` / `errors.As`; when each is
 returned and what its fields hold: [engineering.md](engineering.md#error-semantics).
 `ErrLockedMemoryUnavailable` also reaches this feature (admitted, then refused by
-the kernel); it belongs to [locked-memory](../locked-memory/api.md#errors).
+the kernel); it belongs to [memory-enclave](../memory-enclave/api.md#errors).
 
 ## Versioning
 

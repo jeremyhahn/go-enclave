@@ -19,7 +19,7 @@ package enclave
 // has no fork.
 //
 // Windows excludes nothing from any dump, so dump exposure must be governed by
-// host policy. See docs/locked-memory/engineering.md, Platform contract, for
+// host policy. See docs/memory-enclave/engineering.md, Platform contract, for
 // why WerRegisterExcludedMemoryBlock is not used.
 
 // coreDumpMapFlags is empty: there is no mapping-time exclusion here.

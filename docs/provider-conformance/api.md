@@ -7,7 +7,7 @@
 
 The embedded Go call is the only transport; the suite runs inside the provider
 author's test binary. Other transports are not applicable (see
-[locked-memory/api.md](../locked-memory/api.md#transports)).
+[memory-enclave/api.md](../memory-enclave/api.md#transports)).
 
 | Capability | Embedded Go call | REST / gRPC / QUIC / MCP / Unix socket |
 |---|---|---|

@@ -31,7 +31,7 @@ go-enclave owns:
 
 - **Locked-memory handling for the portfolio**: `mlock`, guard pages, canary,
   wipe on release. No other project carries its own
-  ([ownership](locked-memory/architecture.md#component-boundaries)).
+  ([ownership](memory-enclave/architecture.md#component-boundaries)).
 - **Admission against a locked-memory budget**; no other project hand-rolls one
   ([budget](locked-memory-budget/architecture.md#component-boundaries)).
 - **The sealing envelope and the provider seam** (`KeyProtector`,
@@ -39,7 +39,9 @@ go-enclave owns:
   ([sealing](sealing/architecture.md#component-boundaries)).
 - **The backend seam**: the `Backend`, `Handle` and capability interfaces that
   hardware backend modules implement
-  ([backends](backends/architecture.md#component-boundaries)).
+  ([backends](backends/architecture.md#component-boundaries)). Every
+  environment must be attestable: the requirement binds every backend, in
+  this module and out of tree.
 - **The process-wide teardown**, `WipeAll`, which the consuming binary calls
   ([shutdown sweep](shutdown-sweep/architecture.md#component-boundaries)).
 - **The conformance suites** it ships to provider and backend authors.
@@ -56,7 +58,8 @@ go-enclave never:
   typed error and never touches another enclave.
 - **Carries hardware code.** No hardware backend, hardware-specific code or
   second dependency in this module: hardware backends live in their own
-  modules, and TPM, PKCS#11 and cloud KMS crypto belongs to go-xkms.
+  modules. The TPM backend, and TPM, PKCS#11 and cloud KMS crypto, belong to
+  go-xkms.
 - **Persists or transports material.** No persistence or transport format, no
   cross-process sharing.
 - **Is a database, cluster, engine, store, service or network client**
@@ -76,7 +79,7 @@ go-enclave never:
 
 | Feature | Status | Requirements | Detail |
 |---|---|---|---|
-| memory-enclave | shipped | The default software backend. `Memory` keeps material in `mlock`'d pages between guard pages with a canary, out of core dumps and `fork` children where the OS allows, read only through the `WithBytes` borrow, read-only after `Freeze`, and wiped before release. Every failure is a typed error that touches no other enclave. Opt-in `HardenProcess`. Compiles on every GOOS in the [platform contract](locked-memory/engineering.md#platform-contract). [Architecture](locked-memory/architecture.md). | [locked-memory/](locked-memory/user.md) |
+| memory-enclave | shipped | The default software backend. `Memory` keeps material in `mlock`'d pages between guard pages with a canary, out of core dumps and `fork` children where the OS allows, read only through the `WithBytes` borrow, read-only after `Freeze`, and wiped before release. Every failure is a typed error that touches no other enclave. Opt-in `HardenProcess`. Compiles on every GOOS in the [platform contract](memory-enclave/engineering.md#platform-contract). [Architecture](memory-enclave/architecture.md). | [memory-enclave/](memory-enclave/user.md) |
 | locked-memory-budget | shipped | `Allocator` admits against a budget in page-rounded locked bytes before allocating, by compare-and-swap; refunds failed constructions; discovers `RLIMIT_MEMLOCK`; retunes at runtime; one process allocator installed by the binary and drawn on by libraries. [Architecture](locked-memory-budget/architecture.md). | [locked-memory-budget/](locked-memory-budget/user.md) |
 | sealing | shipped | `Sealed` holds an AES-256-GCM envelope at rest and decrypts only into a fresh, frozen `Memory` on `Open`. `Sealer` modes `ModeRootKey` and `ModePerOperation`, selected by the typed `KeyProtector` / `RootUnsealer` options; provider calls take a context. Works under FIPS 140-only mode; opt-in strict key-schedule erasure. [Architecture](sealing/architecture.md). | [sealing/](sealing/user.md) |
 | shutdown-sweep | shipped | `WipeAll(ctx)` reclaims every live enclave and orphaned mapping, never unmapping one a reader holds, waiting only as long as `ctx` allows, then sweeps registered `Sweeper` backends; findings are one typed `*SweepError`. [Architecture](shutdown-sweep/architecture.md). | [shutdown-sweep/](shutdown-sweep/user.md) |
@@ -85,17 +88,16 @@ go-enclave never:
 | backend-conformance | shipped | `backendtest.TestBackend(ctx, cfg)` holds a backend to the seam: handle lifecycle, exact capability claims in both directions, import wiping, nonce binding through the author's `VerifyEvidence`; it fails closed. [Architecture](backend-conformance/architecture.md). | [backend-conformance/](backend-conformance/user.md) |
 | build and release | shipped | Every gate is a Makefile target that passes offline in the devcontainer, with pinned, checksum-verified tools. A change adds a changelog fragment. `make release`, `make release-candidate` and `make release-alpha` each cut one kind of release from `main`; the tag's workflow runs the full gate (FIPS and trivy included) and a consumer check, and the artifacts are signed. [Development](../README.md#development). | none |
 | enclave-interface | in progress | The one public interface upstream consumes: the handle plus capabilities. Constructors return it; concrete types are backend-internal. No upstream project depends on a concrete type. [#138](../../../issues/138), milestone v0.9.0-rc.1. | none |
-| backend-detection | planned | At start go-enclave probes the host and selects the most secure backend present, the memory enclave when nothing else; the selection is observable and testable. [#190](../../../issues/190), milestone v0.9.0-rc.1. | none |
-| BSD and Windows runtime testing | planned | The BSDs and Windows run the test suite, not only compile; until then they are build-only ([test status](locked-memory/engineering.md#test-status)). [#188](../../../issues/188), milestone v0.9.0-rc.1. | none |
+| backend-detection | planned | Detection runs only on an explicit call from `main`; importing the package changes no process state. It covers only the backends the binary registered, and probing the host is each backend's own code. Each backend reports its rank; go-enclave compares the ranks and fixes no ranking of its own. It selects the most secure usable backend, the memory enclave when nothing else is usable; the selection is observable and testable. [#190](../../../issues/190), milestone v0.9.0-rc.1. [Architecture](backend-detection/architecture.md). | [backend-detection/](backend-detection/user.md) |
+| BSD and Windows runtime testing | planned | The BSDs and Windows run the test suite, not only compile; until then they are build-only ([test status](memory-enclave/engineering.md#test-status)). [#188](../../../issues/188), milestone v0.9.0-rc.1. | none |
 | se052f-secure-element | future | A backend on the EdgeLock SE052F secure element that implements the backend seam and passes `backendtest` ([out-of-tree backend](backends/architecture.md#an-out-of-tree-backend)). It is the host-side Go backend; trusted-firmware owns the on-device C driver for the same part as its element tier. [#191](../../../issues/191). | [backends/](backends/user.md) |
 | optiga-trust-m | future | A backend on the Infineon OPTIGA Trust M I2C element that implements the backend seam and passes `backendtest` ([out-of-tree backend](backends/architecture.md#an-out-of-tree-backend)). It is the host-side Go backend; trusted-firmware owns the on-device driver for the same part. [#196](../../../issues/196). | [backends/](backends/user.md) |
 | mac-secure-enclave | future | A backend on the Mac Secure Enclave that implements the backend seam and passes `backendtest` ([out-of-tree backend](backends/architecture.md#an-out-of-tree-backend)). [#192](../../../issues/192). | [backends/](backends/user.md) |
 | intel-sgx | future | A backend on Intel SGX that implements the backend seam and passes `backendtest` ([out-of-tree backend](backends/architecture.md#an-out-of-tree-backend)). [#193](../../../issues/193). | [backends/](backends/user.md) |
 | amd-sev | future | A backend on AMD SEV that implements the backend seam and passes `backendtest` ([out-of-tree backend](backends/architecture.md#an-out-of-tree-backend)). [#194](../../../issues/194). | [backends/](backends/user.md) |
 | imx-edgelock-enclave | future | A go-enclave backend that binds the Linux side (xkmsd) to the trusted-imx95 secure world through that repo's interface, consumed by go-xkms's `hsm-appliance` feature. The secure world and the secure key handling code live in trusted-imx95; nothing device-specific is implemented in go-enclave. [#195](../../../issues/195). | [backends/](backends/user.md) |
-| intel-tdx | future | A backend on Intel TDX that implements the backend seam and passes `backendtest` ([out-of-tree backend](backends/architecture.md#an-out-of-tree-backend)). | [backends/](backends/user.md) |
-| tpm | future | A backend on a TPM that implements the backend seam and passes `backendtest` ([out-of-tree backend](backends/architecture.md#an-out-of-tree-backend)). | [backends/](backends/user.md) |
-| nvidia-blackwell | future | A backend on NVIDIA Blackwell confidential computing that implements the backend seam and passes `backendtest` ([out-of-tree backend](backends/architecture.md#an-out-of-tree-backend)). | [backends/](backends/user.md) |
+| intel-tdx | future | A backend on Intel TDX that implements the backend seam and passes `backendtest` ([out-of-tree backend](backends/architecture.md#an-out-of-tree-backend)). [#199](../../../issues/199). | [backends/](backends/user.md) |
+| nvidia-blackwell | future | A backend on NVIDIA Blackwell confidential computing that implements the backend seam and passes `backendtest` ([out-of-tree backend](backends/architecture.md#an-out-of-tree-backend)). [#200](../../../issues/200). | [backends/](backends/user.md) |
 
 ## Interfaces
 
@@ -108,7 +110,7 @@ go-enclave never:
   [backend-conformance](backend-conformance/api.md).
 - **CLI**: none; this is a library ([index](README.md)).
 - **API transport**: none; consumers reach it only through the exported Go API
-  ([ownership](locked-memory/architecture.md#component-boundaries)).
+  ([ownership](memory-enclave/architecture.md#component-boundaries)).
 
 ## Release criteria
 

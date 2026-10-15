@@ -15,12 +15,12 @@ legacy documents to migrate. The generated API reference is on
 
 Platforms: tests run on Linux only. The BSDs and Windows are build-only:
 they compile, and no test runs on them
-([test status](locked-memory/engineering.md#test-status)); how they would
-run is a proposal in [runtime testing](locked-memory/runtime-testing.md).
+([test status](memory-enclave/engineering.md#test-status)); how they would
+run is a proposal in [runtime testing](memory-enclave/runtime-testing.md).
 
 | Feature | What it covers |
 |---|---|
-| [locked-memory](locked-memory/user.md) | `Memory`: constructors, borrowing, `Freeze`, `Destroy` and canary corruption, guard pages and canary, platform and core-dump matrix |
+| [memory-enclave](memory-enclave/user.md) | `Memory`: constructors, borrowing, `Freeze`, `Destroy` and canary corruption, guard pages and canary, platform and core-dump matrix |
 | [locked-memory-budget](locked-memory-budget/user.md) | `Allocator`, `RLIMIT_MEMLOCK` discovery, retuning, the process allocator, refunds for failed constructions |
 | [sealing](sealing/user.md) | `Sealed`, `Sealer` modes, the `KeyProtector`/`RootUnsealer` seam, contexts, `Openable`, FIPS, the key-schedule heap exposure and its erasure under `runtime/secret` |
 | [shutdown-sweep](shutdown-sweep/user.md) | `WipeAll(ctx)`: admission, waiting for borrows, termination, the count and `SweepError` |

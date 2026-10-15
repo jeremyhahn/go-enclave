@@ -131,7 +131,7 @@ only the owed borrows bound the call.
 
 Ownership: go-enclave owns the process-wide teardown; the consuming binary
 calls it and a library never does
-([ownership](../locked-memory/architecture.md#component-boundaries)).
+([ownership](../memory-enclave/architecture.md#component-boundaries)).
 
 ## Trust boundaries
 

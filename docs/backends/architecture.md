@@ -377,7 +377,7 @@ owner's to sweep, by calling its `Sweep` directly.
 
 Hardening is a package function specific to locked memory, not a backend
 capability; its design is in
-[locked-memory/architecture.md](../locked-memory/architecture.md). A backend
+[memory-enclave/architecture.md](../memory-enclave/architecture.md). A backend
 that needs device setup does it in its own constructor, which `main` calls
 explicitly.
 
@@ -629,7 +629,7 @@ errors and use are in [backend-conformance](../backend-conformance/architecture.
 | Hardware backends | their own modules, never this one |
 
 go-enclave owns this seam (the `Backend`, `Handle` and capability interfaces)
-along with [locked memory](../locked-memory/architecture.md#component-boundaries).
+along with [locked memory](../memory-enclave/architecture.md#component-boundaries).
 Hardware and cloud crypto (TPM2, PKCS#11, cloud KMS) belongs to go-xkms, and a
 hardware backend module implements this seam rather than extending it. This
 module carries attestation evidence as `Evidence` and never parses or

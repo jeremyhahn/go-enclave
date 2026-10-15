@@ -6,7 +6,7 @@
 ## Transports
 
 The embedded Go call is the only transport; other transports are not
-applicable (see [locked-memory/api.md](../locked-memory/api.md#transports)).
+applicable (see [memory-enclave/api.md](../memory-enclave/api.md#transports)).
 A remote "wipe everything" verb would be a remotely triggerable destroyer of
 every key in the process; it is deliberately absent.
 
@@ -23,7 +23,7 @@ Schemas and error mapping: [engineering.md](engineering.md#error-semantics).
 `SweepError` (returned as `*SweepError`), the `BackendSweepFailure` records it
 carries, and the sentinel `ErrSweepInProgress`. `*SweepError` matches
 `ErrEnclaveCorrupted` and `ErrReleasedWithoutWipe`
-([locked-memory](../locked-memory/api.md#errors)) and unwraps to each failed
+([memory-enclave](../memory-enclave/api.md#errors)) and unwraps to each failed
 backend's error. Contracts: [engineering.md](engineering.md#exported-surface).
 
 ## Versioning

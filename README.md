@@ -97,9 +97,9 @@ defer func() {
 Linux (including Android), the BSDs, darwin, iOS, illumos, Solaris, AIX and
 Windows compile; any other GOOS (js, wasip1, plan9) fails to compile. Only Linux
 runs the tests; the BSDs and Windows are build-only
-([test status](docs/locked-memory/engineering.md#test-status)). The per-OS lock
+([test status](docs/memory-enclave/engineering.md#test-status)). The per-OS lock
 primitive, core-dump exclusion and `CoreDumpsDisabled()` result are in the
-[platform contract](docs/locked-memory/engineering.md#platform-contract).
+[platform contract](docs/memory-enclave/engineering.md#platform-contract).
 
 ## Documentation
 
@@ -159,7 +159,7 @@ contents. Do not introduce `Secret`, `SecureString`, `SecureBytes` or
 ## Security
 
 The threat model — what each type protects against and what it does not — is in
-[docs/locked-memory/architecture.md](docs/locked-memory/architecture.md#trust-boundaries)
+[docs/memory-enclave/architecture.md](docs/memory-enclave/architecture.md#trust-boundaries)
 and [docs/sealing/architecture.md](docs/sealing/architecture.md#what-each-mode-buys-against-a-live-memory-reader).
 To report a vulnerability, follow [SECURITY.md](SECURITY.md) — privately, never
 in a public issue. It also lists supported versions, scope and the disclosure

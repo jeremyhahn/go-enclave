@@ -6,7 +6,7 @@
 ## Transports
 
 The embedded Go call is the only transport; other transports are not
-applicable (see [locked-memory/api.md](../locked-memory/api.md#transports)). A
+applicable (see [memory-enclave/api.md](../memory-enclave/api.md#transports)). A
 provider that talks to a device over a network (a cloud KMS) owns that
 transport itself, behind the `KeyProtector`/`RootUnsealer` interfaces.
 

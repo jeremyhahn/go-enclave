@@ -19,7 +19,7 @@ so upgrading to get a fix can require the steps in
 | Anything older | No — upgrade |
 
 Reports against the BSDs and Windows are in scope, though they are build-only
-([test status](docs/locked-memory/engineering.md#test-status)).
+([test status](docs/memory-enclave/engineering.md#test-status)).
 
 ## Reporting a vulnerability
 
@@ -121,7 +121,7 @@ published with the repository host once the release is available.
 
 What each type protects against, and what it does not:
 
-- [docs/locked-memory/architecture.md](docs/locked-memory/architecture.md#trust-boundaries) — locked memory, guard pages, canary, core dumps.
+- [docs/memory-enclave/architecture.md](docs/memory-enclave/architecture.md#trust-boundaries) — locked memory, guard pages, canary, core dumps.
 - [docs/sealing/architecture.md](docs/sealing/architecture.md#what-each-mode-buys-against-a-live-memory-reader) — what each sealing mode buys against a live-memory reader.
 - [docs/sealing/engineering.md](docs/sealing/engineering.md#key-schedule-heap-exposure) — the accepted key-schedule exposure.
 - [docs/locked-memory-budget/architecture.md](docs/locked-memory-budget/architecture.md#trust-boundaries) — what admission control does and does not bound.

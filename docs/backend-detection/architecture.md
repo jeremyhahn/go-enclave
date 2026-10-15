@@ -123,9 +123,10 @@ as the backend wrote them, and the backend name in a `ProbeError` is quoted.
 ## Scope fence
 
 - No hardware backend is in this module, so detection selects locked memory on
-  every host this module tests on ([test status](../locked-memory/engineering.md#test-status)).
-- Attestation is out of scope. Every environment must be attestable, and
-  `Detect` neither attests nor compares attestation. How attestability bears
+  every host this module tests on ([test status](../memory-enclave/engineering.md#test-status)).
+- Attestation is out of scope. Every environment must be attestable
+  ([SPEC](../SPEC.md#boundaries)), and `Detect` neither attests nor compares
+  attestation. How attestability bears
   on selection is an open question for the owner. The
   [attestation](../backends/architecture.md#attestation) capability stands
   apart from rank.

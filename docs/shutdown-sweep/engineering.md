@@ -147,7 +147,7 @@ a borrow), `sweepPassForTest` (start of each pass), `sweepParkedForTest` (after
 the generation bump, before destroying), `sweepAdmissionWaitForTest` (about to
 block for the slot). Release refusals and corruption are injected through the
 memory seams described in
-[locked-memory/engineering.md](../locked-memory/engineering.md#test-strategy).
+[memory-enclave/engineering.md](../memory-enclave/engineering.md#test-strategy).
 Phase two is driven by registered fake `Sweeper`s that record their call order
 and `ctx`, and one that calls `Register` from inside `Sweep`.
 Borrow-path cost is measured by the borrow benchmarks (`make bench`).
