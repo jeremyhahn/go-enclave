@@ -467,7 +467,7 @@ toolchain-image:
 build:
 	"$$GOCMD" build $(PKG)
 
-## cross-build: compile (and vet) every package for every supported GOOS/GOARCH
+## cross-build: compile, vet and link the test binaries of every package for every supported GOOS/GOARCH
 .PHONY: cross-build
 cross-build:
 	@sh scripts/cross-build.sh $(CROSS_TARGETS) -- $(PKG)

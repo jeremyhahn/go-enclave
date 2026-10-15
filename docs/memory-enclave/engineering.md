@@ -163,7 +163,7 @@ should stop is the caller's decision.
 
 Linux is the only platform whose tests run. The BSDs (freebsd, openbsd, netbsd,
 dragonfly) and Windows are **build-only**: `make cross-build` compiles and vets
-them and nothing executes, so their rows above describe what the code does,
+them and links their test binaries, and nothing executes, so their rows above describe what the code does,
 not behavior a test has observed. darwin, iOS, illumos, Solaris, AIX and Android are likewise
 compiled, not run (iOS is not in the matrix; it builds through the darwin
 files). How the suite would run on the BSDs and Windows is a proposal awaiting

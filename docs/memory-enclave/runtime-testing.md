@@ -1,8 +1,9 @@
 # Runtime testing on the BSDs and Windows — design proposal
 
-> **Status: REFERENCE** · Scope: go-enclave · Last verified: 2026-10-13
+> **Status: REFERENCE** · Scope: go-enclave · Last verified: 2026-10-15
 > A proposal the owner approves before any implementation (#188). Nothing here
-> is built yet: the Makefile, scripts and CI are unchanged.
+> is built yet beyond option E ([§1](#1-what-runs-today)): no runner, guest or
+> CI job exists.
 
 The BSDs (freebsd, openbsd, netbsd, dragonfly) and Windows are build-only
 ([test status](engineering.md#test-status)); owner ruling M10 on #138 kept them
@@ -20,8 +21,9 @@ open questions ([§6](#6-open-questions)), not stated as true.
 ([Makefile](../../Makefile), [scripts/cross-build.sh](../../scripts/cross-build.sh));
 the BSDs are in it as `amd64`, Windows as `amd64` and `386`. `go vet`
 type-checks `_test.go` files too, so the per-GOOS tests below compile on every
-push and have never executed. Nothing is linked into a test binary and nothing
-runs.
+push and have never executed. Since option [E](#e-link-the-test-binaries-in-cross-build-complement-not-an-answer)
+landed, `cross-build` also links every package's test binary (`go test -c`)
+for each entry, so a link failure fails the gate; nothing runs.
 
 | GOOS | Platform files a run would exercise ([platform layer](engineering.md#platform-contract)) | Tests written for it, never run |
 |---|---|---|
