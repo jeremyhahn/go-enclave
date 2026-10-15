@@ -132,17 +132,19 @@ would repeat the package.
 
 ### What each backend class provides
 
-| Capability | On | Locked memory | TEE memory (TDX, SEV-SNP, SGX, GPU CC) | Secure element, TPM |
+| Capability | On | Locked memory | TEE memory (TDX, SEV-SNP, SGX, GPU CC) | Secure element, TPM[^tpm] |
 |---|---|---|---|---|
 | `ByteAccess` | handle | yes | yes | no: material never leaves the device |
 | `Freezer` | handle | yes | where the platform can protect pages | no: read-only by nature |
 | `AEAD`, `crypto.Signer`, `crypto.Decrypter` | handle | no | no (byte access suffices) | per key type |
 | `Deriver` | handle | no | no | where the device has a KDF |
-| `Attester` | handle or backend | no | backend: platform evidence | handle: key attestation |
+| `Attester` | handle or backend | no: the host's platform attests its environment ([SPEC boundaries](../SPEC.md#boundaries)) | backend: platform evidence | handle: key attestation |
 | `Importer` | backend | yes (`Allocator`) | yes | where policy allows import, per purpose |
 | `Sweeper` | backend | no: `WipeAll`'s first phase sweeps every locked-memory enclave, an `Allocator`'s included | yes | releases sessions and transient objects |
 | `Confiner` | backend | no | yes, when this process runs inside the TEE | no: the process is outside the device |
 | `Prober` | backend | yes: rank 0, always usable | yes: ranks itself, probes for the TEE | yes: ranks itself, probes for the device |
+
+[^tpm]: the TPM backend is go-xkms's, out of tree; see [SPEC Boundaries](../SPEC.md#boundaries)
 
 ### Opaque operations
 

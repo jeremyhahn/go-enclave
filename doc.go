@@ -43,7 +43,7 @@
 // The package supports Linux, Android, the BSDs, darwin, iOS, illumos,
 // Solaris, AIX and Windows; core-dump exclusion and other protections vary by
 // platform, and other GOOS values fail to compile. Tests run on Linux only; the
-// BSDs and Windows are build-only for v0.9.0-rc.1. Design, invariants, error
+// BSDs and Windows are build-only for v0.9.0. Design, invariants, error
 // semantics, the platform matrix and upgrade notes are in the [documentation
 // index].
 //

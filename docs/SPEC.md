@@ -41,7 +41,10 @@ go-enclave owns:
   hardware backend modules implement
   ([backends](backends/architecture.md#component-boundaries)). Every
   environment must be attestable: the requirement binds every backend, in
-  this module and out of tree.
+  this module and out of tree. Hardware backends attest through `Attester`;
+  the memory enclave does not attest itself, and its environment is attested
+  through the host's platform attestation, which go-xkms and
+  go-trusted-platform own.
 - **The process-wide teardown**, `WipeAll`, which the consuming binary calls
   ([shutdown sweep](shutdown-sweep/architecture.md#component-boundaries)).
 - **The conformance suites** it ships to provider and backend authors.
@@ -87,9 +90,9 @@ go-enclave never:
 | backends | shipped | A small core (`Handle`, `Backend`) plus optional capabilities found by type assertion; a named registry beside explicit injection, with nothing registered at import; a missing capability is a `*CapabilityError`, never a fallback. Sealing opens into and seals from any backend. [Architecture](backends/architecture.md). | [backends/](backends/user.md) |
 | backend-conformance | shipped | `backendtest.TestBackend(ctx, cfg)` holds a backend to the seam: handle lifecycle, exact capability claims in both directions, import wiping, nonce binding through the author's `VerifyEvidence`; it fails closed. [Architecture](backend-conformance/architecture.md). | [backend-conformance/](backend-conformance/user.md) |
 | build and release | shipped | Every gate is a Makefile target that passes offline in the devcontainer, with pinned, checksum-verified tools. A change adds a changelog fragment. `make release`, `make release-candidate` and `make release-alpha` each cut one kind of release from `main`; the tag's workflow runs the full gate (FIPS and trivy included) and a consumer check, and the artifacts are signed. [Development](../README.md#development). | none |
-| enclave-interface | in progress | The one public interface upstream consumes: the handle plus capabilities. Constructors return it; concrete types are backend-internal. No upstream project depends on a concrete type. [#138](../../../issues/138), milestone v0.9.0-rc.1. | none |
-| backend-detection | planned | Detection runs only on an explicit call from `main`; importing the package changes no process state. It covers only the backends the binary registered, and probing the host is each backend's own code. Each backend reports its rank; go-enclave compares the ranks and fixes no ranking of its own. It selects the most secure usable backend, the memory enclave when nothing else is usable; the selection is observable and testable. [#190](../../../issues/190), milestone v0.9.0-rc.1. [Architecture](backend-detection/architecture.md). | [backend-detection/](backend-detection/user.md) |
-| BSD and Windows runtime testing | planned | The BSDs and Windows run the test suite, not only compile; until then they are build-only ([test status](memory-enclave/engineering.md#test-status)). [#188](../../../issues/188), milestone v0.9.0-rc.1. | none |
+| enclave-interface | in progress | The one public interface upstream consumes: the handle plus capabilities. Constructors return it; concrete types are backend-internal. No upstream project depends on a concrete type. [#138](../../../issues/138), milestone v0.9.0 dev complete. | none |
+| backend-detection | shipped | Detection runs only on an explicit call from `main`; importing the package changes no process state. It covers only the backends the binary registered, and probing the host is each backend's own code. Each backend reports its rank; go-enclave compares the ranks and fixes no ranking of its own. It selects the most secure usable backend, the memory enclave when nothing else is usable; the selection is observable and testable. [#190](../../../issues/190), milestone v0.9.0 dev complete. [Architecture](backend-detection/architecture.md). | [backend-detection/](backend-detection/user.md) |
+| BSD and Windows runtime testing | planned | The BSDs and Windows run the test suite, not only compile; until then they are build-only ([test status](memory-enclave/engineering.md#test-status)). [#188](../../../issues/188), milestone v0.9.0 dev complete. | none |
 | se052f-secure-element | future | A backend on the EdgeLock SE052F secure element that implements the backend seam and passes `backendtest` ([out-of-tree backend](backends/architecture.md#an-out-of-tree-backend)). It is the host-side Go backend; trusted-firmware owns the on-device C driver for the same part as its element tier. [#191](../../../issues/191). | [backends/](backends/user.md) |
 | optiga-trust-m | future | A backend on the Infineon OPTIGA Trust M I2C element that implements the backend seam and passes `backendtest` ([out-of-tree backend](backends/architecture.md#an-out-of-tree-backend)). It is the host-side Go backend; trusted-firmware owns the on-device driver for the same part. [#196](../../../issues/196). | [backends/](backends/user.md) |
 | mac-secure-enclave | future | A backend on the Mac Secure Enclave that implements the backend seam and passes `backendtest` ([out-of-tree backend](backends/architecture.md#an-out-of-tree-backend)). [#192](../../../issues/192). | [backends/](backends/user.md) |
@@ -114,15 +117,15 @@ go-enclave never:
 
 ## Release criteria
 
-The next candidate, [v0.9.0-rc.1](../../../milestone/34) (see
+The next milestone, [v0.9.0 dev complete](../../../milestone/34) (see
 [ROADMAP milestones](../ROADMAP.md#milestones)), closes when:
 
 1. The enclave interface is the public API (enclave-interface).
 2. Detection selects the memory backend on a plain host (backend-detection).
 3. Every issue in the milestone is closed.
-4. `make release-candidate` passes on `main`.
-5. The candidate is cut from `main` with
-   `make release-candidate VERSION=v0.9.0-rc.1` and published as a
+4. `make release-alpha VERSION=v0.9.0-alpha` passes its checks on `main`.
+5. The alpha is cut from `main` with
+   `make release-alpha VERSION=v0.9.0-alpha` and published as a
    pre-release.
 6. The tag's release workflow passes: `make release-verify`, the full gate
    (FIPS and trivy included) and `make consumer-check`.

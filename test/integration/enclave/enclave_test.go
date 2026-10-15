@@ -26,9 +26,9 @@ import (
 // check is preceded by a control that finds the material where it is known to
 // be, so a blind sweep cannot pass.
 
-// TestLockedMemory_EnclaveMaterialLivesOnlyInItsEnclaveAndIsGoneAfterDestroy follows one
+// TestMemoryEnclave_EnclaveMaterialLivesOnlyInItsEnclaveAndIsGoneAfterDestroy follows one
 // secret through every Memory constructor a consumer has.
-func TestLockedMemory_EnclaveMaterialLivesOnlyInItsEnclaveAndIsGoneAfterDestroy(t *testing.T) {
+func TestMemoryEnclave_EnclaveMaterialLivesOnlyInItsEnclaveAndIsGoneAfterDestroy(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		alloc, err := enclave.NewAllocator(16 * enclave.LockedSize(1))
 		if err != nil {
@@ -131,10 +131,10 @@ func TestLockedMemory_EnclaveMaterialLivesOnlyInItsEnclaveAndIsGoneAfterDestroy(
 	})
 }
 
-// TestLockedMemory_DestroyedEnclaveRefusesEveryAccess checks the consumer-visible contract
+// TestMemoryEnclave_DestroyedEnclaveRefusesEveryAccess checks the consumer-visible contract
 // after Destroy: every accessor reports ErrEnclaveDestroyed (or false), and
 // Destroy itself is idempotent.
-func TestLockedMemory_DestroyedEnclaveRefusesEveryAccess(t *testing.T) {
+func TestMemoryEnclave_DestroyedEnclaveRefusesEveryAccess(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		n := newNeedle(t)
 		e := enclaveFromNeedle(t, n)
@@ -184,11 +184,11 @@ func destroyAndRequireGone(t *testing.T, e enclave.ByteAccess, n needle) {
 	requireHitsExactly(t, "after Destroy", hits, scanned)
 }
 
-// TestLockedMemory_EnclaveAccessorsTellTheTruth exercises the accessors a consumer reads an
+// TestMemoryEnclave_EnclaveAccessorsTellTheTruth exercises the accessors a consumer reads an
 // enclave through, against real locked memory: every constructor, the
 // comparisons, the redacted String, the scoped borrow, and what each
 // reports once the enclave is destroyed.
-func TestLockedMemory_EnclaveAccessorsTellTheTruth(t *testing.T) {
+func TestMemoryEnclave_EnclaveAccessorsTellTheTruth(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		const secret = "accessor material, 32 bytes long"
 
@@ -274,10 +274,10 @@ func TestSealing_KeyScheduleErasureReportsThisBuild(t *testing.T) {
 	}
 }
 
-// TestLockedMemory_EnclaveErrorTypesRenderEveryValue pins that every value of the exported
+// TestMemoryEnclave_EnclaveErrorTypesRenderEveryValue pins that every value of the exported
 // release and allocation error types, including the zero value, renders and
 // unwraps to nothing it does not carry.
-func TestLockedMemory_EnclaveErrorTypesRenderEveryValue(t *testing.T) {
+func TestMemoryEnclave_EnclaveErrorTypesRenderEveryValue(t *testing.T) {
 	for _, e := range []error{&enclave.UnwipedReleaseError{}, &enclave.LockedMemoryError{}} {
 		if msg := e.Error(); !strings.HasPrefix(msg, "enclave: ") {
 			t.Errorf("%T{}.Error() = %q, want a message in the package's voice", e, msg)
@@ -288,10 +288,10 @@ func TestLockedMemory_EnclaveErrorTypesRenderEveryValue(t *testing.T) {
 	}
 }
 
-// TestLockedMemory_DestroyedAndNilEnclavesAnswerSafely pins that every accessor of a
+// TestMemoryEnclave_DestroyedAndNilEnclavesAnswerSafely pins that every accessor of a
 // destroyed or nil Memory returns its documented sentinel or zero value
 // without touching unmapped memory.
-func TestLockedMemory_DestroyedAndNilEnclavesAnswerSafely(t *testing.T) {
+func TestMemoryEnclave_DestroyedAndNilEnclavesAnswerSafely(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		var nilEnclave *enclave.Memory
 		if nilEnclave.Size() != 0 || nilEnclave.IsAlive() || nilEnclave.Destroy() != nil {

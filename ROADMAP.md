@@ -1,6 +1,6 @@
 # go-enclave roadmap
 
-> **Status: REFERENCE** · Owner: Software Department · Last verified: 2026-10-14
+> **Status: REFERENCE** · Owner: Software Department · Last verified: 2026-10-15
 > Changes are proposed by docs-only PR. Agrees with [docs/SPEC.md](docs/SPEC.md), which lists every feature named below.
 
 ## Mission
@@ -15,11 +15,11 @@ What it owns and never does: [SPEC boundaries](docs/SPEC.md#boundaries).
 
 Each line: issue or fact, outcome, the SPEC feature it serves, status.
 
-- [v0.9.0-rc.1](../../milestone/34), target kind RC; closes per [SPEC release criteria](docs/SPEC.md#release-criteria).
-- [#138](../../issues/138) v0.9.0-rc.1 pre-RC review fixes and hardware-backend seam (umbrella); its trains [#135](../../issues/135), [#136](../../issues/136), [#145](../../issues/145), [#146](../../issues/146) and [#150](../../issues/150) are closed — enclave-interface, backends, memory-enclave, sealing, backend-conformance, build and release — open
-- [#190](../../issues/190) — backend-detection — open
+- [v0.9.0 dev complete](../../milestone/34), next tag v0.9.0-alpha; closes per [SPEC release criteria](docs/SPEC.md#release-criteria).
+- [#138](../../issues/138) v0.9.0 dev complete: pre-release review fixes and hardware-backend seam (umbrella); its trains [#135](../../issues/135), [#136](../../issues/136), [#145](../../issues/145), [#146](../../issues/146) and [#150](../../issues/150) are closed — enclave-interface, backends, memory-enclave, sealing, backend-conformance, build and release — open
+- [#190](../../issues/190), PR [#202](../../pulls/202) — backend-detection — done
 - [#188](../../issues/188) design, PR [#189](../../pulls/189) — BSD and Windows runtime testing — open
-- [Release candidate (M1)](../../milestone/1), target kind RC — closed: 0 open, 11 closed issues.
+- [Dev complete (M1)](../../milestone/1), target kind RC — closed: 0 open, 11 closed issues.
 - [#80](../../issues/80) release-readiness checklist (M1) — build and release — done
 - [#163](../../issues/163) `ErrSealerNotConstructed` godoc matches the code (M1) — sealing — done
 - [#164](../../issues/164) `WipeAll` godoc on `Sweeper` panics (M1) — shutdown-sweep — done
@@ -39,7 +39,7 @@ Each line: issue or fact, outcome, the SPEC feature it serves, status.
 
 ## Complete
 
-Each line: SPEC feature, what shipped, the closing issues, the release. A feature's name is its `docs/<feature>/` folder; [SPEC](docs/SPEC.md#features) gives the folder of each. Every shipped feature is in [v0.8.0-rc.2](../../releases/tag/v0.8.0-rc.2).
+Each line: SPEC feature, what shipped, the closing issues, the release. A feature's name is its `docs/<feature>/` folder; [SPEC](docs/SPEC.md#features) gives the folder of each. Every shipped feature is in [v0.8.0-rc.2](../../releases/tag/v0.8.0-rc.2), except backend-detection, which is in no release yet.
 
 - **memory-enclave** (`docs/memory-enclave/`) — `Memory`: sized and copying constructors, `Freeze`, typed `Destroy` and release reporting, the OS layer on `golang.org/x/sys`, fork exclusion and opt-in `HardenProcess`, renamed from `MemoryEnclave` with `noCopy` — [#1](../../issues/1), [#6](../../issues/6), [#12](../../issues/12), [#13](../../issues/13), [#14](../../issues/14), [#29](../../issues/29), [#30](../../issues/30), [#86](../../issues/86), [#88](../../issues/88), [#109](../../issues/109), [#110](../../issues/110), [#145](../../issues/145); docs [#157](../../issues/157)
 - **locked-memory-budget** — mandatory admission in locked pages, `RLIMIT_MEMLOCK` discovery, runtime retune, the process allocator, a guarded refusal path — [#2](../../issues/2), [#7](../../issues/7), [#11](../../issues/11), [#35](../../issues/35), [#46](../../issues/46), [#47](../../issues/47), [#71](../../issues/71); docs [#158](../../issues/158)
@@ -49,10 +49,11 @@ Each line: SPEC feature, what shipped, the closing issues, the release. A featur
 - **backends** — the backend seam: registry, injection, capabilities, `*Allocator` as the locked-memory backend, sealing wiring (`WithBackend`, `OpenIn`, `SealFrom`) — [#135](../../issues/135), [#145](../../issues/145); first in [v0.8.0-rc.1](../../releases/tag/v0.8.0-rc.1); docs [#156](../../issues/156)
 - **backend-conformance** — `backendtest`, typed errors and `memscan` fail closed — [#146](../../issues/146), [#154](../../issues/154); docs [#156](../../issues/156)
 - **build and release** — pinned tools and Makefile-driven CI, changelog fragments, the integration suite, `make release VERSION=…` for every release kind, release safety and build gates, signed release artifacts (IS-14), docs conformance for the Serena agent rule — [#48](../../issues/48), [#89](../../issues/89), [#91](../../issues/91), [#134](../../issues/134), [#136](../../issues/136), [#137](../../issues/137), [#140](../../issues/140); docs match the exported API, roadmap and docs index current to the RC — [#150](../../issues/150), [#160](../../issues/160)
+- **backend-detection** (`docs/backend-detection/`) — `Detect`, on an explicit call from `main`, selects the most secure of the registered backends by the rank each reports, the memory enclave when nothing else is usable — [#190](../../issues/190) (PR [#202](../../pulls/202)); milestone v0.9.0 dev complete
 
 ## Now
 
-- **enclave-interface** — [#138](../../issues/138), milestone v0.9.0-rc.1: the one public interface upstream consumes; constructors return it.
+- **enclave-interface** — [#138](../../issues/138), milestone v0.9.0 dev complete: the one public interface upstream consumes; constructors return it.
 
 ## Next
 
@@ -60,8 +61,7 @@ Nothing queued. New work arrives as issues.
 
 ## Later
 
-- **backend-detection** — [#190](../../issues/190), milestone v0.9.0-rc.1: on an explicit call from `main`, selects the most secure of the registered backends by the rank each reports, the memory enclave when nothing else is usable — `docs/backend-detection/`
-- **BSD and Windows runtime testing** — [#188](../../issues/188) design, PR [#189](../../pulls/189), milestone v0.9.0-rc.1: test runners for the BSDs and Windows, which are build-only for the RC — no feature folder
+- **BSD and Windows runtime testing** — [#188](../../issues/188) design, PR [#189](../../pulls/189), milestone v0.9.0 dev complete: test runners for the BSDs and Windows, which are build-only for v0.9.0 — no feature folder
 
 ## Future
 

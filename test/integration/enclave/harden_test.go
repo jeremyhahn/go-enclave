@@ -22,11 +22,11 @@ import (
 	enclave "github.com/jeremyhahn/go-enclave"
 )
 
-// TestLockedMemory_HardenProcess_KernelReportsNotDumpable calls HardenProcess in an
+// TestMemoryEnclave_HardenProcess_KernelReportsNotDumpable calls HardenProcess in an
 // isolated child and reads the result back from the kernel: PR_GET_DUMPABLE
 // is 0, RLIMIT_CORE is 0 soft and hard and cannot be raised again, and, for a
 // non-root process, /proc/self/mem is now owned by root.
-func TestLockedMemory_HardenProcess_KernelReportsNotDumpable(t *testing.T) {
+func TestMemoryEnclave_HardenProcess_KernelReportsNotDumpable(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		v, err := unix.PrctlRetInt(unix.PR_GET_DUMPABLE, 0, 0, 0, 0)
 		if err != nil || v == 0 {
@@ -68,10 +68,10 @@ func TestLockedMemory_HardenProcess_KernelReportsNotDumpable(t *testing.T) {
 	})
 }
 
-// TestLockedMemory_HardenProcess_ReportsARefusedPrctl refuses PR_SET_DUMPABLE with a
+// TestMemoryEnclave_HardenProcess_ReportsARefusedPrctl refuses PR_SET_DUMPABLE with a
 // seccomp filter and requires the refusal back as a typed error with nothing
 // reported in effect.
-func TestLockedMemory_HardenProcess_ReportsARefusedPrctl(t *testing.T) {
+func TestMemoryEnclave_HardenProcess_ReportsARefusedPrctl(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		installErrnoFilter(t, unix.SYS_PRCTL, 0, unix.PR_SET_DUMPABLE, unix.EPERM)
 
@@ -92,12 +92,12 @@ func TestLockedMemory_HardenProcess_ReportsARefusedPrctl(t *testing.T) {
 	})
 }
 
-// TestLockedMemory_HardenProcess_ReportsARefusedCoreDumpLimit refuses the
+// TestMemoryEnclave_HardenProcess_ReportsARefusedCoreDumpLimit refuses the
 // RLIMIT_CORE change with seccomp, whichever syscall the platform's setrlimit
 // is, and requires the refusal back as the typed failure of that step: the
 // process is still marked not dumpable and the report says so, and
 // CoreDumpsDisabled reports the same failure.
-func TestLockedMemory_HardenProcess_ReportsARefusedCoreDumpLimit(t *testing.T) {
+func TestMemoryEnclave_HardenProcess_ReportsARefusedCoreDumpLimit(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		if err := enclave.CoreDumpsDisabled(); !errors.Is(err, enclave.ErrCoreDumpLimitNotApplied) {
 			t.Fatalf("CoreDumpsDisabled() = %v before HardenProcess, want ErrCoreDumpLimitNotApplied", err)

@@ -210,7 +210,7 @@ func TestProbeError_Text(t *testing.T) {
 	}
 }
 
-func TestLockedMemory_RanksAndProbesAsTheDefault(t *testing.T) {
+func TestMemoryEnclave_RanksAndProbesAsTheDefault(t *testing.T) {
 	a, err := NewAllocator(1 << 20)
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)

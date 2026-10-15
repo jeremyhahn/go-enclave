@@ -12,7 +12,7 @@ in a fresh child process. Everything else is a unit test in the package itself.
 
 Every test is named for the one feature it belongs to, with the prefix
 [scripts/features.map](../../scripts/features.map) gives that feature
-(`TestLockedMemory_`, `TestLockedMemoryBudget_`, `TestSealing_`,
+(`TestMemoryEnclave_`, `TestLockedMemoryBudget_`, `TestSealing_`,
 `TestShutdownSweep_`, `TestProviderConformance_`, `TestBackends_`). `make
 integration-test-<feature>` runs the tests with that prefix and nothing else,
 and `build/ci/buildgates` fails on a test with no feature's prefix. A test that

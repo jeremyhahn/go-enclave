@@ -34,13 +34,13 @@ import (
 // and that a later Destroy or WipeAll finishes once the refusal lifts. Each
 // first requires that the injector actually refused something.
 
-// TestLockedMemory_EnclaveMappingsAreLockedUndumpableAndGuarded creates an enclave by every
+// TestMemoryEnclave_EnclaveMappingsAreLockedUndumpableAndGuarded creates an enclave by every
 // public route and reads each mapping back from /proc/self/smaps: VmFlags has
 // lo, dd and dc; the size is exactly LockedSize(n); permissions are r--p once
 // final (rw-p only for an unfrozen sized enclave); the neighbors are unlocked
 // ---p guard pages. Every locked mapping in the process, the sealer's
 // included, is dd and together they make up VmLck; after WipeAll none remain.
-func TestLockedMemory_EnclaveMappingsAreLockedUndumpableAndGuarded(t *testing.T) {
+func TestMemoryEnclave_EnclaveMappingsAreLockedUndumpableAndGuarded(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		ctx := context.Background()
 		page := int(enclave.LockedSize(1))
@@ -196,15 +196,15 @@ func TestLockedMemory_EnclaveMappingsAreLockedUndumpableAndGuarded(t *testing.T)
 	})
 }
 
-// TestLockedMemory_CoreDumpLimitUnchangedByImport pins that importing go-enclave
+// TestMemoryEnclave_CoreDumpLimitUnchangedByImport pins that importing go-enclave
 // leaves RLIMIT_CORE where the parent set it, and that CoreDumpsDisabled says
 // nothing was applied; lowering the limit is HardenProcess's
-// (TestLockedMemory_HardenProcess_KernelReportsNotDumpable).
+// (TestMemoryEnclave_HardenProcess_KernelReportsNotDumpable).
 //
 // It runs in the top-level process so its parent is the `go` command, which
 // does not import go-enclave; the test requires that parent's limit to be the
 // non-zero figure compose.yaml declares, or "unchanged" would be unfalsifiable.
-func TestLockedMemory_CoreDumpLimitUnchangedByImport(t *testing.T) {
+func TestMemoryEnclave_CoreDumpLimitUnchangedByImport(t *testing.T) {
 	if isChild() {
 		t.Fatalf("must run in the top-level test process, whose parent is the go command")
 	}
@@ -252,10 +252,10 @@ func procLimit(path, row string) (soft, hard string, err error) {
 	return "", "", fmt.Errorf("%s: no %q row", path, row)
 }
 
-// TestLockedMemory_RefusedMlockRollsBackConstruction pins that a refused mlock fails every
+// TestMemoryEnclave_RefusedMlockRollsBackConstruction pins that a refused mlock fails every
 // constructor with ErrLockedMemoryUnavailable, refunds the Allocator charge in
 // full, leaves nothing on the ledger, and the next allocation succeeds.
-func TestLockedMemory_RefusedMlockRollsBackConstruction(t *testing.T) {
+func TestMemoryEnclave_RefusedMlockRollsBackConstruction(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		f := installFaultInjector(t, 0)
 		a, err := enclave.NewAllocator(16 * enclave.LockedSize(1))
@@ -295,10 +295,10 @@ func TestLockedMemory_RefusedMlockRollsBackConstruction(t *testing.T) {
 	})
 }
 
-// TestLockedMemory_RefusedUnmapKeepsTheEnclaveForARetry pins that a refused munmap makes
+// TestMemoryEnclave_RefusedUnmapKeepsTheEnclaveForARetry pins that a refused munmap makes
 // Destroy return the error, keeps the mapping and ledger entry, and a later
 // Destroy finishes.
-func TestLockedMemory_RefusedUnmapKeepsTheEnclaveForARetry(t *testing.T) {
+func TestMemoryEnclave_RefusedUnmapKeepsTheEnclaveForARetry(t *testing.T) {
 	const n = 48
 	isolated(t, childOpts{}, func(t *testing.T) {
 		f := installFaultInjector(t, mappingLen(n))
@@ -330,10 +330,10 @@ func TestLockedMemory_RefusedUnmapKeepsTheEnclaveForARetry(t *testing.T) {
 	})
 }
 
-// TestLockedMemory_DeniedMprotectReleasesUnwiped pins that when mprotect is denied a frozen
+// TestMemoryEnclave_DeniedMprotectReleasesUnwiped pins that when mprotect is denied a frozen
 // enclave is unmapped unwiped and reported as such: ErrReleasedWithoutWipe
 // from Destroy, Unwiped in WipeAll's SweepError.
-func TestLockedMemory_DeniedMprotectReleasesUnwiped(t *testing.T) {
+func TestMemoryEnclave_DeniedMprotectReleasesUnwiped(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		f := installFaultInjector(t, 0)
 		viaDestroy, err := enclave.NewMemory([]byte("frozen at construction"))
@@ -375,11 +375,11 @@ func TestLockedMemory_DeniedMprotectReleasesUnwiped(t *testing.T) {
 	})
 }
 
-// TestLockedMemory_RefusedGuardPageRollsBackALockedMapping refuses the guard page after
+// TestMemoryEnclave_RefusedGuardPageRollsBackALockedMapping refuses the guard page after
 // the lock succeeded, and the rollback's munlock and munmap too: the mapping
 // stays a counted, charged, locked orphan and is reclaimed once the kernel
 // relents.
-func TestLockedMemory_RefusedGuardPageRollsBackALockedMapping(t *testing.T) {
+func TestMemoryEnclave_RefusedGuardPageRollsBackALockedMapping(t *testing.T) {
 	const n = 40
 	isolated(t, childOpts{}, func(t *testing.T) {
 		f := installFaultInjector(t, mappingLen(n))
@@ -417,10 +417,10 @@ func TestLockedMemory_RefusedGuardPageRollsBackALockedMapping(t *testing.T) {
 	})
 }
 
-// TestLockedMemory_ConstructionFailsClosedWhenAnExclusionIsRefused pins that a refused
+// TestMemoryEnclave_ConstructionFailsClosedWhenAnExclusionIsRefused pins that a refused
 // MADV_DONTFORK or MADV_DONTDUMP fails construction with
 // ErrLockedMemoryUnavailable and leaves nothing locked.
-func TestLockedMemory_ConstructionFailsClosedWhenAnExclusionIsRefused(t *testing.T) {
+func TestMemoryEnclave_ConstructionFailsClosedWhenAnExclusionIsRefused(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		advice uint32

@@ -96,7 +96,8 @@ backend breaks; the change is additive.
   over, and that observability is a requirement. Probing is a startup cost
   paid once.
 - **Return an error when nothing but locked memory is usable.** Locked memory
-  is a correct, attestable floor (see the scope fence), not a failure. A
+  is the correct floor, attested through the host's platform (see the scope
+  fence), not a failure. A
   deployment that requires hardware checks what was selected.
 - **Detect selects and installs a process-wide backend.** No process-wide
   backend exists to install. `Detect` returns the interface, and `main` hands
@@ -124,12 +125,12 @@ as the backend wrote them, and the backend name in a `ProbeError` is quoted.
 
 - No hardware backend is in this module, so detection selects locked memory on
   every host this module tests on ([test status](../memory-enclave/engineering.md#test-status)).
-- Attestation is out of scope. Every environment must be attestable
-  ([SPEC](../SPEC.md#boundaries)), and `Detect` neither attests nor compares
-  attestation. How attestability bears
-  on selection is an open question for the owner. The
-  [attestation](../backends/architecture.md#attestation) capability stands
-  apart from rank.
+- Attestation is out of scope: `Detect` neither attests nor compares
+  attestation, and selects by rank only. A deployment that needs hardware
+  evidence checks what was selected for the
+  [`Attester`](../backends/architecture.md#attestation) capability. Locked
+  memory's environment is attested through the host's platform
+  ([SPEC boundaries](../SPEC.md#boundaries)).
 - Rank has no shared scale beyond "0 is locked memory, higher is more secure".
   Out-of-tree backends that must order against each other agree on their ranks
   themselves.
