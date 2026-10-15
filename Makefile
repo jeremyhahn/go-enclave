@@ -562,6 +562,11 @@ ci: ci-fast ci-integration
 deps-latest:
 	@sh scripts/deps-latest.sh
 
+## deps-check: fail on any module a go.mod requires that is behind its latest release without a "// held: <reason>" comment on its require or replace line (needs the module proxy)
+.PHONY: deps-check
+deps-check:
+	@sh scripts/deps-check.sh
+
 ## release: Tag and push a production release (VERSION=vX.Y.Z; refuses -alpha and -rc.N)
 # The version is explicit, never derived. The three release targets run the one
 # scripts/release.sh with their kind: every check runs before anything is

@@ -51,7 +51,7 @@ Nothing queued. New work arrives as issues.
 
 ## Dependencies
 
-- Up: none in-house, as the base layer it embeds no project; the only module dependency is `golang.org/x/sys` v0.48.0 — memory-enclave.
+- Up: none in-house, as the base layer it embeds no project; the only module dependency is `golang.org/x/sys` v0.49.0 — memory-enclave.
 - Down: Every layer above, from go-quicraft up, consumes the enclave interface (enclave-interface) and re-exports it through its own SDK. Today luks2, xkms, quicraft, qrdb and quicbaas hold concrete pointers — memory-enclave, sealing, enclave-interface.
 - Out of tree: the hardware backend rows depend on go-enclave, never the reverse; the TPM backend and TPM, HSM and KMS providers belong to go-xkms — the hardware backend rows, sealing.
 - trusted-firmware: owns the on-device C driver for the NXP EdgeLock SE052F as its element tier, and the on-device driver for the Infineon OPTIGA Trust M; go-enclave's backends for the same parts are the host-side Go backends — se052f-secure-element, optiga-trust-m.

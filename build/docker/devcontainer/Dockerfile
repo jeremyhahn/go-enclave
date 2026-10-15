@@ -56,10 +56,6 @@
 #     script behaves here as it does there. The base digest fixes the Alpine
 #     branch, and a branch moves a package only by security rebuilds, so these
 #     follow the branch rather than a revision.
-#
-# BOTH STAGES carry node, git, bash and tar: CI runs each stage's jobs with
-# `container:` set to this image, so the runner's JavaScript actions
-# (checkout, cache, upload) execute inside it (handbook ci-standard.md §2).
 #   * Every tool scripts/tool-pins.sh pins, in /usr/local/bin, installed by
 #     scripts/install-tools.sh through scripts/tool.sh: the same pins, hashes
 #     and verification `make lint` uses, and no second copy of either.
@@ -67,6 +63,10 @@
 #     nothing.
 #   * build/ci/buildgates' dependencies, beside the root module's.
 #   * HOME=/tmp: nothing a gate needs lives under a home directory.
+#
+# BOTH STAGES carry node, git, bash and tar: CI runs each stage's jobs with
+# `container:` set to this image, so the runner's JavaScript actions
+# (checkout, cache, upload) execute inside it (handbook ci-standard.md §2).
 #
 # THE INTEGRATION STAGE adds the source, BAKED IN rather than bind-mounted. On
 # our runners `docker compose` reaches the HOST daemon through the job
