@@ -1,4 +1,0 @@
-### Changed
-
-- **SPEC: backend-detection is shipped, and the memory enclave is attested through the host's platform** (#138). The memory enclave does not attest itself: the host's platform attestation, which go-xkms and go-trusted-platform own, attests its environment, and hardware backends attest through `Attester`. `Detect` selects by rank only; a deployment that needs hardware evidence checks what was selected. The secure-element and TPM column of the [backend capability table](docs/backends/architecture.md#what-each-backend-class-provides) notes that the TPM backend is go-xkms's. The next milestone is v0.9.0 dev complete, cut as `v0.9.0-alpha`. Nothing changes for Go callers.
-- **The memory-enclave integration tests are named `TestMemoryEnclave_`** (#138), after the SPEC feature, in place of `TestLockedMemory_`. `make integration-test-memory-enclave` selects them as before.

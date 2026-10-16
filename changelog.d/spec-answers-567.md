@@ -1,5 +1,0 @@
-### Changed
-
-- **The memory-enclave docs moved from `docs/locked-memory/` to `docs/memory-enclave/`** (#187). The folder now carries the SPEC feature's name, and the per-feature make targets follow it: `test-memory-enclave` and `integration-test-memory-enclave` replace `test-locked-memory` and `integration-test-locked-memory`. Nothing changes for Go callers; a published link into `docs/locked-memory/` no longer resolves. See [memory enclave](docs/memory-enclave/user.md).
-- **SPEC: the backend-detection row states its contract** (#187, #190): detection runs only on an explicit call from `main`, covers only the backends the binary registered, leaves probing to each backend, and compares the rank each backend reports, with no ranking fixed in go-enclave. The SPEC boundaries now require every environment to be attestable.
-- **SPEC: no tpm row** (#187). The TPM backend is go-xkms's, as TPM, PKCS#11 and cloud KMS crypto already were. The intel-tdx and nvidia-blackwell future rows link #199 and #200.

@@ -1,5 +1,0 @@
-### Added
-
-- **Backend detection: `Detect(ctx)` selects the most secure registered backend this host can run** (#190). It probes only registered backends, and only when called. It returns the usable one with the highest rank, falls back to locked memory, and reports one `ProbeResult` per backend saying why each was passed over. Ties go to locked memory, then to the name first in byte order. See [backend detection](docs/backend-detection/user.md).
-- **The `Prober` backend capability (`CapabilityProbe`)** (#190): `Rank() int`, where higher is more secure and locked memory is 0, and `Probe(ctx) error`, the backend's own check of the host. It is optional, so `Backend` is unchanged. The default backend and every `Allocator` are rank-0 `Prober`s. A failed probe is a `*ProbeError` matching the new `ErrBackendUnavailable`.
-- **`backendtest` checks `Prober`** (#190): a backend claiming `CapabilityProbe` must report a stable rank and give a stable probe verdict across calls, under a nil context and under concurrent calls.

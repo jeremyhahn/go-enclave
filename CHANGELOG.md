@@ -6,6 +6,61 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [v0.9.0-alpha] - 2026-10-16
+
+### Changed
+
+- **The memory-enclave docs moved from `docs/locked-memory/` to `docs/memory-enclave/`** (#187). The folder now carries the SPEC feature's name, and the per-feature make targets follow it: `test-memory-enclave` and `integration-test-memory-enclave` replace `test-locked-memory` and `integration-test-locked-memory`. Nothing changes for Go callers; a published link into `docs/locked-memory/` no longer resolves. See [memory enclave](docs/memory-enclave/user.md).
+- **SPEC: the backend-detection row states its contract** (#187, #190): detection runs only on an explicit call from `main`, covers only the backends the binary registered, leaves probing to each backend, and compares the rank each backend reports, with no ranking fixed in go-enclave. The SPEC boundaries now require every environment to be attestable.
+- **SPEC: no tpm row** (#187). The TPM backend is go-xkms's, as TPM, PKCS#11 and cloud KMS crypto already were. The intel-tdx and nvidia-blackwell future rows link #199 and #200.
+
+- **SPEC: backend-detection is shipped, and the memory enclave is attested through the host's platform** (#138). The memory enclave does not attest itself: the host's platform attestation, which go-xkms and go-trusted-platform own, attests its environment, and hardware backends attest through `Attester`. `Detect` selects by rank only; a deployment that needs hardware evidence checks what was selected. The secure-element and TPM column of the [backend capability table](docs/backends/architecture.md#what-each-backend-class-provides) notes that the TPM backend is go-xkms's. The next milestone is v0.9.0 dev complete, cut as `v0.9.0-alpha`. Nothing changes for Go callers.
+- **The memory-enclave integration tests are named `TestMemoryEnclave_`** (#138), after the SPEC feature, in place of `TestLockedMemory_`. `make integration-test-memory-enclave` selects them as before.
+
+- **The SPEC's memory-enclave and sealing rows name the memory enclave, not `Memory`** (#138). They describe the shipped API: constructors and `Sealed.Open` return a `ByteAccess`, `Freeze` is the `Freezer` capability, and `Sealer` is an interface. Nothing changes for Go callers.
+- **The SPEC's `enclave-interface` row is shipped** (#138): every constructor returns an interface, and no exported concrete type is a handle to locked or sealed material or to a backend. Nothing changes for Go callers.
+
+- **[Build and release](docs/build-and-release.md) documents the build, the gates and the release** (#169). One page covers the release targets and what they refuse, the post-tag checks, the `build/ci/buildgates` gates, the CI tiers and the CI Gate, and verifying a signed release; the everyday targets stay in the [README](README.md#development). Nothing changes for Go callers.
+
+- **Tests run on Linux only** (#188). By the owner's ruling, the BSDs and Windows get no runtime testing: they stay build-only, and `make cross-build` compiles, vets and links their test binaries with nothing executed. The design proposal is withdrawn; [runtime testing](docs/memory-enclave/runtime-testing.md) states the ruling, and the SPEC row `bsd-windows-runtime-testing` is now `future`. Nothing changes for Go callers.
+
+- **`make cross-build` links every package's test binaries for each target** (#188). After `go build` and `go vet`, it runs `go test -c` for every `CROSS_TARGETS` entry, so a test that compiles but does not link off Linux fails the gate; nothing runs. The BSDs and Windows are build-only and tests run on Linux only ([runtime testing](docs/memory-enclave/runtime-testing.md)). Nothing changes for Go callers.
+
+- **`golang.org/x/sys` v0.49.0, was v0.48.0** (#212), its latest release, so `make deps-check` passes.
+
+- **The devcontainer's `toolchain` and `integration` stages carry node, git, bash and tar** (#212). CI runs each stage's jobs with `container:` set to the image, so the runner's JavaScript actions (checkout, cache, upload) execute inside it; `toolchain` gains `nodejs`, `integration` gains `bash git tar nodejs` and still runs as `dev`. Nothing changes for Go callers.
+
+- **CI runs its stages in the devcontainer image, in the ci-template v1.18 shape** (#217). `ci.yml` builds the devcontainer images from the commit under test. It runs `make build`, `make cross-build`, `make ci-test`, `make security` and `make deps-check` in the toolchain image, then scans the integration image with `trivy image`. The FIPS job runs `make test-fips` there too, and the integration job runs `make ci-integration`. No stage runs on runner tools. `scripts/in-toolchain-image.sh` copies the checkout into the toolchain container, and `scripts/reap-stale-ci-stacks.sh` removes the CI containers and compose stacks a dead runner left behind. `make security` now runs `ci-security`'s scans as well. The devcontainer's Go image moves to the current `golang:1.27.2-alpine3.24` index. Nothing changes for Go callers.
+- **gosec builds against golang.org/x/tools v0.52.0** (#217). gosec v2.29.0's own x/tools (v0.49.0) cannot read the export data Go 1.27 writes, so `make gosec` failed on every import. `scripts/tool.sh` now builds it in a throwaway module with x/tools raised to `XTOOLS_VERSION` (`scripts/tool-pins.sh`), as ci-template does.
+
+### Changed — BREAKING:
+
+- **Constructors return interfaces, never a pointer to a concrete type** (#138). A failed call returns a nil interface. See [Upgrading](docs/README.md#constructors-return-interfaces).
+  - `NewMemory`, `NewMemoryCopy` and `NewMemorySized` return `ByteAccess`, was `*Memory`. `Freeze` is reached through the `Freezer` capability with `As`.
+  - `NewSealed`, `NewSealedFrom`, `Sealer.Seal` and `Sealer.SealFrom` return the `Sealed` interface, was `*Sealed`; `Sealed.Open` returns `ByteAccess`, was `*Memory`.
+  - `NewAllocator`, `NewAllocatorWithinRLimit` and `ProcessAllocator` return the `Allocator` interface, was `*Allocator`; `Allocator.New` and `Allocator.NewSized` return `ByteAccess`, was `*Memory`. `SetAllocator` and `Allocator.TransferTo` take an `Allocator` and refuse one this package did not build with `ErrAllocatorNotConstructed`.
+  - `NewSoftwareProvider` returns the `SoftwareProvider` interface (`KeyProtector`, `RootUnsealer`, `HealthReporter` and `Destroy`), was `*SoftwareProvider`.
+- **`Sealed`, `Allocator` and `SoftwareProvider` are interfaces; their implementations are internal** (#138). A caller can no longer declare a zero value or call through a nil pointer, so `ErrProviderNotConstructed`, and `ErrAllocatorNotConstructed` for a zero `Allocator{}`, no longer reach callers. `String` and `GoString` are not interface methods; printing stays redacted.
+
+- **`enclave.Memory` is gone; the memory enclave's type is internal** (#138). Hold the `ByteAccess` that `NewMemory`, `NewMemoryCopy`, `NewMemorySized`, `Sealed.Open` and `Allocator.New` return, and use `As` for `Freeze`. A nil or zero enclave can no longer be declared. The constructor names and the redacted `String` and `GoString` text are unchanged. See [Upgrading](docs/README.md#upgrading).
+
+- **`Sealer` is an interface; its implementation is internal** (#138). `*enclave.Sealer` becomes `enclave.Sealer`; callers drop the `*`. See [Upgrading](docs/README.md#constructors-return-interfaces).
+  - `NewSealer` returns the `Sealer` interface (`Seal`, `SealFrom`, `Mode` and `Destroy`), was `*Sealer`, and a nil interface on every refusal.
+  - `SetSealer` takes a `Sealer`, was `*Sealer`. It refuses a nil or typed-nil one with `ErrNilSealer`, one `NewSealer` did not build (another implementation included) with `ErrSealerNotConstructed`, and a destroyed one with `ErrSealerDestroyed`, installing nothing.
+  - A caller can no longer declare a zero `Sealer` or call through a nil pointer, so `Seal` and `SealFrom` no longer return `ErrSealerNotConstructed` or `ErrNilSealer` to callers.
+
+### Added
+
+- **Backend detection: `Detect(ctx)` selects the most secure registered backend this host can run** (#190). It probes only registered backends, and only when called. It returns the usable one with the highest rank, falls back to locked memory, and reports one `ProbeResult` per backend saying why each was passed over. Ties go to locked memory, then to the name first in byte order. See [backend detection](docs/backend-detection/user.md).
+- **The `Prober` backend capability (`CapabilityProbe`)** (#190): `Rank() int`, where higher is more secure and locked memory is 0, and `Probe(ctx) error`, the backend's own check of the host. It is optional, so `Backend` is unchanged. The default backend and every `Allocator` are rank-0 `Prober`s. A failed probe is a `*ProbeError` matching the new `ErrBackendUnavailable`.
+- **`backendtest` checks `Prober`** (#190): a backend claiming `CapabilityProbe` must report a stable rank and give a stable probe verdict across calls, under a nil context and under concurrent calls.
+
+- **`make deps-check`, the CI standard's latest-version stage** (#212). It compares every module the root `go.mod` and `build/ci/buildgates/go.mod` require, direct and indirect, with its latest release through `go list -m -u`, names each one behind with its current and latest versions, and fails on any whose `require` or `replace` line lacks a `// held: <reason>` comment (handbook `devops.md` §9). It needs the module proxy, so `make ci` and `ci-lint` stay offline and do not run it. Nothing changes for Go callers.
+
+### Fixed
+
+- **The integration suite and docs follow #201's nil-allocator behaviour** (#138). A nil `Allocator` given to `Sealed.OpenIn` is a nil `Backend` and returns `ErrInvalidBackend`; the integration test expected `ErrNilAllocator`, which only `SetAllocator(nil)` returns to a caller. [Upgrading](docs/README.md#constructors-return-interfaces) now says so.
+
 ## [v0.8.0-rc.2] - 2026-10-13
 
 ### Changed
