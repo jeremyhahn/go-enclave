@@ -21,13 +21,13 @@ import (
 	"github.com/jeremyhahn/go-enclave/internal/memscan"
 )
 
-// Where a Memory's material lives, and that it is gone after Destroy,
+// Where a memory enclave's material lives, and that it is gone after Destroy,
 // measured by sweeping every readable mapping (procfs_test.go). Each absence
 // check is preceded by a control that finds the material where it is known to
 // be, so a blind sweep cannot pass.
 
 // TestMemoryEnclave_EnclaveMaterialLivesOnlyInItsEnclaveAndIsGoneAfterDestroy follows one
-// secret through every Memory constructor a consumer has.
+// secret through every memory enclave constructor a consumer has.
 func TestMemoryEnclave_EnclaveMaterialLivesOnlyInItsEnclaveAndIsGoneAfterDestroy(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		alloc, err := enclave.NewAllocator(16 * enclave.LockedSize(1))
@@ -288,22 +288,11 @@ func TestMemoryEnclave_EnclaveErrorTypesRenderEveryValue(t *testing.T) {
 	}
 }
 
-// TestMemoryEnclave_DestroyedAndNilEnclavesAnswerSafely pins that every accessor of a
-// destroyed or nil Memory returns its documented sentinel or zero value
-// without touching unmapped memory.
-func TestMemoryEnclave_DestroyedAndNilEnclavesAnswerSafely(t *testing.T) {
+// TestMemoryEnclave_DestroyedEnclavesAnswerSafely pins that every accessor of
+// a destroyed enclave, its Freezer reached through As included, returns its
+// documented sentinel or zero value without touching unmapped memory.
+func TestMemoryEnclave_DestroyedEnclavesAnswerSafely(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
-		var nilEnclave *enclave.Memory
-		if nilEnclave.Size() != 0 || nilEnclave.IsAlive() || nilEnclave.Destroy() != nil {
-			t.Error("a nil *Memory does not answer as an empty, dead, already-released enclave")
-		}
-		if err := nilEnclave.WithBytes(func([]byte) error { return nil }); !errors.Is(err, enclave.ErrEnclaveDestroyed) {
-			t.Errorf("WithBytes on a nil *Memory = %v, want ErrEnclaveDestroyed", err)
-		}
-		if err := nilEnclave.Freeze(); !errors.Is(err, enclave.ErrEnclaveDestroyed) {
-			t.Errorf("Freeze on a nil *Memory = %v, want ErrEnclaveDestroyed", err)
-		}
-
 		e, err := enclave.NewMemorySized(32)
 		if err != nil {
 			t.Fatalf("NewMemorySized: %v", err)
@@ -317,7 +306,11 @@ func TestMemoryEnclave_DestroyedAndNilEnclavesAnswerSafely(t *testing.T) {
 		if err := e.Destroy(); err != nil {
 			t.Errorf("a second Destroy = %v, want nil (idempotent)", err)
 		}
-		if err := e.(enclave.Freezer).Freeze(); !errors.Is(err, enclave.ErrEnclaveDestroyed) {
+		var f enclave.Freezer
+		if !enclave.As(e, &f) {
+			t.Fatalf("a destroyed enclave does not reach Freezer through As")
+		}
+		if err := f.Freeze(); !errors.Is(err, enclave.ErrEnclaveDestroyed) {
 			t.Errorf("Freeze of a destroyed enclave = %v, want ErrEnclaveDestroyed", err)
 		}
 		if err := e.WithBytes(func([]byte) error { return nil }); !errors.Is(err, enclave.ErrEnclaveDestroyed) {

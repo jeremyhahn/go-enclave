@@ -20,7 +20,7 @@ flowchart LR
   main["binary main()"] -- "SetAllocator(a), once" --> PA[(process allocator)]
   lib1["library A"] -- "ProcessAllocator()" --> PA
   lib2["library B"] -- "ProcessAllocator()" --> PA
-  PA -- "New / NewSized: CAS on free" --> E["Memory (reservation)"]
+  PA -- "New / NewSized: CAS on free" --> E["memory enclave (reservation)"]
   E -- "Destroy: free += charge" --> PA
   K["kernel RLIMIT_MEMLOCK"] -. "DiscoverLockedMemoryLimit<br/>(construction, and every non-negative<br/>SetLimit on an allocator that opted in)" .-> PA
 ```
@@ -104,10 +104,10 @@ sequenceDiagram
       A-->>C: ErrLockedMemoryUnavailable
     else constructed
       A->>R: register enclave (last step)
-      A-->>C: *Memory holding the reservation
+      A-->>C: ByteAccess holding the reservation
     end
   end
-  C->>A: Destroy (on the Memory)
+  C->>A: Destroy (on the enclave)
   A->>K: unmap
   A->>A: free += charge, once
 ```

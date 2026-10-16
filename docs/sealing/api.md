@@ -15,12 +15,12 @@ transport itself, behind the `KeyProtector`/`RootUnsealer` interfaces.
 | Seal under the process sealer | `enclave.NewSealed(ctx, data)`, or from an enclave `enclave.NewSealedFrom(ctx, src)` | N/A |
 | Configure a sealer | `enclave.NewSealer(enclave.WithKeyProtector(kp))` or `enclave.NewSealer(enclave.WithRootUnsealer(ru), enclave.WithKEKRotationLimit(n))`; `enclave.WithBackend(b)` for where its keys live, `enclave.WithRequireKeyScheduleErasure()` for strict mode | N/A |
 | Install the process sealer | `enclave.SetSealer(s)` | N/A |
-| Seal under an explicit sealer | `(*Sealer).Seal(ctx, data)`, `(*Sealer).SealFrom(ctx, src)`, each returning the `Sealed` interface | N/A |
+| Seal under an explicit sealer | `Sealer.Seal(ctx, data)`, `Sealer.SealFrom(ctx, src)`, each returning the `Sealed` interface | N/A |
 | Open (locked memory / another backend) | `Sealed.Open(ctx)` (a `ByteAccess`), `Sealed.OpenIn(ctx, b)` (a `Handle`) | N/A |
-| Read a sealer's mode | `(*Sealer).Mode()` | N/A |
+| Read a sealer's mode | `Sealer.Mode()` | N/A |
 | Probe openability | `Sealed.Openable()`, `Sealed.IsAlive()` | N/A |
 | Release ciphertext | `Sealed.Destroy() error` | N/A |
-| End a sealer and release its keys | `(*Sealer).Destroy() error` (what it releases per mode: [engineering.md](engineering.md#exported-surface)) | N/A |
+| End a sealer and release its keys | `Sealer.Destroy() error` (what it releases per mode: [engineering.md](engineering.md#exported-surface)) | N/A |
 | Release the software provider's root | `SoftwareProvider.Destroy() error` | N/A |
 | Implement a provider | `KeyProtector`, `RootUnsealer`, optional `HealthReporter`, `RootKeyBytes` | N/A |
 | Software provider | `enclave.NewSoftwareProvider()` | N/A |
@@ -42,7 +42,7 @@ Every exported symbol of the feature. The contract of each is in
 | `ModeRootKey` | `Mode` constant | The zero value: unseal a root once, run an in-memory KEK hierarchy. Selected by `WithRootUnsealer`, and by no provider option. |
 | `ModePerOperation` | `Mode` constant | Protect and unprotect each value's DEK through the provider on every seal and open. Selected by `WithKeyProtector`. |
 | `SealerOption` | `func(*sealerConfig)` type | An option of `NewSealer`. A nil option is `ErrInvalidSealerOption`. |
-| `Sealer` | struct | Seals values and opens them. Built by `NewSealer`; a zero value is `ErrSealerNotConstructed`. |
+| `Sealer` | interface | Seals values and opens them. Returned by `NewSealer`; the implementation is internal, and `SetSealer` refuses any other with `ErrSealerNotConstructed`. |
 | `Sealed` | interface | An envelope of ciphertext on the heap, returned by `NewSealed`, `NewSealedFrom`, `Seal` and `SealFrom`; the implementation is internal. Under `%v`, `%s` and `%#v` it prints a redacted form, `Sealed(sealed)` or `Sealed(destroyed)`, never the ciphertext. |
 | `NewSealer`, `WithKeyProtector`, `WithRootUnsealer`, `WithKEKRotationLimit`, `WithBackend`, `WithRequireKeyScheduleErasure` | functions | Construction and options. |
 | `SetSealer`, `NewSealed`, `NewSealedFrom` | functions | The process sealer: install it, seal under it. |
@@ -54,7 +54,7 @@ Every exported symbol of the feature. The contract of each is in
 
 | Method | Notes |
 |---|---|
-| `(*Sealer).Seal`, `SealFrom`, `Mode`, `Destroy` | Seal, seal from an enclave, read the mode, end the sealer. |
+| `Sealer.Seal`, `SealFrom`, `Mode`, `Destroy` | Seal, seal from an enclave, read the mode, end the sealer. |
 | `Sealed.Open`, `OpenIn`, `Openable`, `IsAlive`, `Destroy` | Open into locked memory or another backend, probe, release. |
 | `(Mode).String` | See above. |
 

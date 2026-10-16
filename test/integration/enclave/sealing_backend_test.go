@@ -27,7 +27,7 @@ import (
 
 // rootSealerOn is a ModeRootKey sealer whose key hierarchy lives in b, torn
 // down with the test.
-func rootSealerOn(t *testing.T, b enclave.Backend, opts ...enclave.SealerOption) *enclave.Sealer {
+func rootSealerOn(t *testing.T, b enclave.Backend, opts ...enclave.SealerOption) enclave.Sealer {
 	t.Helper()
 	all := append([]enclave.SealerOption{enclave.WithRootUnsealer(newDevice()), enclave.WithBackend(b)}, opts...)
 	s, err := enclave.NewSealer(all...)
@@ -99,19 +99,9 @@ func TestSealing_SealFromRefusesWhatItCannotSeal(t *testing.T) {
 	dev := newDeviceBackend()
 	s := rootSealerOn(t, enclave.DefaultBackend())
 
-	t.Run("NilSealer", func(t *testing.T) {
-		var none *enclave.Sealer
-		if _, err := none.SealFrom(ctx, enclaveFromNeedle(t, newNeedle(t))); !errors.Is(err, enclave.ErrNilSealer) {
-			t.Fatalf("SealFrom on a nil sealer: %v, want ErrNilSealer", err)
-		}
-	})
 	t.Run("NilSource", func(t *testing.T) {
 		if _, err := s.SealFrom(ctx, nil); !errors.Is(err, enclave.ErrEnclaveDestroyed) {
 			t.Fatalf("SealFrom(nil): %v, want ErrEnclaveDestroyed", err)
-		}
-		var typedNil *enclave.Memory
-		if _, err := s.SealFrom(ctx, typedNil); !errors.Is(err, enclave.ErrEnclaveDestroyed) {
-			t.Fatalf("SealFrom of a typed-nil *Memory: %v, want ErrEnclaveDestroyed", err)
 		}
 	})
 	t.Run("DestroyedSource", func(t *testing.T) {
@@ -284,7 +274,7 @@ func TestSealing_ADeviceHoldsTheKeyHierarchy(t *testing.T) {
 
 func TestSealing_ADeviceThatCannotImportAKeyFailsClosed(t *testing.T) {
 	ctx := context.Background()
-	seal := func(s *enclave.Sealer) error {
+	seal := func(s enclave.Sealer) error {
 		buf := heapBytes(needleLen)
 		newNeedle(t).fill(buf)
 		v, err := s.Seal(ctx, buf)
@@ -387,14 +377,14 @@ func TestSealing_ADeviceFailureInItsAEADIsTyped(t *testing.T) {
 
 	// A sealer past its first seal, so the hierarchy is built and only the
 	// AEAD calls of the next seal or open are left to fail.
-	setup := func(t *testing.T) (*deviceBackend, *enclave.Sealer, enclave.Sealed) {
+	setup := func(t *testing.T) (*deviceBackend, enclave.Sealer, enclave.Sealed) {
 		dev := newDeviceBackend()
 		s := rootSealerOn(t, dev)
 		v := sealNeedle(t, ctx, s, n)
 		t.Cleanup(func() { _ = v.Destroy() })
 		return dev, s, v
 	}
-	seal := func(s *enclave.Sealer) error {
+	seal := func(s enclave.Sealer) error {
 		buf := heapBytes(needleLen)
 		n.fill(buf)
 		v, err := s.Seal(ctx, buf)
@@ -530,8 +520,9 @@ func TestSealing_OpenInRefusesWhatCannotHoldTheValue(t *testing.T) {
 			t.Fatalf("OpenIn the default backend: %v", err)
 		}
 		defer h.Destroy()
-		if _, ok := h.(*enclave.Memory); !ok {
-			t.Fatalf("OpenIn the default backend returned a %T, want *enclave.Memory", h)
+		var f enclave.Freezer
+		if _, ok := h.(enclave.ByteAccess); !ok || !enclave.As(h, &f) {
+			t.Fatalf("OpenIn the default backend returned a %T, want an enclave.ByteAccess that reaches enclave.Freezer through As", h)
 		}
 	})
 	t.Run("DestroyedValue", func(t *testing.T) {
@@ -595,7 +586,7 @@ func firstErr(_ enclave.Handle, err error) error { return err }
 
 func TestSealing_RequiredKeyScheduleErasureIsAcceptedOrRefused(t *testing.T) {
 	erases := enclave.KeyScheduleErasure()
-	newSealer := func(b enclave.Backend, opts ...enclave.SealerOption) (*enclave.Sealer, error) {
+	newSealer := func(b enclave.Backend, opts ...enclave.SealerOption) (enclave.Sealer, error) {
 		return enclave.NewSealer(append([]enclave.SealerOption{
 			enclave.WithBackend(b), enclave.WithRequireKeyScheduleErasure(),
 		}, opts...)...)
@@ -617,7 +608,7 @@ func TestSealing_RequiredKeyScheduleErasureIsAcceptedOrRefused(t *testing.T) {
 	}
 	// requireOutcome asserts a sealer is built exactly when the build erases
 	// key schedules, and otherwise is refused for the key class name.
-	requireOutcome := func(t *testing.T, s *enclave.Sealer, err error, name string) {
+	requireOutcome := func(t *testing.T, s enclave.Sealer, err error, name string) {
 		t.Helper()
 		if erases {
 			if err != nil {

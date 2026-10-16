@@ -7,11 +7,11 @@
 
 go-enclave will hold material in hardware enclaves: TEEs (Intel TDX and SGX,
 AMD SEV-SNP), secure elements and TPMs, and NVIDIA Blackwell confidential
-computing. Locked, guarded, zeroized memory (`Memory`) is the strategy
+computing. Locked, guarded, zeroized memory (the memory enclave) is the strategy
 for a node that has none of them, and stands in as its enclave. The API must
 not freeze around that one memory-backed implementation. It needs a seam that:
 
-- lets another backend's enclave stand where a `Memory` stands (sealing
+- lets another backend's enclave stand where a memory enclave stands (sealing
   into it, opening into it, sweeping it at shutdown);
 - lets a caller reach a backend's own, richer interface;
 - keeps the core module at one dependency (`golang.org/x/sys`), with every
@@ -86,8 +86,8 @@ classDiagram
   Backend <|-- Confiner
   Backend <|-- Prober
   Handle --> Backend : made by
-  Memory ..|> ByteAccess
-  Memory ..|> Freezer
+  lockedRegion ..|> ByteAccess
+  lockedRegion ..|> Freezer
 ```
 
 - **Handle** is the core every enclave provides: size, liveness, destroy, and
@@ -127,8 +127,9 @@ contents (no `Secret`, `SecureBytes`).
 | `BackendNames`, `DefaultBackend`, `LockedMemoryBackendName` | Nouns need the qualifier: `enclave.Names()` would not say whose. | |
 | `Capability`, `CapabilityError`, `Evidence` | Named for what they carry. | |
 
-`Memory` and `Sealed` carry no `Enclave` suffix because `enclave.MemoryEnclave`
-would repeat the package.
+`Sealed` carries no `Enclave` suffix because `enclave.SealedEnclave` would
+repeat the package; the memory enclave's type is internal, and callers hold
+its `ByteAccess`.
 
 ### What each backend class provides
 
@@ -241,7 +242,7 @@ equal a registered one's; nothing compares them.
 
 | Type | Role in the seam |
 |---|---|
-| `Memory` | The locked-memory backend's handle: `Handle`, `ByteAccess`, `Freezer`. Its `Backend()` returns the admitting `Allocator`, else `DefaultBackend()`. |
+| `ByteAccess` from `NewMemory` | The locked-memory backend's handle, a memory enclave whose internal type is `Handle`, `ByteAccess` and `Freezer` (`Freezer` reached with `As`). Its `Backend()` returns the admitting `Allocator`, else `DefaultBackend()`. |
 | `Allocator` | The locked-memory backend's budget, and the locked-memory backend type itself (below). |
 | `Sealer`, `Sealed` | Open into a chosen backend; seal from any handle with byte access. |
 | `KeyProtector`, `RootUnsealer`, `HealthReporter` | A separate seam a hardware module may also implement. |
@@ -265,8 +266,8 @@ it in its own module, in its own unit.
 
 `Allocator` is the locked-memory backend: it implements `Backend`
 (name `"locked-memory"`) and `Importer`, so a budgeted locked memory is
-injected like any other backend, `WithBackend(a)`. `(*Memory).Backend()`
-then returns the admitting `Allocator`, or `DefaultBackend()` for an
+injected like any other backend, `WithBackend(a)`. A memory enclave's
+`Backend()` then returns the admitting `Allocator`, or `DefaultBackend()` for an
 unbudgeted enclave. An `Allocator` is not registered: the registered
 `"locked-memory"` stays the unbudgeted default, so `Lookup("locked-memory")`
 for a budgeted enclave returns the default, not its `Allocator`; the name is
@@ -308,7 +309,7 @@ in [locked-memory-budget](../locked-memory-budget/architecture.md).
   nothing about future handles. That check runs where each key is imported,
   when the sealer first unseals its root or creates a KEK, which destroys the
   handle and fails with `*CapabilityError{Capability: CapabilityAEAD}`.
-- **Seal from an enclave.** `(*Sealer).SealFrom(ctx, src Handle)` and
+- **Seal from an enclave.** `Sealer.SealFrom(ctx, src Handle)` and
   `NewSealedFrom(ctx, src Handle)`, named to pair with `Seal` and `NewSealed`.
   `src` needs `ByteAccess` (else `CapabilityBytes`), is read under its own
   borrow, and is left intact: not destroyed and, unlike `Seal`'s `data`, not
@@ -341,7 +342,7 @@ on, which is a sealing question.
 
 `WipeAll(ctx)` runs in two phases, inside the one sweep slot it already takes:
 
-1. **Locked memory**: every `Memory` in the ledger, an `Allocator`'s
+1. **Locked memory**: every memory enclave in the ledger, an `Allocator`'s
    included. The built-in backend does not implement `Sweeper`, so it is never
    swept twice and `WipeAll` never recurses.
 2. **Registered sweepers.** Under the registry's read lock, `WipeAll`
@@ -437,10 +438,10 @@ and open path changes.
   key from `Public()`), and `Backend()` is unchanged.
 - **Nil receivers** are outside the `Handle` contract: a handle is bound to
   the backend instance that made it, which a nil pointer cannot recover.
-  A type that supports one documents it, as `*Memory` does (every
-  method, `Destroy` included). A backend documents which errors
-  leave material held and whether `Destroy` again resumes, as `Memory`
-  does; held material stays in the backend's `Sweep`.
+  A type that supports one documents it; the memory enclave's type is
+  internal, so callers never hold a nil one. A backend documents which errors
+  leave material held and whether `Destroy` again resumes, as `NewMemory`
+  does for a memory enclave; held material stays in the backend's `Sweep`.
 - **What Destroy deletes.** What the handle owns. A handle over persistent
   device material it did not create (a loaded, provisioned key) releases its
   reference, not the key.
@@ -453,8 +454,8 @@ and open path changes.
   contract covers: live and destroyed handles, a nil or typed-nil backend, an
   invalid name, a nil or typed-nil `As` value, a bad `As` target, invalid import
   options and a missing capability all return typed errors or `false`. A nil
-  receiver is outside the `Handle` contract; `*Memory` accepts one as its own
-  guarantee. A panic raised by a backend's own `As` method is the backend's
+  receiver is outside the `Handle` contract; the memory enclave's internal
+  `*lockedRegion` accepts one, a guarantee inside the package only. A panic raised by a backend's own `As` method is the backend's
   defect and is not recovered. Out-of-tree backends are held to it by
   [backend conformance](../backend-conformance/architecture.md).
 
@@ -484,8 +485,8 @@ flowchart TD
   H["source Handle with ByteAccess"] -->|"SealFrom: read under a borrow"| SL["Sealer"]
   SL -->|"wrap with key handles from WithBackend(b)<br/>(AEAD in the device, or ByteAccess in-process)"| SV["Sealed (ciphertext at rest)"]
   SV -->|"OpenIn(ctx, b)"| D{"b is locked memory?"}
-  D -- yes --> LM["decrypt in place into a Memory"]
-  D -- no --> SC["decrypt into a locked scratch Memory"]
+  D -- yes --> LM["decrypt in place into a memory enclave"]
+  D -- no --> SC["decrypt into a locked scratch enclave"]
   SC -->|"Importer.Import inside a borrow,<br/>wipes the scratch"| BH["Handle of b"]
 ```
 
@@ -504,7 +505,7 @@ sequenceDiagram
   participant G as registry
   participant S as registered Sweeper
   P->>W: WipeAll(ctx)
-  W->>L: wipe every Memory
+  W->>L: wipe every memory enclave
   W->>G: snapshot non-default Sweepers (read lock)
   G-->>W: sorted by name, lock released
   loop each backend
@@ -554,7 +555,9 @@ func (b *Backend) Import(ctx context.Context, material []byte, opts ...enclave.I
 	if err != nil {
 		return nil, err
 	}
-	return &Handle{m: m, b: b}, nil
+	var f enclave.Freezer
+	enclave.As(m, &f) // every memory enclave is a Freezer
+	return &Handle{m: m, f: f, b: b}, nil
 }
 
 // Attest satisfies enclave.Attester with a TD quote over nonce.
@@ -568,7 +571,8 @@ func (b *Backend) Report(reportData [64]byte) (*Report, error) { /* … */ }
 // contract.
 type Handle struct {
 	noCopy noCopy
-	m      *enclave.Memory
+	m      enclave.ByteAccess
+	f      enclave.Freezer
 	b      *Backend
 }
 
@@ -578,9 +582,9 @@ func (h *Handle) Destroy() error                        { return h.m.Destroy() }
 func (h *Handle) Backend() enclave.Backend              { return h.b }
 func (h *Handle) WithBytes(fn func([]byte) error) error { return h.m.WithBytes(fn) }
 func (h *Handle) EqualTo(o []byte) (bool, error)        { return h.m.EqualTo(o) }
-func (h *Handle) Freeze() error                         { return h.m.Freeze() }
+func (h *Handle) Freeze() error                         { return h.f.Freeze() }
 
-// As exposes the wrapped enclave, so enclave.As reaches *enclave.Memory.
+// As exposes the wrapped enclave, so enclave.As reaches its capabilities.
 func (h *Handle) As(target any) bool { return enclave.As(h.m, target) }
 
 var (
@@ -626,7 +630,7 @@ errors and use are in [backend-conformance](../backend-conformance/architecture.
 |---|---|
 | Interfaces, capabilities, `Evidence`, import intent (`Purpose`, `Algorithm`, `ImportSpec`, its options), registry, `As`, the locked-memory backend value | [backend.go](../../backend.go) |
 | Sentinels (`ErrInvalidImport`, `ErrInvalidNonce`, `ErrAEADAuthentication` among them), `BackendNotRegisteredError`, `BackendExistsError`, `CapabilityError`, `CleanupError` | [errors.go](../../errors.go) |
-| `(*Memory).Backend` | [enclave.go](../../enclave.go) |
+| The memory enclave's `Backend()` | [enclave.go](../../enclave.go) |
 | Conformance suite | [backendtest](../../backendtest/doc.go) |
 | Hardware backends | their own modules, never this one |
 

@@ -255,7 +255,7 @@ func TestSealed_NoPlaintextInProcessMemory(t *testing.T) {
 // findNeedle sweeps process memory outside the mapping containing home for the
 // material held in probe, comparing from inside a borrow so the needle never
 // exists as a heap value.
-func findNeedle(probe *Memory, home uintptr) ([]string, error) {
+func findNeedle(probe *lockedRegion, home uintptr) ([]string, error) {
 	var hits []string
 	var err error
 	berr := probe.WithBytes(func(needle []byte) error {
@@ -270,7 +270,7 @@ func findNeedle(probe *Memory, home uintptr) ([]string, error) {
 
 // TestSealed_FailedOpenLeaksNoLockedMemory pins the cleanup on Open's
 // failure path. Open allocates its DEK and destination before it knows whether
-// the envelope authenticates, and a Memory has no finalizer, so a
+// the envelope authenticates, and a memory enclave has no finalizer, so a
 // dropped Destroy would leak locked pages on every retried open. VmLck is the
 // yardstick, so it measures what the kernel charged.
 func TestSealed_FailedOpenLeaksNoLockedMemory(t *testing.T) {
@@ -425,7 +425,7 @@ func TestSealed_SizeMismatchDoesNotDecryptOntoTheHeap(t *testing.T) {
 // sealFromEnclave seals a copy of src's material without the plaintext
 // touching the ordinary heap: NewSealed is called on a borrow of a locked
 // transfer enclave, so the input it wipes is locked memory.
-func sealFromEnclave(t *testing.T, src *Memory) *sealedValue {
+func sealFromEnclave(t *testing.T, src *lockedRegion) *sealedValue {
 	t.Helper()
 	transfer, err := newMemorySized(src.Size())
 	if err != nil {

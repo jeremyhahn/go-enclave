@@ -184,11 +184,11 @@ func adoptOrphan(err error, refund func()) {
 // e to a concurrent [WipeAll], so it must be the last step of construction, after
 // every field a sweep reads (release in particular) is set; registryMu is the
 // happens-before edge that makes them visible to the sweep.
-func register(e *memoryState) *Memory {
+func register(e *memoryState) *lockedRegion {
 	registryMu.Lock()
 	live[e] = struct{}{}
 	registryMu.Unlock()
-	return &Memory{memoryState: e}
+	return &lockedRegion{memoryState: e}
 }
 
 // settleRelease books the outcome err of a release attempt on the ledger entry
@@ -223,7 +223,7 @@ func sweepGeneration() uint64 { return sweepGen.Load() }
 // sweepInFlight reports whether g was taken while a sweep was running.
 func sweepInFlight(g uint64) bool { return g%2 == 1 }
 
-// WipeAll destroys every [Memory] this package has handed out and not
+// WipeAll destroys every memory enclave this package has handed out and not
 // yet reclaimed, including [Sealer] and [SoftwareProvider] keys, and retries
 // the release of every mapping a failed construction could not give back. It
 // does not touch [Sealed] values; after a [ModeRootKey] sweep they fail

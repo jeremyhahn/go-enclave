@@ -18,7 +18,7 @@ import (
 
 // The backend seam: what a hardware enclave module (a TEE, a secure element,
 // a TPM, GPU confidential computing) implements so its enclaves stand where a
-// [Memory] stands. Locked memory is the default backend; every other
+// memory enclave ([NewMemory]) stands. Locked memory is the default backend; every other
 // backend ships as its own module. The design is docs/backends/architecture.md.
 
 // Handle is the core every backend's enclave provides: a reference to
@@ -32,8 +32,7 @@ import (
 // handle refers to the same material and one Destroy reaches all of them.
 // Every method, the capabilities' included, is safe for concurrent use and
 // never panics on a live or destroyed handle. A nil receiver is outside the
-// contract: a backend whose type supports one, as [*Memory] does,
-// documents it.
+// contract: a backend whose type supports one documents it.
 //
 // After Destroy, every capability method that returns an error returns
 // [ErrEnclaveDestroyed], one sentinel for every backend. A method with no
@@ -83,7 +82,7 @@ type Backend interface {
 
 // ByteAccess is the capability of a handle whose material this process may
 // read: locked memory, and the memory of a TEE the process runs inside.
-// [Memory] documents the contract each method follows.
+// [NewMemory] documents how a memory enclave keeps each method's contract.
 type ByteAccess interface {
 	Handle
 
@@ -359,7 +358,7 @@ const (
 )
 
 // LockedMemoryBackendName is the name of the locked-memory backend, the
-// default: what [DefaultBackend] returns and every [Memory] reports. It
+// default: what [DefaultBackend] returns and every unbudgeted memory enclave reports. It
 // is always registered and cannot be registered again.
 const LockedMemoryBackendName = "locked-memory"
 
@@ -392,9 +391,9 @@ var (
 )
 
 var (
-	_ Handle     = (*Memory)(nil)
-	_ ByteAccess = (*Memory)(nil)
-	_ Freezer    = (*Memory)(nil)
+	_ Handle     = (*lockedRegion)(nil)
+	_ ByteAccess = (*lockedRegion)(nil)
+	_ Freezer    = (*lockedRegion)(nil)
 	_ Prober     = lockedMemory{}
 	_ Importer   = (*budgetAllocator)(nil)
 	_ Prober     = (*budgetAllocator)(nil)

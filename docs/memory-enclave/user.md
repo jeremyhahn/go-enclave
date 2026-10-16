@@ -29,6 +29,9 @@ err = e.WithBytes(func(key []byte) error {
 })
 ```
 
+`e` is a `ByteAccess`, the type you hold and pass around; optional behaviour
+such as `Freeze` is reached with `enclave.As` (below).
+
 If you must keep your buffer (you do not own it), use
 `NewMemoryCopy(src)` and wipe `src` yourself as soon as you can — the
 heap copy is outside every protection this package gives.
@@ -72,7 +75,7 @@ writing at once is a data race.
   call back into the same enclave from `fn`. A string-only API gets the borrowed
   bytes converted inside `fn`, knowing that string cannot be wiped.
 - `EqualTo(b)` — returns `(bool, error)`: `(false, nil)` means "did not
-  match", and a destroyed or nil enclave returns `ErrEnclaveDestroyed`. The time
+  match", and a destroyed enclave returns `ErrEnclaveDestroyed`. The time
   taken does not depend on the contents, but it does reveal whether the lengths
   differ; compare fixed-length values (digests) if the length is secret.
 

@@ -10,6 +10,7 @@ package enclave
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"reflect"
@@ -57,7 +58,7 @@ func TestNewSealed_RefusesAFrozenView(t *testing.T) {
 		t.Fatalf("NewSealed over a frozen view = %v, want ErrSealSourceReadOnly", err)
 	}
 
-	s, err := NewSealer()
+	s, err := newEnvelopeSealer()
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
@@ -98,7 +99,7 @@ func TestSealFrom_LeavesTheSourceIntact(t *testing.T) {
 	}
 	defer src.Destroy()
 
-	s, err := NewSealer()
+	s, err := newEnvelopeSealer()
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
@@ -130,19 +131,19 @@ func TestSealFrom_LeavesTheSourceIntact(t *testing.T) {
 // TestSealFrom_Refusals pins SealFrom's argument checks.
 func TestSealFrom_Refusals(t *testing.T) {
 	ctx := t.Context()
-	s, err := NewSealer()
+	s, err := newEnvelopeSealer()
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
 	defer s.Destroy()
 
-	if _, err := (*Sealer)(nil).sealFromHandle(ctx, nil); !errors.Is(err, ErrNilSealer) {
+	if _, err := (*envelopeSealer)(nil).sealFromHandle(ctx, nil); !errors.Is(err, ErrNilSealer) {
 		t.Errorf("nil Sealer: %v, want ErrNilSealer", err)
 	}
 	if _, err := s.sealFromHandle(ctx, nil); !errors.Is(err, ErrEnclaveDestroyed) {
 		t.Errorf("nil source: %v, want ErrEnclaveDestroyed", err)
 	}
-	if _, err := s.sealFromHandle(ctx, (*Memory)(nil)); !errors.Is(err, ErrEnclaveDestroyed) {
+	if _, err := s.sealFromHandle(ctx, (*lockedRegion)(nil)); !errors.Is(err, ErrEnclaveDestroyed) {
 		t.Errorf("typed-nil source: %v, want ErrEnclaveDestroyed", err)
 	}
 	dead, err := newMemoryCopy([]byte("dead"))
@@ -175,7 +176,7 @@ func copyOf[T any](p *T) *T {
 // so destroying it destroys the original.
 func TestSealer_CopiesShareState(t *testing.T) {
 	ctx := t.Context()
-	s, err := NewSealer()
+	s, err := newEnvelopeSealer()
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
@@ -198,7 +199,7 @@ func TestSealer_CopiesShareState(t *testing.T) {
 // so destroying it destroys the original.
 func TestSealed_CopiesShareState(t *testing.T) {
 	ctx := t.Context()
-	s, err := NewSealer()
+	s, err := newEnvelopeSealer()
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
@@ -241,7 +242,7 @@ func TestSealer_StrictModeRefusesAnExposedKeySchedule(t *testing.T) {
 		{"confining backend, per operation", []SealerOption{WithKeyProtector(kp), WithBackend(&fakeImporter{confines: true})}, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			s, err := NewSealer(append(tc.opts, WithRequireKeyScheduleErasure())...)
+			s, err := newEnvelopeSealer(append(tc.opts, WithRequireKeyScheduleErasure())...)
 			if tc.want == "" {
 				if err != nil {
 					t.Fatalf("NewSealer: %v, want accepted", err)
@@ -257,7 +258,7 @@ func TestSealer_StrictModeRefusesAnExposedKeySchedule(t *testing.T) {
 				t.Fatalf("exposed class %q, want %q", exposed.Name, tc.want)
 			}
 			// Without the option the same configuration is accepted.
-			s, err = NewSealer(tc.opts...)
+			s, err = newEnvelopeSealer(tc.opts...)
 			if err != nil {
 				t.Fatalf("NewSealer without strict mode: %v", err)
 			}
@@ -267,7 +268,7 @@ func TestSealer_StrictModeRefusesAnExposedKeySchedule(t *testing.T) {
 
 	// A build that erases covers every class.
 	swapSeam(t, &erasesKeySchedules, true)
-	s, err := NewSealer(WithRequireKeyScheduleErasure())
+	s, err := newEnvelopeSealer(WithRequireKeyScheduleErasure())
 	if err != nil {
 		t.Fatalf("NewSealer on an erasing build: %v", err)
 	}
@@ -279,7 +280,7 @@ func TestSealer_StrictModeRefusesAnExposedKeySchedule(t *testing.T) {
 // kekBlobs bounded.
 func TestSealer_RetiredGenerationsAreDropped(t *testing.T) {
 	ctx := t.Context()
-	s, err := NewSealer(WithKEKRotationLimit(1))
+	s, err := newEnvelopeSealer(WithKEKRotationLimit(1))
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
@@ -340,7 +341,7 @@ func TestSealer_RetiredGenerationsAreDropped(t *testing.T) {
 func TestSealer_AnOpenInFlightKeepsItsGeneration(t *testing.T) {
 	ctx := t.Context()
 	material := []byte("open-in-flight")
-	s, err := NewSealer(WithKEKRotationLimit(1))
+	s, err := newEnvelopeSealer(WithKEKRotationLimit(1))
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
@@ -388,16 +389,58 @@ func TestSetSealer_RefusesAnUnusableSealer(t *testing.T) {
 	resetProcessSealerForTest()
 	t.Cleanup(resetProcessSealerForTest)
 
-	if err := SetSealer(&Sealer{}); !errors.Is(err, ErrSealerNotConstructed) {
-		t.Errorf("SetSealer(&Sealer{}) = %v, want ErrSealerNotConstructed", err)
+	if err := SetSealer(&envelopeSealer{}); !errors.Is(err, ErrSealerNotConstructed) {
+		t.Errorf("SetSealer(&envelopeSealer{}) = %v, want ErrSealerNotConstructed", err)
 	}
-	dead, err := NewSealer()
+	dead, err := newEnvelopeSealer()
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
 	_ = dead.Destroy()
 	if err := SetSealer(dead); !errors.Is(err, ErrSealerDestroyed) {
 		t.Errorf("SetSealer(destroyed) = %v, want ErrSealerDestroyed", err)
+	}
+
+	live, err := newEnvelopeSealer()
+	if err != nil {
+		t.Fatalf("NewSealer: %v", err)
+	}
+	if err := SetSealer(live); err != nil {
+		t.Fatalf("SetSealer after the refusals: %v", err)
+	}
+}
+
+// foreignSealer is a Sealer this package did not build.
+type foreignSealer struct{}
+
+func (foreignSealer) Seal(context.Context, []byte) (Sealed, error)     { return nil, nil }
+func (foreignSealer) SealFrom(context.Context, Handle) (Sealed, error) { return nil, nil }
+func (foreignSealer) Mode() Mode                                       { return ModeRootKey }
+func (foreignSealer) Destroy() error                                   { return nil }
+
+// TestSetSealer_RefusesAForeignSealer: SetSealer refuses another
+// implementation of the interface with ErrSealerNotConstructed and every nil
+// shape with ErrNilSealer, and none of the refusals takes the slot.
+func TestSetSealer_RefusesAForeignSealer(t *testing.T) {
+	resetProcessSealerForTest()
+	t.Cleanup(resetProcessSealerForTest)
+
+	for name, s := range map[string]Sealer{
+		"value":   foreignSealer{},
+		"pointer": &foreignSealer{},
+	} {
+		if err := SetSealer(s); !errors.Is(err, ErrSealerNotConstructed) {
+			t.Errorf("SetSealer(foreign %s) = %v, want ErrSealerNotConstructed", name, err)
+		}
+	}
+	for name, s := range map[string]Sealer{
+		"nil interface":          nil,
+		"typed-nil foreign":      (*foreignSealer)(nil),
+		"typed-nil this package": (*envelopeSealer)(nil),
+	} {
+		if err := SetSealer(s); !errors.Is(err, ErrNilSealer) {
+			t.Errorf("SetSealer(%s) = %v, want ErrNilSealer", name, err)
+		}
 	}
 
 	live, err := NewSealer()
@@ -407,24 +450,28 @@ func TestSetSealer_RefusesAnUnusableSealer(t *testing.T) {
 	if err := SetSealer(live); err != nil {
 		t.Fatalf("SetSealer after the refusals: %v", err)
 	}
+	got, err := processSealer()
+	if err != nil || Sealer(got) != live {
+		t.Errorf("processSealer() = (%v, %v), want the installed sealer", got, err)
+	}
 }
 
 // hookedSource is a locked-memory source whose borrow runs before first.
 type hookedSource struct {
-	*Memory
+	*lockedRegion
 	before func()
 }
 
 func (h *hookedSource) WithBytes(fn func([]byte) error) error {
 	h.before()
-	return h.Memory.WithBytes(fn)
+	return h.lockedRegion.WithBytes(fn)
 }
 
 // TestSealer_DataAEADRunsOutsideTheLock pins L4: the value's own encryption
 // does not hold off Destroy, and a seal Destroy overlapped fails closed.
 func TestSealer_DataAEADRunsOutsideTheLock(t *testing.T) {
 	ctx := t.Context()
-	s, err := NewSealer()
+	s, err := newEnvelopeSealer()
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
@@ -434,7 +481,7 @@ func TestSealer_DataAEADRunsOutsideTheLock(t *testing.T) {
 	}
 	defer m.Destroy()
 
-	src := &hookedSource{Memory: m, before: func() {
+	src := &hookedSource{lockedRegion: m, before: func() {
 		done := make(chan error, 1)
 		go func() { done <- s.Destroy() }()
 		select {
@@ -458,16 +505,16 @@ func TestSealer_DataAEADRunsOutsideTheLock(t *testing.T) {
 
 // TestSealer_NilOptionsAndReceivers pins L6.
 func TestSealer_NilOptionsAndReceivers(t *testing.T) {
-	if _, err := NewSealer(nil); !errors.Is(err, ErrInvalidSealerOption) {
-		t.Errorf("NewSealer(nil) = %v, want ErrInvalidSealerOption", err)
+	if s, err := NewSealer(nil); s != nil || !errors.Is(err, ErrInvalidSealerOption) {
+		t.Errorf("NewSealer(nil) = (%v, %v), want (nil, ErrInvalidSealerOption)", s, err)
 	}
-	if _, err := NewSealer(WithKEKRotationLimit(1), nil); !errors.Is(err, ErrInvalidSealerOption) {
-		t.Errorf("NewSealer(opt, nil) = %v, want ErrInvalidSealerOption", err)
+	if s, err := NewSealer(WithKEKRotationLimit(1), nil); s != nil || !errors.Is(err, ErrInvalidSealerOption) {
+		t.Errorf("NewSealer(opt, nil) = (%v, %v), want (nil, ErrInvalidSealerOption)", s, err)
 	}
-	if got := (*Sealer)(nil).Mode(); got != ModeRootKey {
+	if got := (*envelopeSealer)(nil).Mode(); got != ModeRootKey {
 		t.Errorf("nil Mode() = %v, want the zero Mode", got)
 	}
-	if got := (&Sealer{}).Mode(); got != ModeRootKey {
+	if got := (&envelopeSealer{}).Mode(); got != ModeRootKey {
 		t.Errorf("zero Mode() = %v, want the zero Mode", got)
 	}
 }
@@ -476,7 +523,7 @@ func TestSealer_NilOptionsAndReceivers(t *testing.T) {
 // SoftwareProvider NewSealer created serves one unseal and is then destroyed.
 func TestSealer_DefaultProviderIsReleasedAfterTheUnseal(t *testing.T) {
 	ctx := t.Context()
-	s, err := NewSealer()
+	s, err := newEnvelopeSealer()
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}

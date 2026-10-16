@@ -126,8 +126,9 @@ type CleanupError struct {
 type Capability string // "bytes", "freeze", "sign", "decrypt", "aead", "derive", "attest", "import", "sweep", "confine", "probe"
 ```
 
-`*Memory` satisfies `Handle`, `ByteAccess` and `Freezer`, asserted at compile
-time. Every handle's dynamic type is a pointer to shared state, and handle
+The memory enclave's internal type, `*lockedRegion`, satisfies `Handle`,
+`ByteAccess` and `Freezer`, asserted at compile time; callers hold the
+`ByteAccess` and reach `Freezer` with `As`. Every handle's dynamic type is a pointer to shared state, and handle
 structs carry a `noCopy` field so `go vet`'s copylocks check reports a
 dereferenced copy ([architecture](architecture.md#lifetime-and-ownership)).
 
@@ -137,7 +138,7 @@ dereferenced copy ([architecture](architecture.md#lifetime-and-ownership)).
 |---|---|
 | `Handle` | The core of every backend's enclave: `Size`, `IsAlive`, `Destroy`, `Backend`. The dynamic type is a pointer; every method, the capabilities' included, is concurrency-safe and never panics on a live or destroyed handle. After `Destroy` every capability method that returns an error returns `ErrEnclaveDestroyed`; one without an error result (`AEAD`'s `NonceSize` and `Overhead`, `Public()`) keeps reporting its non-secret constant. A nil receiver is outside the contract. |
 | `Backend` | The core of every backend: `Name`, valid and stable for the backend's life. A name is a registry and configuration label, not an instance identity. |
-| `ByteAccess` | Handle capability: `WithBytes`, `EqualTo`, with `Memory`'s contract. |
+| `ByteAccess` | Handle capability: `WithBytes`, `EqualTo`, with the contract `NewMemory` documents for a memory enclave. |
 | `Freezer` | Handle capability: `Freeze`, idempotent and irreversible. |
 | `Deriver` | Handle capability: `Derive(ctx, info, n)` returns a new handle from the same backend. |
 | `AEAD` | Handle capability: `NonceSize`, `Overhead`, and `Seal`/`Open` with `cipher.AEAD`'s arguments returning `([]byte, error)`: `ErrEnclaveDestroyed`, `ErrInvalidNonce`, `ErrAEADAuthentication` or the backend's own typed error, never a panic. |
@@ -158,7 +159,7 @@ dereferenced copy ([architecture](architecture.md#lifetime-and-ownership)).
 | `Lookup(name string) (Backend, error)` | The backend registered under `name`. |
 | `BackendNames() []string` | Every registered name, sorted, the default included. |
 | `As(v, target any) bool` | Sets `*target` to `v` when `v`'s dynamic type is assignable to it, else defers to `v`'s `As(any) bool` method. A nil or typed-nil `v` or a bad target returns `false` without panicking; a panic from `v`'s own `As` is not recovered. |
-| `(*Memory).Backend() Backend` | The `Allocator` that admitted the enclave, else `DefaultBackend()` (a nil enclave included); unchanged by `Destroy`. |
+| `Handle.Backend()` of a memory enclave | The `Allocator` that admitted the enclave, else `DefaultBackend()`; unchanged by `Destroy`. |
 | `Allocator` as `Backend`, `Importer` and `Prober` | Name `"locked-memory"`, ranked and probed as the default; `Import` is an admitted `New` that resolves `NewImportSpec` and refuses an `AlgorithmAES256GCM` key that is not 32 bytes with `ErrInvalidImport` ([budget](../locked-memory-budget/engineering.md)). Never registered. |
 | `SweepError.Backends`, `BackendSweepFailure{Backend; Err}` | `WipeAll`'s backend phase: one entry per registered `Sweeper` that failed, in name order ([shutdown-sweep](../shutdown-sweep/engineering.md)). |
 | `ErrBackendNotRegistered`, `BackendNotRegisteredError{Name}` | `Lookup` found no backend under `Name`. |
@@ -197,7 +198,8 @@ dereferenced copy ([architecture](architecture.md#lifetime-and-ownership)).
    target or a nil pointer, and `NewImportSpec` with a nil option return a
    typed error or `false`. `As` does not recover a panic from a value's own
    `As` method. Nil receivers are not part of the `Handle` contract;
-   `*Memory` accepts one on every method as its own guarantee.
+   the memory enclave's internal `*lockedRegion` accepts one on every method,
+   a guarantee inside the package only.
 6. **A capability is its method set.** The type assertion is the only test of
    whether a handle or backend has a capability; there is no list to drift from
    it.
@@ -223,7 +225,7 @@ Texts are the sentinel's, then the detail with every name quoted
 
 `Lookup` and `BackendNames` take a read lock; `Register` a write lock. Each is
 a configuration-time call, never on a borrow. `As` uses reflection once per
-call. `(*Memory).Backend()` takes no lock: it returns the admitting
+call. A memory enclave's `Backend()` takes no lock: it returns the admitting
 `Allocator` or a zero-size default.
 
 ## Configuration and persistence
@@ -232,7 +234,7 @@ None. The registry lives for the process and is never persisted.
 
 ## Test strategy
 
-`backend_test.go` covers the default and its name, `Memory`'s backend
+`backend_test.go` covers the default and its name, a memory enclave's backend
 (live, destroyed and nil), register and lookup, every refusal of `Register`,
 the name rule at both bounds, distinct capability names, concurrent registration of distinct and of
 identical names under `-race` (exactly one of the identical ones wins), `As`
@@ -240,10 +242,11 @@ on direct matches, interface targets, wrappers, typed-nil values (direct and
 wrapper) and every input that would make `errors.As` panic, `NewImportSpec`
 on every valid shape and every refusal, valid purpose and algorithm names,
 and each error's text and sentinel. Compile-time assertions
-in `backend.go` hold `*Memory` to `Handle`, `ByteAccess` and `Freezer`, the
+in `backend.go` hold `*lockedRegion` to `Handle`, `ByteAccess` and `Freezer`, the
 default to `Prober`, and `Allocator` to `Backend`, `Importer` and `Prober`. `allocator_backend_test.go` covers
-the admitting allocator as `Backend()`, `Import`, and copies of `Memory` and
-`Allocator` sharing state; `wipeall_backends_test.go` covers the sweep phase.
+the admitting allocator as `Backend()`, `Import`, and copies of a memory enclave
+and of an `Allocator` sharing state; `enclave_test.go` covers `As` reaching
+`Freezer` through a constructor's `ByteAccess` and refusing a foreign one; `wipeall_backends_test.go` covers the sweep phase.
 
 Tests that register a backend remove it in `t.Cleanup` by editing the registry
 map directly; that is the only place a name is ever unbound.

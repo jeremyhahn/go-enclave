@@ -749,28 +749,28 @@ func TestSealing_SealerKeyUseOverlappingASweepIsWiped(t *testing.T) {
 		prior       int
 		skip        uint64
 		refuseUnmap bool
-		op          func(ctx context.Context, s *enclave.Sealer, prior []enclave.Sealed) error
+		op          func(ctx context.Context, s enclave.Sealer, prior []enclave.Sealed) error
 	}{
 		// DEK, root destination, the provider's root, then the first KEK.
-		{"first KEK mint", 0, 3, false, func(ctx context.Context, s *enclave.Sealer, _ []enclave.Sealed) error {
+		{"first KEK mint", 0, 3, false, func(ctx context.Context, s enclave.Sealer, _ []enclave.Sealed) error {
 			_, err := s.Seal(ctx, heapBytes(needleLen))
 			return err
 		}},
 		// DEK, then the rotated KEK.
-		{"rotated KEK mint", 1, 1, false, func(ctx context.Context, s *enclave.Sealer, _ []enclave.Sealed) error {
+		{"rotated KEK mint", 1, 1, false, func(ctx context.Context, s enclave.Sealer, _ []enclave.Sealed) error {
 			_, err := s.Seal(ctx, heapBytes(needleLen))
 			return err
 		}},
-		{"first KEK mint, releases refused", 0, 3, true, func(ctx context.Context, s *enclave.Sealer, _ []enclave.Sealed) error {
+		{"first KEK mint, releases refused", 0, 3, true, func(ctx context.Context, s enclave.Sealer, _ []enclave.Sealed) error {
 			_, err := s.Seal(ctx, heapBytes(needleLen))
 			return err
 		}},
-		{"rotated KEK mint, releases refused", 1, 1, true, func(ctx context.Context, s *enclave.Sealer, _ []enclave.Sealed) error {
+		{"rotated KEK mint, releases refused", 1, 1, true, func(ctx context.Context, s enclave.Sealer, _ []enclave.Sealed) error {
 			_, err := s.Seal(ctx, heapBytes(needleLen))
 			return err
 		}},
 		// Destination, DEK, then the retired KEK for the unwrap.
-		{"retired KEK unwrap", 2, 2, false, func(ctx context.Context, _ *enclave.Sealer, prior []enclave.Sealed) error {
+		{"retired KEK unwrap", 2, 2, false, func(ctx context.Context, _ enclave.Sealer, prior []enclave.Sealed) error {
 			_, err := prior[0].Open(ctx)
 			return err
 		}},
@@ -922,7 +922,7 @@ func TestSealing_SealerAbandonedInitReportsBothCauses(t *testing.T) {
 }
 
 // sealNeedle seals the material through s from a heap slice that Seal wipes.
-func sealNeedle(t *testing.T, ctx context.Context, s *enclave.Sealer, n needle) enclave.Sealed {
+func sealNeedle(t *testing.T, ctx context.Context, s enclave.Sealer, n needle) enclave.Sealed {
 	t.Helper()
 	buf := heapBytes(needleLen)
 	n.fill(buf)
@@ -952,17 +952,21 @@ func requireOpensTo(t *testing.T, ctx context.Context, v enclave.Sealed, n needl
 	}
 }
 
-// openInAllocator is v.OpenIn(ctx, a), as the *enclave.Memory it returns for
-// an enclave.Allocator.
-func openInAllocator(t *testing.T, ctx context.Context, v enclave.Sealed, a enclave.Allocator) (*enclave.Memory, error) {
+// openInAllocator is v.OpenIn(ctx, a), as the enclave.ByteAccess it returns
+// for an enclave.Allocator, which also reaches enclave.Freezer through As.
+func openInAllocator(t *testing.T, ctx context.Context, v enclave.Sealed, a enclave.Allocator) (enclave.ByteAccess, error) {
 	t.Helper()
 	h, err := v.OpenIn(ctx, a)
 	if err != nil {
 		return nil, err
 	}
-	m, ok := h.(*enclave.Memory)
+	m, ok := h.(enclave.ByteAccess)
 	if !ok {
-		t.Fatalf("OpenIn into an Allocator returned a %T, want *enclave.Memory", h)
+		t.Fatalf("OpenIn into an Allocator returned a %T, want an enclave.ByteAccess", h)
+	}
+	var f enclave.Freezer
+	if !enclave.As(m, &f) {
+		t.Fatalf("OpenIn into an Allocator returned a %T, which does not reach enclave.Freezer through As", h)
 	}
 	return m, nil
 }
@@ -1129,11 +1133,6 @@ func TestSealing_SealerRefusesInvalidArgumentsBeforeAnyLockedMemory(t *testing.T
 		}
 		if !memscan.AllZero(buf) {
 			t.Error("Seal refused for its context did not wipe the caller's slice")
-		}
-		var nilSealer *enclave.Sealer
-		buf = []byte("sealed by nobody")
-		if _, err := nilSealer.Seal(ctx, buf); !errors.Is(err, enclave.ErrNilSealer) || !memscan.AllZero(buf) {
-			t.Errorf("Seal on a nil *Sealer = %v (caller's slice wiped: %t), want ErrNilSealer and a wiped slice", err, memscan.AllZero(buf))
 		}
 		buf = []byte("refused before the process sealer")
 		if _, err := enclave.NewSealed(ended, buf); !errors.Is(err, enclave.ErrSealFailed) || !errors.Is(err, context.Canceled) || !memscan.AllZero(buf) {

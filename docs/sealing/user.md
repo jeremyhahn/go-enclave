@@ -7,7 +7,7 @@
 
 | Material | Use | Why |
 |---|---|---|
-| In continuous use (a session key on every packet; a buffer an API keeps) | `Memory` | It would always be open; sealing buys nothing. Costs at least one locked page for its life. |
+| In continuous use (a session key on every packet; a buffer an API keeps) | A memory enclave (`NewMemory`) | It would always be open; sealing buys nothing. Costs at least one locked page for its life. |
 | Used intermittently (a credential per request; a root key a few times an hour) | `Sealed` | Plaintext exists only in the enclave an `Open` returns, until you destroy it. At rest it is heap ciphertext; each `Open` takes a fresh locked page. |
 
 Know what sealing does not do. This package never writes recovered plaintext
@@ -72,7 +72,7 @@ import key material is refused with a `*CapabilityError`, and the value
 remains intact.
 
 `Seal` and `NewSealed` wipe their input, so they refuse a read-only view (the
-slice an opened `Memory` lends you) with `ErrSealSourceReadOnly`. To re-seal
+slice an opened enclave lends you) with `ErrSealSourceReadOnly`. To re-seal
 material that is already locked, seal from the handle instead. The source is
 only borrowed and never wiped:
 
@@ -188,7 +188,7 @@ value keeps reporting `IsAlive() == true` (its ciphertext is still there); ask
 |---|---|
 | `nil` | Nothing known prevents an open. |
 | `ErrSealerWiped` | A sweep destroyed in-process keys this sealer needs (in `ModeRootKey`, its root or current KEK), or the provider's `HealthReporter` reports it; the value can never be opened. |
-| `ErrSealerDestroyed` | `(*Sealer).Destroy` ran; the value can never be opened. |
+| `ErrSealerDestroyed` | `Sealer.Destroy` ran; the value can never be opened. |
 | `ErrEnclaveDestroyed` | The value itself was destroyed. |
 | `ErrOpenabilityUnknown` | A sweep ran and the provider does not implement `HealthReporter`; open it to find out. |
 
@@ -204,12 +204,12 @@ A wiped sealer never re-keys. Construct a new `Sealer` and re-seal from source.
 | `ErrOpenFailed` intermittently | Deadline too short, or device/KMS unavailable | If the error matches none of `ErrSealedAuthentication`, `ErrSealerWiped` or `ErrEnclaveDestroyed`, the value is intact. Classify any provider cause first (`errors.As` on its types): never retry a permanent one, even if a cancellation is joined with it; retry a transient one; retry a bare cancellation with a live context. |
 | `ErrSealerWiped` | A shutdown `WipeAll` destroyed this sealer's own keys (its root or current KEK in `ModeRootKey`), or the provider returned it. A sweep that destroys only one call's working key gives `ErrEnclaveDestroyed` instead | Check `Openable()` on a value: `ErrSealerWiped` there means the sealer is dead (expected at exit; mid-run, something called `WipeAll` too early). |
 | `ErrSealerDestroyed` | Something called `Destroy` on this sealer (or on the `SoftwareProvider` it uses) | Destroy a sealer only after its last use; construct a new one and re-seal from source. |
-| `ErrSealerNotConstructed` | A `Sealer` not built by `NewSealer` (for example a zero value), also from `SetSealer` | Construct it with `NewSealer`. |
+| `ErrSealerNotConstructed` from `SetSealer` | A `Sealer` not built by `NewSealer`, such as your own implementation of the interface | Construct it with `NewSealer`. |
 | `ErrSealerDestroyed` from `SetSealer` | The sealer was destroyed before it was installed | Install a live sealer. |
 | `ErrInvalidSealerOption` from `NewSealer` | A nil option | Pass only non-nil options. |
 | `ErrInvalidBackend` from `NewSealer` or `OpenIn` | A nil or typed-nil `Backend` | Pass a backend, or `DefaultBackend()`. |
 | `*KeyScheduleExposedError` from `NewSealer` | `WithRequireKeyScheduleErasure` and a key (`Name`: `wrapping-key` or `dek`) whose AES schedule would land on the heap | Use a `runtime/secret` build or a confining backend; see [Choose the type](#choose-the-type-by-access-pattern). |
-| `ErrSealSourceReadOnly` | `Seal` or `NewSealed` was given a read-only view, such as the slice an opened `Memory` lends | Use `SealFrom` or `NewSealedFrom` with the handle. |
+| `ErrSealSourceReadOnly` | `Seal` or `NewSealed` was given a read-only view, such as the slice an opened enclave lends | Use `SealFrom` or `NewSealedFrom` with the handle. |
 | `*CapabilityError` from `NewSealer`, `OpenIn` or `SealFrom` | The backend cannot import or does not return the imported bytes, or the source handle does not expose its bytes | Use a backend that implements `Importer`; seal from a handle with `ByteAccess`. |
 | `ErrProviderMessageLimit` | `SoftwareProvider` used in `ModePerOperation` past 2^31 seals | Use `ModeRootKey` (rotates KEKs) or a hardware provider. |
 | Locked memory grows with traffic | Each `Open` takes a locked page | Destroy opened enclaves promptly; use `OpenIn` so the budget sees it. |

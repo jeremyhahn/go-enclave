@@ -125,7 +125,7 @@ func requireCleanupFailure(t *testing.T, err error, failures ...error) {
 
 // destroyRetried lets b's handles go, destroys s again, and fails t unless that
 // released every handle b still had live.
-func destroyRetried(t *testing.T, s *Sealer, b *stickyImporter) {
+func destroyRetried(t *testing.T, s *envelopeSealer, b *stickyImporter) {
 	t.Helper()
 	b.refuse.Store(false)
 	if err := s.Destroy(); err != nil {
@@ -146,7 +146,7 @@ func TestSealed_OpenInRechecksTheSealerAfterImport(t *testing.T) {
 			name = "destroy-refused"
 		}
 		t.Run(name, func(t *testing.T) {
-			s, err := NewSealer()
+			s, err := newEnvelopeSealer()
 			if err != nil {
 				t.Fatalf("NewSealer: %v", err)
 			}
@@ -200,7 +200,7 @@ func TestSealed_OpenInRechecksTheSealerAfterImport(t *testing.T) {
 // importer returning a handle with its error, whose Destroy then failed, lost
 // both the handle and the cleanup failure.
 func TestSealed_OpenInKeepsAFailedImportsRefusedCleanup(t *testing.T) {
-	s, err := NewSealer()
+	s, err := newEnvelopeSealer()
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
@@ -228,7 +228,7 @@ func TestSealed_OpenInKeepsAFailedImportsRefusedCleanup(t *testing.T) {
 // sealer's own keys: a failed wrapping-key import whose handle refused Destroy.
 func TestSealer_ImportKeyKeepsARefusedCleanup(t *testing.T) {
 	b := newStickyImporter()
-	s, err := NewSealer(WithBackend(b))
+	s, err := newEnvelopeSealer(WithBackend(b))
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
@@ -250,7 +250,7 @@ func TestSealer_ImportKeyKeepsARefusedCleanup(t *testing.T) {
 // reported success.
 func TestSealer_RotationKeepsARefusedOutgoingKEK(t *testing.T) {
 	b := newStickyImporter()
-	s, err := NewSealer(WithBackend(b), WithKEKRotationLimit(1))
+	s, err := newEnvelopeSealer(WithBackend(b), WithKEKRotationLimit(1))
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
@@ -322,7 +322,7 @@ func TestReadOnly_ProbesEveryPage(t *testing.T) {
 		t.FailNow() // Seal would wipe the read-only page and kill the process
 	}
 
-	s, err := NewSealer()
+	s, err := newEnvelopeSealer()
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}

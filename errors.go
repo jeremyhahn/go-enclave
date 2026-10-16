@@ -46,10 +46,11 @@ var (
 	ErrReleasedWithoutWipe = errors.New("enclave: pages unmapped without an in-process wipe; mprotect was denied")
 
 	// ErrEnclaveCorrupted reports that an enclave's canary or guard pages were
-	// overwritten, detected at release. See [Memory.Destroy].
+	// overwritten, detected at release. See Destroy in [NewMemory].
 	ErrEnclaveCorrupted = errors.New("enclave: canary verification failed; memory ahead of the enclave was overwritten")
 
-	// ErrNilFunc is returned by [Memory.WithBytes] for a nil function, which
+	// ErrNilFunc is returned by a memory enclave's [ByteAccess.WithBytes] for
+	// a nil function, which
 	// it never calls; the enclave is unchanged.
 	ErrNilFunc = errors.New("enclave: WithBytes was given a nil function")
 
@@ -437,20 +438,20 @@ var (
 	// installing the software default.
 	ErrSealerInstalled = errors.New("enclave: a process sealer is already installed")
 
-	// ErrNilSealer is returned by [SetSealer] for a nil *Sealer, and by
-	// [Sealer.Seal] on a nil receiver.
+	// ErrNilSealer is returned by [SetSealer] for a nil [Sealer], a typed-nil
+	// implementation included, which installs nothing.
 	ErrNilSealer = errors.New("enclave: sealer is nil")
 
 	// ErrSealerDestroyed is returned by every Seal and Open, and by
-	// [Sealed.Openable], once [Sealer.Destroy] has run; and by a
+	// [Sealed.Openable], once [Sealer.Destroy] has run; by [SetSealer] for a
+	// sealer already destroyed, which installs nothing; and by a
 	// [SoftwareProvider] once its own Destroy has run. The sealer fails closed
 	// and never re-keys.
 	ErrSealerDestroyed = errors.New("enclave: sealer was destroyed; sealed values are unrecoverable and sealing requires constructing a new Sealer")
 
-	// ErrSealerNotConstructed is returned by [Sealer.Seal], [Sealer.SealFrom]
-	// and [SetSealer] for a Sealer that was not built by [NewSealer], such as
-	// the zero value. Seal wipes the caller's data as on every other failure;
-	// SealFrom leaves src as it was, and SetSealer takes no material.
+	// ErrSealerNotConstructed is returned by [SetSealer] for a [Sealer] that
+	// was not built by [NewSealer] (another implementation of the interface),
+	// which installs nothing and takes no material.
 	ErrSealerNotConstructed = errors.New("enclave: sealer was not constructed with NewSealer")
 
 	// ErrInvalidSealerOption is returned by [NewSealer] for a nil
@@ -458,7 +459,7 @@ var (
 	ErrInvalidSealerOption = errors.New("enclave: a sealer option is nil")
 
 	// ErrSealSourceReadOnly is returned by [Sealer.Seal] and [NewSealed] for
-	// data this process cannot write, such as a view into a frozen [Memory]
+	// data this process cannot write, such as a view into a frozen memory enclave
 	// passed from inside its WithBytes. Seal wipes its input, and a write to a
 	// read-only page kills the process, so the value is refused before any key
 	// is touched and data is left as it was. Seal the enclave itself with
@@ -793,7 +794,7 @@ var ErrSweepInProgress = errors.New("enclave: another WipeAll is in progress; no
 type SweepError struct {
 	// Corrupt is how many entries this sweep found with a failed canary
 	// (enclaves, and orphaned mappings that had material copied in), plus
-	// every enclave whose [Memory.Destroy] reported [ErrEnclaveCorrupted]
+	// every enclave whose [Handle.Destroy] reported [ErrEnclaveCorrupted]
 	// since the previous admitted sweep. Each is counted once per sweep. A
 	// corrupt entry whose pages the kernel would not release is also in the
 	// count WipeAll returns.
@@ -974,7 +975,7 @@ func asCleanupError(err error, ce **CleanupError) bool {
 // destroyOnFailure destroys e, which a failed operation leaves unwanted, and
 // returns failure with any release the kernel refused, which destroyTransient
 // would drop.
-func destroyOnFailure(failure error, e *Memory) error {
+func destroyOnFailure(failure error, e *lockedRegion) error {
 	return withCleanupFailure(failure, e.Destroy())
 }
 

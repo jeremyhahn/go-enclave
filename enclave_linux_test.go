@@ -382,7 +382,7 @@ func allocReleaseChild(t *testing.T) {
 
 	// Allocations that succeed before the ceiling hold legitimate reservations
 	// until Destroy; only the failed one's must be returned by the constructor.
-	var survivors []*Memory
+	var survivors []*lockedRegion
 	var lastErr error
 	for i := 0; i < 64; i++ {
 		e, err := a.admitData([]byte(fmt.Sprintf("key-material-%d", i)))

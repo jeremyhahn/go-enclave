@@ -78,9 +78,9 @@ func TestMemory_BackendIsTheDefault(t *testing.T) {
 	if h.Backend() != DefaultBackend() {
 		t.Error("Backend() changed once destroyed")
 	}
-	var none *Memory
+	var none *lockedRegion
 	if none.Backend() != DefaultBackend() {
-		t.Error("a nil *Memory does not report the default backend")
+		t.Error("a nil *lockedRegion does not report the default backend")
 	}
 }
 
@@ -212,7 +212,7 @@ func TestAs(t *testing.T) {
 		t.Fatal("As did not match the wrapper itself first")
 	}
 
-	var e *Memory
+	var e *lockedRegion
 	if As(inner, &e) || e != nil {
 		t.Fatal("As matched an unrelated type")
 	}

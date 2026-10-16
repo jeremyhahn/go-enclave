@@ -9,7 +9,8 @@
 // Package enclave provides locked, zeroized memory for sensitive material such
 // as private keys, credentials, passphrases and tokens.
 //
-// [Memory] holds plaintext on pages the package maps itself: locked out
+// A memory enclave, from [NewMemory], [NewMemoryCopy] or [NewMemorySized],
+// is a [ByteAccess] holding plaintext on pages the package maps itself: locked out
 // of swap, fenced by guard pages, checked by a canary, excluded from core dumps
 // where the kernel allows, and wiped before release ([ErrReleasedWithoutWipe]
 // reports the rare release that could not wipe). Failures are returned as
@@ -31,7 +32,7 @@
 // with [SetAllocator]; libraries allocate through [ProcessAllocator].
 //
 // [Sealed] holds material encrypted at rest with AES-256-GCM and
-// decrypts it into a new Memory on [Sealed.Open]. A [Sealer]
+// decrypts it into a new memory enclave on [Sealed.Open]. A [Sealer]
 // protects the keys through a provider: the built-in [SoftwareProvider], or a
 // TPM, HSM or KMS provider implementing [KeyProtector] or [RootUnsealer] and
 // injected with [NewSealer] or [SetSealer]. Read [Mode] before choosing one.

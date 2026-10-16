@@ -199,7 +199,7 @@ func copyRollbackChild(t *testing.T) {
 	}
 	constructors := []struct {
 		name  string
-		build func([]byte) (*Memory, error)
+		build func([]byte) (*lockedRegion, error)
 	}{
 		{"NewMemory", newMemory},
 		{"NewMemoryCopy", newMemoryCopy},

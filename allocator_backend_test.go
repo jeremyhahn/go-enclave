@@ -25,7 +25,7 @@ func shallowCopy[T any](p *T) *T {
 	return c
 }
 
-// TestMemory_DestroyThroughACopyReachesEveryCopy pins B3: a copied Memory is
+// TestMemory_DestroyThroughACopyReachesEveryCopy pins B3: a copied lockedRegion is
 // the same enclave, so one Destroy releases it for every copy and settles its
 // one ledger entry.
 func TestMemory_DestroyThroughACopyReachesEveryCopy(t *testing.T) {
@@ -168,9 +168,9 @@ func TestMemory_WithBytesRefusesANilFunc(t *testing.T) {
 		t.Error("WithBytes(nil) destroyed the enclave")
 	}
 
-	var nilMemory *Memory
-	var zero Memory
-	for name, m := range map[string]*Memory{"nil": nilMemory, "zero": &zero} {
+	var nilMemory *lockedRegion
+	var zero lockedRegion
+	for name, m := range map[string]*lockedRegion{"nil": nilMemory, "zero": &zero} {
 		if err := m.WithBytes(nil); !errors.Is(err, ErrEnclaveDestroyed) {
 			t.Errorf("%s receiver WithBytes(nil) = %v, want ErrEnclaveDestroyed", name, err)
 		}
@@ -205,8 +205,8 @@ func TestMemory_BackendIsTheAdmittingAllocator(t *testing.T) {
 		t.Fatalf("NewMemorySized: %v", err)
 	}
 	t.Cleanup(func() { _ = plain.Destroy() })
-	var nilMemory *Memory
-	for name, m := range map[string]*Memory{"unbudgeted": plain, "nil": nilMemory} {
+	var nilMemory *lockedRegion
+	for name, m := range map[string]*lockedRegion{"unbudgeted": plain, "nil": nilMemory} {
 		if got := m.Backend(); got != DefaultBackend() {
 			t.Errorf("%s Backend() = %#v, want DefaultBackend()", name, got)
 		}
@@ -279,9 +279,9 @@ func TestAllocator_Import(t *testing.T) {
 			}
 			t.Cleanup(func() { _ = h.Destroy() })
 
-			e, ok := h.(*Memory)
+			e, ok := h.(*lockedRegion)
 			if !ok {
-				t.Fatalf("Import returned a %T, want *Memory", h)
+				t.Fatalf("Import returned a %T, want *lockedRegion", h)
 			}
 			if got := e.Backend(); got != Backend(a) {
 				t.Errorf("imported Backend() = %#v, want the importing *budgetAllocator", got)

@@ -6,7 +6,7 @@
 ## Mission
 
 go-enclave is the enclave abstraction layer plus the default software memory enclave for hosts without hardware; upstream projects consume one clearly defined interface and never a concrete implementation or a pointer to one.
-`Sealed` keeps contents encrypted at rest and opens them into a fresh `Memory`.
+`Sealed` keeps contents encrypted at rest and opens them into a fresh memory enclave.
 Its layer is the base of the stack, under go-quicraft: [SPEC purpose](docs/SPEC.md#purpose); what it owns and never does: [SPEC boundaries](docs/SPEC.md#boundaries).
 
 ## Milestones

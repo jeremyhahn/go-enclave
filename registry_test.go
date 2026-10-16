@@ -109,7 +109,7 @@ func TestWipeAll_DestroysEveryLiveEnclave(t *testing.T) {
 
 	before := liveCount()
 
-	held := make([]*Memory, 0, n)
+	held := make([]*lockedRegion, 0, n)
 	for i := 0; i < n; i++ {
 		e, err := newMemory(append([]byte(nil), material...))
 		if err != nil {
@@ -401,7 +401,7 @@ func TestWipeAll_DoesNotReturnZeroWhileAnEnclaveIsAlive(t *testing.T) {
 
 	var (
 		lateMu sync.Mutex
-		late   *Memory
+		late   *lockedRegion
 	)
 	// Runs inside WipeAll, after the snapshot that will never contain `late`.
 	trigger.release = func() {
@@ -722,7 +722,7 @@ func TestWipeAll_DoesNotPanicOnACorruptCanaryAndFinishesTheSweep(t *testing.T) {
 		t.Fatalf("NewAllocator: %v", err)
 	}
 
-	held := make([]*Memory, 0, count)
+	held := make([]*lockedRegion, 0, count)
 	for i := 0; i < count; i++ {
 		// Sized, so the pages stay writable; a frozen enclave would fault on the
 		// canary write below.
@@ -1065,7 +1065,7 @@ func TestWipeAll_ABorrowEndingWakesTheSweep(t *testing.T) {
 // once it is inside the borrow. end finishes the borrow and waits for it to
 // return; it is idempotent and also registered as cleanup, so a failing test
 // never leaves the borrow parked.
-func holdBorrow(t *testing.T, e *Memory) (end func()) {
+func holdBorrow(t *testing.T, e *lockedRegion) (end func()) {
 	t.Helper()
 	inBorrow := make(chan struct{})
 	release := make(chan struct{})
@@ -1212,8 +1212,8 @@ func TestWipeAll_AConstructorThatNeverStopsCannotKeepTheSweepRunning(t *testing.
 		made  atomic.Int32
 		cerrs = make(chan error, 1)
 	)
-	var link func() *Memory
-	link = func() *Memory {
+	var link func() *lockedRegion
+	link = func() *lockedRegion {
 		e, err := newMemorySized(32)
 		if err != nil {
 			select {
@@ -1278,7 +1278,7 @@ func TestWipeAll_TerminatesAgainstALiveConstructorUnderBackground(t *testing.T) 
 	// want carries a request for one construction; the goroutine answers on
 	// the request's channel once that enclave is REGISTERED (the constructor
 	// has returned), before it is borrowed.
-	want := make(chan chan *Memory)
+	want := make(chan chan *lockedRegion)
 	cerr := make(chan error, 1)
 	stop := make(chan struct{})
 	started := make(chan struct{})
@@ -1287,7 +1287,7 @@ func TestWipeAll_TerminatesAgainstALiveConstructorUnderBackground(t *testing.T) 
 		defer close(done)
 		var once sync.Once
 		for {
-			var ack chan *Memory
+			var ack chan *lockedRegion
 			select {
 			case <-stop:
 				return
@@ -1340,7 +1340,7 @@ func TestWipeAll_TerminatesAgainstALiveConstructorUnderBackground(t *testing.T) 
 		// Inside the sweep, after its first snapshot: ask the live goroutine
 		// for a construction and wait until it is registered. A constructor
 		// failure releases the sweep and is reported below.
-		ack := make(chan *Memory, 1)
+		ack := make(chan *lockedRegion, 1)
 		select {
 		case want <- ack:
 		case err := <-cerr:
@@ -1392,7 +1392,7 @@ func TestWipeAll_ALateBorrowIsNeverWaitedFor(t *testing.T) {
 		t.Fatalf("NewMemorySized: %v", err)
 	}
 	var (
-		late   *Memory
+		late   *lockedRegion
 		endMu  sync.Mutex
 		endFn  func()
 		lateOK = make(chan error, 1)
@@ -1482,7 +1482,7 @@ func TestWipeAll_RetriesAContendedLockAtOnce(t *testing.T) {
 // TestTryReleaseMapping_ClassifiesTheLock pins the three outcomes the sweep
 // acts on, each against the lock state that produces it.
 func TestTryReleaseMapping_ClassifiesTheLock(t *testing.T) {
-	newEnclave := func(t *testing.T) *Memory {
+	newEnclave := func(t *testing.T) *lockedRegion {
 		t.Helper()
 		e, err := newMemorySized(32)
 		if err != nil {
@@ -1590,7 +1590,7 @@ func TestHolders_TheLastReleaseWakesOnlyAnArmedSweep(t *testing.T) {
 }
 
 // TestHolders_EveryMethodLeavesTheCountBalanced pins that every acquisition on
-// Memory is bracketed, including a borrow whose callback panics: a count
+// lockedRegion is bracketed, including a borrow whose callback panics: a count
 // stuck above zero makes a Background sweep wait forever, one below zero lets
 // it wait with no holder to wake it.
 func TestHolders_EveryMethodLeavesTheCountBalanced(t *testing.T) {
@@ -1627,7 +1627,7 @@ func TestHolders_EveryMethodLeavesTheCountBalanced(t *testing.T) {
 // contract: a nil enclave and an already-destroyed one have nothing to
 // release, and report nothing.
 func TestDestroy_NilAndRepeatedReturnNil(t *testing.T) {
-	var nilEnclave *Memory
+	var nilEnclave *lockedRegion
 	if err := nilEnclave.Destroy(); err != nil {
 		t.Errorf("Destroy on a nil enclave = %v, want nil", err)
 	}
@@ -1750,7 +1750,7 @@ func TestWipeAll_SweepErrorCountsAreReadableWithErrorsAs(t *testing.T) {
 // parkSweepOnABorrow starts a context.Background sweep that parks waiting for
 // a borrow on e that never ends until the returned end is called. It returns
 // once the sweep is inside its wait, and a channel carrying the sweep's result.
-func parkSweepOnABorrow(t *testing.T, e *Memory) (end func(), result <-chan sweepResult) {
+func parkSweepOnABorrow(t *testing.T, e *lockedRegion) (end func(), result <-chan sweepResult) {
 	t.Helper()
 	end = holdBorrow(t, e)
 	parked := make(chan struct{})

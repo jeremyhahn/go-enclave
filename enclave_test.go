@@ -80,8 +80,8 @@ func TestNewMemory_Empty(t *testing.T) {
 }
 
 // TestNewMemory_ReturnsTheInterface pins the exported constructors' shape: a
-// *Memory handed out as a ByteAccess that is also a Freezer, and a nil
-// interface, never one holding a nil *Memory, on failure.
+// *lockedRegion handed out as a ByteAccess that is also a Freezer, and a nil
+// interface, never one holding a nil *lockedRegion, on failure.
 func TestNewMemory_ReturnsTheInterface(t *testing.T) {
 	ctors := map[string]func() (ByteAccess, error){
 		"NewMemory":      func() (ByteAccess, error) { return NewMemory([]byte("material")) },
@@ -95,8 +95,8 @@ func TestNewMemory_ReturnsTheInterface(t *testing.T) {
 				t.Fatalf("%s: %v", name, err)
 			}
 			defer e.Destroy()
-			if _, ok := e.(*Memory); !ok {
-				t.Errorf("%s returned a %T, want *Memory", name, e)
+			if _, ok := e.(*lockedRegion); !ok {
+				t.Errorf("%s returned a %T, want *lockedRegion", name, e)
 			}
 			var f Freezer
 			if !As(e, &f) {
@@ -123,6 +123,47 @@ func TestNewMemory_ReturnsTheInterface(t *testing.T) {
 				t.Errorf("%s returned %#v on failure, want a nil interface", name, e)
 			}
 		})
+	}
+}
+
+// foreignBytes is another backend's ByteAccess: it forwards ByteAccess's
+// methods to a memory enclave and has neither Freeze nor an As method.
+type foreignBytes struct{ ByteAccess }
+
+// TestAs_ReachesFreezerOnlyThroughAMemoryEnclave pins how a caller holding a
+// ByteAccess reaches Freeze: As finds the Freezer a constructor's enclave has,
+// and refuses a foreign ByteAccess, leaving the target untouched.
+func TestAs_ReachesFreezerOnlyThroughAMemoryEnclave(t *testing.T) {
+	e, err := NewMemorySized(8)
+	if err != nil {
+		t.Fatalf("NewMemorySized: %v", err)
+	}
+	defer e.Destroy()
+
+	var f Freezer
+	if !As(e, &f) || any(f) != any(e) {
+		t.Fatalf("As(NewMemorySized's ByteAccess, &Freezer) = %v, want the enclave itself", f)
+	}
+	if err := f.Freeze(); err != nil {
+		t.Fatalf("Freeze through As: %v", err)
+	}
+	if err := e.WithBytes(func(b []byte) error {
+		if !readOnly(b) {
+			return errors.New("the view is writable after Freeze through As")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var foreign ByteAccess = foreignBytes{e}
+	f = nil
+	if As(foreign, &f) || f != nil {
+		t.Errorf("As(a foreign ByteAccess, &Freezer) = true or set %v, want false and nil", f)
+	}
+	var region *lockedRegion
+	if As(foreign, &region) || region != nil {
+		t.Errorf("As(a foreign ByteAccess, &*lockedRegion) = true or set %v, want false and nil", region)
 	}
 }
 
@@ -273,7 +314,7 @@ func TestMemory_Destroy(t *testing.T) {
 }
 
 func TestMemory_NilReceiver(t *testing.T) {
-	var e *Memory
+	var e *lockedRegion
 
 	e.Destroy() // must not panic
 
@@ -551,7 +592,7 @@ func TestEqualToSeparatesMismatchFromDestroyed(t *testing.T) {
 	})
 
 	t.Run("nil receiver", func(t *testing.T) {
-		var e *Memory
+		var e *lockedRegion
 		equal, err := e.EqualTo([]byte(material))
 		if !errors.Is(err, ErrEnclaveDestroyed) || equal {
 			t.Fatalf("nil EqualTo = (%v, %v), want (false, ErrEnclaveDestroyed)", equal, err)
@@ -570,7 +611,7 @@ func panicValue(fn func()) (r any) {
 // from inside the same borrow, into a second locked enclave (the yardstick), so
 // the material never exists outside locked memory. The caller must Destroy the
 // yardstick.
-func generateInto(t *testing.T, e *Memory) *Memory {
+func generateInto(t *testing.T, e *lockedRegion) *lockedRegion {
 	t.Helper()
 	yardstick, err := newMemorySized(e.Size())
 	if err != nil {
@@ -615,7 +656,7 @@ func generateInto(t *testing.T, e *Memory) *Memory {
 
 // sameMaterial reports whether a and b hold identical material, comparing
 // through a nested borrow and a's EqualTo so nothing leaves locked memory.
-func sameMaterial(t *testing.T, a, b *Memory) bool {
+func sameMaterial(t *testing.T, a, b *lockedRegion) bool {
 	t.Helper()
 	var same bool
 	if err := b.WithBytes(func(w []byte) error {
@@ -628,7 +669,7 @@ func sameMaterial(t *testing.T, a, b *Memory) bool {
 }
 
 // ledgerKey is the shutdown-ledger key of e, nil for an unset enclave.
-func ledgerKey(e *Memory) *memoryState {
+func ledgerKey(e *lockedRegion) *memoryState {
 	if e.unset() {
 		return nil
 	}
@@ -636,7 +677,7 @@ func ledgerKey(e *Memory) *memoryState {
 }
 
 // isRegistered reports whether e is still on the shutdown ledger.
-func isRegistered(e *Memory) bool {
+func isRegistered(e *lockedRegion) bool {
 	registryMu.Lock()
 	defer registryMu.Unlock()
 	_, ok := live[ledgerKey(e)]
@@ -1585,7 +1626,7 @@ func TestMemory_FreezeIsIdempotent(t *testing.T) {
 // TestMemory_FreezeReportsDestroyed pins that Freeze on a nil or
 // destroyed enclave returns ErrEnclaveDestroyed, with a live control.
 func TestMemory_FreezeReportsDestroyed(t *testing.T) {
-	var nilEnclave *Memory
+	var nilEnclave *lockedRegion
 	if err := nilEnclave.Freeze(); !errors.Is(err, ErrEnclaveDestroyed) {
 		t.Errorf("(nil).Freeze() = %v, want ErrEnclaveDestroyed", err)
 	}
@@ -1854,7 +1895,7 @@ func TestAllocator_FreezeKeepsTheReservation(t *testing.T) {
 // bracket dominates.
 
 // newBenchEnclave returns a small frozen enclave, destroyed at cleanup.
-func newBenchEnclave(b *testing.B) *Memory {
+func newBenchEnclave(b *testing.B) *lockedRegion {
 	b.Helper()
 	e, err := newMemoryCopy(make([]byte, 32))
 	if err != nil {
@@ -1949,9 +1990,9 @@ func BenchmarkIsAliveParallel(b *testing.B) {
 func TestRelease_RetryReturnsTheReservationUnderStrictUnlock(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
-		retry func(t *testing.T, e *Memory, wantHeld bool)
+		retry func(t *testing.T, e *lockedRegion, wantHeld bool)
 	}{
-		{"Destroy", func(t *testing.T, e *Memory, wantHeld bool) {
+		{"Destroy", func(t *testing.T, e *lockedRegion, wantHeld bool) {
 			err := e.Destroy()
 			if got := pagesHeld(err); got != wantHeld {
 				t.Fatalf("Destroy = %v, pagesHeld %v, want %v", err, got, wantHeld)
@@ -1960,7 +2001,7 @@ func TestRelease_RetryReturnsTheReservationUnderStrictUnlock(t *testing.T) {
 				t.Fatalf("Destroy = %v, want nil", err)
 			}
 		}},
-		{"WipeAll", func(t *testing.T, _ *Memory, wantHeld bool) {
+		{"WipeAll", func(t *testing.T, _ *lockedRegion, wantHeld bool) {
 			want := 0
 			if wantHeld {
 				want = 1

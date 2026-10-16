@@ -82,7 +82,7 @@ Out of scope — these are documented limits, not vulnerabilities (reports that
 show the documentation understates them are in scope):
 
 - An adversary who can read this process's live memory (`ptrace`,
-  `/proc/<pid>/mem`, a debugger): a `Memory` is readable for its whole
+  `/proc/<pid>/mem`, a debugger): a memory enclave is readable for its whole
   life, and with the software sealer or `ModeRootKey` the sealing keys are too.
 - AES key schedules left on the heap by seals and opens, as described in
   [docs/sealing/engineering.md](docs/sealing/engineering.md#key-schedule-heap-exposure),

@@ -42,11 +42,11 @@ func fillRandom(b []byte) error {
 	return err
 }
 
-// newKeyEnclave returns a [Memory] holding n bytes from the CSPRNG,
+// newKeyEnclave returns a [lockedRegion] holding n bytes from the CSPRNG,
 // generated directly into locked memory.
 //
 //nolint:unparam // n is always 32 today because dekBytes, kekBytes and RootKeyBytes are three independent decisions that happen to agree; folding them into one constant here would couple them.
-func newKeyEnclave(n int) (*Memory, error) {
+func newKeyEnclave(n int) (*lockedRegion, error) {
 	e, err := newMemorySized(n)
 	if err != nil {
 		return nil, err

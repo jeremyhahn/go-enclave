@@ -15,7 +15,7 @@
 | `Allocator.ForceLimit(newLimit int64) (int64, error)` | Accepts any non-negative budget; returns the over-subscription in bytes. |
 | `Allocator.TransferTo(dst Allocator, n int64) error` | Moves `n` bytes of headroom to `dst` in one operation. A `dst` this package did not build: `ErrAllocatorNotConstructed`. |
 | `Allocator.InUse() int64` / `Limit() int64` / `Available() int64` | Observability snapshots; never an admission gate. `Available` clamps at 0. |
-| `Allocator.Name() string` / `Import(ctx, material, opts...) (Handle, error)` | The locked-memory `Backend` (name `"locked-memory"`) and `Importer`: `Import` is an admitted `New` under the [backends](../backends/engineering.md) contract. An `Allocator` is never registered; `(*Memory).Backend()` returns the one that admitted the enclave. |
+| `Allocator.Name() string` / `Import(ctx, material, opts...) (Handle, error)` | The locked-memory `Backend` (name `"locked-memory"`) and `Importer`: `Import` is an admitted `New` under the [backends](../backends/engineering.md) contract. An `Allocator` is never registered; a memory enclave's `Backend()` returns the one that admitted it. |
 | `SetAllocator(a Allocator) error` | Installs the process allocator. One-shot. Binary only. Nil: `ErrNilAllocator`; an `Allocator` this package did not build: `ErrAllocatorNotConstructed`. |
 | `ProcessAllocator() (Allocator, error)` | Returns the installed allocator, lazily installing the default. Libraries call this. |
 | `DiscoverLockedMemoryLimit() (LockedMemoryLimit, error)` | Snapshot of the ceiling and its source. |

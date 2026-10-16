@@ -89,7 +89,7 @@ func sealCleanupChild(t *testing.T) {
 	}
 
 	// Open: the destination fits and the DEK does not.
-	s, err := NewSealer()
+	s, err := newEnvelopeSealer()
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
@@ -119,7 +119,7 @@ func sealCleanupChild(t *testing.T) {
 
 	// Seal: the DEK fits and the rotation's KEK does not.
 	setCeiling(original.Cur)
-	r, err := NewSealer(WithKEKRotationLimit(1))
+	r, err := newEnvelopeSealer(WithKEKRotationLimit(1))
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}

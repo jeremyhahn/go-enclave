@@ -18,7 +18,7 @@ transport own those surfaces.
 | Bring existing material in (copy, source kept) | `enclave.NewMemoryCopy(src) (ByteAccess, error)` | N/A |
 | Generate in place | `enclave.NewMemorySized(n) (ByteAccess, error)` then `WithBytes`, and `Freeze` through `Freezer` | N/A |
 | Read under lock | `ByteAccess.WithBytes(fn)`, `EqualTo(b) (bool, error)` | N/A |
-| Make read-only | `Freezer.Freeze()`: `enclave.As(e, &f)` or `e.(enclave.Freezer)` | N/A |
+| Make read-only | `Freezer.Freeze()`, reached with `enclave.As(e, &f)` | N/A |
 | Inspect | `Handle.Size()`, `Handle.IsAlive()`; `%v` and `%s` print it redacted | N/A |
 | Mask under `%#v` | prints the same redacted text | N/A |
 | Release | `Handle.Destroy() error` | N/A |
@@ -28,8 +28,9 @@ transport own those surfaces.
 | Opt-in process hardening | `enclave.HardenProcess() (ProcessHardening, error)` | N/A |
 | Zero a heap slice | `enclave.Wipe(b)` | N/A |
 
-The constructors return the `ByteAccess` interface; the enclave behind it is a
-`*Memory`, which is also a `Freezer`. Its `String()` returns `Memory(redacted)`
+The constructors return the `ByteAccess` interface, the type callers hold; the
+enclave behind it is internal and is also a `Freezer`, reached with `As`. Its
+`String()` returns `Memory(redacted)`
 for a live enclave and `Memory(destroyed)` once it is destroyed, and its
 `GoString()` returns the same text, so `%v`, `%s` and `%#v` never print the
 contents. A failed constructor returns a nil interface.

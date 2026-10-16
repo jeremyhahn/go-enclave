@@ -58,10 +58,6 @@ func TestBackends_AnAllocatorNamesTheDefaultBackendAndOwnsWhatItAdmits(t *testin
 	if got := plain.Backend(); got.Name() != enclave.LockedMemoryBackendName {
 		t.Fatalf("Backend of an unbudgeted enclave = %q, want the default", got.Name())
 	}
-	var none *enclave.Memory
-	if got := none.Backend(); got.Name() != enclave.LockedMemoryBackendName {
-		t.Fatalf("Backend of a nil enclave = %q, want the default", got.Name())
-	}
 }
 
 func TestBackends_AnAllocatorImportsKeysAndMaterialIntoItsBudget(t *testing.T) {

@@ -89,7 +89,7 @@ func (s *sealerState) hierarchyStateLocked() (published bool, err error) {
 // protectRootKey and unprotectRootKey are the boundary every root-mode seal
 // and open passes through, so their deferred withDeadHierarchyCleanup is the
 // one place a dead hierarchy's key release is retried, and no exit skips it.
-func (s *sealerState) protectRootKey(ctx context.Context, dek *Memory) (blob []byte, err error) {
+func (s *sealerState) protectRootKey(ctx context.Context, dek *lockedRegion) (blob []byte, err error) {
 	defer func() { err = s.withDeadHierarchyCleanup(err) }()
 
 	for {
@@ -188,7 +188,7 @@ func (s *sealerState) dropIfUnusedLocked(gen uint32) {
 // unprotectRootKey recovers a DEK: current generation under the live KEK, a
 // retired one by first unwrapping its retained blob under the root. It makes
 // no provider call, so the context is unused.
-func (s *sealerState) unprotectRootKey(_ context.Context, blob []byte, dek *Memory) (err error) {
+func (s *sealerState) unprotectRootKey(_ context.Context, blob []byte, dek *lockedRegion) (err error) {
 	// Deferred before the read lock is taken, so it runs once it is released.
 	defer func() { err = s.withDeadHierarchyCleanup(err) }()
 
@@ -252,7 +252,7 @@ func (s *sealerState) withDeadHierarchyCleanup(err error) error {
 // has verified the hierarchy is alive. It stays in locked memory even under
 // WithBackend: importing would be a blocking device call under mu, for one
 // unwrap of a generation that was itself minted in locked memory.
-func (s *sealerState) unwrapRetiredKEKLocked(kekBlob []byte) (*Memory, error) {
+func (s *sealerState) unwrapRetiredKEKLocked(kekBlob []byte) (*lockedRegion, error) {
 	kek, err := newMemorySized(kekBytes)
 	if err != nil {
 		return nil, err
@@ -306,7 +306,7 @@ func destroyKeys(keys ...Handle) error {
 // failure, an E; a handle the sealer cannot wrap with, one with neither
 // AEAD nor ByteAccess, is destroyed and refused. A handle that refuses that
 // Destroy is retained (destroyOrRetain). The caller must not hold s.mu.
-func importKey[E causeShape, P causeError[E]](ctx context.Context, s *sealerState, src *Memory) (Handle, error) {
+func importKey[E causeShape, P causeError[E]](ctx context.Context, s *sealerState, src *lockedRegion) (Handle, error) {
 	var h Handle
 	err := src.WithBytes(func(k []byte) error {
 		var ierr error
@@ -464,7 +464,7 @@ func (s *sealerState) initHierarchy(ctx context.Context) (err error) {
 // wrappingKey is the wrapping key root holds, where the sealer keeps it:
 // root itself, or a copy of it imported into the backend. The copy leaves
 // root intact, so a failed import can be retried.
-func (s *sealerState) wrappingKey(ctx context.Context, root *Memory) (Handle, error) {
+func (s *sealerState) wrappingKey(ctx context.Context, root *lockedRegion) (Handle, error) {
 	if s.importer == nil {
 		return root, nil
 	}
@@ -504,7 +504,7 @@ func (s *sealerState) firstGeneration(ctx context.Context, wrap Handle) (Handle,
 // borrow, by the derived wrapping key, which it leaves in pendingRoot with
 // the sweep sequence read before the unseal in pendingGen. The caller holds
 // initSlot.
-func (s *sealerState) unsealRoot(ctx context.Context) (*Memory, error) {
+func (s *sealerState) unsealRoot(ctx context.Context) (*lockedRegion, error) {
 	// Read before the root exists, as Seal reads sealedAtGen.
 	gen := sweepGeneration()
 
@@ -648,7 +648,7 @@ func (s *sealerState) rotateKEK(ctx context.Context) error {
 // mintNextLocked mints the next KEK generation in locked memory, wrapped
 // under the root, or returns a nil KEK when no rotation is due. Called with mu
 // write-locked; gen is the sweep sequence read when it was taken.
-func (s *sealerState) mintNextLocked(gen uint64) (*Memory, []byte, error) {
+func (s *sealerState) mintNextLocked(gen uint64) (*lockedRegion, []byte, error) {
 	published, err := s.hierarchyStateLocked()
 	switch {
 	case errors.Is(err, ErrSealerWiped):
@@ -699,7 +699,7 @@ func (s *sealerState) publishNextLocked(kek Handle, blob []byte) error {
 
 // newGeneration mints KEK generation gen: a fresh key in locked memory, plus
 // that key wrapped under the root for retention after retirement.
-func newGeneration(root Handle, gen uint32) (*Memory, []byte, error) {
+func newGeneration(root Handle, gen uint32) (*lockedRegion, []byte, error) {
 	kek, err := newKeyEnclave(kekBytes)
 	if err != nil {
 		return nil, nil, err

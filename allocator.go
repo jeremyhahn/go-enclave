@@ -293,7 +293,7 @@ func (a *budgetAllocator) New(data []byte) (ByteAccess, error) {
 }
 
 // admitData is [Allocator.New] returning the implementation.
-func (a *budgetAllocator) admitData(data []byte) (*Memory, error) {
+func (a *budgetAllocator) admitData(data []byte) (*lockedRegion, error) {
 	defer Wipe(data)
 	if err := a.usable(); err != nil {
 		return nil, err
@@ -316,7 +316,7 @@ func (a *budgetAllocator) NewSized(n int) (ByteAccess, error) {
 }
 
 // admitSized is [Allocator.NewSized] returning the implementation.
-func (a *budgetAllocator) admitSized(n int) (*Memory, error) {
+func (a *budgetAllocator) admitSized(n int) (*lockedRegion, error) {
 	if err := a.usable(); err != nil {
 		return nil, err
 	}
@@ -371,7 +371,7 @@ func (a *budgetAllocator) Import(ctx context.Context, material []byte, opts ...I
 // the refund as its release. A failed build is refunded at once, unless it
 // left pages locked: then the orphan carries the refund until a sweep
 // releases them.
-func (a *budgetAllocator) admit(n int64, build func(locked int64) (*mapping, error)) (*Memory, error) {
+func (a *budgetAllocator) admit(n int64, build func(locked int64) (*mapping, error)) (*lockedRegion, error) {
 	charge, err := a.reserve(n)
 	if err != nil {
 		return nil, err

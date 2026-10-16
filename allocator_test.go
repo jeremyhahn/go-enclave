@@ -48,7 +48,7 @@ func FuzzAllocatorAdmission(f *testing.F) {
 		}
 
 		type handle struct {
-			m      *Memory
+			m      *lockedRegion
 			charge int64
 		}
 		var live []handle
@@ -1204,8 +1204,8 @@ func (sh retuneShape) granted() int64 {
 type retuneRound struct {
 	shape retuneShape
 	a     *budgetAllocator
-	held  []*Memory // one per draining actor; destroyed inside the window
-	got   []*Memory // one per admitting actor; nil where it was refused
+	held  []*lockedRegion // one per draining actor; destroyed inside the window
+	got   []*lockedRegion // one per admitting actor; nil where it was refused
 
 	wg      sync.WaitGroup
 	arrived atomic.Int32
@@ -1420,8 +1420,8 @@ func runRetuneShape(t *testing.T, sh retuneShape, tally *retuneTally) {
 		rd := &retuneRound{
 			shape: sh,
 			a:     a,
-			held:  make([]*Memory, sh.drain),
-			got:   make([]*Memory, sh.admit),
+			held:  make([]*lockedRegion, sh.drain),
+			got:   make([]*lockedRegion, sh.admit),
 		}
 		bad := false
 		for i := range rd.held {
@@ -2141,8 +2141,8 @@ func TestNewAllocator_ReturnsTheInterface(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	if _, ok := e.(*Memory); !ok {
-		t.Errorf("New returned a %T, want *Memory", e)
+	if _, ok := e.(*lockedRegion); !ok {
+		t.Errorf("New returned a %T, want *lockedRegion", e)
 	}
 	if again, err := a.NewSized(32); again != nil || !errors.Is(err, ErrBudgetExhausted) {
 		t.Errorf("NewSized past the budget = (%v, %v), want a nil interface and ErrBudgetExhausted", again, err)
@@ -2154,8 +2154,8 @@ func TestNewAllocator_ReturnsTheInterface(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSized: %v", err)
 	}
-	if _, ok := sized.(*Memory); !ok {
-		t.Errorf("NewSized returned a %T, want *Memory", sized)
+	if _, ok := sized.(*lockedRegion); !ok {
+		t.Errorf("NewSized returned a %T, want *lockedRegion", sized)
 	}
 	if err := sized.Destroy(); err != nil {
 		t.Fatalf("Destroy: %v", err)

@@ -14,9 +14,9 @@ import (
 )
 
 // Sealed holds material encrypted at rest and decrypts it into a new
-// [Memory] only when [Sealed.Open] is called. Use it for
-// material needed occasionally and held for a long time; use a Memory
-// for material in continuous use.
+// memory enclave only when [Sealed.Open] is called. Use it for
+// material needed occasionally and held for a long time; use a memory enclave
+// ([NewMemory]) for material in continuous use.
 //
 // Each value is an envelope on the ordinary heap: the material sealed with
 // AES-256-GCM under a fresh 32-byte data key (DEK), and the DEK wrapped by
@@ -45,7 +45,7 @@ import (
 // [Sealer.SealFrom]; the implementation is internal to this package. A Sealed
 // is safe for concurrent use, and Destroy reaches every reference to it.
 type Sealed interface {
-	// Open decrypts the material directly into a new [Memory] and returns
+	// Open decrypts the material directly into a new memory enclave and returns
 	// it as a [ByteAccess]. The caller owns the result and must Destroy it;
 	// each call returns an independent enclave. Open late and destroy early.
 	//
@@ -131,7 +131,7 @@ type Sealed interface {
 	// It does not wait for opens in flight: they complete against the envelope
 	// they pinned, the last one wipes it, and every Open starting afterwards
 	// returns [ErrEnclaveDestroyed]. The error is always nil today; it matches
-	// [Memory.Destroy] and [Sealer.Destroy].
+	// [Handle.Destroy] and [Sealer.Destroy].
 	Destroy() error
 }
 
@@ -152,7 +152,7 @@ type sealedState struct {
 	mu sync.RWMutex
 
 	// sealer is nil'd on Destroy so a destroyed value does not pin a Sealer.
-	sealer *Sealer
+	sealer *envelopeSealer
 
 	// sealed is nonce || ciphertext || tag under the DEK; nil once destroyed.
 	sealed []byte
@@ -181,7 +181,7 @@ type sealedState struct {
 //
 // It takes ownership of data as [NewMemory] does: the caller's slice
 // is wiped before it returns, on every path but one. Data this process cannot
-// write, such as a view into a frozen [Memory], cannot be wiped and is
+// write, such as a view into a frozen memory enclave, cannot be wiped and is
 // refused with [ErrSealSourceReadOnly] before anything else; seal such
 // material with [NewSealedFrom].
 //
@@ -291,8 +291,8 @@ func (s *sealedValue) OpenIn(ctx context.Context, b Backend) (Handle, error) {
 	return s.openImported(ctx, imp)
 }
 
-// openAdmitted is OpenIn into a, as a *Memory.
-func (s *sealedValue) openAdmitted(ctx context.Context, a *budgetAllocator) (*Memory, error) {
+// openAdmitted is OpenIn into a, as a *lockedRegion.
+func (s *sealedValue) openAdmitted(ctx context.Context, a *budgetAllocator) (*lockedRegion, error) {
 	// A nil receiver keeps openIn's answer; a nil allocator is refused
 	// whatever the value's state.
 	if s != nil && a == nil {
@@ -358,7 +358,7 @@ func (s *sealedValue) openImported(ctx context.Context, imp Importer) (Handle, e
 // destination. The value's lock only pins and unpins the envelope and is
 // not held across Sealer.open, which may block in a provider; Destroy takes
 // no context and must not wait on that.
-func (s *sealedValue) openIn(ctx context.Context, dst func(int) (*Memory, error)) (*Memory, error) {
+func (s *sealedValue) openIn(ctx context.Context, dst func(int) (*lockedRegion, error)) (*lockedRegion, error) {
 	if s == nil || s.sealedState == nil {
 		return nil, ErrEnclaveDestroyed
 	}
@@ -374,7 +374,7 @@ func (s *sealedValue) openIn(ctx context.Context, dst func(int) (*Memory, error)
 
 // pin registers an open in flight and returns the envelope it may read with
 // the lock released, or ok false if the value is destroyed.
-func (s *sealedValue) pin() (sealer *Sealer, blob, sealed []byte, size int, ok bool) {
+func (s *sealedValue) pin() (sealer *envelopeSealer, blob, sealed []byte, size int, ok bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -388,7 +388,7 @@ func (s *sealedValue) pin() (sealer *Sealer, blob, sealed []byte, size int, ok b
 // unpin ends an open in flight. The last open out after a Destroy wipes the
 // envelope halves Destroy left for it, and releases the value's hold on its
 // sealer's KEK generation.
-func (s *sealedValue) unpin(sealer *Sealer, blob, sealed []byte) {
+func (s *sealedValue) unpin(sealer *envelopeSealer, blob, sealed []byte) {
 	s.mu.Lock()
 	s.opens--
 	last := s.opens == 0 && s.sealed == nil
@@ -430,7 +430,7 @@ func (s *sealedValue) Openable() error {
 
 // openableSnapshot reads what Openable needs under the lock, reporting ok
 // false for the destroyed state.
-func (s *sealedValue) openableSnapshot() (*Sealer, uint64, bool) {
+func (s *sealedValue) openableSnapshot() (*envelopeSealer, uint64, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 

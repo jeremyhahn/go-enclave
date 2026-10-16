@@ -185,20 +185,17 @@ func TestSealing_SealerDestroyDuringABlockedUnseal(t *testing.T) {
 	})
 }
 
-// TestSealing_UnconstructedSealerAndRedactedFormatting: a zero-value Sealer refuses
-// without panicking and wipes its input, and %#v never prints an enclave's
-// contents.
+// TestSealing_UnconstructedSealerAndRedactedFormatting: SetSealer refuses a
+// Sealer that NewSealer did not build, and a typed-nil one, installing
+// nothing, and %#v never prints an enclave's contents.
 func TestSealing_UnconstructedSealerAndRedactedFormatting(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		ctx := context.Background()
-		var zero enclave.Sealer
-		buf := heapBytes(needleLen)
-		newNeedle(t).fill(buf)
-		if _, err := zero.Seal(ctx, buf); !errors.Is(err, enclave.ErrSealerNotConstructed) || !memscan.AllZero(buf) {
-			t.Errorf("zero-value Seal = %v (wiped=%t), want ErrSealerNotConstructed and a wiped slice", err, memscan.AllZero(buf))
+		if err := enclave.SetSealer(foreignSealer{}); !errors.Is(err, enclave.ErrSealerNotConstructed) {
+			t.Errorf("SetSealer(foreign Sealer) = %v, want ErrSealerNotConstructed", err)
 		}
-		if err := zero.Destroy(); err != nil {
-			t.Errorf("zero-value Destroy = %v", err)
+		if err := enclave.SetSealer((*foreignSealer)(nil)); !errors.Is(err, enclave.ErrNilSealer) {
+			t.Errorf("SetSealer(typed-nil Sealer) = %v, want ErrNilSealer", err)
 		}
 
 		s, err := enclave.NewSealer()
@@ -226,3 +223,16 @@ func TestSealing_UnconstructedSealerAndRedactedFormatting(t *testing.T) {
 		}
 	})
 }
+
+// foreignSealer is a Sealer this package did not build.
+type foreignSealer struct{}
+
+func (foreignSealer) Seal(context.Context, []byte) (enclave.Sealed, error) { return nil, nil }
+
+func (foreignSealer) SealFrom(context.Context, enclave.Handle) (enclave.Sealed, error) {
+	return nil, nil
+}
+
+func (foreignSealer) Mode() enclave.Mode { return enclave.ModeRootKey }
+
+func (foreignSealer) Destroy() error { return nil }

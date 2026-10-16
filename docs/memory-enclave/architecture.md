@@ -13,7 +13,7 @@ allocation*, never another caller's live key.
 
 ## Shape chosen
 
-One `Memory` owns one guarded mapping, built by this package over
+One memory enclave owns one guarded mapping, built by this package over
 `golang.org/x/sys` with one system call per primitive. There is no global
 coordinator on the access path: an enclave's own `sync.RWMutex` is the whole of
 its concurrency story, and a shutdown ledger (see
@@ -130,7 +130,7 @@ The per-process cost of each step, and what it does not bind, is in
 
 | Concern | File(s) |
 |---|---|
-| `Memory` (a handle on shared `memoryState`), constructors, borrow, `Freeze`, `Destroy`, `Backend` | [enclave.go](../../enclave.go) |
+| `lockedRegion` (the internal type behind `ByteAccess`, a handle on shared `memoryState`), constructors, borrow, `Freeze`, `Destroy`, `Backend` | [enclave.go](../../enclave.go) |
 | Mapping layout, canary, release sequence, `LockedSize` | [mapping.go](../../mapping.go) |
 | `HardenProcess`, `CoreDumpsDisabled` | [harden.go](../../harden.go), [harden_linux.go](../../harden_linux.go), [harden_unsupported.go](../../harden_unsupported.go); the `RLIMIT_CORE` call in the `osmem` files |
 | `Wipe` and the constant-time copy and compare | [constanttime.go](../../constanttime.go) |
@@ -210,7 +210,7 @@ generated on the heap before being moved in. For narrowing the live-memory windo
 
 ## Scope fence
 
-- No cryptography. The only primitive near a `Memory` is `crypto/rand`
+- No cryptography. The only primitive near a memory enclave is `crypto/rand`
   filling the canary.
 - No persistence and no cross-process sharing.
 - No automatic destruction (no finalizer, no fault handler).

@@ -5,7 +5,7 @@
 
 ## Problem
 
-A `Memory` holds plaintext for its whole life. Material used
+A memory enclave holds plaintext for its whole life. Material used
 intermittently — a credential opened once per request, a root key used a few
 times an hour — is then readable by a live-memory adversary for the whole
 process lifetime when it only needs to exist for the operation. Separately,
@@ -15,7 +15,7 @@ bottom-layer package importing any hardware code.
 ## Shape chosen
 
 A `Sealed` holds an **envelope** on the ordinary heap — both halves are
-ciphertext — and decrypts it into a fresh `Memory` only for an `Open`:
+ciphertext — and decrypts it into a fresh memory enclave only for an `Open`:
 
 - a per-value 32-byte **DEK**, generated into locked memory, seals the material
   with AES-256-GCM (`cipher.NewGCMWithRandomNonce`) and is destroyed before the
@@ -40,7 +40,7 @@ flowchart TB
   end
   DEK1 --> ENV["Sealed envelope<br/>ciphertext + blob (AAD)"]
   DEK2 --> ENV
-  ENV -- "Open(ctx)" --> ME["new Memory<br/>plaintext decrypted in place"]
+  ENV -- "Open(ctx)" --> ME["new memory enclave<br/>plaintext decrypted in place"]
 ```
 
 The provider seam is **two interfaces**, `KeyProtector` and `RootUnsealer`,
@@ -89,7 +89,7 @@ No mutex of a `Sealer` or `Sealed` is held across a provider call.
 ```mermaid
 flowchart LR
   IS["Sealer.initSlot<br/>one-slot channel; select on ctx.Done()<br/>serializes one initialization attempt:<br/>UnsealRoot, KEK mint, overlap cleanup,<br/>publication"] --> MU["Sealer.mu (RWMutex)<br/>read: wrap/unwrap DEKs<br/>write: publish hierarchy, rotate KEK<br/>never across a provider call"]
-  MU --> EL["Memory.mu<br/>borrows of root / KEK / DEK"]
+  MU --> EL["memoryState.mu (memory enclave)<br/>borrows of root / KEK / DEK"]
   EL --> RG["registryMu<br/>leaf: one map operation"]
   SE["Sealed.mu<br/>envelope lifecycle and snapshots<br/>(pin/unpin, Destroy, IsAlive, Openable)<br/>never held across a provider call"]
 ```
@@ -140,11 +140,11 @@ points carry the [backend seam](../backends/architecture.md) into sealing:
   a configuration where an AES key schedule would stay on the heap.
 - **`SealFrom(ctx, src)`** seals material that already sits in an enclave
   (`NewSealedFrom` for the process sealer). It borrows `src`, leaves it
-  unwiped and undestroyed, and so also seals a frozen `Memory` that `Seal`
+  unwiped and undestroyed, and so also seals a frozen memory enclave that `Seal`
   refuses: `Seal` wipes its input, and writing to a read-only page kills the
   process.
 - **`OpenIn(ctx, b)`** opens into any backend that can hold the material
-  instead of only a new `Memory`. Locked memory and an `Allocator` are
+  instead of only a new memory enclave. Locked memory and an `Allocator` are
   decrypted into directly (the allocator admits the destination against its
   budget). Any other `Importer` receives the plaintext from a locked scratch
   enclave that is destroyed once the import returns, so plaintext still never
@@ -167,7 +167,7 @@ flowchart LR
   UNW --> DEK2["DEK, fresh, locked"]
   DEK2 --> DEC["AES-256-GCM open, blob as AAD"]
   CT --> DEC
-  DEC -->|"decrypted in place"| DST["locked Memory, a budgeted allocation,<br/>or a scratch enclave imported into another backend"]
+  DEC -->|"decrypted in place"| DST["memory enclave, a budgeted allocation,<br/>or a scratch enclave imported into another backend"]
 ```
 
 - **Seal.** The caller's slice (or the source enclave, read under its own

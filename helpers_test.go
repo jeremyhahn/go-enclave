@@ -72,21 +72,21 @@ func resetProcessSealerForTest() {
 // unpublishedCopy is NewMemory without the WipeAll ledger, for a test
 // that leaves the pages held on purpose: a ledger entry would leak into every
 // WipeAll test. data is wiped.
-func unpublishedCopy(data []byte) (*Memory, error) {
+func unpublishedCopy(data []byte) (*lockedRegion, error) {
 	defer Wipe(data)
 	return unpublished(newFrozenCopy(data))
 }
 
 // unpublishedSized is NewMemorySized without the ledger, as above.
-func unpublishedSized(n int) (*Memory, error) {
+func unpublishedSized(n int) (*lockedRegion, error) {
 	return unpublished(newMapping(n))
 }
 
-func unpublished(m *mapping, err error) (*Memory, error) {
+func unpublished(m *mapping, err error) (*lockedRegion, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Memory{memoryState: &memoryState{m: m}}, nil
+	return &lockedRegion{memoryState: &memoryState{m: m}}, nil
 }
 
 // reset clears the slot; only tests may, because replacing a live value

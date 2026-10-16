@@ -1,10 +1,10 @@
 # go-enclave
 
-A locked-memory primitive for Go. `Memory` is a region of locked,
-zeroized memory for holding sensitive material — private keys, credentials,
+A locked-memory primitive for Go. A memory enclave, held as a `ByteAccess`,
+is a region of locked, zeroized memory for holding sensitive material — private keys, credentials,
 passphrases, tokens — for its whole lifetime in the process. `Sealed`
 holds the same kind of material encrypted at rest and decrypts it into a fresh
-`Memory` only while a caller has it open.
+memory enclave only while a caller has it open.
 
 It is built to sit at the bottom of a dependency graph so libraries that handle
 key material can share one implementation. Each enclave is `mlock`'d, fenced by

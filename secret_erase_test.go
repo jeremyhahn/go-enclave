@@ -32,7 +32,7 @@ func TestWithAEAD_ErasesTheKeyScheduleUnderRuntimeSecret(t *testing.T) {
 	// sealOnce performs one AES-GCM seal under a fresh random key held in
 	// locked memory, through run, and returns probe enclaves holding the key in
 	// both stored forms so the needle is never a heap value.
-	sealOnce := func(t *testing.T, run func(ByteAccess, func(cipher.AEAD) error) error) (exact, swapped *Memory) {
+	sealOnce := func(t *testing.T, run func(ByteAccess, func(cipher.AEAD) error) error) (exact, swapped *lockedRegion) {
 		t.Helper()
 		key, err := newMemorySized(dekBytes)
 		if err != nil {
@@ -83,7 +83,7 @@ func TestWithAEAD_ErasesTheKeyScheduleUnderRuntimeSecret(t *testing.T) {
 		return exact, swapped
 	}
 
-	residue := func(t *testing.T, probe *Memory) []string {
+	residue := func(t *testing.T, probe *lockedRegion) []string {
 		t.Helper()
 		var home uintptr
 		if err := probe.WithBytes(func(b []byte) error {

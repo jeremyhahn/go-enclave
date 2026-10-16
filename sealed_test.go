@@ -85,7 +85,7 @@ func TestSealed_RoundTrip(t *testing.T) {
 // that hands out a [ByteAccess], and a nil interface on failure.
 func TestNewSealed_ReturnsTheInterface(t *testing.T) {
 	freshProcessSealer(t)
-	s, err := NewSealer()
+	s, err := newEnvelopeSealer()
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
@@ -121,8 +121,8 @@ func TestNewSealed_ReturnsTheInterface(t *testing.T) {
 				t.Fatalf("%s: Open: %v", name, err)
 			}
 			defer e.Destroy()
-			if _, ok := e.(*Memory); !ok {
-				t.Errorf("%s: Open returned a %T, want *Memory", name, e)
+			if _, ok := e.(*lockedRegion); !ok {
+				t.Errorf("%s: Open returned a %T, want *lockedRegion", name, e)
 			}
 			if !holds(e, []byte("material")) {
 				t.Errorf("%s: the opened enclave does not hold the material", name)
@@ -133,7 +133,7 @@ func TestNewSealed_ReturnsTheInterface(t *testing.T) {
 	failing := map[string]func() (Sealed, error){
 		"NewSealed":     func() (Sealed, error) { return NewSealed(ctx, nil) },
 		"NewSealedFrom": func() (Sealed, error) { return NewSealedFrom(ctx, nil) },
-		"Sealer.Seal":   func() (Sealed, error) { return (*Sealer)(nil).Seal(ctx, []byte("material")) },
+		"Sealer.Seal":   func() (Sealed, error) { return (*envelopeSealer)(nil).Seal(ctx, []byte("material")) },
 		"SealFrom":      func() (Sealed, error) { return s.SealFrom(ctx, nil) },
 	}
 	for name, ctor := range failing {
@@ -603,7 +603,7 @@ func TestSealed_OversizedMaterialIsRefusedNotPanicked(t *testing.T) {
 
 func TestEnclaves_GoStringIsRedacted(t *testing.T) {
 	ctx := t.Context()
-	s, err := NewSealer()
+	s, err := newEnvelopeSealer()
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
@@ -620,7 +620,7 @@ func TestEnclaves_GoStringIsRedacted(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 	if got := fmt.Sprintf("%#v", e); got != "Memory(redacted)" {
-		t.Errorf("%%#v of a Memory = %q, want the redacted form", got)
+		t.Errorf("%%#v of a memory enclave = %q, want the redacted form", got)
 	}
 	_ = e.Destroy()
 	v.Destroy()
@@ -686,7 +686,7 @@ func TestSealed_WipeAllFailsClosed(t *testing.T) {
 
 	// The package-level surface is bricked on purpose — the one-shot
 	// installer cannot swap in a replacement under (dead) sealed values.
-	replacement, err := NewSealer()
+	replacement, err := newEnvelopeSealer()
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
@@ -723,7 +723,7 @@ func sweepForOpenableTest(t *testing.T) {
 // value reporting IsAlive (its ciphertext is untouched) while Openable reports
 // ErrSealerWiped, in agreement with Open.
 func TestSealed_OpenableReportsTheSweep(t *testing.T) {
-	s, err := NewSealer() // software provider, ModeRootKey
+	s, err := newEnvelopeSealer() // software provider, ModeRootKey
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
@@ -770,7 +770,7 @@ func TestSealed_OpenableReportsTheSweep(t *testing.T) {
 // value reports ErrSealerWiped, distinguishable from a destroyed value's
 // ErrEnclaveDestroyed.
 func TestSealed_OpenableSeparatesASweepFromADestroy(t *testing.T) {
-	s, err := NewSealer()
+	s, err := newEnvelopeSealer()
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
@@ -803,7 +803,7 @@ func TestSealed_OpenableSeparatesASweepFromADestroy(t *testing.T) {
 // TestSealed_OpenableOnDestroyedAndNilValues covers the lifecycle
 // answers, including the nil receiver every method on this type accepts.
 func TestSealed_OpenableOnDestroyedAndNilValues(t *testing.T) {
-	s, err := NewSealer()
+	s, err := newEnvelopeSealer()
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
@@ -840,7 +840,7 @@ func TestSealed_OpenableSplitsByMode(t *testing.T) {
 	t.Run("deviceHeldKeySurvivesTheSweep", func(t *testing.T) {
 		// The provider reports its health, so its answer overrides the
 		// sweep-generation fallback; compare reportsNothingAfterASweep below.
-		s, err := NewSealer(
+		s, err := newEnvelopeSealer(
 			WithKeyProtector(healthyProtector{newMapKeyProtector(t)}),
 		)
 		if err != nil {
@@ -872,7 +872,7 @@ func TestSealed_OpenableSplitsByMode(t *testing.T) {
 	})
 
 	t.Run("softwareProviderRootDoesNot", func(t *testing.T) {
-		s, err := NewSealer(WithKeyProtector(newSoftwareProvider()))
+		s, err := newEnvelopeSealer(WithKeyProtector(newSoftwareProvider()))
 		if err != nil {
 			t.Fatalf("NewSealer: %v", err)
 		}
@@ -903,7 +903,7 @@ func TestSealed_OpenableSplitsByMode(t *testing.T) {
 // TestWipeAll_DoesNotSweepSealeds pins that WipeAll's count excludes
 // sealed values: they hold no locked memory; the sealer's keys do.
 func TestWipeAll_DoesNotSweepSealeds(t *testing.T) {
-	s, err := NewSealer()
+	s, err := newEnvelopeSealer()
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
@@ -958,7 +958,7 @@ func TestSealed_OpenableClosesTheExternalProviderFailOpen(t *testing.T) {
 		t.Fatal("provider satisfies HealthReporter; it no longer stands in for one that reports nothing")
 	}
 
-	s, err := NewSealer(WithKeyProtector(p))
+	s, err := newEnvelopeSealer(WithKeyProtector(p))
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
@@ -999,7 +999,7 @@ func TestSealed_OpenableClosesTheExternalProviderFailOpen(t *testing.T) {
 // override it, so a provider can still report nil after a sweep.
 func TestSealed_OpenableBelievesAProviderThatReports(t *testing.T) {
 	t.Run("reportsHealthyAfterASweep", func(t *testing.T) {
-		s, err := NewSealer(
+		s, err := newEnvelopeSealer(
 			WithKeyProtector(healthyProtector{newMapKeyProtector(t)}),
 		)
 		if err != nil {
@@ -1028,7 +1028,7 @@ func TestSealed_OpenableBelievesAProviderThatReports(t *testing.T) {
 
 	t.Run("reportsWipedAfterASweep", func(t *testing.T) {
 		p := newEnclaveBackedProtector(t)
-		s, err := NewSealer(
+		s, err := newEnvelopeSealer(
 			WithKeyProtector(reportingProtector{p}),
 		)
 		if err != nil {
@@ -1064,7 +1064,7 @@ func TestSealed_OpenableBelievesAProviderThatReports(t *testing.T) {
 // returns nil.
 func TestSealed_OpenableUnknownOnlyAfterASweep(t *testing.T) {
 	p := newEnclaveBackedProtector(t)
-	s, err := NewSealer(WithKeyProtector(p))
+	s, err := newEnvelopeSealer(WithKeyProtector(p))
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
@@ -1105,7 +1105,7 @@ func TestSealed_OpenableGenerationDoesNotAffectModeRootKey(t *testing.T) {
 	// Bump the generation before sealing so a value exists that was sealed
 	// under an older generation than the current one — the precondition the
 	// fallback triggers on — without wiping this sealer's own hierarchy.
-	s, err := NewSealer()
+	s, err := newEnvelopeSealer()
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
@@ -1211,7 +1211,7 @@ func TestSealed_OpenableSuspectsASealThatOverlappedASweep(t *testing.T) {
 	freshProcessSealer(t)
 
 	p := newEnclaveBackedProtector(t)
-	s, err := NewSealer(WithKeyProtector(p))
+	s, err := newEnvelopeSealer(WithKeyProtector(p))
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
@@ -1287,7 +1287,7 @@ func TestSealer_ProviderHealthIsIgnoredInRootKeyMode(t *testing.T) {
 	freshProcessSealer(t)
 
 	called := false
-	s, err := NewSealer(WithRootUnsealer(wipedReportingUnsealer{newSoftwareProvider(), &called}))
+	s, err := newEnvelopeSealer(WithRootUnsealer(wipedReportingUnsealer{newSoftwareProvider(), &called}))
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
@@ -1374,21 +1374,21 @@ func openBudget(pages int64) int64 {
 	return LockedSize(1) * pages
 }
 
-// openInAllocator is v.OpenIn(ctx, a), as the *Memory it returns for an
+// openInAllocator is v.OpenIn(ctx, a), as the *lockedRegion it returns for an
 // *budgetAllocator.
-func openInAllocator(ctx context.Context, v *sealedValue, a *budgetAllocator) (*Memory, error) {
+func openInAllocator(ctx context.Context, v *sealedValue, a *budgetAllocator) (*lockedRegion, error) {
 	h, err := v.OpenIn(ctx, a)
 	if err != nil {
 		return nil, err
 	}
-	return h.(*Memory), nil
+	return h.(*lockedRegion), nil
 }
 
 // sealForBudgetTest returns a sealed value under a private ModeRootKey sealer,
 // so nothing here depends on (or disturbs) the process sealer.
 func sealForBudgetTest(t *testing.T) *sealedValue {
 	t.Helper()
-	s, err := NewSealer()
+	s, err := newEnvelopeSealer()
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
@@ -1597,7 +1597,7 @@ func TestSealed_OpenInRefusesWhatTheBudgetCannotCover(t *testing.T) {
 // refusal came first.
 func TestSealed_OpenInGatesOnTheDestination(t *testing.T) {
 	kp := newMapKeyProtector(t)
-	s, err := NewSealer(WithKeyProtector(kp))
+	s, err := newEnvelopeSealer(WithKeyProtector(kp))
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
@@ -1687,7 +1687,7 @@ func TestSealed_OpenInConcurrentCallersDoNotStarveEachOther(t *testing.T) {
 	const rounds, goroutines = 20, 8
 	for round := 0; round < rounds; round++ {
 		var wg sync.WaitGroup
-		opened := make(chan *Memory, goroutines)
+		opened := make(chan *lockedRegion, goroutines)
 		refused := make(chan error, goroutines)
 		start := make(chan struct{})
 
@@ -1744,7 +1744,7 @@ func TestSealed_OpenInConcurrentCallersDoNotStarveEachOther(t *testing.T) {
 func TestSealed_OpenInOnARetiredGeneration(t *testing.T) {
 	short := []byte("short-credential")
 
-	s, err := NewSealer() // software provider, ModeRootKey
+	s, err := newEnvelopeSealer() // software provider, ModeRootKey
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
@@ -1866,7 +1866,7 @@ func TestSealed_OpenInOnADestroyedValue(t *testing.T) {
 // what this proves is that the DEK and the destination are still admitted when
 // a device — not an in-process hierarchy — supplies the key.
 func TestSealed_OpenInPerOperationMode(t *testing.T) {
-	s, err := NewSealer(WithKeyProtector(newMapKeyProtector(t)))
+	s, err := newEnvelopeSealer(WithKeyProtector(newMapKeyProtector(t)))
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
@@ -1908,7 +1908,7 @@ func TestSealed_NoForeignBytesConstructor(t *testing.T) {
 	// combine bytes-in with *sealedValue-out.
 	allowed := map[string]bool{
 		"NewSealed": true, // package-level, process sealer
-		"Seal":      true, // (*Sealer), explicit sealer
+		"Seal":      true, // (*envelopeSealer), explicit sealer
 	}
 
 	entries, err := os.ReadDir(".")

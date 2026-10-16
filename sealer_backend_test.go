@@ -91,7 +91,7 @@ func (b *fakeImporter) Import(_ context.Context, material []byte, opts ...Import
 	case importOpaque:
 		h = &opaqueHandle{m: m, b: b}
 	default:
-		h = &importedBytes{Memory: m, b: b}
+		h = &importedBytes{lockedRegion: m, b: b}
 	}
 	b.handles = append(b.handles, h)
 	return h, nil
@@ -107,7 +107,7 @@ func (b *fakeImporter) imported() ([]ImportSpec, []Handle) {
 
 // importedBytes is a ByteAccess handle of a fakeImporter.
 type importedBytes struct {
-	*Memory
+	*lockedRegion
 	b Backend
 }
 
@@ -115,7 +115,7 @@ func (h *importedBytes) Backend() Backend { return h.b }
 
 // opaqueHandle is a handle with neither ByteAccess nor AEAD.
 type opaqueHandle struct {
-	m *Memory
+	m *lockedRegion
 	b Backend
 }
 
@@ -196,7 +196,7 @@ func (namedBackend) Name() string { return "named-backend" }
 
 func sealForSeamTest(t *testing.T, material []byte) *sealedValue {
 	t.Helper()
-	s, err := NewSealer()
+	s, err := newEnvelopeSealer()
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
@@ -219,9 +219,9 @@ func TestSealed_OpenInTheDefaultBackend(t *testing.T) {
 		t.Fatalf("OpenIn: %v", err)
 	}
 	defer h.Destroy()
-	m, ok := h.(*Memory)
+	m, ok := h.(*lockedRegion)
 	if !ok {
-		t.Fatalf("OpenIn(DefaultBackend()) returned a %T, want a *Memory", h)
+		t.Fatalf("OpenIn(DefaultBackend()) returned a %T, want a *lockedRegion", h)
 	}
 	if !holds(m, material) {
 		t.Fatal("OpenIn opened the wrong material")
@@ -303,24 +303,24 @@ func TestSealed_OpenInRefusals(t *testing.T) {
 
 // TestSealer_WithBackendIsValidated pins NewSealer's checks of WithBackend.
 func TestSealer_WithBackendIsValidated(t *testing.T) {
-	if _, err := NewSealer(WithBackend(nil)); !errors.Is(err, ErrInvalidBackend) {
+	if _, err := newEnvelopeSealer(WithBackend(nil)); !errors.Is(err, ErrInvalidBackend) {
 		t.Errorf("WithBackend(nil) = %v, want ErrInvalidBackend", err)
 	}
-	if _, err := NewSealer(WithBackend((*fakeImporter)(nil))); !errors.Is(err, ErrInvalidBackend) {
+	if _, err := newEnvelopeSealer(WithBackend((*fakeImporter)(nil))); !errors.Is(err, ErrInvalidBackend) {
 		t.Errorf("WithBackend(typed nil) = %v, want ErrInvalidBackend", err)
 	}
-	_, err := NewSealer(WithBackend(namedBackend{}))
+	_, err := newEnvelopeSealer(WithBackend(namedBackend{}))
 	requireCapability(t, err, "named-backend", CapabilityImport)
 
 	// A per-operation sealer holds no keys of its own, so it imports nothing.
-	s, err := NewSealer(WithKeyProtector(newMapKeyProtector(t)), WithBackend(namedBackend{}))
+	s, err := newEnvelopeSealer(WithKeyProtector(newMapKeyProtector(t)), WithBackend(namedBackend{}))
 	if err != nil {
 		t.Fatalf("WithBackend on a per-operation sealer: %v", err)
 	}
 	_ = s.Destroy()
 
 	// The default backend keeps the keys in this process's locked memory.
-	s, err = NewSealer(WithBackend(DefaultBackend()))
+	s, err = newEnvelopeSealer(WithBackend(DefaultBackend()))
 	if err != nil {
 		t.Fatalf("WithBackend(DefaultBackend()): %v", err)
 	}
@@ -330,8 +330,8 @@ func TestSealer_WithBackendIsValidated(t *testing.T) {
 		t.Fatalf("Seal: %v", err)
 	}
 	defer v.Destroy()
-	if _, ok := s.root.(*Memory); !ok {
-		t.Fatalf("the wrapping key is a %T, want a *Memory", s.root)
+	if _, ok := s.root.(*lockedRegion); !ok {
+		t.Fatalf("the wrapping key is a %T, want a *lockedRegion", s.root)
 	}
 }
 
@@ -344,7 +344,7 @@ func TestSealer_KeysLiveInTheBackend(t *testing.T) {
 		t.Run(mode.String(), func(t *testing.T) {
 			ctx := t.Context()
 			b := &fakeImporter{keys: mode}
-			s, err := NewSealer(WithBackend(b), WithKEKRotationLimit(2))
+			s, err := newEnvelopeSealer(WithBackend(b), WithKEKRotationLimit(2))
 			if err != nil {
 				t.Fatalf("NewSealer: %v", err)
 			}
@@ -404,7 +404,7 @@ func TestSealer_KeysLiveInTheBackend(t *testing.T) {
 func TestSealer_KeyHandleWithoutAEADOrBytesIsRefused(t *testing.T) {
 	for _, mode := range []importMode{importOpaque, importNil} {
 		b := &fakeImporter{keys: mode}
-		s, err := NewSealer(WithBackend(b))
+		s, err := newEnvelopeSealer(WithBackend(b))
 		if err != nil {
 			t.Fatalf("NewSealer: %v", err)
 		}

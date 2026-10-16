@@ -23,7 +23,7 @@ import (
 // mapping, named or not. The control comes first: with the enclaves alive the
 // material must be found outside the needle's own mapping.
 func TestWipeAll_LeavesNoResidentMaterial(t *testing.T) {
-	// The needle lives in a raw mapping, not a Memory: WipeAll would
+	// The needle lives in a raw mapping, not a lockedRegion: WipeAll would
 	// destroy an enclave holding it, and a []byte literal would put it on the heap.
 	m, err := newMapping(64)
 	if err != nil {

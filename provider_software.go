@@ -27,7 +27,7 @@ const softwareProtectKeyInfo = "go-enclave v1 SoftwareProvider Protect key"
 // ships. It implements [RootUnsealer] (the default for [ModeRootKey]),
 // [KeyProtector] (AES-GCM under a key derived from the root, for tests and
 // development of [ModePerOperation]) and [HealthReporter]. Its root is
-// generated into a locked [Memory] at first use, and the Protect key,
+// generated into a memory enclave at first use, and the Protect key,
 // HKDF-SHA256 of the root under its own info, at the first Protect.
 //
 // Because the root lives in this process, a reader of this process's live
@@ -74,10 +74,10 @@ type softwareState struct {
 	// root is created on first use and retried on failure, since a
 	// RLIMIT_MEMLOCK refusal can lift. Non-nil but dead means a sweep
 	// destroyed it, and it must not be regenerated.
-	root *Memory
+	root *lockedRegion
 	// protectKey is derived from root at the first Protect, and is dead
 	// exactly when root is.
-	protectKey *Memory
+	protectKey *lockedRegion
 	// protects counts Protect attempts, charged before each so a failed one
 	// still counts; only encryptions count against the bound.
 	protects uint64
@@ -115,7 +115,7 @@ func (p *softwareProvider) state() (*softwareState, error) {
 
 // rootLocked returns the root enclave, generating it on first use. The
 // caller holds s.mu.
-func (s *softwareState) rootLocked() (*Memory, error) {
+func (s *softwareState) rootLocked() (*lockedRegion, error) {
 	root, err := s.liveRootLocked()
 	if err != nil || root != nil {
 		return root, err
@@ -129,7 +129,7 @@ func (s *softwareState) rootLocked() (*Memory, error) {
 
 // protectKeyLocked returns the Protect key, deriving it, and the root, on
 // first use. The caller holds s.mu.
-func (s *softwareState) protectKeyLocked() (*Memory, error) {
+func (s *softwareState) protectKeyLocked() (*lockedRegion, error) {
 	root, err := s.rootLocked()
 	if err != nil || s.protectKey != nil {
 		return s.protectKey, err
@@ -147,7 +147,7 @@ func (s *softwareState) protectKeyLocked() (*Memory, error) {
 // random, so no salt is needed; the info alone separates the two keys. The
 // HKDF output and HMAC state are heap memory, wiped or erased as for an AES
 // key schedule.
-func deriveProtectKey(root *Memory) (*Memory, error) {
+func deriveProtectKey(root *lockedRegion) (*lockedRegion, error) {
 	k, err := newMemorySized(RootKeyBytes)
 	if err != nil {
 		return nil, err
@@ -177,7 +177,7 @@ func deriveProtectKey(root *Memory) (*Memory, error) {
 // [ErrSealerDestroyed] after Destroy, [ErrSealerWiped] once a shutdown sweep
 // has destroyed the root or the Protect key, and otherwise the root, nil
 // before first use. The caller holds s.mu.
-func (s *softwareState) liveRootLocked() (*Memory, error) {
+func (s *softwareState) liveRootLocked() (*lockedRegion, error) {
 	switch {
 	case s.destroyed:
 		return nil, ErrSealerDestroyed

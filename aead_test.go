@@ -184,7 +184,7 @@ const fuzzSealMax = 64 << 10
 // up to its limit and refuses every size over it with ErrMaterialTooLarge,
 // for any int width from 32 to 64 bits.
 func FuzzSealOpenRoundTrip(f *testing.F) {
-	s, err := NewSealer()
+	s, err := newEnvelopeSealer()
 	if err != nil {
 		f.Fatalf("NewSealer: %v", err)
 	}
@@ -239,7 +239,7 @@ func FuzzSealOpenRoundTrip(f *testing.F) {
 		}
 		defer func() {
 			if err := m.Destroy(); err != nil {
-				t.Errorf("Memory.Destroy: %v", err)
+				t.Errorf("Destroy: %v", err)
 			}
 		}()
 		if err := m.WithBytes(func(got []byte) error {

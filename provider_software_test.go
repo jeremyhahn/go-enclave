@@ -373,7 +373,7 @@ func TestNewSoftwareProvider_ReturnsTheInterface(t *testing.T) {
 	if _, ok := p.(*softwareProvider); !ok {
 		t.Fatalf("NewSoftwareProvider returned a %T, want *softwareProvider", p)
 	}
-	s, err := NewSealer(WithKeyProtector(p))
+	s, err := newEnvelopeSealer(WithKeyProtector(p))
 	if err != nil {
 		t.Fatalf("NewSealer(WithKeyProtector): %v", err)
 	}

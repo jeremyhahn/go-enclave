@@ -439,7 +439,7 @@ func (u *gatedRootUnsealer) callCount() int {
 // enclaveBackedProtector is a KeyProtector that keeps its key in this
 // process's locked memory and does not implement [HealthReporter], standing in
 // for a third-party provider that reports nothing.
-type enclaveBackedProtector struct{ key *Memory }
+type enclaveBackedProtector struct{ key *lockedRegion }
 
 func newEnclaveBackedProtector(t *testing.T) *enclaveBackedProtector {
 	t.Helper()

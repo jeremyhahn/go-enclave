@@ -20,7 +20,7 @@ ruling on #188 ([runtime testing](memory-enclave/runtime-testing.md)).
 
 | Feature | What it covers |
 |---|---|
-| [memory-enclave](memory-enclave/user.md) | `Memory`: constructors, borrowing, `Freeze`, `Destroy` and canary corruption, guard pages and canary, platform and core-dump matrix |
+| [memory-enclave](memory-enclave/user.md) | The memory enclave, held as a `ByteAccess`: constructors, borrowing, `Freeze` through `As`, `Destroy` and canary corruption, guard pages and canary, platform and core-dump matrix |
 | [locked-memory-budget](locked-memory-budget/user.md) | `Allocator`, `RLIMIT_MEMLOCK` discovery, retuning, the process allocator, refunds for failed constructions |
 | [sealing](sealing/user.md) | `Sealed`, `Sealer` modes, the `KeyProtector`/`RootUnsealer` seam, contexts, `Openable`, FIPS, the key-schedule heap exposure and its erasure under `runtime/secret` |
 | [shutdown-sweep](shutdown-sweep/user.md) | `WipeAll(ctx)`: admission, waiting for borrows, termination, the count and `SweepError` |
@@ -48,7 +48,7 @@ are no deprecated aliases; rename with a search and replace.
 
 | v0.8 | v0.9 |
 |---|---|
-| `MemoryEnclave` | `Memory` |
+| `MemoryEnclave` | none: hold `ByteAccess` ([below](#constructors-return-interfaces)) |
 | `NewMemoryEnclave`, `NewMemoryEnclaveCopy`, `NewMemoryEnclaveSized` | `NewMemory`, `NewMemoryCopy`, `NewMemorySized` |
 | `SealedEnclave` | `Sealed` |
 | `(*SealedEnclave).OpenWith(ctx, a)` | `Sealed.OpenIn(ctx, a)` |
@@ -58,23 +58,27 @@ are no deprecated aliases; rename with a search and replace.
 
 Every constructor hands out an interface, never a pointer to a concrete type.
 `Sealed`, `Allocator` and `SoftwareProvider` keep their names but are now
-interfaces; their implementations are internal. `Memory` stays exported.
+interfaces; their implementations are internal.
 
 | Function (v0.9 name) | v0.8 returned | v0.9 returns |
 |---|---|---|
-| `NewMemory`, `NewMemoryCopy`, `NewMemorySized` | `*Memory` | `ByteAccess` |
-| `NewSealed`, `NewSealedFrom`, `(*Sealer).Seal`, `(*Sealer).SealFrom` | `*Sealed` | `Sealed` |
-| `Sealed.Open` | `*Memory` | `ByteAccess` |
+| `NewMemory`, `NewMemoryCopy`, `NewMemorySized` | `*MemoryEnclave` | `ByteAccess` |
+| `NewSealed`, `NewSealedFrom`, `Sealer.Seal`, `Sealer.SealFrom` | `*Sealed` | `Sealed` |
+| `Sealed.Open` | `*MemoryEnclave` | `ByteAccess` |
 | `NewAllocator`, `NewAllocatorWithinRLimit`, `ProcessAllocator` | `*Allocator` | `Allocator` |
-| `Allocator.New`, `Allocator.NewSized` | `*Memory` | `ByteAccess` |
+| `Allocator.New`, `Allocator.NewSized` | `*MemoryEnclave` | `ByteAccess` |
 | `NewSoftwareProvider` | `*SoftwareProvider` | `SoftwareProvider` |
 
 `SetAllocator` and `Allocator.TransferTo` take an `Allocator`. Replace
 `*enclave.Sealed`, `*enclave.Allocator` and `*enclave.SoftwareProvider` in
-declarations with the interface name, and `*enclave.Memory` with
+declarations with the interface name, and `*enclave.MemoryEnclave` with
 `enclave.ByteAccess`. A failed call returns a nil interface, so `x == nil`
 checks are unchanged.
 
+- **`enclave.Memory` is gone.** The type behind a memory enclave is internal;
+  hold the `ByteAccess` its constructors, `Sealed.Open` and `Allocator.New`
+  return, and use `As` for `Freeze`, below. A nil or zero enclave can no
+  longer be declared.
 - **Freeze through `Freezer`.** `ByteAccess` has no `Freeze`; reach it with
   `As`:
 
@@ -96,6 +100,12 @@ checks are unchanged.
   `ErrAllocatorNotConstructed`; nil is still `ErrNilAllocator` and
   `ErrInvalidTransfer`. A nil `Allocator` given to `Sealed.OpenIn` is a nil
   `Backend` and returns `ErrInvalidBackend`, was `ErrNilAllocator`.
+- **`Sealer` is an interface.** `*enclave.Sealer` becomes `enclave.Sealer`:
+  `NewSealer` returns it and `SetSealer` takes it. Callers drop the `*`, and
+  nothing else changes. `SetSealer` refuses another implementation with
+  `ErrSealerNotConstructed` and a typed-nil one with `ErrNilSealer`; with no
+  zero `Sealer` to declare, `Seal` and `SealFrom` no longer return
+  `ErrSealerNotConstructed` or `ErrNilSealer`.
 - **Zero values and nil receivers are gone.** No caller can declare a zero
   `Sealed`, `Allocator` or `SoftwareProvider` any more, so
   `ErrProviderNotConstructed` and a zero `Allocator{}`'s
@@ -126,11 +136,9 @@ the new step, and its failure is a `*ProcessHardeningError` whose `Cause` is a
 `*CoreDumpLimitError` (`ErrCoreDumpLimitFailed`). A binary that wants only the
 core limit, not the non-dumpable flag, must now weigh both.
 
-**`Memory` and `Allocator` values share their state.** A copied value was a
-second, independent handle: `Destroy` through one left the other reporting a
-live enclave over unmapped pages, and a copied `Allocator` could admit the same
-headroom twice. A copy now reaches the same enclave or budget, and `go vet`
-reports it. Build an `Allocator` with `NewAllocator` and pass the interface it
+**`Allocator` values share their state.** A copied value was a second,
+independent budget that could admit the same headroom twice. A copy now
+reaches the same budget, and `go vet` reports it. Build an `Allocator` with `NewAllocator` and pass the interface it
 returns.
 
 **`Destroy` of a writable enclave whose `mprotect` is refused returns `nil`**,
@@ -160,12 +168,11 @@ inside `e.WithBytes` used to crash on the read-only pages; it now fails with
 `ErrSealSourceReadOnly`. Use `NewSealedFrom(ctx, e)`, which leaves `e`
 intact.
 
-**`Sealer` and `Sealed` values share their state too**, as `Memory` and
-`Allocator` do above. Pass the `*Sealer` and the `Sealed` interface.
+**`Sealer` and `Sealed` values share their state too**, as `Allocator`
+does above. Pass the `Sealer` and `Sealed` interfaces.
 
-**`SetSealer` refuses a zero-value or destroyed `Sealer`** with
-`ErrSealerNotConstructed` or `ErrSealerDestroyed`, and **`NewSealer` refuses a
-nil option** with `ErrInvalidSealerOption`.
+**`SetSealer` refuses a destroyed `Sealer`** with `ErrSealerDestroyed`, and
+**`NewSealer` refuses a nil option** with `ErrInvalidSealerOption`.
 
 #### Errors
 
