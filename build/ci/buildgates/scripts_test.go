@@ -933,11 +933,12 @@ func toolEnv(t *testing.T, bin string, over map[string]string) map[string]string
 		"exit 1\n"
 	writeExecutable(t, goCmd, []byte(goScript))
 	env := map[string]string{
-		"PATH":         bin + ":" + isolatedPath(t),
-		"TOOL_INSTALL": "0",
-		"TOOLS_DIR":    "",
-		"TOOLCHAIN":    "go1.27.1",
-		"GO":           goCmd,
+		"PATH":           bin + ":" + isolatedPath(t),
+		"TOOL_INSTALL":   "0",
+		"TOOLS_DIR":      "",
+		"TOOLCHAIN":      "go1.27.1",
+		"GO":             goCmd,
+		"XTOOLS_VERSION": "v0.52.0",
 	}
 	for _, k := range []string{"TRIVY", "SHELLCHECK"} {
 		for _, kind := range []string{"SHA256", "BIN_SHA256"} {
@@ -1134,6 +1135,40 @@ func fakeGo(t *testing.T, log string) string {
 	return p
 }
 
+// gosecBuild is the first go call of a gosec install: tool.sh builds it in a
+// throwaway module (build_gosec), so fakeGo's log shows a reinstall as this.
+const gosecBuild = " mod init gosec-build"
+
+// gosec is built against the pinned golang.org/x/tools, not the one its go.mod
+// names, and keeps the version stamp tool.sh verifies it by.
+func TestScriptsToolResolve_GosecBuildsAgainstThePinnedXTools(t *testing.T) {
+	log := filepath.Join(t.TempDir(), "go.log")
+	goCmd := filepath.Join(t.TempDir(), "go")
+	writeExecutable(t, goCmd, []byte("#!/bin/sh\n"+
+		"echo \"GOTOOLCHAIN=$GOTOOLCHAIN CGO_ENABLED=${CGO_ENABLED-} $*\" >> "+log+"\n"+
+		"case $1 in mod|get) exit 0 ;; esac\n"+
+		"exit 1\n"))
+	env := toolEnv(t, t.TempDir(), map[string]string{
+		"TOOL_INSTALL": "1", "TOOLS_DIR": t.TempDir(), "GO": goCmd,
+		// As the devcontainer sets it (-race needs cgo): the install still
+		// builds a static gosec.
+		"CGO_ENABLED": "1",
+	})
+	out, ok := runScript(t, t.TempDir(), env, "tool.sh", "gosec", "v2.29.0")
+	calls, _ := os.ReadFile(log)
+	want := "GOTOOLCHAIN=go1.27.1 CGO_ENABLED=1 mod init gosec-build\n" +
+		"GOTOOLCHAIN=go1.27.1 CGO_ENABLED=1 get github.com/securego/gosec/v2/cmd/gosec@v2.29.0 golang.org/x/tools@v0.52.0\n" +
+		"GOTOOLCHAIN=go1.27.1 CGO_ENABLED=0 install -ldflags -X main.Version=v2.29.0 github.com/securego/gosec/v2/cmd/gosec\n"
+	if ok || string(calls) != want || !strings.Contains(out, "against golang.org/x/tools v0.52.0 failed") {
+		t.Fatalf("gosec was not built in a module raising x/tools (ok=%v, go calls %q):\n%s", ok, calls, out)
+	}
+
+	env["XTOOLS_VERSION"] = "latest"
+	if out, ok := runScript(t, t.TempDir(), env, "tool.sh", "gosec", "v2.29.0"); ok || !strings.Contains(out, "XTOOLS_VERSION 'latest' is not a pinned") {
+		t.Fatalf("built gosec against an unpinned x/tools (ok=%v):\n%s", ok, out)
+	}
+}
+
 func copyExec(t *testing.T, src, dst string) {
 	t.Helper()
 	b, err := os.ReadFile(src)
@@ -1300,27 +1335,27 @@ func TestScriptsToolResolve_GoToolCacheIsKeyedByToolchain(t *testing.T) {
 	// Another toolchain: a different cache entry, so an install under that
 	// toolchain.
 	out, ok, calls = run(other)
-	if ok || !strings.Contains(calls, "GOTOOLCHAIN="+other+" install") {
+	if ok || !strings.Contains(calls, "GOTOOLCHAIN="+other+gosecBuild) {
 		t.Fatalf("toolchain %s did not force a reinstall under it (ok=%v, go calls %q):\n%s", other, ok, calls, out)
 	}
 
 	// The same binary copied into the other toolchain's directory: its build
 	// metadata says otherwise, so it is not trusted on its path.
 	copyExec(t, built, filepath.Join(tools, "gosec-v2.29.0-"+other, "gosec"))
-	if out, ok, calls = run(other); ok || !strings.Contains(calls, " install") {
+	if out, ok, calls = run(other); ok || !strings.Contains(calls, gosecBuild) {
 		t.Fatalf("trusted a binary whose build metadata names %s under %s (ok=%v, go calls %q):\n%s", toolchain, other, ok, calls, out)
 	}
 
 	// A script with the right name and output but no build metadata at all.
 	fakeTool(t, filepath.Join(tools, "gosec-v2.29.0-"+toolchain), "gosec", "Version: v2.29.0")
-	if out, ok, calls = run(toolchain); ok || !strings.Contains(calls, " install") {
+	if out, ok, calls = run(toolchain); ok || !strings.Contains(calls, gosecBuild) {
 		t.Fatalf("trusted a cached binary with no Go build metadata (ok=%v, go calls %q):\n%s", ok, calls, out)
 	}
 
 	// The right toolchain but the wrong version.
 	wrong, _ := buildFakeGoTool(t, "Version: v2.28.0")
 	copyExec(t, wrong, cached)
-	if out, ok, calls = run(toolchain); ok || !strings.Contains(calls, " install") {
+	if out, ok, calls = run(toolchain); ok || !strings.Contains(calls, gosecBuild) {
 		t.Fatalf("trusted a cached binary reporting another version (ok=%v, go calls %q):\n%s", ok, calls, out)
 	}
 
@@ -1450,13 +1485,13 @@ func TestScriptsToolResolve_UsesAVerifiedCopyOnPath(t *testing.T) {
 			t.Fatalf("did not use the verified copy on PATH (ok=%v, go calls %q):\n%s", ok, calls, out)
 		}
 		// Built by another toolchain: not the pinned build, so an install.
-		if out, ok, calls := run("go1.26.7"); ok || !strings.Contains(calls, " install") || !strings.Contains(out, "is not the pinned build") {
+		if out, ok, calls := run("go1.26.7"); ok || !strings.Contains(calls, gosecBuild) || !strings.Contains(out, "is not the pinned build") {
 			t.Fatalf("trusted a copy on PATH built by another toolchain (ok=%v, go calls %q):\n%s", ok, calls, out)
 		}
 		// The right toolchain but another version.
 		wrong, _ := buildFakeGoTool(t, "Version: v2.28.0")
 		copyExec(t, wrong, onPath)
-		if out, ok, calls := run(toolchain); ok || !strings.Contains(calls, " install") {
+		if out, ok, calls := run(toolchain); ok || !strings.Contains(calls, gosecBuild) {
 			t.Fatalf("trusted a copy on PATH reporting another version (ok=%v, go calls %q):\n%s", ok, calls, out)
 		}
 	})

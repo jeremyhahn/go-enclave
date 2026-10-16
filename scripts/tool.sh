@@ -36,6 +36,8 @@
 #                 for the two tools installed from release archives (TRIVY,
 #                 SHELLCHECK): the archive's SHA-256 and the extracted
 #                 binary's, pinned in scripts/tool-pins.sh beside the version.
+#   XTOOLS_VERSION the golang.org/x/tools gosec is built against (see
+#                 build_gosec), pinned in scripts/tool-pins.sh.
 #
 # What a cached install, or a copy on PATH, must prove before it is used
 # (TOOL_INSTALL=1):
@@ -200,6 +202,23 @@ install_archive() {
   chmod 0755 "$tmp/$tool"
 }
 
+# build_gosec writes gosec to $tmp/gosec, built in a throwaway module so
+# golang.org/x/tools can be raised to XTOOLS_VERSION: the version gosec's
+# go.mod names cannot read the export data Go 1.27 writes, so every import
+# fails to type-check (ci-template; go-quicraft and go-luks2 build it so).
+build_gosec() {
+  matches "${XTOOLS_VERSION-}" '^v[0-9]+\.[0-9]+\.[0-9]+$' ||
+    die "gosec: XTOOLS_VERSION '${XTOOLS_VERSION-}' is not a pinned vX.Y.Z version (scripts/tool-pins.sh)"
+  mkdir "$tmp/mod"
+  (
+    cd "$tmp/mod" &&
+      GOTOOLCHAIN=$TOOLCHAIN "$go" mod init gosec-build >&2 &&
+      GOTOOLCHAIN=$TOOLCHAIN "$go" get "$pkg@$want" "golang.org/x/tools@$XTOOLS_VERSION" >&2 &&
+      GOTOOLCHAIN=$TOOLCHAIN CGO_ENABLED=0 GOBIN=$tmp "$go" install -ldflags "$ldflags" "$pkg" >&2
+  ) || die "installing $tool $want against golang.org/x/tools $XTOOLS_VERSION failed"
+  rm -rf "$tmp/mod"
+}
+
 # verified reports whether the binary at $1 may be used without installing.
 verified() {
   [ -x "$1" ] || return 1
@@ -281,9 +300,8 @@ case $mode in
       trap 'rm -rf "$tmp"' EXIT
       if [ "$kind" = archive ]; then
         install_archive
-      elif [ -n "$ldflags" ]; then
-        GOTOOLCHAIN=$TOOLCHAIN GOBIN=$tmp "$go" install -ldflags "$ldflags" "$pkg@$want" >&2 ||
-          die "installing $tool $want failed"
+      elif [ "$tool" = gosec ]; then
+        build_gosec
       else
         GOTOOLCHAIN=$TOOLCHAIN GOBIN=$tmp "$go" install "$pkg@$want" >&2 ||
           die "installing $tool $want failed"

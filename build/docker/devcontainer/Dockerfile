@@ -1,22 +1,30 @@
-# go-enclave devcontainer: the one toolchain every gate builds and tests in.
-# Two stages ship, built by `make docker-build`, both FROM a shared `base`:
+# go-enclave devcontainer: one Dockerfile, the shipped stages built FROM base
+# (handbook devcontainer.md §1).
 #
-#   toolchain    base, plus every pinned tool the Makefile runs and the shell
-#                userland its scripts need. The checkout is MOUNTED, never
-#                baked: every gate (`make lint`, `make coverage`, the check-*
-#                build gates, ...) runs in it as any non-root uid, offline.
-#                `make docker-run CMD='make lint'`; `make toolchain-image`
-#                prints its content-addressed tag.
-#   integration  base, plus the source BAKED IN: the ONLY place the
+#   tools        build-only: the pinned tools, built or downloaded into /out
+#   base         the Go toolchain by digest, the C compiler -race needs, a
+#                non-root user and the verified module cache; GOPROXY=off
+#   toolchain    base + every tool the Makefile calls. `make build`, `make test`,
+#                `make security` and `make deps-check` run here, in CI too
+#                (scripts/in-toolchain-image.sh). The checkout is MOUNTED or
+#                COPIED in, never baked: every gate runs in it as any non-root
+#                uid, offline. `make docker-run CMD='make lint'`;
+#                `make toolchain-image` prints its content-addressed tag.
+#   integration  base + the source only, BAKED IN: the ONLY place the
 #                integration suite runs (handbook integration-testing §4,
 #                testing-guidelines). `make integration-test` builds it
 #                through compose.yaml beside this file; nothing else should.
 #
+# Build with `make docker-build`. There is no modules stage: the one
+# dependency resolves from the public proxy, so base downloads it with no forge
+# credentials. GO_IMAGE keeps its default here, the pin
+# build/ci/buildgates holds to go.mod, so a plain `docker build` of a stage
+# builds the pinned toolchain.
+#
 # integration is deliberately NOT built FROM toolchain: the suite scans its
 # own image (`trivy image`, devops §8), and the hardened runtime image ships
-# no developer tool binaries for that scan to find. A third stage, `tools`,
-# builds and verifies the tools; only their binaries leave it, and only into
-# toolchain.
+# no developer tool binaries for that scan to find. Only the tools stage's
+# binaries leave it, and only into toolchain.
 #
 # WHAT IS IN BASE, AND WHY NOTHING ELSE IS
 #
@@ -34,7 +42,9 @@
 #     never a new compiler; an exact `=x.y.z-rN` pin stops building the day
 #     Alpine supersedes the revision, which turns a distro security fix into a
 #     red gate.
-#   * The user `dev` (10001).
+#   * The user `dev` (10001), and /src owned by it: CI copies the checkout in
+#     with `docker cp` (scripts/in-toolchain-image.sh), which keeps an existing
+#     directory's owner, and runs as 10001. A bind mount hides it.
 #   * The root module's dependencies, downloaded and VERIFIED against go.sum
 #     at build time into /gomodcache, so a run needs no network (GOPROXY=off).
 #     A mounted GOMODCACHE replaces it whole.
@@ -60,7 +70,8 @@
 #     scripts/install-tools.sh through scripts/tool.sh: the same pins, hashes
 #     and verification `make lint` uses, and no second copy of either.
 #     tool.sh uses a verified copy on PATH, so a gate here builds and downloads
-#     nothing.
+#     nothing. gosec builds in a throwaway module against XTOOLS_VERSION: the
+#     x/tools its go.mod names cannot read the export data Go 1.27 writes.
 #   * build/ci/buildgates' dependencies, beside the root module's.
 #   * HOME=/tmp: nothing a gate needs lives under a home directory.
 #
@@ -91,7 +102,7 @@
 # the toolchain's content tag (scripts/devcontainer.sh inputs); build/ci/buildgates
 # fails when the two disagree.
 
-ARG GO_IMAGE=golang:1.27.2-alpine3.24@sha256:85dc1069ac644ea3c527b177303a406eb3358192816cd7f9e5848eb658851673
+ARG GO_IMAGE=golang:1.27.2-alpine3.24@sha256:f92b6ef800e499660581efdabdf25d9d817a9d124eaf900924f0504e7e27e12d
 ARG GO_BUILD_PROXY=https://proxy.golang.org,direct
 
 # ---------------------------------------------------------------------------
@@ -141,7 +152,8 @@ RUN set -eux; \
     apk add --no-cache 'gcc~15.2' 'musl-dev~1.2.6'; \
     addgroup -S -g 10001 dev; \
     adduser -S -D -H -u 10001 -G dev -h /home/dev -s /sbin/nologin dev; \
-    install -d -o root -g root -m 0755 /gomodcache /src; \
+    install -d -o root -g root -m 0755 /gomodcache; \
+    install -d -m 0755 -o 10001 -g 10001 /src; \
     install -d -o root -g root -m 0777 /gocache
 
 # Dependencies first: a source-only change reuses this layer. The module
@@ -177,9 +189,12 @@ ARG GO_BUILD_PROXY
 
 ENV HOME=/tmp
 
+# safe.directory: a checkout copied or mounted in is owned by whoever ran it,
+# and the releasability gates read its .git as any uid.
 RUN apk add --no-cache \
         bash make git curl jq nodejs \
-        coreutils grep sed gawk findutils diffutils tar xz
+        coreutils grep sed gawk findutils diffutils tar xz; \
+    git config --system --add safe.directory '*'
 
 COPY --from=tools /out/ /usr/local/bin/
 

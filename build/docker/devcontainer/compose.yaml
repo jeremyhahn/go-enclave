@@ -9,8 +9,10 @@
 #                seccomp profile that also permits CLONE_NEWUSER (see below).
 #   toolchain    `make docker-run CMD='make lint'`: a command in the toolchain
 #                image, as the invoking user, with the checkout bind-mounted.
-#                For a workstation; on a CI runner a bind mount resolves on the
-#                host daemon, where the checkout does not exist (Dockerfile).
+#                For a workstation: on a CI runner the bind mount would resolve
+#                on the daemon's host, so CI copies the checkout in instead
+#                (scripts/in-toolchain-image.sh, with this posture's
+#                capabilities, ulimits and network).
 #
 # Per-run isolation of the integration service (handbook integration-testing
 # §7): no container_name, no published ports, and the only volume is

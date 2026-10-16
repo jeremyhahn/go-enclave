@@ -17,6 +17,9 @@
 GOLANGCI_VERSION=v2.14.0
 # Raise with `go list -m github.com/securego/gosec/v2@latest`.
 GOSEC_VERSION=v2.29.0
+# gosec is built against this x/tools: the v0.49.0 its go.mod names cannot read
+# the export data (version 5) Go 1.27 writes, so every import fails to type-check.
+XTOOLS_VERSION=v0.52.0
 # Raise with `go list -m golang.org/x/vuln@latest`.
 GOVULNCHECK_VERSION=v1.8.0
 # Raise with `go list -m github.com/rhysd/actionlint@latest`.

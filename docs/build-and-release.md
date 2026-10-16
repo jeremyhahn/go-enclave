@@ -144,11 +144,27 @@ Which integration test covers which feature: [COVERAGE.md](../test/integration/C
 
 ## CI
 
-`ci.yml` has two tiers. The **PR tier** (lint, security, build, test) runs on
-every event. The **full tier** (FIPS, integration) runs on a push to `main`, on
-`workflow_dispatch`, and on a pull request labelled `ci:full`; label a PR that
-changes the API or fixes the integration suite. Each job runs one aggregate on
-the bare runner with Go from `go.mod`.
+`ci.yml` follows the ci-template v1.18 shape. Its stages run in the
+devcontainer image that `make docker-build` builds from the commit under test,
+never on runner tools. `scripts/in-toolchain-image.sh` copies the checkout into
+a toolchain container, because a bind mount would resolve on the daemon's host.
+`scripts/reap-stale-ci-stacks.sh` runs first and removes what a dead runner
+left behind.
+
+| Job | Tier | Runs |
+|---|---|---|
+| Lint | PR | `make ci-lint` on the runner |
+| Devcontainer image | PR | In the toolchain image: `make build`, `make cross-build`, `make ci-test`, `make security`, `make deps-check`. Then `trivy image` on the integration image. `security` and `deps-check` get a network for the vulnerability databases and the module proxy |
+| FIPS | full | `make test-fips` in the toolchain image |
+| Integration | full | `make ci-integration`: the integration-test stage, default and FIPS strict, on one scanned image |
+
+The **PR tier** runs on every event. The **full tier** runs on a push to
+`main`, on `workflow_dispatch`, and on a pull request labelled `ci:full`. Label
+a PR `ci:full` when it changes the API or fixes the integration suite.
+
+`make security` includes `ci-security`'s scans. The test stage is `make
+ci-test`, which adds the coverage floor and the runtimesecret build to `make
+test`'s race suite. Nothing is uploaded to code scanning.
 
 The **CI Gate** is the one required check. It runs on the `ci-gate` runner
 label and carries `build/ci/summary.sh <message> <full> <tier>:<job>=<result>…` inline:
@@ -211,6 +227,7 @@ tree at publish.
 | `release.sh`, `release-version-check.sh`, `release-check-tag.sh`, `changelog-assemble.sh`, `release-notes.sh` | Cutting a release ([above](#what-releasesh-refuses)) |
 | `release-verify.sh`, `consumer-check.sh`, `release-publish.sh` | The [post-tag targets](#post-tag-targets) |
 | `deps-latest.sh` | `make deps-latest`: bump internal dependencies to their latest tags, then tidy |
+| `in-toolchain-image.sh`, `reap-stale-ci-stacks.sh` | CI only, from the ci-template: run a command in the toolchain image on a copy of the checkout; remove this repository's stale CI containers and compose stacks |
 
 `build/ci/` holds what only a workflow runs: `release-tag.sh`,
 `publish-release.sh`, `summary.sh`, `forge-resolution.sh` and

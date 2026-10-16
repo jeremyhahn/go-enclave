@@ -62,6 +62,7 @@ export GO := $(GOCMD)
 export TRIVY_VERSION
 export TRIVY_SHA256_LINUX_AMD64 TRIVY_SHA256_LINUX_ARM64 TRIVY_BIN_SHA256_LINUX_AMD64 TRIVY_BIN_SHA256_LINUX_ARM64
 export SHELLCHECK_SHA256_LINUX_AMD64 SHELLCHECK_SHA256_LINUX_ARM64 SHELLCHECK_BIN_SHA256_LINUX_AMD64 SHELLCHECK_BIN_SHA256_LINUX_ARM64
+export XTOOLS_VERSION
 tool = $$(sh scripts/tool.sh $(1) $($(2)_VERSION))
 
 # gosec flags live only here; CI runs `make gosec`. golangci-lint runs gosec
@@ -209,13 +210,15 @@ lint-actions:
 ## lint-scripts: shellcheck (pinned) over scripts/*.sh, build/docker/devcontainer/*.sh and build/ci/*.sh
 # The scripts are POSIX sh, and release.yml runs them with a write token. -x
 # follows the `. lib.sh` every script sources. build/ci/*.sh are the workflows'
-# scripts; each names its own shell on its first line.
+# scripts, and CI_BASH_SCRIPTS the ci-template's bash ones, taken unchanged
+# from it; each names its own shell on its first line.
+CI_BASH_SCRIPTS := scripts/in-toolchain-image.sh scripts/reap-stale-ci-stacks.sh
 .PHONY: lint-scripts
 lint-scripts:
 	@sc=$(call tool,shellcheck,SHELLCHECK) && \
-	echo "shellcheck $(SHELLCHECK_VERSION) -x --shell=sh scripts/*.sh build/docker/devcontainer/*.sh; build/ci/*.sh" && \
-	"$$sc" -x --source-path=SCRIPTDIR --shell=sh scripts/*.sh build/docker/devcontainer/*.sh && \
-	"$$sc" -x --source-path=SCRIPTDIR build/ci/*.sh
+	echo "shellcheck $(SHELLCHECK_VERSION) -x --shell=sh scripts/*.sh build/docker/devcontainer/*.sh; $(CI_BASH_SCRIPTS) build/ci/*.sh" && \
+	"$$sc" -x --source-path=SCRIPTDIR --shell=sh $(filter-out $(CI_BASH_SCRIPTS),$(sort $(wildcard scripts/*.sh))) build/docker/devcontainer/*.sh && \
+	"$$sc" -x --source-path=SCRIPTDIR $(CI_BASH_SCRIPTS) build/ci/*.sh
 
 ## staticcheck: staticcheck (golangci-lint's, the one implementation, lint-go)
 .PHONY: staticcheck
@@ -274,11 +277,11 @@ trivy-misconfig:
 trivy-sarif:
 	@$(call trivy_fs,--scanners vuln$(,)secret --exit-code 0 --format sarif --output trivy-results.sarif)
 
-## security: full local security suite — golangci-lint's gosec, govulncheck, modverify, trivy
-# No image to scan. CI runs gosec (SARIF), govulncheck and modverify per push
-# and trivy nightly; release.yml runs all four.
+## security: the security stage — golangci-lint's gosec, gosec and govulncheck (default and runtimesecret builds), modverify, trivy fs
+# ci-security's scans are folded in, so CI's stage (#217) and this target are
+# one list; release.yml still calls ci-security and trivy.
 .PHONY: security
-security: lint-go govulncheck modverify trivy
+security: lint-go gosec gosec-runtimesecret govulncheck govulncheck-runtimesecret modverify trivy
 	@echo "Security suite passed"
 
 # CI's test flags, defined once so local and CI runs cannot drift; `:=` so an
