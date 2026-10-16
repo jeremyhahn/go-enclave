@@ -24,10 +24,11 @@ Its layer is the base of the stack, under go-quicraft: [SPEC purpose](docs/SPEC.
 - **backend-conformance** — `backendtest`, typed errors and `memscan` fail closed — [#146](../../issues/146) — done
 - **build-and-release** — pinned tools and Makefile-driven CI, changelog fragments, the integration suite, `make release VERSION=…` for every release kind, release safety and build gates, signed release artifacts — [#48](../../issues/48) — done
 - **backend-detection** — `Detect`, on an explicit call from `main`, selects the most secure of the registered backends by the rank each reports, the memory enclave when nothing else is usable — [#190](../../issues/190) — done
+- **enclave-interface** — the one public interface upstream consumes; constructors return it — [#138](../../issues/138) — done
 
 ## Now
 
-- **enclave-interface** — the one public interface upstream consumes; constructors return it — [#138](../../issues/138) — open
+Nothing in progress.
 
 ## Next
 
