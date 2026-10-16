@@ -160,7 +160,9 @@ left behind.
 
 The **PR tier** runs on every event. The **full tier** runs on a push to
 `main`, on `workflow_dispatch`, and on a pull request labelled `ci:full`. Label
-a PR `ci:full` when it changes the API or fixes the integration suite.
+a PR `ci:full` when it changes the API or fixes the integration suite. The label
+takes effect on the PR's next push or update-branch, or via `workflow_dispatch`,
+because a label change starts no run.
 
 `make security` includes `ci-security`'s scans. The test stage is `make
 ci-test`, which adds the coverage floor and the runtimesecret build to `make

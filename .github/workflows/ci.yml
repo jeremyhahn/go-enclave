@@ -20,6 +20,8 @@
 #   PR tier    every run. lint, image.
 #   Full tier  push to main, workflow_dispatch (the coordinator's nightly), or
 #              a pull_request carrying the label `ci:full`. fips, integration.
+#              `ci:full` takes effect on the PR's next push or update-branch,
+#              because a label event starts no run.
 #
 # Each full-tier job carries the same `if:`, spelled out per job because
 # Gitea's workflow parser does not expand YAML anchors. ci-gate passes a
@@ -52,9 +54,16 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
-    # `labeled` so that adding `ci:full` starts a full-tier run. Any other
-    # label also starts a run, which re-runs the PR tier on the same commit.
-    types: [opened, synchronize, reopened, labeled]
+    # No `labeled` (#853 in go-trusted-platform; DS-2281). Gitea 1.27.1 sends
+    # every label add AND remove as `label_updated`, and its matcher maps that
+    # to `labeled` whichever label moved, with no `github.event.label` in the
+    # payload. Each `task:*` or `code-review` change then started a run that
+    # the `concurrency` block let cancel the PR's run in progress, and a run
+    # whose jobs an `if:` skips would post `skipped` over the real run's
+    # `CI / *` contexts, CI Gate included. An action outside `types` matches
+    # nothing: no run, no status. The cost: adding `ci:full` waits for the
+    # PR's next push or update-branch, or runs via workflow_dispatch.
+    types: [opened, synchronize, reopened]
   workflow_dispatch:
 
 # Cancel superseded runs. Keyed on the ref so a branch only supersedes itself,

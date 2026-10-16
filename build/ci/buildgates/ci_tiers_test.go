@@ -15,7 +15,8 @@ import (
 )
 
 // CI runs in two tiers (#175). The PR tier runs on every event; the full tier
-// runs on push to main, on workflow_dispatch and on a PR labeled `ci:full`.
+// runs on push to main, on workflow_dispatch and on a PR labeled `ci:full`
+// (from its next push or update-branch: a label event starts no run).
 // CI Gate, the one required check, needs every job and names each one in its
 // script with its tier, and build/ci/summary.sh lets a full job's skip pass
 // only in a run that did not select the full tier. These tests hold ci.yml's
@@ -47,9 +48,11 @@ const (
 	scheduledWorkflow = "automerge.yml"
 )
 
-// ciPullRequestTypes are ci.yml's pull_request activity types: `labeled` makes
-// adding `ci:full` start a full run.
-var ciPullRequestTypes = []string{"opened", "synchronize", "reopened", "labeled"}
+// ciPullRequestTypes are ci.yml's pull_request activity types. `labeled` is
+// absent (DS-2281): Gitea maps every label add and remove to it, so each label
+// change started a run that canceled the PR's run in progress. A `ci:full`
+// label takes effect on the PR's next push or update-branch.
+var ciPullRequestTypes = []string{"opened", "synchronize", "reopened"}
 
 var (
 	// gateCheckLine is one tagged result in the gate script:
@@ -332,7 +335,7 @@ func TestCIGateTiers_RefusesWhatItMustRefuse(t *testing.T) {
 		{"pr job with an if", "    name: Lint\n", "    name: Lint\n    if: always()\n"},
 		{"pr job needs a full job", "    name: Lint\n", "    name: Lint\n    needs: [fips]\n"},
 		{"gate FULL flag differs", "          FULL: ${{ " + fullTierIf, "          FULL: ${{ github.event_name == 'push'"},
-		{"no labeled type", "types: [opened, synchronize, reopened, labeled]", "types: [opened, synchronize, reopened]"},
+		{"labeled type added back", "types: [opened, synchronize, reopened]", "types: [opened, synchronize, reopened, labeled]"},
 		{"gate on the shared runner", "    runs-on: " + ciGateRunner + "\n", "    runs-on: ubuntu-latest\n"},
 		{"gate uses an action", "      - name: Fail closed on any non-success\n", "      - uses: actions/checkout@abc # v7\n      - name: Fail closed on any non-success\n"},
 	} {
