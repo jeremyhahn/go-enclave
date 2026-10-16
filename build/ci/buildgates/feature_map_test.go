@@ -244,7 +244,9 @@ func TestFeatureMap_EveryDocsDirectoryIsAFeatureAndBack(t *testing.T) {
 	}
 	dirs := map[string]bool{}
 	for _, e := range entries {
-		if e.IsDir() {
+		// docs/reference/ holds the standards the code implements
+		// (handbook documentation.md §9), not a feature.
+		if e.IsDir() && e.Name() != "reference" {
 			dirs[e.Name()] = true
 		}
 	}

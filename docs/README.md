@@ -32,6 +32,9 @@ ruling on #188 ([runtime testing](memory-enclave/runtime-testing.md)).
 How a change is built and gated, and how a signed release is cut, verified and
 published: [build and release](build-and-release.md).
 
+The standards the code implements, copied and indexed by implementing symbol:
+[reference](reference/README.md).
+
 ## Upgrading
 
 This is the only place migration guidance is written; each feature's `user.md`
