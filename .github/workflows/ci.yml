@@ -117,7 +117,7 @@ jobs:
   # credentials: the one dependency resolves from the public proxy.
   image:
     name: Devcontainer image [build, test, security, deps-check, trivy image]
-    runs-on: ubuntu-latest
+    runs-on: bigdisk
     timeout-minutes: 90
     env:
       IT_IMAGE: go-enclave-ci-it:${{ github.run_id }}-${{ github.run_attempt }}-image

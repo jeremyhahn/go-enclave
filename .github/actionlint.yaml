@@ -6,3 +6,5 @@ self-hosted-runner:
     - ci-gate
     # The batch runners: dispatch-only work (workflows/batch.yml, handbook batch.yml).
     - batch
+    # The Dell and omega runners: the Devcontainer image job (workflows/ci.yml, #225).
+    - bigdisk
