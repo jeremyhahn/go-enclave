@@ -261,6 +261,8 @@ func TestProviderConformance_RootUnsealerFaultsAreEachReported(t *testing.T) {
 				want: []string{propRootFill}},
 			{name: "UnsealRoot returns a different root each call", modes: rootKey, provider: rootsWith(unsealIsDifferentEachTime),
 				want: []string{propRootFill}},
+			{name: "UnsealRoot returns different roots, then fails on the third call", modes: rootKey,
+				provider: rootsWith(unsealIsDifferentThenFails), want: []string{propRootFill, propRootRetain}},
 			{name: "UnsealRoot zeroes the destination it filled before", modes: rootKey,
 				provider: rootsWith(keepsTheDestinations(forgetfulZeroesTheLast)), want: []string{propRootRetain}},
 			{name: "UnsealRoot overwrites the destination it filled before", modes: rootKey,

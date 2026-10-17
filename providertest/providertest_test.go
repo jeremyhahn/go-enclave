@@ -1126,6 +1126,63 @@ func TestSuiteCatchesANondeterministicRoot(t *testing.T) {
 		"DIFFERENT roots")
 }
 
+// canaryCollidingUnsealer writes a different fixed root on each call, chosen
+// so that byte 0 matches the suite's first two canaries: 0xAA on call 1, 0x55
+// on call 2, and neither on any later call. It writes every byte every time.
+type canaryCollidingUnsealer struct{ calls int }
+
+func (u *canaryCollidingUnsealer) UnsealRoot(ctx context.Context, dst []byte) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	u.calls++
+	rest, head := byte(0x33), byte(0x66)
+	switch u.calls {
+	case 1:
+		rest, head = 0x11, 0xAA
+	case 2:
+		rest, head = 0x22, 0x55
+	}
+	for i := range dst {
+		dst[i] = rest
+	}
+	dst[0] = head
+	return nil
+}
+
+func TestSuiteCatchesANondeterministicRootThatMatchesTheCanaries(t *testing.T) {
+	cfg := rootOnly(func() (any, error) { return &canaryCollidingUnsealer{}, nil })
+	wantFail(t, cfg, "DIFFERENT roots")
+	cfg.Logf = t.Logf
+	if err := TestProvider(t.Context(), cfg); strings.Contains(err.Error(), "UNWRITTEN") {
+		t.Fatalf("the suite read a root that changes per call as unwritten bytes:\n%v", err)
+	}
+}
+
+// thirdCallFailingUnsealer writes a different root on each of its first two
+// calls and fails every call after, so the suite's third call, the one that
+// tells unwritten bytes from a root that changes per call, is what fails.
+type thirdCallFailingUnsealer struct{ calls int }
+
+func (u *thirdCallFailingUnsealer) UnsealRoot(ctx context.Context, dst []byte) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	u.calls++
+	if u.calls >= 3 {
+		return errors.New("the device refuses a third unseal")
+	}
+	for i := range dst {
+		dst[i] = byte(u.calls*0x10 + i)
+	}
+	return nil
+}
+
+func TestSuiteCatchesARootUnsealerWhoseThirdCallFails(t *testing.T) {
+	wantFail(t, rootOnly(func() (any, error) { return &thirdCallFailingUnsealer{}, nil }),
+		"a third UnsealRoot on the same provider: the device refuses a third unseal", "Config.SingleUseRoot")
+}
+
 // rootDestRetainer keeps the destination it was handed and wipes it on the next
 // call, leaving a Sealer running its whole KEK hierarchy under zeros.
 type rootDestRetainer struct {

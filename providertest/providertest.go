@@ -1089,7 +1089,9 @@ var rootUnsealerChecks = []func(*report, Config){
 // with different canaries; a byte the provider never wrote keeps its canary, so
 // requiring the two to be equal proves every position was written. The
 // equality also requires UnsealRoot to be deterministic within an instance, so
-// two Sealers over one device hold the same root. With Config.SingleUseRoot set
+// two Sealers over one device hold the same root; when the two differ, a third
+// call under a third canary tells unwritten bytes from a root that changes per
+// call. With Config.SingleUseRoot set
 // only one call is made and only the placeholder checks remain.
 func checkUnsealRootFillsTheDestination(r *report, cfg Config) {
 	const property = "UnsealRoot writes a root across the whole destination"
@@ -1102,8 +1104,8 @@ func checkUnsealRootFillsTheDestination(r *report, cfg Config) {
 
 	const canary = 0xAA
 	// Locked: against a real device these receive its actual root.
-	if err := withLocked(2, enclave.RootKeyBytes, func(bufs [][]byte) error {
-		first, second := bufs[0], bufs[1]
+	if err := withLocked(3, enclave.RootKeyBytes, func(bufs [][]byte) error {
+		first, second, third := bufs[0], bufs[1], bufs[2]
 		fill(first, canary)
 		if err := p.UnsealRoot(r.ctx, first); err != nil {
 			r.fail(property, "UnsealRoot: %v", err)
@@ -1132,9 +1134,21 @@ func checkUnsealRootFillsTheDestination(r *report, cfg Config) {
 		}
 
 		if !bytes.Equal(first, second) {
+			// A byte is UNWRITTEN only if it kept its own fill on three calls
+			// under three fills. Two fills alone misread a root that differs
+			// per call: it matches both by chance at a byte with probability
+			// 2^-16, about once in 2,000 runs; three take that to 2^-19 per
+			// run, while a real partial writer still keeps all three.
+			fill(third, 0x3C)
+			if err := p.UnsealRoot(r.ctx, third); err != nil {
+				r.fail(property, "a third UnsealRoot on the same provider: %v. If this provider consumes a "+
+					"one-shot handle on a successful unseal, set Config.SingleUseRoot with the reason; the seam "+
+					"guarantees only that a Sealer calls UnsealRoot at most once", err)
+				return nil
+			}
 			var unwritten []int
 			for i := range first {
-				if first[i] == 0xAA && second[i] == 0x55 {
+				if first[i] == 0xAA && second[i] == 0x55 && third[i] == 0x3C {
 					unwritten = append(unwritten, i)
 				}
 			}

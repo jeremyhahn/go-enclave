@@ -683,6 +683,23 @@ func unsealIsDifferentEachTime(_ *lab, f *rootFault) {
 	}
 }
 
+// unsealIsDifferentThenFails: the first two calls return different random
+// roots, and the third live call, which the suite takes to tell unwritten
+// bytes from a root that changes per call, and every one after it, fails.
+func unsealIsDifferentThenFails(_ *lab, f *rootFault) {
+	var calls atomic.Int64
+	f.unseal = func(ctx context.Context, dst []byte) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if calls.Add(1) >= 3 {
+			return errFake
+		}
+		_, err := rand.Read(dst)
+		return err
+	}
+}
+
 // forgetful is how a RootUnsealer that kept its callers' destinations treats
 // them on later calls.
 type forgetful int
