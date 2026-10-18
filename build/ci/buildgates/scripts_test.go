@@ -2324,7 +2324,7 @@ func TestScriptsMakefile_AHostileCheckoutPathIsOneLiteralOperand(t *testing.T) {
 	// TOOL_INSTALL=0 requires it to hash to the pin, so the fake's hash is the pin.
 	sum := sha256Hex(t, filepath.Join(fakes, "shellcheck"))
 	out, ok = makeIn(withFakes, "lint-scripts", "SHELLCHECK_BIN_SHA256_LINUX_AMD64="+sum, "SHELLCHECK_BIN_SHA256_LINUX_ARM64="+sum)
-	if logged := readLog(t, log); !ok || !strings.Contains(logged, "<--shell=sh>\n<scripts/changelog-assemble.sh>\n") || !strings.Contains(logged, "<scripts/tool.sh>\n") {
+	if logged := readLog(t, log); !ok || !strings.Contains(logged, "<--shell=sh>\n<scripts/assert-build-tags.sh>\n<scripts/changelog-assemble.sh>\n") || !strings.Contains(logged, "<scripts/tool.sh>\n") {
 		t.Fatalf("lint-scripts (ok=%v) passed shellcheck:\n%s\noutput:\n%s", ok, logged, out)
 	}
 

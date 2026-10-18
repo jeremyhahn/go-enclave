@@ -4,6 +4,10 @@
 #   usage: scripts/in-toolchain-image.sh <image> <command...>
 #   e.g.   scripts/in-toolchain-image.sh go-enclave-toolchain:abc make build
 #
+# in-toolchain-template: v1 (ci-template v1.21). Ships beside ci.yml; copy it to
+# scripts/ with the workflow. From go-quicraft's scripts/in-toolchain-image.sh
+# (a141c3c), with the container prefix and uid taken from the environment.
+#
 # How CI runs a stage in the devcontainer image (handbook ci-standard.md §2). A
 # CI runner reaches its Docker daemon through a socket, so a bind mount would
 # resolve on the daemon's host, where the checkout does not exist. This
@@ -16,7 +20,9 @@
 # The container keeps the integration service's posture where a copy-in allows
 # it: every capability dropped, no-new-privileges, the same ulimits and pid
 # bound, a non-root user, no network. The root filesystem is writable only
-# because `docker cp` cannot write into a read-only one.
+# because `docker cp` cannot write into a read-only one. go-enclave: memlock
+# and nofile are build/docker/devcontainer/compose.yaml's (16 MiB, 4096), not
+# the template's: the locked-memory tests read RLIMIT_MEMLOCK as the ceiling.
 #
 # IN_IMAGE_NETWORK=bridge gives the container a network, for the stages that
 # must reach one: `make deps-check` asks the module proxy for the newest
@@ -26,8 +32,10 @@
 # this environment (the four variables dependency-resolution.md §6 has the
 # runner inject), so no token ever appears on a command line.
 #
-# The container is named go-enclave-ci-tc-<pid>-<random>, under the prefix
-# scripts/reap-stale-ci-stacks.sh reaps, and is removed on every exit.
+# The container is named <CI_STACK_PREFIX>tc-<pid>-<random>, under the prefix
+# scripts/reap-stale-ci-stacks.sh reaps (default <checkout dir>-ci-, which in CI
+# is <repo>-ci-), and is removed on every exit. IN_IMAGE_UID is the non-root
+# uid the command runs as (default 10001; devcontainer.md §5: any non-root uid).
 set -euo pipefail
 # shellcheck source=lib.sh
 . "${0%/*}/lib.sh"
@@ -44,8 +52,12 @@ case $network in
   *) echo "IN_IMAGE_NETWORK must be none or bridge: $network" >&2; exit 2 ;;
 esac
 
-uid=10001
-name="go-enclave-ci-tc-$$-${RANDOM}"
+uid=${IN_IMAGE_UID:-10001}
+case $uid in
+  "" | 0 | *[!0-9]*) echo "IN_IMAGE_UID must be a non-root numeric uid: $uid" >&2; exit 2 ;;
+esac
+prefix=${CI_STACK_PREFIX:-$(basename "$PWD")-ci-}
+name="${prefix}tc-$$-${RANDOM}"
 args=(
   --name "$name"
   --init

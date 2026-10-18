@@ -1,0 +1,3 @@
+### Changed
+
+- **CI: ci-template v1.21.1, every stage in the devcontainer image** (#227). The separate Lint job is gone. `ci.yml`'s one `image` job builds the devcontainer images and runs each stage as a step in the toolchain image: lint, the static checks, build, cross-build, `make coverage`, the runtimesecret build, security, deps-check and `trivy image`. The Integration job runs on `bigdisk` with no `setup-go`, and an Architecture Gates job is added. The image and integration jobs mask the forge credentials first. The Makefile takes the handbook's CI variables (`MODULE_ENV_FILE`, `IT_IMAGE`, `IT_PROJECT`, `GO_BUILD_TAGS`), and `scripts/assert-build-tags.sh` comes from the template. Nothing changes for Go callers.

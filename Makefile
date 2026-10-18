@@ -112,6 +112,20 @@ COVERAGE_THRESHOLD := 90
 EXTERNAL_VARS := TAG SHA MAIN_REF VERSION TOOL_INSTALL COVERAGE_THRESHOLD
 $(call raw_bind,$(EXTERNAL_VARS))
 
+# CI VARIABLES (handbook devcontainer.md §6): ci.yml passes them, so they are
+# data from a workflow and raw-bound like EXTERNAL_VARS.
+## MODULE_ENV_FILE=<file>: docker-build, integration-test: the forge module variables; go-enclave needs none, so it is never read or printed
+## IT_IMAGE=<tag>: docker-build: the integration image's tag (default go-enclave-it:local)
+## IT_PROJECT=<name>: integration-test: accepted; each suite names its own compose project (go-enclave-it-*, go-enclave-userns-*)
+## GO_BUILD_TAGS=<tags>: lint, build, coverage, security: must stay empty, no package is tag-gated (userns and integration are their suites' tags)
+# GO_BUILD_TAGS is refused rather than ignored: a tag that reached no target
+# would read as analysed while nothing saw it. The value is never printed.
+ifneq ($(strip $(value GO_BUILD_TAGS)),)
+$(error GO_BUILD_TAGS must be empty: no go-enclave package is gated by a build tag)
+endif
+CI_VARS := MODULE_ENV_FILE IT_IMAGE IT_PROJECT GO_BUILD_TAGS
+$(call raw_bind,$(CI_VARS))
+
 # Every GOOS/GOARCH a consumer may build for; 32-bit targets catch uintptr
 # comparisons that do not compile there.
 CROSS_TARGETS := linux/amd64 linux/arm64 linux/386 linux/arm \
@@ -453,7 +467,7 @@ $(call raw_bind,CMD)
 ## docker-build: Build both devcontainer stages: go-enclave-toolchain:<content tag> and :latest, and the integration image
 .PHONY: docker-build
 docker-build:
-	@sh scripts/devcontainer.sh build
+	@GO_ENCLAVE_IT_IMAGE="$$IT_IMAGE" sh scripts/devcontainer.sh build
 
 ## docker-run: Run CMD in the toolchain image, checkout mounted, offline, as you: make docker-run CMD='make lint'
 .PHONY: docker-run

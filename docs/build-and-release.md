@@ -144,19 +144,21 @@ Which integration test covers which feature: [COVERAGE.md](../test/integration/C
 
 ## CI
 
-`ci.yml` follows the ci-template v1.18 shape. Its stages run in the
-devcontainer image that `make docker-build` builds from the commit under test,
-never on runner tools. `scripts/in-toolchain-image.sh` copies the checkout into
-a toolchain container, because a bind mount would resolve on the daemon's host.
-`scripts/reap-stale-ci-stacks.sh` runs first and removes what a dead runner
-left behind.
+`ci.yml` follows the ci-template v1.21.1 shape. Every stage runs in the
+devcontainer image that `make docker-build` builds from the commit under test.
+No job installs Go or a tool on the runner. `scripts/in-toolchain-image.sh`
+copies the checkout into a toolchain container, because a bind mount would
+resolve on the daemon's host. Each job that uses Docker runs
+`scripts/reap-stale-ci-stacks.sh` first, which removes what a dead runner left
+behind. The image and integration jobs mask the forge credentials before any
+other step. No step prints an env file or the job environment.
 
 | Job | Tier | Runs |
 |---|---|---|
-| Lint | PR | `make ci-lint` on the runner |
-| Devcontainer image | PR | In the toolchain image: `make build`, `make cross-build`, `make ci-test`, `make security`, `make deps-check`. Then `trivy image` on the integration image. `security` and `deps-check` get a network for the vulnerability databases and the module proxy |
+| Devcontainer image | PR | One job on `bigdisk`. Each stage is a step in the toolchain image: `make lint`; the static checks `make ci-lint` adds (`tidy-check lint-runtimesecret lint-integration check-buildgates check-releasability check-changelog-assembly check-scripts`); `make build`; `make cross-build`; `make coverage`; `make test-runtimesecret`; `make security`; `make deps-check`. Then `trivy image` on the integration image. A failed step does not stop the later ones. `security`, `deps-check` and `trivy image` get a network for the vulnerability databases and the module proxy |
+| Architecture Gates | PR | No go-objstore import (the template's storage-seam check), on the runner's shell |
 | FIPS | full | `make test-fips` in the toolchain image |
-| Integration | full | `make ci-integration`: the integration-test stage, default and FIPS strict, on one scanned image |
+| Integration | full | `make ci-integration` on `bigdisk`: the user-namespace, default and FIPS strict suites, on one scanned integration image |
 
 The **PR tier** runs on every event. The **full tier** runs on a push to
 `main`, on `workflow_dispatch`, and on a pull request labelled `ci:full`. Label
@@ -164,9 +166,13 @@ a PR `ci:full` when it changes the API or fixes the integration suite. The label
 takes effect on the PR's next push or update-branch, or via `workflow_dispatch`,
 because a label change starts no run.
 
-`make security` includes `ci-security`'s scans. The test stage is `make
-ci-test`, which adds the coverage floor and the runtimesecret build to `make
-test`'s race suite. Nothing is uploaded to code scanning.
+`make coverage` is the test stage: the race suite across the CPU matrix, failing
+when any package is below `COVERAGE_THRESHOLD` (90). `make security` includes
+`ci-security`'s scans. Nothing is uploaded to code scanning. The workflow passes
+the make variables of handbook devcontainer.md §6. `IT_IMAGE` tags the
+integration image that `docker-build` builds. go-enclave needs no module
+credential, so `MODULE_ENV_FILE` is never read. `GO_BUILD_TAGS` must stay empty,
+because no package is gated by a tag; the Makefile refuses any other value.
 
 The **CI Gate** is the one required check. It runs on the `ci-gate` runner
 label and carries `build/ci/summary.sh <message> <full> <tier>:<job>=<result>…` inline:
@@ -181,8 +187,10 @@ other skip, failure or cancellation fails the gate.
 | `batch.yml` | dispatch only | Fuzz, full race, soak and bench on the `batch` runners; never part of a merge gate |
 | `automerge.yml` | `pull_request_target`, CI completion, every 30 minutes | Merge trains; it never checks out the PR |
 
-`TOOL_INSTALL=0` on our runners, where the pinned tools are already on `PATH`,
-and `1` (install into `bin/tools/`) elsewhere. actionlint alone ignores
+`TOOL_INSTALL=1`, the default, installs a missing pin into `bin/tools/`.
+`TOOL_INSTALL=0` installs nothing and fails closed. `ci.yml` sets neither,
+because its stages run in the toolchain image, where the pinned tools are on
+`PATH`. actionlint alone ignores
 `TOOL_INSTALL=0`: it uses a verified copy on `PATH` or builds it at its pin.
 
 ## Values are data
@@ -229,7 +237,7 @@ tree at publish.
 | `release.sh`, `release-version-check.sh`, `release-check-tag.sh`, `changelog-assemble.sh`, `release-notes.sh` | Cutting a release ([above](#what-releasesh-refuses)) |
 | `release-verify.sh`, `consumer-check.sh`, `release-publish.sh` | The [post-tag targets](#post-tag-targets) |
 | `deps-latest.sh` | `make deps-latest`: bump internal dependencies to their latest tags, then tidy |
-| `in-toolchain-image.sh`, `reap-stale-ci-stacks.sh` | CI only, from the ci-template: run a command in the toolchain image on a copy of the checkout; remove this repository's stale CI containers and compose stacks |
+| `in-toolchain-image.sh`, `reap-stale-ci-stacks.sh`, `assert-build-tags.sh` | CI only, from the ci-template: run a command in the toolchain image on a copy of the checkout; remove this repository's stale CI containers and compose stacks; fail when a `GO_BUILD_TAGS` tag selects no file |
 
 `build/ci/` holds what only a workflow runs: `release-tag.sh`,
 `publish-release.sh`, `summary.sh`, `forge-resolution.sh` and

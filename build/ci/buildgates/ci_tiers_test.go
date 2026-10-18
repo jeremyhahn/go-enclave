@@ -56,7 +56,7 @@ var ciPullRequestTypes = []string{"opened", "synchronize", "reopened"}
 
 var (
 	// gateCheckLine is one tagged result in the gate script:
-	//   pr:lint="${{ needs.lint.result }}" \
+	//   pr:image="${{ needs.image.result }}" \
 	gateCheckLine = regexp.MustCompile(`^\s*([a-z]+):([A-Za-z0-9_-]+)="\$\{\{ needs\.([A-Za-z0-9_-]+)\.result \}\}"\s*\\?\s*$`)
 	// needsResult finds every result the gate reads, tagged or not.
 	needsResult = regexp.MustCompile(`needs\.([A-Za-z0-9_-]+)\.result`)
@@ -322,18 +322,18 @@ func TestCIGateTiers_RefusesWhatItMustRefuse(t *testing.T) {
 	const fullIf = "    if: " + fullTierIf + "\n"
 	for _, tc := range []struct{ name, old, new string }{
 		{"full job tagged pr", "full:fips=", "pr:fips="},
-		{"pr job tagged full", "pr:lint=", "full:lint="},
+		{"pr job tagged full", "pr:arch-gates=", "full:arch-gates="},
 		{"unknown tag", "pr:image=", "nightly:image="},
 		{"untagged check", "pr:image=", "image="},
-		{"check names another job", `pr:lint="${{ needs.lint`, `pr:lint="${{ needs.image`},
+		{"check names another job", `pr:arch-gates="${{ needs.arch-gates`, `pr:arch-gates="${{ needs.image`},
 		{"job missing from the gate", "            pr:image=\"${{ needs.image.result }}\" \\\n", ""},
 		{"job checked twice", "            pr:image=\"${{ needs.image.result }}\" \\\n", "            pr:image=\"${{ needs.image.result }}\" \\\n            pr:image=\"${{ needs.image.result }}\" \\\n"},
-		{"gate misses a need", "needs: [lint, image, fips, integration]", "needs: [lint, image, fips]"},
+		{"gate misses a need", "needs: [image, fips, integration, arch-gates]", "needs: [image, fips, integration]"},
 		{"gate not always", "    runs-on: " + ciGateRunner + "\n    if: always()\n", "    runs-on: " + ciGateRunner + "\n    if: success()\n"},
 		{"full job without its if", "    name: FIPS\n" + fullIf, "    name: FIPS\n"},
 		{"full job with a looser if", "    name: FIPS\n" + fullIf, "    name: FIPS\n    if: github.event_name == 'push' || github.event_name == 'pull_request'\n"},
-		{"pr job with an if", "    name: Lint\n", "    name: Lint\n    if: always()\n"},
-		{"pr job needs a full job", "    name: Lint\n", "    name: Lint\n    needs: [fips]\n"},
+		{"pr job with an if", "    name: Architecture Gates\n", "    name: Architecture Gates\n    if: always()\n"},
+		{"pr job needs a full job", "    name: Architecture Gates\n", "    name: Architecture Gates\n    needs: [fips]\n"},
 		{"gate FULL flag differs", "          FULL: ${{ " + fullTierIf, "          FULL: ${{ github.event_name == 'push'"},
 		{"labeled type added back", "types: [opened, synchronize, reopened]", "types: [opened, synchronize, reopened, labeled]"},
 		{"gate on the shared runner", "    runs-on: " + ciGateRunner + "\n", "    runs-on: ubuntu-latest\n"},
