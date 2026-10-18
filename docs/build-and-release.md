@@ -144,14 +144,19 @@ Which integration test covers which feature: [COVERAGE.md](../test/integration/C
 
 ## CI
 
-`ci.yml` follows the ci-template v1.21.1 shape. Every stage runs in the
+`ci.yml` follows the ci-template v1.22.1 shape. Every stage runs in the
 devcontainer image that `make docker-build` builds from the commit under test.
 No job installs Go or a tool on the runner. `scripts/in-toolchain-image.sh`
 copies the checkout into a toolchain container, because a bind mount would
 resolve on the daemon's host. Each job that uses Docker runs
 `scripts/reap-stale-ci-stacks.sh` first, which removes what a dead runner left
 behind. The image and integration jobs mask the forge credentials before any
-other step. No step prints an env file or the job environment.
+other step. No step prints an env file or the job environment. The stages
+keep the Go build, golangci-lint and module caches in named volumes on the
+runner's Docker host, `go-enclave-ci-cache-<pr|main>-{gobuild,golangci,gomod}`,
+and only a push to `main` writes the `main` set. After the image build,
+`scripts/trim-ci-caches.sh` removes the largest unused volume while this
+repository's volumes on that host exceed `CI_CACHE_MAX_GIB` (32).
 
 | Job | Tier | Runs |
 |---|---|---|
@@ -164,7 +169,9 @@ The **PR tier** runs on every event. The **full tier** runs on a push to
 `main`, on `workflow_dispatch`, and on a pull request labelled `ci:full`. Label
 a PR `ci:full` when it changes the API or fixes the integration suite. The label
 takes effect on the PR's next push or update-branch, or via `workflow_dispatch`,
-because a label change starts no run.
+because a label change starts no run. A newer push to a PR cancels that PR's
+older run; a push to `main` cancels nothing, and waits for the older `main`
+run, so every `main` commit keeps its run.
 
 `make coverage` is the test stage: the race suite across the CPU matrix, failing
 when any package is below `COVERAGE_THRESHOLD` (90). `make security` includes
@@ -237,7 +244,7 @@ tree at publish.
 | `release.sh`, `release-version-check.sh`, `release-check-tag.sh`, `changelog-assemble.sh`, `release-notes.sh` | Cutting a release ([above](#what-releasesh-refuses)) |
 | `release-verify.sh`, `consumer-check.sh`, `release-publish.sh` | The [post-tag targets](#post-tag-targets) |
 | `deps-latest.sh` | `make deps-latest`: bump internal dependencies to their latest tags, then tidy |
-| `in-toolchain-image.sh`, `reap-stale-ci-stacks.sh`, `assert-build-tags.sh` | CI only, from the ci-template: run a command in the toolchain image on a copy of the checkout; remove this repository's stale CI containers and compose stacks; fail when a `GO_BUILD_TAGS` tag selects no file |
+| `in-toolchain-image.sh`, `reap-stale-ci-stacks.sh`, `trim-ci-caches.sh`, `assert-build-tags.sh` | CI only, from the ci-template: run a command in the toolchain image on a copy of the checkout; remove this repository's stale CI containers and compose stacks; bound this repository's CI cache volumes on the host; fail when a `GO_BUILD_TAGS` tag selects no file |
 
 `build/ci/` holds what only a workflow runs: `release-tag.sh`,
 `publish-release.sh`, `summary.sh`, `forge-resolution.sh` and

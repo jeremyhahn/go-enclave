@@ -44,6 +44,9 @@ const (
 	fullTierIf = "github.event_name == 'push' || github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'ci:full')"
 	// refConcurrencyGroup is the ref-keyed group of every pull_request workflow.
 	refConcurrencyGroup = "${{ github.workflow }}-${{ github.ref }}"
+	// refCancelInProgress cancels a superseded run on every ref but main, so
+	// a push to main never cancels an in-flight main run (ci-template v1.22.1).
+	refCancelInProgress = "${{ github.ref != 'refs/heads/main' }}"
 	// scheduledWorkflow is the one workflow allowed a `schedule:` trigger.
 	scheduledWorkflow = "automerge.yml"
 )
@@ -261,8 +264,8 @@ func workflowTriggerViolations(file string, src []byte) ([]string, error) {
 	var bad []string
 	if _, ok := events["pull_request"]; ok {
 		c, _ := wf.Concurrency.(map[string]any)
-		if c == nil || c["group"] != refConcurrencyGroup || c["cancel-in-progress"] != true {
-			bad = append(bad, fmt.Sprintf("runs on pull_request but its workflow-level concurrency is %v, want group: %s, cancel-in-progress: true", wf.Concurrency, refConcurrencyGroup))
+		if c == nil || c["group"] != refConcurrencyGroup || c["cancel-in-progress"] != refCancelInProgress {
+			bad = append(bad, fmt.Sprintf("runs on pull_request but its workflow-level concurrency is %v, want group: %s, cancel-in-progress: %s", wf.Concurrency, refConcurrencyGroup, refCancelInProgress))
 		}
 	}
 	if _, ok := events["schedule"]; ok && filepath.Base(file) != scheduledWorkflow {
@@ -374,7 +377,7 @@ func TestCIGateTiers_RefusesWhatItMustRefuse(t *testing.T) {
 		})
 	}
 
-	const wantConc = "concurrency:\n  group: ${{ github.workflow }}-${{ github.ref }}\n  cancel-in-progress: true\n"
+	const wantConc = "concurrency:\n  group: ${{ github.workflow }}-${{ github.ref }}\n  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}\n"
 	for _, tc := range []struct {
 		name, file, src string
 		wantBad         bool
@@ -382,6 +385,7 @@ func TestCIGateTiers_RefusesWhatItMustRefuse(t *testing.T) {
 		{"pull_request without concurrency", "x.yml", "on: [pull_request]\njobs: {}\n", true},
 		{"pull_request, global group", "x.yml", "on: pull_request\nconcurrency:\n  group: ci\n  cancel-in-progress: true\njobs: {}\n", true},
 		{"pull_request, no cancel", "x.yml", "on:\n  pull_request:\nconcurrency:\n  group: ${{ github.workflow }}-${{ github.ref }}\njobs: {}\n", true},
+		{"pull_request, cancels main", "x.yml", "on:\n  pull_request:\nconcurrency:\n  group: ${{ github.workflow }}-${{ github.ref }}\n  cancel-in-progress: true\njobs: {}\n", true},
 		{"pull_request, ref-keyed", "x.yml", "on:\n  pull_request:\n" + wantConc + "jobs: {}\n", false},
 		{"push only, no concurrency", "x.yml", "on:\n  push:\njobs: {}\n", false},
 		{"scheduled", "nightly.yml", "on:\n  schedule:\n    - cron: '0 3 * * *'\n  workflow_dispatch:\njobs: {}\n", true},

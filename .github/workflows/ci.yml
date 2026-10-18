@@ -1,4 +1,20 @@
-# ci-template: v1.21.1 (customized)
+# ci-template: v1.22.1 (customized)
+# v1.22.1 (Company Agent m636 item 2, 2026-10-18, after go-quicbaas main
+# fe167500f was left with no completed run): the concurrency block is
+# canonical. A newer push to a PR ref still cancels that ref's older run, but
+# a push to main never cancels an in-flight main run: each main commit keeps
+# its run, so every merge is validated. Every repository carried the block as
+# a CUSTOMIZE copy with `cancel-in-progress: true` on every ref, main included
+# (devops.md §9); the copy goes and the canonical block replaces it. Adopted
+# with the v1.22 rollout.
+# v1.22 (Company Agent m616 item 2, 2026-10-18, after CI job layers filled the
+# runner disks): the image job's stages keep the Go build, golangci-lint and
+# module caches in named volumes on the runner's Docker host, kept across jobs
+# and split by trust class (CI_CACHE_CLASS: `main` for a push to main, `pr`
+# otherwise), never in a job container's writable layer or its /tmp
+# (ci-standard.md §6; in-toolchain-image.sh v2). A new step,
+# trim-ci-caches.sh, bounds the repo's cache volumes on the host
+# (CI_CACHE_MAX_GIB, default 32).
 # v1.21.1 (Company Agent m605 item 8, 2026-10-18, after a forge token printed
 # in a go-xkms run): the image and integration jobs mask the forge
 # credentials first, and no step or make target prints an env file, the job
@@ -258,14 +274,12 @@ on:
                                         # only retry when a run was never
                                         # created (see v1.3 correction above)
 
-# CUSTOMIZE: cancel superseded runs. Keyed on the ref so a branch only
-# supersedes itself, and set at workflow level so the whole superseded
-# pipeline goes. cancel-in-progress is the literal `true` because Gitea does
-# not evaluate expressions there. ci-gate treats `cancelled` as a failure,
-# which never blocks a merge: only a superseded commit gets cancelled.
+# One group per ref (v1.22.1). On a PR ref the newer run cancels the older; on
+# main nothing is cancelled, and a newer main run waits for the older one, so
+# no main commit loses its run. Never set `cancel-in-progress: true` on main.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 permissions:
   contents: read
@@ -301,6 +315,11 @@ jobs:
   # image's module cache; security and deps-check get one (IN_IMAGE_NETWORK=
   # bridge) for the vulnerability databases and the module proxy.
   #
+  # v1.22: every stage mounts the build and golangci-lint cache volumes, and a
+  # bridge stage the module cache volume, from the runner's Docker host
+  # (in-toolchain-image.sh v2, ci-standard.md §6), so a stage writes its
+  # caches there and not into its container's layer.
+  #
   # The forge credentials reach the image build only as the gomodauth BuildKit
   # secret, from a file outside the context that the job removes.
   # No step and no make target prints that file, the job environment (`env`,
@@ -318,6 +337,10 @@ jobs:
     timeout-minutes: 90       # CUSTOMIZE: give the stages honest headroom
     env:
       CI_STACK_PREFIX: ${{ github.event.repository.name }}-ci-
+      # v1.22: the cache volumes' trust class. Only a push to main writes the
+      # caches main's build reads; every other event, pull requests included,
+      # gets the `pr` set (ci-standard.md §6).
+      CI_CACHE_CLASS: ${{ github.event_name == 'push' && 'main' || 'pr' }}
       IT_IMAGE: ${{ github.event.repository.name }}-ci-it:${{ github.run_id }}-${{ github.run_attempt }}-image
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -352,6 +375,12 @@ jobs:
           make docker-build MODULE_ENV_FILE="$RUNNER_TEMP/gomodauth.env" IT_IMAGE="$IT_IMAGE"
           rm -f "$RUNNER_TEMP/gomodauth.env"
           echo "TOOLCHAIN_IMAGE=$(make -s toolchain-image)" >> "$GITHUB_ENV"
+
+      # v1.22: bound this repo's cache volumes on the host before the stages
+      # add to them (ci-standard.md §6). It never fails the job.
+      - name: Trim the CI caches
+        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' }}
+        run: scripts/trim-ci-caches.sh "$CI_STACK_PREFIX" "$TOOLCHAIN_IMAGE"
 
       # make lint: gofmt, vet, golangci-lint, actionlint with shellcheck
       # (devops.md §4). .golangci.yml enables staticcheck, errcheck, unused,
