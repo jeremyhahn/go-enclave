@@ -579,7 +579,7 @@ ci: ci-fast ci-integration
 deps-latest:
 	@sh scripts/deps-latest.sh
 
-## deps-check: fail on any module a go.mod requires that is behind its latest release without a "// held: <reason>" comment on its require or replace line (needs the module proxy)
+## deps-check: fail on any module a go.mod requires that is behind its latest release without a "// held: <reason>" comment on its require or replace line, except one whose latest release is under 7 days old, which is reported (needs the module proxy)
 .PHONY: deps-check
 deps-check:
 	@sh scripts/deps-check.sh
