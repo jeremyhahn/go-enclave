@@ -1,6 +1,6 @@
 # go-enclave specification
 
-> **Status: NORMATIVE** · Scope: go-enclave · Owner: Software Department · Last verified: 2026-10-15
+> **Status: NORMATIVE** · Scope: go-enclave · Owner: Software Department · Last verified: 2026-10-20
 > What the project is and every feature it has. [ROADMAP.md](../ROADMAP.md) carries what is complete and what remains; the two agree.
 > A feature listed here, in any status, is never deleted: not its docs, code or issues; only the owner removes or re-scopes one, by changing this file.
 
@@ -92,6 +92,7 @@ go-enclave never:
 | build-and-release | shipped | Every gate is a Makefile target that passes offline in the devcontainer, with pinned, checksum-verified tools. A change adds a changelog fragment. `make release`, `make release-candidate` and `make release-alpha` each cut one kind of release from `main`; the tag's workflow runs the full gate (FIPS and trivy included) and a consumer check, and the artifacts are signed. [build and release](build-and-release.md). | none |
 | enclave-interface | shipped | The one public interface upstream consumes: the handle plus capabilities. Constructors return it; concrete types are backend-internal. No upstream project depends on a concrete type. [#138](../../../issues/138), milestone v0.9.0 dev complete. | none |
 | backend-detection | shipped | Detection runs only on an explicit call from `main`; importing the package changes no process state. It covers only the backends the binary registered, and probing the host is each backend's own code. Each backend reports its rank; go-enclave compares the ranks and fixes no ranking of its own. It selects the most secure usable backend, the memory enclave when nothing else is usable; the selection is observable and testable. [#190](../../../issues/190), milestone v0.9.0 dev complete. [Architecture](backend-detection/architecture.md). | [backend-detection/](backend-detection/user.md) |
+| public-release | in progress | The first public release is a plain `vX.Y.Z` tag cut from `main` with `make release`, its version confirmed at the owner's publish approval, after a release candidate has passed its tag workflow and staging. The published tree is the tag's tree, which names no lab host and carries no agent-only file (`make check-releasability`). From that release on, a breaking change ships with its migration in [Upgrading](README.md#upgrading). | [build and release](build-and-release.md) |
 | bsd-windows-runtime-testing | future | The BSDs and Windows run the test suite, not only compile. Until then they are build-only and tests run on Linux only ([runtime testing](memory-enclave/runtime-testing.md)). [#188](../../../issues/188). | none |
 | se052f-secure-element | future | A backend on the EdgeLock SE052F secure element that implements the backend seam and passes `backendtest` ([out-of-tree backend](backends/architecture.md#an-out-of-tree-backend)). It is the host-side Go backend; trusted-firmware owns the on-device C driver for the same part as its element tier. [#191](../../../issues/191). | [backends/](backends/user.md) |
 | optiga-trust-m | future | A backend on the Infineon OPTIGA Trust M I2C element that implements the backend seam and passes `backendtest` ([out-of-tree backend](backends/architecture.md#an-out-of-tree-backend)). It is the host-side Go backend; trusted-firmware owns the on-device driver for the same part. [#196](../../../issues/196). | [backends/](backends/user.md) |
@@ -117,21 +118,28 @@ go-enclave never:
 
 ## Release criteria
 
-The next milestone, [v0.9.0 dev complete](../../../milestone/34) (see
-[ROADMAP milestones](../ROADMAP.md#milestones)), closes when:
+The next release is the first public release (public-release). It is cut
+when:
 
-1. The enclave interface is the public API (enclave-interface).
-2. Detection selects the memory backend on a plain host (backend-detection).
-3. Every issue in the milestone is closed.
-4. `make release-alpha VERSION=v0.9.0-alpha` passes its checks on `main`.
-5. The alpha is cut from `main` with
-   `make release-alpha VERSION=v0.9.0-alpha` and published as a
-   pre-release.
-6. The tag's release workflow passes: `make release-verify`, the full gate
-   (FIPS and trivy included) and `make consumer-check`.
-7. The version is confirmed at the owner's publish approval.
-8. CI conforms to the handbook's CI standard,
+1. Every feature marked shipped holds on `main`. The future backends are not
+   part of it; each ships in a later release.
+2. Every change since the last release passed CI and one review.
+3. CI conforms to the handbook's CI standard,
    `software/conventions/ci-standard.md`:
    build, unit, integration, security and the latest-version check
    (`make build`, `make test`, `make integration-test`, `make security`,
    `make deps-check`), all in the project devcontainer image.
+4. The module has no in-house upstream; its one dependency,
+   `golang.org/x/sys`, is at its latest version (`make deps-check`).
+5. `make check-releasability` passes on `main`: no tracked file names the lab
+   fleet or is agent-only.
+6. A release candidate is cut from `main` with
+   `make release-candidate VERSION=vX.Y.Z-rc.N`, its tag's release workflow
+   passes (`make release-verify`, the full gate with FIPS and trivy, and
+   `make consumer-check`), and it exits staging after one week with every P1
+   integration suite green.
+7. The version is confirmed at the owner's publish approval, and
+   `make release VERSION=vX.Y.Z` cuts it from `main`; its tag's release
+   workflow passes.
+8. The release is published to GitHub as one commit whose tree is
+   byte-identical to the tag's tree.

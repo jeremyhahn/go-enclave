@@ -1,6 +1,6 @@
 # go-enclave roadmap
 
-> **Status: REFERENCE** · Owner: Software Department · Last verified: 2026-10-15
+> **Status: REFERENCE** · Owner: Software Department · Last verified: 2026-10-20
 > Changes are proposed by docs-only PR. Agrees with [docs/SPEC.md](docs/SPEC.md), which lists every feature named below.
 
 ## Mission
@@ -11,7 +11,8 @@ Its layer is the base of the stack, under go-quicraft: [SPEC purpose](docs/SPEC.
 
 ## Milestones
 
-- [v0.9.0 dev complete](../../milestone/34) — target kind: dev complete toward the v0.9.0-alpha release — due 2026-10-14 — 1 open, 9 closed issues
+- First public release — target kind: release (`vX.Y.Z`), the version confirmed at the owner's publish approval — criteria: [SPEC release criteria](docs/SPEC.md#release-criteria)
+- [v0.10.0 dev complete](../../milestone/39) — target kind: dev complete — 1 open, 0 closed issues
 
 ## Complete
 
@@ -28,7 +29,7 @@ Its layer is the base of the stack, under go-quicraft: [SPEC purpose](docs/SPEC.
 
 ## Now
 
-Nothing in progress.
+- **public-release** — the first public release: a release candidate through its tag workflow and staging, then `make release` at the version the owner confirms, published to GitHub with a tree byte-identical to the tag's — [release criteria](docs/SPEC.md#release-criteria) — in progress
 
 ## Next
 
