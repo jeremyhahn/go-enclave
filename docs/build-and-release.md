@@ -160,7 +160,7 @@ repository's volumes on that host exceed `CI_CACHE_MAX_GIB` (32).
 
 | Job | Tier | Runs |
 |---|---|---|
-| Devcontainer image | PR | One job on `bigdisk`. Each stage is a step in the toolchain image: `make lint`; the static checks `make ci-lint` adds (`tidy-check lint-runtimesecret lint-integration check-buildgates check-releasability check-changelog-assembly check-scripts`); `make build`; `make cross-build`; `make coverage`; `make test-runtimesecret`; `make security`; `make deps-check`. Then `trivy image` on the integration image. A failed step does not stop the later ones. `security`, `deps-check` and `trivy image` get a network for the vulnerability databases and the module proxy |
+| Devcontainer image | PR | One job on `bigdisk`. Each stage is a step in the toolchain image: `make lint`; the static checks `make ci-lint` adds (`tidy-check lint-runtimesecret lint-integration check-buildgates check-releasability check-changelog-assembly check-scripts`); `make build`; `make cross-build`; `make coverage`; `make test-runtimesecret`; `make security`; `make deps-check`. Then `trivy image` on the integration image. A failed step does not stop the later ones. `security`, `deps-check` and `trivy image` get a network for the vulnerability databases and the module proxy. `deps-check` reports, and does not fail on, a module behind a latest release published under 7 days ago without a `// held: <reason>` comment |
 | Architecture Gates | PR | No go-objstore import (the template's storage-seam check), on the runner's shell |
 | FIPS | full | `make test-fips` in the toolchain image |
 | Integration | full | `make ci-integration` on `bigdisk`: the user-namespace, default and FIPS strict suites, on one scanned integration image |

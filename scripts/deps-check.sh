@@ -12,7 +12,9 @@
 #
 #     // held: <reason>
 #
-# and the reason is not empty. It needs the module proxy: with GOPROXY off, the
+# and the reason is not empty. One behind without a reason whose latest release
+# was published under 7 days ago is reported and passes; once that release is 7
+# days old, or its publish time is unknown, it fails. It needs the module proxy: with GOPROXY off, the
 # devcontainer's default, it uses https://proxy.golang.org,direct.
 set -eu
 # shellcheck source=lib.sh
@@ -54,21 +56,26 @@ held_reason() {
 
 [ $# -gt 0 ] || set -- . build/ci/buildgates
 bad=0
+now=$(date +%s)
 for dir in "$@"; do
   gomod=$dir/go.mod
   [ -f "$gomod" ] || die "$gomod: no such file"
   behind=$(cd "$dir" && "$go" list -m -u \
-    -f '{{if and (not .Main) .Update}}{{.Path}} {{.Version}} {{.Update.Version}}{{end}}' all) ||
+    -f '{{if and (not .Main) .Update}}{{.Path}} {{.Version}} {{.Update.Version}} {{with .Update.Time}}{{.Unix}} {{.UTC.Format "2006-01-02T15:04:05Z"}}{{else}}0 unknown{{end}}{{end}}' all) ||
     die "go list -m -u all failed in $dir"
-  while read -r mod cur latest; do
+  while read -r mod cur latest released when; do
     [ -n "$mod" ] || continue
     state=$(held_reason "$gomod" "$mod")
     case $state in
       '') ;;
       held*) echo "$prog: $gomod: $mod $cur is held below $latest: ${state#held }" ;;
       *)
-        echo "$prog: $gomod: $mod $cur is behind $latest, with no '// held: <reason>' comment" >&2
-        bad=$((bad + 1))
+        if [ "${released:-0}" -gt 0 ] && [ $((now - released)) -lt 604800 ]; then
+          echo "$prog: $gomod: $mod $cur is behind $latest, released $when, under 7 days ago"
+        else
+          echo "$prog: $gomod: $mod $cur is behind $latest, with no '// held: <reason>' comment" >&2
+          bad=$((bad + 1))
+        fi
         ;;
     esac
   done <<EOF
@@ -76,4 +83,4 @@ $behind
 EOF
 done
 [ "$bad" -eq 0 ] || die "$bad module(s) behind their latest release without a documented reason"
-echo "$prog: every required module is at its latest release or held with a reason"
+echo "$prog: every required module is at its latest release, held with a reason, or behind one under 7 days old"

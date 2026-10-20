@@ -2,8 +2,10 @@ package buildgates
 
 import (
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Tests for the Makefile and scripts fixes of #136 (T3b).
@@ -62,7 +64,8 @@ const depsCheckGoMod = "module example.com/self\n\ngo 1.27.2\n\n" +
 
 func TestScriptsDepsCheck_PassesWhenEveryModuleIsCurrentOrHeld(t *testing.T) {
 	dir, goCmd := depsCheckTree(t, depsCheckGoMod,
-		"\nexample.com/held v1.0.0 v1.1.0\nexample.com/swapped v1.0.0 v1.3.0\nexample.com/graph-only v1.0.0 v2.0.0\n\n")
+		"\nexample.com/held v1.0.0 v1.1.0 0 unknown\nexample.com/swapped v1.0.0 v1.3.0 0 unknown\n"+
+			"example.com/graph-only v1.0.0 v2.0.0 0 unknown\n\n")
 	out, ok := runScript(t, dir, map[string]string{"GOCMD": goCmd}, "deps-check.sh", ".")
 	if !ok {
 		t.Fatalf("failed although every module behind is held:\n%s", out)
@@ -83,7 +86,9 @@ func TestScriptsDepsCheck_PassesWhenEveryModuleIsCurrentOrHeld(t *testing.T) {
 func TestScriptsDepsCheck_FailsOnAnUndocumentedModuleBehind(t *testing.T) {
 	gomod := depsCheckGoMod + "\nrequire example.com/empty v1.0.0 // held:\n"
 	dir, goCmd := depsCheckTree(t, gomod,
-		"example.com/direct v1.0.0 v1.4.0\nexample.com/indirect v1.0.0 v1.0.1\nexample.com/empty v1.0.0 v1.1.0\n")
+		"example.com/direct v1.0.0 v1.4.0 "+depsCheckReleased(8*24*time.Hour)+"\n"+
+			"example.com/indirect v1.0.0 v1.0.1 "+depsCheckReleased(30*24*time.Hour)+"\n"+
+			"example.com/empty v1.0.0 v1.1.0 0 unknown\n")
 	out, ok := runScript(t, dir, map[string]string{"GOCMD": goCmd}, "deps-check.sh", ".")
 	if ok {
 		t.Fatalf("succeeded although modules are behind without a reason:\n%s", out)
@@ -97,6 +102,42 @@ func TestScriptsDepsCheck_FailsOnAnUndocumentedModuleBehind(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("output lacks %q:\n%s", want, out)
 		}
+	}
+}
+
+// depsCheckReleased returns the listing's release-time fields for a release
+// published age ago: its Unix time and its UTC time.
+func depsCheckReleased(age time.Duration) string {
+	at := time.Now().Add(-age).UTC()
+	return strconv.FormatInt(at.Unix(), 10) + " " + at.Format("2006-01-02T15:04:05Z")
+}
+
+func TestScriptsDepsCheck_ReportsARecentReleaseWithoutFailing(t *testing.T) {
+	dir, goCmd := depsCheckTree(t, depsCheckGoMod,
+		"example.com/direct v1.0.0 v1.4.0 "+depsCheckReleased(24*time.Hour)+"\n")
+	out, ok := runScript(t, dir, map[string]string{"GOCMD": goCmd}, "deps-check.sh", ".")
+	if !ok {
+		t.Fatalf("failed on a release under 7 days old:\n%s", out)
+	}
+	if !strings.Contains(out, "example.com/direct v1.0.0 is behind v1.4.0") || !strings.Contains(out, "under 7 days") {
+		t.Fatalf("does not report the module behind a release under 7 days old:\n%s", out)
+	}
+}
+
+func TestScriptsDepsCheck_FailsOnAReleaseOlderThan7Days(t *testing.T) {
+	dir, goCmd := depsCheckTree(t, depsCheckGoMod,
+		"example.com/direct v1.0.0 v1.4.0 "+depsCheckReleased(8*24*time.Hour)+"\n")
+	out, ok := runScript(t, dir, map[string]string{"GOCMD": goCmd}, "deps-check.sh", ".")
+	if ok || !strings.Contains(out, "example.com/direct v1.0.0 is behind v1.4.0, with no '// held: <reason>' comment") {
+		t.Fatalf("does not fail on a release 8 days old (ok=%v):\n%s", ok, out)
+	}
+}
+
+func TestScriptsDepsCheck_FailsWhenTheReleaseTimeIsUnknown(t *testing.T) {
+	dir, goCmd := depsCheckTree(t, depsCheckGoMod, "example.com/direct v1.0.0 v1.4.0 0 unknown\n")
+	out, ok := runScript(t, dir, map[string]string{"GOCMD": goCmd}, "deps-check.sh", ".")
+	if ok || !strings.Contains(out, "1 module(s) behind") {
+		t.Fatalf("does not fail when the release time is unknown (ok=%v):\n%s", ok, out)
 	}
 }
 
