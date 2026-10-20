@@ -162,8 +162,9 @@ RUN set -eux; \
 # are the exception.
 WORKDIR /build
 COPY go.mod go.sum ./
+# The download retries: a transient proxy error must not fail the image (m850).
 RUN set -eux; \
-    GOPROXY="$GO_BUILD_PROXY" go mod download -x; \
+    n=0; until GOPROXY="$GO_BUILD_PROXY" go mod download -x; do n=$((n + 1)); [ "$n" -lt 3 ] || exit 1; sleep $((n * 10)); done; \
     go mod verify; \
     chmod -R a+rX /gomodcache; \
     find /gomodcache/cache -type d -exec chmod a+w {} +
@@ -200,8 +201,9 @@ COPY --from=tools /out/ /usr/local/bin/
 
 WORKDIR /build
 COPY build/ci/buildgates/go.mod build/ci/buildgates/go.sum ./
+# The download retries: a transient proxy error must not fail the image (m850).
 RUN set -eux; \
-    GOPROXY="$GO_BUILD_PROXY" go mod download -x; \
+    n=0; until GOPROXY="$GO_BUILD_PROXY" go mod download -x; do n=$((n + 1)); [ "$n" -lt 3 ] || exit 1; sleep $((n * 10)); done; \
     go mod verify; \
     chmod -R a+rX /gomodcache; \
     find /gomodcache/cache -type d -exec chmod a+w {} +
