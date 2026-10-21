@@ -3,8 +3,8 @@
 #   integration  `make integration-test` (and -fips) is the entry point; it
 #                runs this file under a UNIQUE project name per run and tears
 #                it down with `down --volumes` on every exit. The image is not
-#                the project's: scripts/integration-image.sh builds, scans and
-#                removes it (below).
+#                the project's: scripts/integration-image.sh names it by
+#                content, builds it when missing and scans it (below).
 #   userns       `make integration-test-userns`: the integration service under a
 #                seccomp profile that also permits CLONE_NEWUSER (see below).
 #   toolchain    `make docker-run CMD='make lint'`: a command in the toolchain
@@ -16,11 +16,13 @@
 #
 # Per-run isolation of the integration service (handbook integration-testing
 # §7): no container_name, no published ports, and the only volume is
-# per-project. The integration image's tag is unique per run
-# (go-enclave-it:<time>-<pid>-<random>, GO_ENCLAVE_IT_IMAGE), set by
-# scripts/integration-image.sh, which builds it once, scans it, runs the suites
-# on it and removes it. Two runs on one host — two agents, a push and a re-run —
-# cannot claim each other's containers, images or caches. The toolchain service
+# per-project. The integration image's tag is its content
+# (go-enclave-ci-it:<hash> of the build context, `make -s it-image`,
+# GO_ENCLAVE_IT_IMAGE), set by scripts/integration-image.sh, which builds it
+# only when the daemon lacks it, scans it and runs the suites on it; no run
+# removes it. Two runs on one host — two agents, a push and a re-run — share
+# an image only when they build the same tree, and cannot claim each other's
+# containers or caches. The toolchain service
 # names its image, go-enclave-toolchain:<tag>, because `make docker-build`
 # builds and tags it; pull_policy: never means that name is never looked up in
 # a registry.
@@ -115,9 +117,9 @@ x-posture: &posture
 
 x-integration: &integration_service
   <<: *posture
-  # One image per `make ci-integration`: scripts/integration-image.sh builds it
-  # under a tag unique to the run (GO_ENCLAVE_IT_IMAGE), scans that exact image
-  # ID, and the userns, default and FIPS suites run on it with `run --pull never`.
+  # One image per tree: scripts/integration-image.sh names it by content
+  # (GO_ENCLAVE_IT_IMAGE), builds it when missing, scans that exact image ID,
+  # and the userns, default and FIPS suites run on it with `run --pull never`.
   # The default is for a hand-run `docker compose`, never for the make targets.
   image: ${GO_ENCLAVE_IT_IMAGE:-go-enclave-it:local}
   build:

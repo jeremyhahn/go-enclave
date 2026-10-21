@@ -134,7 +134,7 @@ its own. Each target runs `vet-buildgates` first and selects tests by prefix.
 | `make ci-build` | `build cross-build` |
 | `make ci-security` | `gosec gosec-runtimesecret govulncheck govulncheck-runtimesecret modverify` |
 | `make ci-test` | `coverage test-runtimesecret` |
-| `make ci-integration` | Builds the integration image once, scans it, and runs every integration suite on it (needs Docker) |
+| `make ci-integration` | Builds the integration image unless the daemon holds it, scans it, and runs every integration suite on it (needs Docker) |
 | `make ci-fast` | `ci-lint ci-security trivy ci-test ci-build`: everything that needs no Docker |
 | `make ci` | `ci-fast ci-integration` |
 
@@ -144,7 +144,7 @@ Which integration test covers which feature: [COVERAGE.md](../test/integration/C
 
 ## CI
 
-`ci.yml` follows the ci-template v1.22.1 shape. Every stage runs in the
+`ci.yml` follows the ci-template v1.25 shape. Every stage runs in the
 devcontainer image that `make docker-build` builds from the commit under test.
 No job installs Go or a tool on the runner. `scripts/in-toolchain-image.sh`
 copies the checkout into a toolchain container, because a bind mount would
@@ -160,37 +160,48 @@ repository's volumes on that host exceed `CI_CACHE_MAX_GIB` (32).
 
 | Job | Tier | Runs |
 |---|---|---|
-| Devcontainer image | PR | One job on `bigdisk`. Each stage is a step in the toolchain image: `make lint`; the static checks `make ci-lint` adds (`tidy-check lint-runtimesecret lint-integration check-buildgates check-releasability check-changelog-assembly check-scripts`); `make build`; `make cross-build`; `make coverage`; `make test-runtimesecret`; `make security`; `make deps-check`. Then `trivy image` on the integration image. A failed step does not stop the later ones. `security`, `deps-check` and `trivy image` get a network for the vulnerability databases and the module proxy. `deps-check` reports, and does not fail on, a module behind a latest release published under 7 days ago without a `// held: <reason>` comment |
+| Devcontainer image | PR | One job on `bigdisk`. Each stage is a step in the toolchain image: `make lint`; the static checks `make ci-lint` adds (`tidy-check lint-runtimesecret lint-integration check-buildgates check-releasability check-changelog-assembly check-scripts`); `make build`; `make cross-build`; `make coverage`; `make test-runtimesecret`; then, on the full tier only, `make security`, `make deps-check` and `trivy image` on the integration image. A failed step does not stop the later ones. `security`, `deps-check` and `trivy image` get a network for the vulnerability databases and the module proxy. `deps-check` reports, and does not fail on, a module behind a latest release published under 7 days ago without a `// held: <reason>` comment |
 | Architecture Gates | PR | No go-objstore import (the template's storage-seam check), on the runner's shell |
 | FIPS | full | `make test-fips` in the toolchain image |
 | Integration | full | `make ci-integration` on `bigdisk`: the user-namespace, default and FIPS strict suites, on one scanned integration image |
+| Soak | nightly | `make ci-integration` looped on `bigdisk` for 30 minutes, each iteration its own compose project |
 
-The **PR tier** runs on every event. The **full tier** runs on a push to
-`main`, on `workflow_dispatch`, and on a pull request labelled `ci:full`. Label
-a PR `ci:full` when it changes the API or fixes the integration suite. The label
-takes effect on the PR's next push or update-branch, or via `workflow_dispatch`,
-because a label change starts no run. A newer push to a PR cancels that PR's
-older run; a push to `main` cancels nothing, and waits for the older `main`
-run, so every `main` commit keeps its run.
+The **PR tier** runs on every event. The **full tier** runs on every event
+but a pull request (a push to `main`, the nightly schedule, `workflow_dispatch`)
+and on a pull request labelled `ci:full`. The **nightly tier** runs on the
+schedule (04:00 UTC) and on `workflow_dispatch`. Label a PR `ci:full` when it
+changes the API or fixes the integration suite. The label takes effect on the
+PR's next push or update-branch, or via `workflow_dispatch`, because a label
+change starts no run. A pull request whose every changed file is markdown or
+under `docs/` runs only the lint steps of the PR tier; on the full tier the
+build and test steps always run.
+
+A newer run of a pull request cancels its older run. On `main` each event has
+its own group: a push cancels the in-progress push run of an older commit, and
+a scheduled or dispatched run cancels only an older run of its own event.
 
 `make coverage` is the test stage: the race suite across the CPU matrix, failing
 when any package is below `COVERAGE_THRESHOLD` (90). `make security` includes
 `ci-security`'s scans. Nothing is uploaded to code scanning. The workflow passes
-the make variables of handbook devcontainer.md §6. `IT_IMAGE` tags the
-integration image that `docker-build` builds. go-enclave needs no module
+the make variables of handbook devcontainer.md §6. `IT_IMAGE` is
+`make -s it-image`, `go-enclave-ci-it:<hash>`: a hash of the build context
+(the commit's tree, the checkout's diff and every untracked file `.gitignore`
+does not exclude). Every job of one commit names the same image and builds it
+only when the runner's daemon lacks it; each job leases it, and
+`reap-stale-ci-stacks.sh` removes an old unleased one. go-enclave needs no module
 credential, so `MODULE_ENV_FILE` is never read. `GO_BUILD_TAGS` must stay empty,
 because no package is gated by a tag; the Makefile refuses any other value.
 
 The **CI Gate** is the one required check. It runs on the `ci-gate` runner
-label and carries `build/ci/summary.sh <message> <full> <tier>:<job>=<result>…` inline:
-a full-tier job skipped because the full tier was not selected passes; any
-other skip, failure or cancellation fails the gate.
+label and carries `build/ci/summary.sh <message> <full> <nightly> <tier>:<job>=<result>…` inline:
+a full- or nightly-tier job skipped because its tier was not selected passes;
+any other skip, failure or cancellation fails the gate.
 
 | Workflow | Trigger | Runs |
 |---|---|---|
-| `ci.yml` | push to `main`, pull request to `main`, dispatch | The two tiers and the CI Gate |
+| `ci.yml` | push to `main`, pull request to `main`, nightly schedule, dispatch | The three tiers and the CI Gate; the one CI schedule |
 | `release.yml` | a `v*` tag | The [release flow](#release-flow) |
-| `nightly.yml` | dispatch only | `trivy-misconfig`, `trivy-sarif`, `trivy` |
+| `nightly.yml` | dispatch only | `trivy-misconfig`, `trivy-sarif` |
 | `batch.yml` | dispatch only | Fuzz, full race, soak and bench on the `batch` runners; never part of a merge gate |
 | `automerge.yml` | `pull_request_target`, CI completion, every 30 minutes | Merge trains; it never checks out the PR |
 
@@ -262,4 +273,4 @@ tree at publish.
 | `FORGE_* is unset` or refused | Set all three; the token and URL are checked for characters a token or URL does not carry |
 | The unit suite fails at startup | `RLIMIT_MEMLOCK` or `/proc` is missing ([README](../README.md#development)) |
 | `devcontainer: docker is required` | The devcontainer and integration targets need Docker; `make ci-fast` does not |
-| CI Gate fails on a skipped job | A PR-tier job was skipped; only full-tier skips pass |
+| CI Gate fails on a skipped job | A PR-tier job was skipped, or a full- or nightly-tier job in a run that selected its tier |

@@ -115,7 +115,7 @@ $(call raw_bind,$(EXTERNAL_VARS))
 # CI VARIABLES (handbook devcontainer.md §6): ci.yml passes them, so they are
 # data from a workflow and raw-bound like EXTERNAL_VARS.
 ## MODULE_ENV_FILE=<file>: docker-build, integration-test: the forge module variables; go-enclave needs none, so it is never read or printed
-## IT_IMAGE=<tag>: docker-build: the integration image's tag (default go-enclave-it:local)
+## IT_IMAGE=<tag>: docker-build, ci-integration: the integration image's tag (default `make -s it-image`)
 ## IT_PROJECT=<name>: integration-test: accepted; each suite names its own compose project (go-enclave-it-*, go-enclave-userns-*)
 ## GO_BUILD_TAGS=<tags>: lint, build, coverage, security: must stay empty, no package is tag-gated (userns and integration are their suites' tags)
 # GO_BUILD_TAGS is refused rather than ignored: a tag that reached no target
@@ -469,6 +469,11 @@ $(call raw_bind,CMD)
 docker-build:
 	@GO_ENCLAVE_IT_IMAGE="$$IT_IMAGE" sh scripts/devcontainer.sh build
 
+## it-image: Print the integration image's content-addressed tag, go-enclave-ci-it:<hash> of the build context (ci.yml's IT_IMAGE)
+.PHONY: it-image
+it-image:
+	@sh scripts/devcontainer.sh it-tag
+
 ## docker-run: Run CMD in the toolchain image, checkout mounted, offline, as you: make docker-run CMD='make lint'
 .PHONY: docker-run
 docker-run: docker-build
@@ -553,8 +558,10 @@ ci-test: coverage test-runtimesecret
 
 ## ci-integration: both integration variants (default and FIPS 140-3 strict) in the devcontainer
 # One image serves the userns, default and FIPS suites (FIPS is a run-time
-# flag): scripts/integration-image.sh builds it once, trivy-scans that exact
-# image ID, runs both targets against it with no rebuild, and removes it last.
+# flag): scripts/integration-image.sh names it by content (IT_IMAGE, else
+# `make -s it-image`), builds it only when the daemon lacks it, trivy-scans
+# that exact image ID and runs both targets against it with no rebuild. No
+# run removes it: CI's reap step does, once it is old and unused.
 # The recipe names make through a variable, so `make -n ci-integration` prints it
 # instead of running it (a line with a literal $(MAKE) runs even under -n).
 IT_MAKE = $(MAKE) --no-print-directory

@@ -3,7 +3,7 @@
 #
 #   usage: scripts/reap-stale-ci-stacks.sh <prefix> [min-age-seconds]
 #
-# v1 (ci-template v1.18, dept-infra 2026-10-12). An integration job's
+# v1 (ci-template v1.18, 2026-10-12); v2 and v3 below. An integration job's
 # `if: always()` teardown runs only while the job process lives. When the host
 # or its Docker daemon dies mid-job, the job is gone and so is its teardown: the
 # compose stack stays behind, exited, with its networks and volumes (11 stacks
@@ -16,6 +16,27 @@
 #     networks and volumes (same label);
 #   - a container outside compose whose name starts with <prefix>, when stale,
 #     with its anonymous volumes.
+# v2 (ci-template v1.23, Company Agent m674 item 3, 2026-10-18; the go-qrdb
+# #814 pattern): images too. The integration image is named by its content,
+# <prefix>it:<hash> (`make -s it-image`, ci-standard.md §9), and every job and
+# run of that tree on this runner reuses it, so no job removes it. This
+# removes a <prefix>it image created at least REAP_IMAGE_MIN_AGE seconds ago,
+# default 7200 (2 h: the longest full-tier run plus headroom), so an image a
+# run still needs is not old enough. `docker image rm` without force refuses
+# an image a container (running or stopped) uses, so a live stack's image is
+# never removed. Age alone does not protect a reused image older than that,
+# so every job that needs the image holds a lease on it: a created, never
+# started container named <prefix>lease-<run>-..., removed at its Tear down
+# (ci.yml). A lease a dead job leaves is stale like any other container
+# outside compose, and goes after <min-age-seconds>; its image goes on the
+# reap after that.
+# v3 (ci-template v1.23.1, 2026-10-19): an image's age runs
+# from the later of its `.Created` and its last tag time
+# (`.Metadata.LastTagTime`). A rebuild from a full cache keeps the old
+# `.Created` but re-tags the image, so v2 saw a just-rebuilt image as stale and
+# a parallel job's reaper removed it between its build and its lease
+# (go-quicraft main runs 57389 and 57484).
+#
 # Stale: exited or dead and finished at least <min-age-seconds> ago, or
 # created and never started at least that long ago. A project with any
 # container running, paused, restarting or removing is never touched.
@@ -24,13 +45,14 @@
 # so no job that could still own the stack is alive. Pass the job's own
 # timeout-minutes * 60 plus a margin only if you know every runner's timeout.
 #
-# The prefix is the repo's own (`go-enclave-ci-`): the name the job gives its
-# compose project, without the run id. Never a prefix another repo's projects
-# could start with.
+# The prefix is the repo's own (CUSTOMIZE: `go-enclave-ci-`): the name the job
+# gives its compose project, without the run id. Never a prefix another repo's
+# projects could start with.
 #
 # A failed removal is reported and skipped: the reaper never fails the job.
 # REAP_DRY_RUN=1 prints what would be removed and removes nothing.
 set -u
+# CUSTOMIZE (go-enclave): every script shares scripts/lib.sh.
 # shellcheck source=lib.sh
 . "${0%/*}/lib.sh"
 
@@ -41,6 +63,10 @@ case $prefix in
 esac
 case $min_age in
   '' | *[!0-9]*) echo "min-age-seconds must be a number: $min_age" >&2; exit 2 ;;
+esac
+image_min_age=${REAP_IMAGE_MIN_AGE:-7200}
+case $image_min_age in
+  '' | *[!0-9]*) echo "REAP_IMAGE_MIN_AGE must be a number: $image_min_age" >&2; exit 2 ;;
 esac
 
 now=$(date +%s)
@@ -101,6 +127,22 @@ docker ps -a --filter "name=^$prefix" \
     fi
   done
 
+# Content-addressed integration images (v2, above).
+images=0
+for ref in $(docker images --filter "reference=${prefix}it" --format '{{.Repository}}:{{.Tag}}'); do
+  case $ref in "${prefix}it:"*) ;; *) continue ;; esac
+  read -r created tagged < <(docker image inspect -f '{{.Created}} {{.Metadata.LastTagTime.Unix}}' "$ref" 2>/dev/null) || continue
+  t=$(date -d "$created" +%s 2>/dev/null) || continue
+  # A never-tagged image reports the zero time, a large negative number.
+  case $tagged in ''|*[!0-9]*) ;; *) [ "$tagged" -le "$t" ] || t=$tagged ;; esac
+  if [ $((now - t)) -lt "$image_min_age" ]; then
+    echo "keep  image $ref (created or tagged within ${image_min_age}s)"
+    continue
+  fi
+  echo "reap  image $ref"
+  if run docker image rm "$ref"; then images=$((images + 1)); else echo "warn  image $ref not removed (in use?)"; fi
+done
+
 if [ "${REAP_DRY_RUN:-0}" = 1 ]; then done_as="would be removed"; else done_as=removed; fi
-echo "reaper: $reaped compose project(s) $done_as for prefix '$prefix'"
+echo "reaper: $reaped compose project(s) and $images image(s) $done_as for prefix '$prefix'"
 exit 0

@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -14,9 +15,10 @@ import (
 // scripts against a fake docker and trivy that log what they are asked.
 
 // fakeImageWorld puts a fake docker and trivy first on PATH. docker logs every
-// call with the GO_ENCLAVE_IT_IMAGE it saw, reports the image ID in idFile, and
-// makes a `go test` run print the userns test's PASS line. It returns the
-// environment for scripts/integration-image.sh and the log.
+// call with the GO_ENCLAVE_IT_IMAGE it saw, reports the image ID in idFile,
+// holds the image only when FAKE_HELD is set, and makes a `go test` run print
+// the userns test's PASS line. It returns the environment for
+// scripts/integration-image.sh and the log.
 func fakeImageWorld(t *testing.T) (env map[string]string, log, idFile string) {
 	t.Helper()
 	requireLinuxInstallPath(t)
@@ -41,7 +43,8 @@ case $1 in
   version) echo 28.0.0; exit 0 ;;
   compose) ;;
   image)
-    if [ "$2" = inspect ] && [ "$3" = --format ]; then cat "$FAKE_ID_FILE"; fi
+    if [ "$2" = inspect ] && [ "$3" = --format ]; then cat "$FAKE_ID_FILE"; exit 0; fi
+    if [ "$2" = inspect ]; then [ -n "${FAKE_HELD-}" ]; exit; fi
     exit 0 ;;
   *) exit 0 ;;
 esac
@@ -64,6 +67,8 @@ esac
 		"COVERAGE_THRESHOLD":     "0",
 		"GO_ENCLAVE_IT_IMAGE":    "",
 		"GO_ENCLAVE_IT_IMAGE_ID": "",
+		"IT_IMAGE":               "",
+		"FAKE_HELD":              "",
 	}, filepath.Join(bin, "trivy")), log, idFile
 }
 
@@ -113,16 +118,22 @@ func isComposeCall(l, sub string) bool {
 	return strings.Contains(l, " compose ") && strings.Contains(l, " "+sub+" ")
 }
 
-// TestIntegrationImage_BuildsOnceScansThatImageAndRunsEverySuiteOnIt pins the
-// scan identity: the userns, default and FIPS suites run on the image that was
-// built once and scanned, nothing rebuilds between them, and it is removed after
-// the last.
-func TestIntegrationImage_BuildsOnceScansThatImageAndRunsEverySuiteOnIt(t *testing.T) {
-	env, log, _ := fakeImageWorld(t)
-	suites := `sh scripts/userns-test.sh &&
+// itImageTag is the integration image's content-addressed tag (ci-template
+// v1.25): `make -s it-image`, which ci.yml passes as IT_IMAGE.
+var itImageTag = regexp.MustCompile(`^go-enclave-ci-it:[0-9a-f]{12}$`)
+
+// integrationSuites runs the userns, default and FIPS suites.
+const integrationSuites = `sh scripts/userns-test.sh &&
 sh scripts/integration-test.sh enclave github.com/jeremyhahn/go-enclave &&
 sh scripts/integration-test.sh enclave github.com/jeremyhahn/go-enclave -e GOFIPS140=latest`
-	out, ok := runImageScript(t, env, "sh", "-c", suites)
+
+// TestIntegrationImage_BuildsOnceScansThatImageAndRunsEverySuiteOnIt pins the
+// scan identity: the userns, default and FIPS suites run on the image that was
+// built once, under its content tag, and scanned; nothing rebuilds between
+// them, and no run removes it (the reap step does, once it is old and unused).
+func TestIntegrationImage_BuildsOnceScansThatImageAndRunsEverySuiteOnIt(t *testing.T) {
+	env, log, _ := fakeImageWorld(t)
+	out, ok := runImageScript(t, env, "sh", "-c", integrationSuites)
 	if !ok {
 		t.Fatalf("the suites failed under the image script:\n%s", out)
 	}
@@ -144,14 +155,14 @@ sh scripts/integration-test.sh enclave github.com/jeremyhahn/go-enclave -e GOFIP
 		}
 	}
 	dump := strings.Join(lines, "\n")
-	if len(builds) != 1 || len(scans) != 1 || len(runs) != 3 || len(removes) != 1 {
-		t.Fatalf("builds=%d scans=%d runs=%d removals=%d, want 1, 1, 3, 1:\n%s", len(builds), len(scans), len(runs), len(removes), dump)
+	if len(builds) != 1 || len(scans) != 1 || len(runs) != 3 || len(removes) != 0 {
+		t.Fatalf("builds=%d scans=%d runs=%d removals=%d, want 1, 1, 3, 0:\n%s", len(builds), len(scans), len(runs), len(removes), dump)
 	}
-	if !strings.HasPrefix(image, "go-enclave-it:") {
-		t.Fatalf("the image is tagged %q, want a unique go-enclave-it:<run> tag", image)
+	if !itImageTag.MatchString(image) {
+		t.Fatalf("the image is tagged %q, want go-enclave-ci-it:<12 hex>", image)
 	}
-	if !(builds[0] < scans[0] && scans[0] < runs[0] && runs[2] < removes[0] && removes[0] == len(lines)-1) {
-		t.Fatalf("want build, scan, the three suites, then removal last:\n%s", dump)
+	if !(builds[0] < scans[0] && scans[0] < runs[0]) {
+		t.Fatalf("want build, scan, then the three suites:\n%s", dump)
 	}
 	if !strings.HasSuffix(lines[scans[0]], " "+image) {
 		t.Errorf("trivy scanned %q, not the image the suites run on (%s)", lines[scans[0]], image)
@@ -161,8 +172,45 @@ sh scripts/integration-test.sh enclave github.com/jeremyhahn/go-enclave -e GOFIP
 			t.Errorf("a suite does not run on the scanned image without a build: %s", lines[r])
 		}
 	}
-	if !strings.HasSuffix(lines[removes[0]], " "+image) {
-		t.Errorf("removed %q, want the image %s", lines[removes[0]], image)
+}
+
+// An image the daemon already holds under its content tag is scanned and used,
+// not rebuilt; a tag the caller names (IT_IMAGE) is the one used, and one that
+// is not a content tag is refused.
+func TestIntegrationImage_AHeldImageIsNotRebuilt(t *testing.T) {
+	env, log, _ := fakeImageWorld(t)
+	env["FAKE_HELD"] = "1"
+	env["IT_IMAGE"] = "go-enclave-ci-it:0123456789ab"
+	out, ok := runImageScript(t, env, "sh", "-c", integrationSuites)
+	if !ok {
+		t.Fatalf("the suites failed under the image script:\n%s", out)
+	}
+	var scans, runs int
+	for _, l := range readCallLog(t, log) {
+		switch {
+		case isComposeCall(l, "build"):
+			t.Fatalf("rebuilt an image the daemon holds: %s", l)
+		case strings.Contains(l, " image rm "):
+			t.Fatalf("removed the image: %s", l)
+		case strings.HasPrefix(l, "trivy image "):
+			scans++
+			if !strings.HasSuffix(l, " "+env["IT_IMAGE"]) {
+				t.Errorf("trivy scanned %q, not IT_IMAGE %s", l, env["IT_IMAGE"])
+			}
+		case isComposeCall(l, "run"):
+			runs++
+			if !strings.HasPrefix(l, "docker image="+env["IT_IMAGE"]+" ") {
+				t.Errorf("a suite does not run on IT_IMAGE: %s", l)
+			}
+		}
+	}
+	if scans != 1 || runs != 3 {
+		t.Fatalf("scans=%d runs=%d, want 1, 3", scans, runs)
+	}
+
+	env["IT_IMAGE"] = "go-enclave-it:latest"
+	if out, ok := runImageScript(t, env, "true"); ok || !strings.Contains(out, "is not a go-enclave-ci-it:<hash> tag") {
+		t.Fatalf("accepted an IT_IMAGE that is not a content tag (ok=%v):\n%s", ok, out)
 	}
 }
 
@@ -181,13 +229,14 @@ func TestIntegrationImage_SuiteRefusesAnImageThatWasNotScanned(t *testing.T) {
 		}
 	}
 
-	env["GO_ENCLAVE_IT_IMAGE"] = "go-enclave-it:planted"
+	env["GO_ENCLAVE_IT_IMAGE"] = "go-enclave-ci-it:planted"
 	if out, ok := runImageScript(t, env, "true"); ok || !strings.Contains(out, "already set") {
 		t.Fatalf("accepted a supplied image instead of building and scanning one (ok=%v):\n%s", ok, out)
 	}
 }
 
-// A scan that fails stops the run: no suite starts, and the image is removed.
+// A scan that fails stops the run: no suite starts. The image stays under its
+// content tag, as every image does, for the reap step to remove.
 func TestIntegrationImage_AFailedScanRunsNoSuite(t *testing.T) {
 	env, log, _ := fakeImageWorld(t)
 	trivy := filepath.Join(strings.SplitN(env["PATH"], ":", 2)[0], "trivy")
@@ -197,14 +246,9 @@ func TestIntegrationImage_AFailedScanRunsNoSuite(t *testing.T) {
 	if ok {
 		t.Fatalf("ran the suite after a failed scan:\n%s", out)
 	}
-	var removed bool
 	for _, l := range readCallLog(t, log) {
 		if isComposeCall(l, "run") {
 			t.Fatalf("a suite ran after a failed scan: %s", l)
 		}
-		removed = removed || strings.Contains(l, " image rm ")
-	}
-	if !removed {
-		t.Error("the image was left behind after a failed scan")
 	}
 }

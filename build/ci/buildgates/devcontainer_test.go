@@ -185,6 +185,101 @@ func TestScriptsDevcontainer_TagIsContentAddressed(t *testing.T) {
 	}
 }
 
+// TestScriptsDevcontainer_ITTagIsContentAddressed drives `devcontainer.sh
+// it-tag` in a scratch repository: one tree gives one go-enclave-ci-it:<12 hex>
+// tag, and a diff against the commit or an untracked file gives another, while
+// an ignored file does not. `make -s it-image` prints the same tag.
+func TestScriptsDevcontainer_ITTagIsContentAddressed(t *testing.T) {
+	root := repoRoot(t)
+	tree := t.TempDir()
+	write := func(rel, body string) {
+		t.Helper()
+		p := filepath.Join(tree, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatalf("write %s: %v", rel, err)
+		}
+	}
+	for _, f := range []string{"scripts/devcontainer.sh", "scripts/lib.sh"} {
+		b, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(f)))
+		if err != nil {
+			t.Fatalf("read %s: %v", f, err)
+		}
+		write(f, string(b))
+	}
+	write(".gitignore", "ignored.txt\n")
+	write("a.txt", "one\n")
+	// A hermetic git: no user or system config, a fixed identity.
+	gitEnv := map[string]string{
+		"GIT_CONFIG_GLOBAL":   os.DevNull,
+		"GIT_CONFIG_NOSYSTEM": "1",
+		"GIT_AUTHOR_NAME":     "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
+		"GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid",
+	}
+	for _, args := range [][]string{{"init", "-q"}, {"add", "-A"}, {"commit", "-q", "-m", "tree"}} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = tree
+		cmd.Env = layerEnv(os.Environ(), gitEnv)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	tag := func() string {
+		t.Helper()
+		cmd := exec.Command("sh", filepath.Join(tree, "scripts", "devcontainer.sh"), "it-tag")
+		cmd.Dir = t.TempDir()
+		cmd.Env = layerEnv(os.Environ(), gitEnv)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("devcontainer.sh it-tag: %v\n%s", err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	itTag := regexp.MustCompile(`^go-enclave-ci-it:[0-9a-f]{12}$`)
+
+	first := tag()
+	if !itTag.MatchString(first) {
+		t.Fatalf("it-tag = %q, want go-enclave-ci-it:<12 hex>", first)
+	}
+	if again := tag(); again != first {
+		t.Fatalf("one tree tagged %q, then %q", first, again)
+	}
+	write("a.txt", "two\n")
+	if dirty := tag(); dirty == first {
+		t.Fatalf("a diff against the commit kept the tag %q", dirty)
+	}
+	write("a.txt", "one\n")
+	if back := tag(); back != first {
+		t.Fatalf("the clean tree again tagged %q, want %q", back, first)
+	}
+	write("ignored.txt", "x\n")
+	if ignored := tag(); ignored != first {
+		t.Fatalf("an ignored file changed the tag to %q", ignored)
+	}
+	write("new.txt", "x\n")
+	if untracked := tag(); untracked == first {
+		t.Fatalf("an untracked file kept the tag %q", untracked)
+	}
+
+	mk := exec.Command("make", "-s", "it-image")
+	mk.Dir = root
+	out, err := mk.Output()
+	if err != nil {
+		t.Fatalf("make -s it-image: %v", err)
+	}
+	direct := exec.Command("sh", "scripts/devcontainer.sh", "it-tag")
+	direct.Dir = root
+	want, err := direct.Output()
+	if err != nil {
+		t.Fatalf("devcontainer.sh it-tag: %v", err)
+	}
+	if got := strings.TrimSpace(string(out)); got != strings.TrimSpace(string(want)) || !itTag.MatchString(got) {
+		t.Fatalf("make -s it-image printed %q, want the it-tag %q", got, strings.TrimSpace(string(want)))
+	}
+}
+
 // dockerignoreAdmits evaluates the devcontainer allowlist for one file at the
 // root of the build context: the last pattern that matches decides, and a
 // leading ! admits. Root-level names are all the userns gate needs.

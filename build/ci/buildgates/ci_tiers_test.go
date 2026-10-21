@@ -14,21 +14,23 @@ import (
 	"github.com/goccy/go-yaml"
 )
 
-// CI runs in two tiers (#175). The PR tier runs on every event; the full tier
-// runs on push to main, on workflow_dispatch and on a PR labeled `ci:full`
-// (from its next push or update-branch: a label event starts no run).
+// CI runs in three tiers (ci-template v1.25). The PR tier runs on every
+// event; the full tier runs on every event but a pull_request, and on a PR
+// labeled `ci:full` (from its next push or update-branch: a label event starts
+// no run); the nightly tier runs on the schedule and on workflow_dispatch.
 // CI Gate, the one required check, needs every job and names each one in its
-// script with its tier, and build/ci/summary.sh lets a full job's skip pass
-// only in a run that did not select the full tier. These tests hold ci.yml's
-// jobs, `if:`s and gate tags to one another, so a job cannot be added, moved
-// between tiers or dropped from the gate without the rest following: a PR-tier
-// job given an `if:` would be skipped and fail the gate, and a full-tier job
-// tagged `pr` would fail every plain PR, but a full job with a looser `if:`
-// or an untagged gate line would pass quietly.
+// script with its tier, and build/ci/summary.sh lets a full or nightly job's
+// skip pass only in a run that did not select its tier. These tests hold
+// ci.yml's jobs, `if:`s and gate tags to one another, so a job cannot be
+// added, moved between tiers or dropped from the gate without the rest
+// following: a PR-tier job given an `if:` would be skipped and fail the gate,
+// and a full-tier job tagged `pr` would fail every plain PR, but a full job
+// with a looser `if:` or an untagged gate line would pass quietly.
 //
 // Every workflow that runs on pull_request also cancels the superseded run of
-// its ref (devops §9b), and no workflow but automerge.yml is scheduled: the
-// coordinator dispatches the nightly runs.
+// its ref (devops §9b), and exactly one CI schedule exists, ci.yml's, which
+// runs the full tier and Soak nightly; automerge.yml's merge sweep is the one
+// other scheduled workflow.
 
 const (
 	ciWorkflowFile = ".github/workflows/ci.yml"
@@ -39,16 +41,22 @@ const (
 	ciGateRunner = "ci-gate"
 	// gateSummaryHeredoc delimits the inline copy of build/ci/summary.sh.
 	gateSummaryHeredoc = "SUMMARY"
-	// fullTierIf is the `if:` every full-tier job carries, written out, and
-	// the gate's FULL value inside ${{ }}.
-	fullTierIf = "github.event_name == 'push' || github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'ci:full')"
-	// refConcurrencyGroup is the ref-keyed group of every pull_request workflow.
-	refConcurrencyGroup = "${{ github.workflow }}-${{ github.ref }}"
-	// refCancelInProgress cancels a superseded run on every ref but main, so
-	// a push to main never cancels an in-flight main run (ci-template v1.22.1).
-	refCancelInProgress = "${{ github.ref != 'refs/heads/main' }}"
-	// scheduledWorkflow is the one workflow allowed a `schedule:` trigger.
-	scheduledWorkflow = "automerge.yml"
+	// fullTierIf is the `if:` every full-tier job carries, and ci.yml's
+	// workflow-level CI_FULL_TIER, which the gate's FULL_TIER reads.
+	fullTierIf = "${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full') }}"
+	// fullTierEnv is the gate's FULL_TIER value.
+	fullTierEnv = "${{ env.CI_FULL_TIER }}"
+	// nightlyTierIf is the `if:` every nightly-tier job carries, and the
+	// gate's NIGHTLY value.
+	nightlyTierIf = "${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}"
+	// refConcurrencyGroup is the group of every pull_request workflow: keyed
+	// by ref, and on main by event, so a schedule or a dispatch never cancels
+	// a main push run (ci-template v1.25).
+	refConcurrencyGroup = "${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && format('main-{0}', github.event_name) || github.ref }}"
+	// ciSchedule is the one CI schedule, ci.yml's nightly cron.
+	ciSchedule = "0 4 * * *"
+	// mergeSweepWorkflow is the one other workflow allowed a `schedule:`.
+	mergeSweepWorkflow = "automerge.yml"
 )
 
 // ciPullRequestTypes are ci.yml's pull_request activity types. `labeled` is
@@ -68,18 +76,36 @@ var (
 type tieredWorkflow struct {
 	On          any                  `yaml:"on"`
 	Concurrency any                  `yaml:"concurrency"`
+	Env         map[string]string    `yaml:"env"`
 	Jobs        map[string]tieredJob `yaml:"jobs"`
 }
 
 type tieredJob struct {
 	If     any      `yaml:"if"`
 	RunsOn any      `yaml:"runs-on"`
-	Needs  []string `yaml:"needs"`
+	Needs  jobNeeds `yaml:"needs"`
 	Steps  []struct {
 		Uses string            `yaml:"uses"`
 		Env  map[string]string `yaml:"env"`
 		Run  string            `yaml:"run"`
 	} `yaml:"steps"`
+}
+
+// jobNeeds is a job's `needs:`, in either shape: one job name or a list.
+type jobNeeds []string
+
+func (n *jobNeeds) UnmarshalYAML(unmarshal func(any) error) error {
+	var one string
+	if err := unmarshal(&one); err == nil {
+		*n = jobNeeds{one}
+		return nil
+	}
+	var list []string
+	if err := unmarshal(&list); err != nil {
+		return err
+	}
+	*n = list
+	return nil
 }
 
 // workflowEvents returns the events a workflow's `on:` names, in any of its
@@ -129,6 +155,10 @@ func ciTierViolations(src []byte) ([]string, error) {
 		bad = append(bad, fmt.Sprintf("on.pull_request.types is %v, want %v", types, ciPullRequestTypes))
 	}
 
+	if wf.Env["CI_FULL_TIER"] != fullTierIf {
+		bad = append(bad, fmt.Sprintf("env CI_FULL_TIER is %q, want %s", wf.Env["CI_FULL_TIER"], fullTierIf))
+	}
+
 	gate, ok := wf.Jobs[ciGateJob]
 	if !ok {
 		return append(bad, fmt.Sprintf("no %s job", ciGateJob)), nil
@@ -156,13 +186,13 @@ func ciTierViolations(src []byte) ([]string, error) {
 		bad = append(bad, fmt.Sprintf("job %s: needs %v, want every other job once: %v", ciGateJob, gate.Needs, jobs))
 	}
 
-	// The tagged check lines, and the FULL flag beside them.
+	// The tagged check lines, and the FULL_TIER and NIGHTLY flags beside them.
 	tier := map[string]string{}
 	seen := map[string]int{}
-	fullFlag := false
+	tierFlags := false
 	for _, st := range gate.Steps {
-		if st.Env["FULL"] == "${{ "+fullTierIf+" }}" && strings.Contains(st.Run, `"$FULL"`) {
-			fullFlag = true
+		if st.Env["FULL_TIER"] == fullTierEnv && st.Env["NIGHTLY"] == nightlyTierIf && strings.Contains(st.Run, `"$FULL_TIER" "$NIGHTLY"`) {
+			tierFlags = true
 		}
 		for line := range strings.SplitSeq(st.Run, "\n") {
 			refs := needsResult.FindAllStringSubmatch(line, -1)
@@ -174,8 +204,8 @@ func ciTierViolations(src []byte) ([]string, error) {
 			case m == nil || len(refs) != 1:
 				bad = append(bad, fmt.Sprintf("job %s: %q is not one `<tier>:<job>=\"${{ needs.<job>.result }}\"` check", ciGateJob, strings.TrimSpace(line)))
 				continue
-			case m[1] != "pr" && m[1] != "full":
-				bad = append(bad, fmt.Sprintf("job %s: %s is tagged %q, want pr or full", ciGateJob, m[3], m[1]))
+			case m[1] != "pr" && m[1] != "full" && m[1] != "nightly":
+				bad = append(bad, fmt.Sprintf("job %s: %s is tagged %q, want pr, full or nightly", ciGateJob, m[3], m[1]))
 			case m[2] != m[3]:
 				bad = append(bad, fmt.Sprintf("job %s: the check named %s reads needs.%s.result", ciGateJob, m[2], m[3]))
 			}
@@ -186,8 +216,8 @@ func ciTierViolations(src []byte) ([]string, error) {
 			seen[m[3]]++
 		}
 	}
-	if !fullFlag {
-		bad = append(bad, fmt.Sprintf("job %s: no step passes \"$FULL\" with env FULL: ${{ %s }}", ciGateJob, fullTierIf))
+	if !tierFlags {
+		bad = append(bad, fmt.Sprintf("job %s: no step passes \"$FULL_TIER\" \"$NIGHTLY\" with env FULL_TIER: %s, NIGHTLY: %s", ciGateJob, fullTierEnv, nightlyTierIf))
 	}
 
 	for _, name := range jobs {
@@ -200,13 +230,17 @@ func ciTierViolations(src []byte) ([]string, error) {
 			if job.If != fullTierIf {
 				bad = append(bad, fmt.Sprintf("job %s is tagged full but its if is %v, want %s", name, job.If, fullTierIf))
 			}
+		case "nightly":
+			if job.If != nightlyTierIf {
+				bad = append(bad, fmt.Sprintf("job %s is tagged nightly but its if is %v, want %s", name, job.If, nightlyTierIf))
+			}
 		case "pr":
 			if job.If != nil {
 				bad = append(bad, fmt.Sprintf("job %s is tagged pr but has a job-level if: %v", name, job.If))
 			}
 			for _, n := range job.Needs {
-				if tier[n] == "full" {
-					bad = append(bad, fmt.Sprintf("job %s is tagged pr but needs the full-tier job %s", name, n))
+				if tier[n] == "full" || tier[n] == "nightly" {
+					bad = append(bad, fmt.Sprintf("job %s is tagged pr but needs the %s-tier job %s", name, tier[n], n))
 				}
 			}
 		}
@@ -214,8 +248,6 @@ func ciTierViolations(src []byte) ([]string, error) {
 	return bad, nil
 }
 
-// workflowTriggerViolations returns what is wrong with one workflow's triggers
-// and concurrency, or nil.
 // gateSummaryViolations returns how ci.yml's gate departs from running its
 // inline copy of build/ci/summary.sh: the gate has no checkout, so the script
 // travels in its step as a heredoc, and that copy must be the file exactly
@@ -252,6 +284,8 @@ func gateSummaryViolations(src, summary []byte) ([]string, error) {
 	return bad, nil
 }
 
+// workflowTriggerViolations returns what is wrong with one workflow's triggers
+// and concurrency, or nil.
 func workflowTriggerViolations(file string, src []byte) ([]string, error) {
 	var wf tieredWorkflow
 	if err := yaml.Unmarshal(src, &wf); err != nil {
@@ -264,12 +298,19 @@ func workflowTriggerViolations(file string, src []byte) ([]string, error) {
 	var bad []string
 	if _, ok := events["pull_request"]; ok {
 		c, _ := wf.Concurrency.(map[string]any)
-		if c == nil || c["group"] != refConcurrencyGroup || c["cancel-in-progress"] != refCancelInProgress {
-			bad = append(bad, fmt.Sprintf("runs on pull_request but its workflow-level concurrency is %v, want group: %s, cancel-in-progress: %s", wf.Concurrency, refConcurrencyGroup, refCancelInProgress))
+		if c == nil || c["group"] != refConcurrencyGroup || c["cancel-in-progress"] != true {
+			bad = append(bad, fmt.Sprintf("runs on pull_request but its workflow-level concurrency is %v, want group: %s, cancel-in-progress: true", wf.Concurrency, refConcurrencyGroup))
 		}
 	}
-	if _, ok := events["schedule"]; ok && filepath.Base(file) != scheduledWorkflow {
-		bad = append(bad, fmt.Sprintf("has a schedule: trigger; only %s may (the coordinator dispatches nightly runs)", scheduledWorkflow))
+	sched, ok := events["schedule"]
+	switch base := filepath.Base(file); {
+	case base == filepath.Base(ciWorkflowFile):
+		crons, _ := sched.([]any)
+		if len(crons) != 1 || fmt.Sprint(crons[0]) != fmt.Sprint(map[string]any{"cron": ciSchedule}) {
+			bad = append(bad, fmt.Sprintf("schedule is %v, want exactly one cron: '%s' (the one CI schedule)", sched, ciSchedule))
+		}
+	case ok && base != mergeSweepWorkflow:
+		bad = append(bad, fmt.Sprintf("has a schedule: trigger; the one CI schedule is %s's (and %s's merge sweep)", ciWorkflowFile, mergeSweepWorkflow))
 	}
 	return bad, nil
 }
@@ -323,21 +364,30 @@ func TestCIGateTiers_RefusesWhatItMustRefuse(t *testing.T) {
 	}
 	ci := string(src)
 	const fullIf = "    if: " + fullTierIf + "\n"
+	const nightlyIf = "    if: " + nightlyTierIf + "\n"
 	for _, tc := range []struct{ name, old, new string }{
 		{"full job tagged pr", "full:fips=", "pr:fips="},
 		{"pr job tagged full", "pr:arch-gates=", "full:arch-gates="},
-		{"unknown tag", "pr:image=", "nightly:image="},
+		{"unknown tag", "pr:image=", "soon:image="},
+		{"nightly job tagged full", "nightly:soak=", "full:soak="},
+		{"full job tagged nightly", "full:fips=", "nightly:fips="},
 		{"untagged check", "pr:image=", "image="},
 		{"check names another job", `pr:arch-gates="${{ needs.arch-gates`, `pr:arch-gates="${{ needs.image`},
 		{"job missing from the gate", "            pr:image=\"${{ needs.image.result }}\" \\\n", ""},
 		{"job checked twice", "            pr:image=\"${{ needs.image.result }}\" \\\n", "            pr:image=\"${{ needs.image.result }}\" \\\n            pr:image=\"${{ needs.image.result }}\" \\\n"},
-		{"gate misses a need", "needs: [image, fips, integration, arch-gates]", "needs: [image, fips, integration]"},
+		{"gate misses a need", "needs: [changes, image, fips, integration, soak, arch-gates]", "needs: [changes, image, fips, integration, arch-gates]"},
 		{"gate not always", "    runs-on: " + ciGateRunner + "\n    if: always()\n", "    runs-on: " + ciGateRunner + "\n    if: success()\n"},
 		{"full job without its if", "    name: FIPS\n" + fullIf, "    name: FIPS\n"},
 		{"full job with a looser if", "    name: FIPS\n" + fullIf, "    name: FIPS\n    if: github.event_name == 'push' || github.event_name == 'pull_request'\n"},
 		{"pr job with an if", "    name: Architecture Gates\n", "    name: Architecture Gates\n    if: always()\n"},
+		{"nightly job without its if", "    name: Soak [integration image]\n" + nightlyIf, "    name: Soak [integration image]\n"},
+		{"nightly job on the full tier's if", "    name: Soak [integration image]\n" + nightlyIf, "    name: Soak [integration image]\n" + fullIf},
 		{"pr job needs a full job", "    name: Architecture Gates\n", "    name: Architecture Gates\n    needs: [fips]\n"},
-		{"gate FULL flag differs", "          FULL: ${{ " + fullTierIf, "          FULL: ${{ github.event_name == 'push'"},
+		{"pr job needs a nightly job", "    name: Architecture Gates\n", "    name: Architecture Gates\n    needs: [soak]\n"},
+		{"gate FULL_TIER flag differs", "          FULL_TIER: " + fullTierEnv, "          FULL_TIER: ${{ github.event_name == 'push' }}"},
+		{"gate NIGHTLY flag differs", "          NIGHTLY: " + nightlyTierIf, "          NIGHTLY: ${{ github.event_name == 'schedule' }}"},
+		{"gate drops NIGHTLY", `"$FULL_TIER" "$NIGHTLY"`, `"$FULL_TIER"`},
+		{"workflow CI_FULL_TIER differs", "  CI_FULL_TIER: " + fullTierIf, "  CI_FULL_TIER: ${{ github.event_name == 'push' }}"},
 		{"labeled type added back", "types: [opened, synchronize, reopened]", "types: [opened, synchronize, reopened, labeled]"},
 		{"gate on the shared runner", "    runs-on: " + ciGateRunner + "\n", "    runs-on: ubuntu-latest\n"},
 		{"gate uses an action", "      - name: Fail closed on any non-success\n", "      - uses: actions/checkout@abc # v7\n      - name: Fail closed on any non-success\n"},
@@ -377,7 +427,7 @@ func TestCIGateTiers_RefusesWhatItMustRefuse(t *testing.T) {
 		})
 	}
 
-	const wantConc = "concurrency:\n  group: ${{ github.workflow }}-${{ github.ref }}\n  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}\n"
+	const wantConc = "concurrency:\n  group: " + refConcurrencyGroup + "\n  cancel-in-progress: true\n"
 	for _, tc := range []struct {
 		name, file, src string
 		wantBad         bool
@@ -385,11 +435,16 @@ func TestCIGateTiers_RefusesWhatItMustRefuse(t *testing.T) {
 		{"pull_request without concurrency", "x.yml", "on: [pull_request]\njobs: {}\n", true},
 		{"pull_request, global group", "x.yml", "on: pull_request\nconcurrency:\n  group: ci\n  cancel-in-progress: true\njobs: {}\n", true},
 		{"pull_request, no cancel", "x.yml", "on:\n  pull_request:\nconcurrency:\n  group: ${{ github.workflow }}-${{ github.ref }}\njobs: {}\n", true},
-		{"pull_request, cancels main", "x.yml", "on:\n  pull_request:\nconcurrency:\n  group: ${{ github.workflow }}-${{ github.ref }}\n  cancel-in-progress: true\njobs: {}\n", true},
-		{"pull_request, ref-keyed", "x.yml", "on:\n  pull_request:\n" + wantConc + "jobs: {}\n", false},
+		{"pull_request, main shares the ref group", "x.yml", "on:\n  pull_request:\nconcurrency:\n  group: ${{ github.workflow }}-${{ github.ref }}\n  cancel-in-progress: true\njobs: {}\n", true},
+		{"pull_request, cancel by expression", "x.yml", "on:\n  pull_request:\nconcurrency:\n  group: " + refConcurrencyGroup + "\n  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}\njobs: {}\n", true},
+		{"pull_request, v1.25 group", "x.yml", "on:\n  pull_request:\n" + wantConc + "jobs: {}\n", false},
 		{"push only, no concurrency", "x.yml", "on:\n  push:\njobs: {}\n", false},
 		{"scheduled", "nightly.yml", "on:\n  schedule:\n    - cron: '0 3 * * *'\n  workflow_dispatch:\njobs: {}\n", true},
 		{"scheduled automerge", "automerge.yml", "on:\n  schedule:\n    - cron: '0 3 * * *'\njobs: {}\n", false},
+		{"ci.yml scheduled", "ci.yml", "on:\n  schedule:\n    - cron: '" + ciSchedule + "'\njobs: {}\n", false},
+		{"ci.yml unscheduled", "ci.yml", "on:\n  push:\njobs: {}\n", true},
+		{"ci.yml scheduled twice", "ci.yml", "on:\n  schedule:\n    - cron: '" + ciSchedule + "'\n    - cron: '0 16 * * *'\njobs: {}\n", true},
+		{"ci.yml on another cron", "ci.yml", "on:\n  schedule:\n    - cron: '0 3 * * *'\njobs: {}\n", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			bad, err := workflowTriggerViolations(tc.file, []byte(tc.src))
@@ -404,8 +459,8 @@ func TestCIGateTiers_RefusesWhatItMustRefuse(t *testing.T) {
 }
 
 // TestCIGateSummaryPassesOnlyUnselectedFullSkips drives build/ci/summary.sh,
-// the gate's script: a skip passes only for a full job in a run that did not
-// select the full tier.
+// the gate's script: a skip passes only for a full or nightly job in a run
+// that did not select its tier.
 func TestCIGateSummaryPassesOnlyUnselectedFullSkips(t *testing.T) {
 	script := filepath.Join(repoRoot(t), "build", "ci", "summary.sh")
 	for _, tc := range []struct {
@@ -413,18 +468,22 @@ func TestCIGateSummaryPassesOnlyUnselectedFullSkips(t *testing.T) {
 		args   []string
 		wantOK bool
 	}{
-		{"all pass, full tier", []string{"true", "pr:lint=success", "full:fips=success"}, true},
-		{"full skipped, not selected", []string{"false", "pr:lint=success", "full:fips=skipped"}, true},
-		{"full skipped, selected", []string{"true", "pr:lint=success", "full:fips=skipped"}, false},
-		{"pr skipped", []string{"false", "pr:lint=skipped", "full:fips=skipped"}, false},
-		{"full failed, not selected", []string{"false", "pr:lint=success", "full:fips=failure"}, false},
-		{"full cancelled", []string{"false", "pr:lint=success", "full:fips=cancelled"}, false}, //nolint:misspell // the forge's result value is spelled "cancelled"
-		{"pr failed", []string{"true", "pr:lint=failure", "full:fips=success"}, false},
-		{"untagged", []string{"false", "lint=success"}, false},
-		{"unknown tier", []string{"false", "nightly:fips=skipped"}, false},
-		{"empty result", []string{"true", "pr:lint="}, false},
-		{"full flag not a boolean", []string{"", "pr:lint=success"}, false},
-		{"no jobs", []string{"false"}, false},
+		{"all pass, every tier", []string{"true", "true", "pr:lint=success", "full:fips=success", "nightly:soak=success"}, true},
+		{"full skipped, not selected", []string{"false", "false", "pr:lint=success", "full:fips=skipped", "nightly:soak=skipped"}, true},
+		{"full skipped, selected", []string{"true", "false", "pr:lint=success", "full:fips=skipped"}, false},
+		{"nightly skipped, not selected", []string{"true", "false", "pr:lint=success", "full:fips=success", "nightly:soak=skipped"}, true},
+		{"nightly skipped, selected", []string{"true", "true", "pr:lint=success", "nightly:soak=skipped"}, false},
+		{"pr skipped", []string{"false", "false", "pr:lint=skipped", "full:fips=skipped"}, false},
+		{"full failed, not selected", []string{"false", "false", "pr:lint=success", "full:fips=failure"}, false},
+		{"nightly failed, not selected", []string{"false", "false", "pr:lint=success", "nightly:soak=failure"}, false},
+		{"full cancelled", []string{"false", "false", "pr:lint=success", "full:fips=cancelled"}, false}, //nolint:misspell // the forge's result value is spelled "cancelled"
+		{"pr failed", []string{"true", "true", "pr:lint=failure", "full:fips=success"}, false},
+		{"untagged", []string{"false", "false", "lint=success"}, false},
+		{"unknown tier", []string{"false", "false", "soon:fips=skipped"}, false},
+		{"empty result", []string{"true", "true", "pr:lint="}, false},
+		{"full flag not a boolean", []string{"", "false", "pr:lint=success"}, false},
+		{"nightly flag not a boolean", []string{"false", "", "pr:lint=success"}, false},
+		{"no jobs", []string{"false", "false"}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cmd := exec.Command("sh", append([]string{script, "a CI job did not pass"}, tc.args...)...)

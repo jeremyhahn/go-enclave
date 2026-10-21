@@ -51,8 +51,8 @@ project="go-enclave-it-$pkg-$(date +%s)-$$-$(od -An -N6 -tx1 /dev/urandom | tr -
 echo "compose project: $project"
 
 # The image is not this project's to remove (it is named by GO_ENCLAVE_IT_IMAGE,
-# and compose's --rmi local leaves a named image alone); integration-image.sh
-# removes it after the last suite.
+# and compose's --rmi local leaves a named image alone); it is named by
+# content and kept for the next run of the same tree (integration-image.sh).
 cleanup() {
   rc=$?
   if ! docker compose -f "$compose" -p "$project" down --volumes --remove-orphans >/dev/null 2>&1; then

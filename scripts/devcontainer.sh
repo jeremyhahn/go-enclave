@@ -1,17 +1,24 @@
 #!/bin/sh
 # devcontainer.sh — build, run and name the devcontainer images.
 #
-# Usage: scripts/devcontainer.sh tag | inputs | build | run [command]
+# Usage: scripts/devcontainer.sh tag | it-tag | inputs | build | run [command]
 #
 #   tag     print the toolchain image's content-addressed reference,
 #           go-enclave-toolchain:<12 hex> (`make toolchain-image`; lane-verify's
 #           VERIFY_IMAGE). It is a hash of the files that build the toolchain
 #           stage, so it names the image a checkout builds without Docker, and
 #           an unchanged tag means an existing image can be reused.
-#   inputs  print those files, one per line.
+#   it-tag  print the integration image's content-addressed reference,
+#           go-enclave-ci-it:<12 hex> (`make -s it-image`, ci-standard.md §9).
+#           It is a hash of the build arguments and the whole build context:
+#           the commit's tree, the checkout's diff against it, and every
+#           untracked file .gitignore does not exclude, so every job and run
+#           of one tree names one image and builds it once.
+#   inputs  print the toolchain tag's files, one per line.
 #   build   build both shipped stages (`make docker-build`): the toolchain,
 #           tagged <tag> and go-enclave-toolchain:latest, then the integration
-#           image through compose (go-enclave-devcontainer-integration).
+#           image through compose, tagged $GO_ENCLAVE_IT_IMAGE (default
+#           <it-tag>), only when the daemon does not hold that tag already.
 #   run     run a command in the toolchain image with the checkout mounted,
 #           offline, as the invoking user (`make docker-run CMD='make lint'`);
 #           the command is one string, run by bash -c. Without one, the
@@ -57,15 +64,41 @@ image() {
   printf '%s:%s\n' "$repo" "$sum"
 }
 
+# The integration stage takes no build argument; its context is the checkout.
+# Each step is checked: a hash over a failed listing would name an image that
+# no tree built.
+it_image() {
+  command -v git >/dev/null 2>&1 || die "git is required for 'it-tag'"
+  ctx=$(mktemp) || die "could not create a temporary file"
+  untracked=$(mktemp) || { rm -f "$ctx"; die "could not create a temporary file"; }
+  ok=1
+  printf 'dockerfile %s\ntarget integration\nbuild-args none\n' "$dockerfile" >"$ctx" || ok=0
+  [ "$ok" = 0 ] || git rev-parse 'HEAD^{tree}' >>"$ctx" || ok=0
+  [ "$ok" = 0 ] || git diff --binary HEAD -- >>"$ctx" || ok=0
+  [ "$ok" = 0 ] || git ls-files -z --others --exclude-standard >"$untracked" || ok=0
+  if [ "$ok" = 1 ] && [ -s "$untracked" ]; then
+    xargs -0 sha256sum -- <"$untracked" >>"$ctx" || ok=0
+  fi
+  [ "$ok" = 0 ] || sum=$(sha256sum <"$ctx" | cut -c1-12) || ok=0
+  rm -f "$ctx" "$untracked"
+  [ "$ok" = 1 ] || die "could not hash the integration image's build context"
+  matches "$sum" '^[0-9a-f]{12}$' || die "could not hash the integration image's build context"
+  printf 'go-enclave-ci-it:%s\n' "$sum"
+}
+
 docker_ok() {
   command -v docker >/dev/null 2>&1 || die "docker is required for '$1'"
 }
 
-[ $# -ge 1 ] || die "usage: $0 tag | inputs | build | run [command]"
+[ $# -ge 1 ] || die "usage: $0 tag | it-tag | inputs | build | run [command]"
 case $1 in
   tag)
     [ $# -eq 1 ] || die "usage: $0 tag"
     image
+    ;;
+  it-tag)
+    [ $# -eq 1 ] || die "usage: $0 it-tag"
+    it_image
     ;;
   inputs)
     [ $# -eq 1 ] || die "usage: $0 inputs"
@@ -76,8 +109,13 @@ case $1 in
     docker_ok build
     ref=$(image)
     docker build -f "$dockerfile" --target toolchain -t "$ref" -t "$repo:latest" .
-    docker compose -f "$compose" -p "$project" build integration
-    echo "built $ref ($repo:latest) and $project-integration"
+    if [ -n "${GO_ENCLAVE_IT_IMAGE:-}" ]; then it=$GO_ENCLAVE_IT_IMAGE; else it=$(it_image); fi
+    if docker image inspect "$it" >/dev/null 2>&1; then
+      echo "built $ref ($repo:latest); $it is already held"
+    else
+      GO_ENCLAVE_IT_IMAGE=$it docker compose -f "$compose" -p "$project" build integration
+      echo "built $ref ($repo:latest) and $it"
+    fi
     ;;
   run)
     [ $# -le 2 ] || die "usage: $0 run [command]"
@@ -96,6 +134,6 @@ case $1 in
     fi
     ;;
   *)
-    die "unknown command '$1' (tag, inputs, build, run)"
+    die "unknown command '$1' (tag, it-tag, inputs, build, run)"
     ;;
 esac
