@@ -1,3 +1,0 @@
-### Changed
-
-- **CI adopts ci-template v1.25** (DS-2961). `ci.yml` runs three tiers: the PR tier on every event, the full tier on every event but a pull request and on a `ci:full` PR, and a nightly tier (Soak) on the one CI schedule, 04:00 UTC, and on dispatch. On `main` each event cancels only an older run of its own event, and a docs-only pull request runs only lint. The integration image is named by its build context, `go-enclave-ci-it:<hash>` (`make -s it-image`), built only when the runner lacks it and leased by each job. `scripts/in-toolchain-image.sh` and `scripts/reap-stale-ci-stacks.sh` are the template's v3, and `nightly.yml` no longer repeats the Trivy gate the full tier runs. Nothing changes for Go callers.

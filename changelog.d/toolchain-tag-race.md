@@ -1,4 +1,0 @@
-### Fixed
-
-- **`make docker-build` counts a held content tag as built** (DS-3010). Two CI jobs on one Docker daemon raced to the same `go-enclave-toolchain:<hash>` tag, and the job whose BuildKit export lost failed with "already exists" although the image it wanted was there. A stage whose content tag the daemon holds is no longer built (the toolchain's `:latest` is still set), and a build that fails while the tag is held counts as built; a build that fails with the tag not held fails as before. Nothing changes for Go callers.
-- **CI adopts ci-template v1.25.2.** Each job's lease on the integration image is bounded and holds the image id: a missing image is built once or fails the step, and every step that uses the image re-tags it from the leased id first. `scripts/reap-stale-ci-stacks.sh` is the template's v4, which keeps every tag of an image a container uses. Nothing changes for Go callers.

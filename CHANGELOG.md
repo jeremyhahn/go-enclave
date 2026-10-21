@@ -6,6 +6,46 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [v0.10.0-alpha] - 2026-10-21
+
+### Changed
+
+- **CI adopts ci-template v1.25** (DS-2961). `ci.yml` runs three tiers: the PR tier on every event, the full tier on every event but a pull request and on a `ci:full` PR, and a nightly tier (Soak) on the one CI schedule, 04:00 UTC, and on dispatch. On `main` each event cancels only an older run of its own event, and a docs-only pull request runs only lint. The integration image is named by its build context, `go-enclave-ci-it:<hash>` (`make -s it-image`), built only when the runner lacks it and leased by each job. `scripts/in-toolchain-image.sh` and `scripts/reap-stale-ci-stacks.sh` are the template's v3, and `nightly.yml` no longer repeats the Trivy gate the full tier runs. Nothing changes for Go callers.
+
+- **`make deps-check` reports a release under 7 days old instead of failing** (DS-2913). A module behind a latest release published less than 7 days ago, with no `// held: <reason>` comment, is named on stdout with the release time and passes; once that release is 7 days old, or its publish time is unknown, it fails as before. `scripts/deps-check.sh` reads the publish time from the same `go list -m -u` call. Nothing changes for Go callers.
+
+- **`make help` states deps-check's 7-day grace** (DS-2913). The `deps-check` help line now says a module behind a latest release under 7 days old is reported, not failed, as `scripts/deps-check.sh` does since #232. Nothing changes for Go callers.
+
+- **docs: the first public release is in progress.** `docs/SPEC.md` gains the `public-release` row and its release criteria replace the closed v0.9.0-alpha ones: a release candidate through its tag workflow and staging, then `make release` at the version confirmed at the owner's publish approval, published with a tree byte-identical to the tag's. `ROADMAP.md` carries the row under Now and its milestones are current. Nothing changes for Go callers.
+
+- **CI: the Devcontainer image job runs on the `bigdisk` runner** (#225). `ci.yml`'s `image` job moves from `ubuntu-latest` to the `bigdisk` label on the Dell and omega runners, so its image builds stop filling the small runners' disks; `.github/actionlint.yaml` lists the label. Nothing changes for Go callers.
+
+- **CI: ci-template v1.21.1, every stage in the devcontainer image** (#227). The separate Lint job is gone. `ci.yml`'s one `image` job builds the devcontainer images and runs each stage as a step in the toolchain image: lint, the static checks, build, cross-build, `make coverage`, the runtimesecret build, security, deps-check and `trivy image`. The Integration job runs on `bigdisk` with no `setup-go`, and an Architecture Gates job is added. The image and integration jobs mask the forge credentials first. The Makefile takes the handbook's CI variables (`MODULE_ENV_FILE`, `IT_IMAGE`, `IT_PROJECT`, `GO_BUILD_TAGS`), and `scripts/assert-build-tags.sh` comes from the template. Nothing changes for Go callers.
+
+- **CI: ci-template v1.22, caches in named host volumes** (#229). The devcontainer image job's stages keep the Go build, golangci-lint and module caches in named volumes on the runner's Docker host, split into a `main` set (written only by a push to `main`) and a `pr` set, instead of the job container's layer. The new `scripts/trim-ci-caches.sh` runs after the image build and keeps this repository's volumes under 32 GiB per host. Nothing changes for Go callers.
+- **CI: ci-template v1.22.1, a push to `main` never cancels a `main` run** (#229). One concurrency group per ref: a newer push to a PR still cancels that PR's older run, but a push to `main` no longer cancels an in-flight `main` run, so every merge keeps its run. Nothing changes for Go callers.
+
+- **CI: a label change starts no pull request run** (DS-2281). `ci.yml`'s `pull_request` trigger drops the `labeled` type, so a `task:*`, `code-review` or review-request label no longer starts a run that cancels the one in flight; `ci:full` takes effect on the PR's next push or update-branch, or via `workflow_dispatch`. Nothing changes for Go callers.
+
+### Fixed
+
+- **The toolchain image build retries a failed module download** (m850). Both `go mod download` steps in `build/docker/devcontainer/Dockerfile` make up to 3 attempts, 10 s then 20 s apart, before failing, so one transient module-proxy error no longer fails `make docker-build`. `go mod verify` and checksum verification are unchanged. Nothing changes for Go callers.
+
+- **providertest: a nondeterministic root no longer reads as unwritten bytes.** When two `UnsealRoot` calls disagree, the root-unsealer check takes a third call under a third canary and calls a byte UNWRITTEN only if it kept its own fill on all three, so a provider whose root changes per call fails on "DIFFERENT roots" (it matched both canaries by chance about once in 2,000 runs) while a partial writer still fails on UNWRITTEN. Nothing changes for Go callers.
+
+- **`make docker-build` counts a held content tag as built** (DS-3010). Two CI jobs on one Docker daemon raced to the same `go-enclave-toolchain:<hash>` tag, and the job whose BuildKit export lost failed with "already exists" although the image it wanted was there. A stage whose content tag the daemon holds is no longer built (the toolchain's `:latest` is still set), and a build that fails while the tag is held counts as built; a build that fails with the tag not held fails as before. Nothing changes for Go callers.
+- **CI adopts ci-template v1.25.2.** Each job's lease on the integration image is bounded and holds the image id: a missing image is built once or fails the step, and every step that uses the image re-tags it from the leased id first. `scripts/reap-stale-ci-stacks.sh` is the template's v4, which keeps every tag of an image a container uses. Nothing changes for Go callers.
+
+- **The toolchain image's tool builds retry a failed module fetch** (m850). Both `go install` steps in `scripts/tool.sh` (the gosec build and every other Go tool) make up to 3 attempts, 10 s then 20 s apart, each from an empty install directory, before failing as before, so one transient module-proxy error no longer fails `make docker-build`. Pins and checksum verification are unchanged. Nothing changes for Go callers.
+
+### Security
+
+- **The toolchain moves to Go 1.27.3** for GO-2026-6809 (crypto/x509), fixed in go1.27.3. `go.mod`, `build/ci/buildgates/go.mod` and the toolchain image's `GO_IMAGE` (`golang:1.27.3-alpine3.24`, index digest) move together. Callers need Go 1.27.3 or later.
+
+### Added
+
+- **Standards first: `docs/reference/` copies each standard the code implements** (#221). FIPS 197 (AES), SP 800-38D (GCM), RFC 5869 (HKDF), FIPS 180-4 (SHA-256) and FIPS 140-3, indexed in [docs/reference/README.md](docs/reference/README.md) with the implementing symbol. go-enclave implements no draft. Nothing changes for Go callers.
+
 ## [v0.9.0-alpha] - 2026-10-16
 
 ### Changed
