@@ -21,7 +21,7 @@ exhausting the process's locked-memory ceiling.
 go get github.com/jeremyhahn/go-enclave
 ```
 
-Requires Go 1.27.2 or later. The only dependency is `golang.org/x/sys`.
+Requires Go 1.27.3 or later. The only dependency is `golang.org/x/sys`.
 
 ## Quick start
 

@@ -5,7 +5,7 @@
 
 ## Prerequisites
 
-- Go 1.27.2 or later; `go get github.com/jeremyhahn/go-enclave`.
+- Go 1.27.3 or later; `go get github.com/jeremyhahn/go-enclave`.
 - A locked-memory allowance. Every enclave locks at least one page (4 KiB on
   most hosts). Check it with `ulimit -l`; raise it with `LimitMEMLOCK=` in a
   systemd unit, `--ulimit memlock=<soft>:<hard>` for a container, or
