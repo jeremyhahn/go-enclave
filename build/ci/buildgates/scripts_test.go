@@ -2412,7 +2412,8 @@ func TestScriptsMakefile_CleanToolsRefusesWhatItMustNotDelete(t *testing.T) {
 
 // TestScriptsReleaseWorkflow_PublishWaitsForTheErasingBuild requires release.yml
 // to run `make test-runtimesecret` on the tag, directly or through the ci-test
-// aggregate that includes it, in a job that publish needs and checks by name,
+// aggregate that includes it, on the runner or in the toolchain image
+// (scripts/in-toolchain-image.sh), in a job that publish needs and checks by name,
 // so a regression confined to that build cannot ship.
 func TestScriptsReleaseWorkflow_EveryJobRunsOnTheVerifiedCommit(t *testing.T) {
 	type step struct {
@@ -2432,7 +2433,7 @@ func TestScriptsReleaseWorkflow_EveryJobRunsOnTheVerifiedCommit(t *testing.T) {
 	if err := yaml.Unmarshal(raw, &wf); err != nil {
 		t.Fatalf("parse release.yml: %v", err)
 	}
-	if len(wf.Jobs) < 7 {
+	if len(wf.Jobs) < 5 {
 		t.Fatalf("release.yml has %d jobs; the discovery is broken", len(wf.Jobs))
 	}
 	const verified = "${{ needs.verify.outputs.sha }}"
@@ -2481,8 +2482,10 @@ func TestScriptsReleaseWorkflow_PublishWaitsForTheErasingBuild(t *testing.T) {
 	var gate string
 	for name, j := range wf.Jobs {
 		for _, s := range j.Steps {
+			// make itself, or make through scripts/in-toolchain-image.sh.
 			fields := strings.Fields(s.Run)
-			if len(fields) > 1 && fields[0] == "make" && (slices.Contains(fields, "test-runtimesecret") || slices.Contains(fields, "ci-test")) {
+			if i := slices.Index(fields, "make"); i >= 0 && (i == 0 || fields[0] == "scripts/in-toolchain-image.sh") &&
+				(slices.Contains(fields[i+1:], "test-runtimesecret") || slices.Contains(fields[i+1:], "ci-test")) {
 				gate = name
 			}
 		}

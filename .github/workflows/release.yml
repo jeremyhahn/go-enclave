@@ -7,8 +7,8 @@
 #
 #   1. Verify   — the tag agrees with its own tree (VERSION, the CHANGELOG
 #                 section, no unassembled fragment) and names a commit on main.
-#   2. Gate     — the full gate on the TAGGED commit, through the same make
-#                 aggregates as ci.yml (ci-lint, ci-build, ci-security,
+#   2. Gate     — the full gate on the TAGGED commit, in the toolchain image,
+#                 through the make aggregates (ci-lint, ci-build, ci-security,
 #                 ci-test, and ci-integration with both FIPS configurations),
 #                 plus `make trivy` as a blocking gate and the unit tests under
 #                 FIPS 140-3 strict mode.
@@ -30,10 +30,14 @@
 # resolution (build/ci/forge-resolution.sh), and refusing to publish unless
 # every stage succeeded (build/ci/summary.sh).
 #
-# Every job runs on the bare runner with actions/setup-go at the version go.mod
-# declares, as in ci.yml (see its header for where the pinned tools come from
-# and why TOOL_INSTALL is 1 only on github.com). Integration runs the hardened
-# integration image through compose.
+# The gate runs in the devcontainer's toolchain image, built from the tagged
+# commit as ci.yml's image job builds it (`make docker-build`, then each stage
+# through scripts/in-toolchain-image.sh), so a release is gated with its own
+# tree's Go toolchain and tool pins, never the runner's: a Go bump needs no
+# runner rebuild (#244). Integration runs the hardened integration image
+# through compose, as ci.yml's Integration job does. Only Consumer runs on the
+# bare runner, with actions/setup-go at the version go.mod declares: it builds
+# what a consumer gets.
 #
 # PUBLICATION ON GITHUB IS NEVER AUTOMATIC. This file is byte-identical on the
 # public mirror, where a tag arrives only when the owner pushes one; there the
@@ -103,97 +107,155 @@ jobs:
           git fetch --no-tags --quiet origin main
           make release-verify
 
-  lint:
-    name: Lint
+  # The gate in the toolchain image built from the tagged commit, as ci.yml's
+  # image job runs its stages (that job's steps, one stage after another):
+  # ci-lint, ci-build, ci-security plus `trivy fs` (CRITICAL/HIGH) as a
+  # blocking gate, and ci-test plus the unit tests under FIPS 140-3 strict
+  # mode. The stages run with no network on the image's module cache, but
+  # security, which fetches the vulnerability databases (IN_IMAGE_NETWORK=
+  # bridge). Each stage runs even when an earlier one failed, so one run
+  # reports every red stage; any red stage fails the job.
+  gate:
+    name: Gate [toolchain image] [lint, build, security, test]
     needs: [verify]
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          ref: ${{ needs.verify.outputs.sha }}   # the commit Verify saw, never the tag again
-
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
-        with:
-          go-version-file: go.mod
-
-      - run: make ci-lint
-
-  build:
-    name: Build
-    needs: [verify]
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          ref: ${{ needs.verify.outputs.sha }}   # the commit Verify saw, never the tag again
-
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
-        with:
-          go-version-file: go.mod
-
-      - run: make ci-build
-
-  # ci.yml's Security job plus `trivy fs` (CRITICAL/HIGH) as a blocking gate,
-  # with the memory bound ci.yml's Security job documents; same reasons.
-  security:
-    name: Security
-    needs: [verify, lint, build]
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'bigdisk' }}
+    timeout-minutes: 120
     env:
-      GOMEMLIMIT: 10GiB
-      GOMAXPROCS: 8
+      CI_STACK_PREFIX: ${{ github.event.repository.name }}-ci-
+      # The cache volumes' trust class (ci-standard.md §6): a release tag is on
+      # main (Verify checks it), so it reads and writes main's set.
+      CI_CACHE_CLASS: main
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ needs.verify.outputs.sha }}   # the commit Verify saw, never the tag again
 
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
-        with:
-          go-version-file: go.mod
+      # Mask the forge credentials before any other step (as in ci.yml).
+      - name: Mask the forge credentials
+        run: |
+          for v in GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0; do
+            val=${!v:-}
+            [ -n "$val" ] || continue
+            echo "::add-mask::$val"
+            case $val in *://*:*@*) t=${val#*://}; t=${t%%@*}; echo "::add-mask::${t#*:}" ;; esac
+          done
 
-      - run: make ci-security trivy
+      - name: Reap stale CI stacks
+        run: scripts/reap-stale-ci-stacks.sh "$CI_STACK_PREFIX"
 
-  # ci.yml's Test job plus the unit tests under FIPS 140-3 strict mode.
-  test:
-    name: Test
-    needs: [verify, lint, build]
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          ref: ${{ needs.verify.outputs.sha }}   # the commit Verify saw, never the tag again
+      - name: Name the integration image
+        run: echo "IT_IMAGE=$(make -s it-image)" >> "$GITHUB_ENV"
 
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
-        with:
-          go-version-file: go.mod
+      - name: Build the devcontainer images
+        run: |
+          ( umask 077; : > "$RUNNER_TEMP/gomodauth.env"
+            for v in GOPRIVATE GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0; do
+              if [ -n "${!v:-}" ]; then printf '%s=%s\n' "$v" "${!v}" >> "$RUNNER_TEMP/gomodauth.env"; fi
+            done )
+          make docker-build MODULE_ENV_FILE="$RUNNER_TEMP/gomodauth.env" IT_IMAGE="$IT_IMAGE"
+          rm -f "$RUNNER_TEMP/gomodauth.env"
+          echo "TOOLCHAIN_IMAGE=$(make -s toolchain-image)" >> "$GITHUB_ENV"
 
-      - run: make ci-test test-fips
+      - name: Trim the CI caches
+        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' }}
+        run: scripts/trim-ci-caches.sh "$CI_STACK_PREFIX" "$TOOLCHAIN_IMAGE"
+
+      - name: make ci-lint
+        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' }}
+        run: scripts/in-toolchain-image.sh "$TOOLCHAIN_IMAGE" make ci-lint
+
+      - name: make ci-build
+        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' }}
+        run: scripts/in-toolchain-image.sh "$TOOLCHAIN_IMAGE" make ci-build
+
+      - name: make ci-security trivy
+        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' }}
+        env:
+          IN_IMAGE_NETWORK: bridge
+        run: scripts/in-toolchain-image.sh "$TOOLCHAIN_IMAGE" make ci-security trivy
+
+      - name: make ci-test test-fips
+        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' }}
+        run: scripts/in-toolchain-image.sh "$TOOLCHAIN_IMAGE" make ci-test test-fips
+
+      - name: Tear down
+        if: always()
+        run: rm -f "$RUNNER_TEMP/gomodauth.env"
 
   # The integration suite (#91), both FIPS configurations, in the hardened
-  # integration image on the TAGGED commit — the same target ci.yml's
-  # Integration job runs, so a tag is held to at least the PR gate. Docker is a
-  # hard requirement: the targets fail, never skip, without docker, Compose v2
-  # or a reachable daemon. No event value reaches these targets; they take
-  # none. The image is trivy-scanned once, and trivy is not on the runner
-  # host, so it is copied out of the toolchain image, which carries it at the
-  # pin in scripts/tool-pins.sh; nothing is downloaded.
+  # integration image on the TAGGED commit, as ci.yml's Integration job runs
+  # it, so a tag is held to at least the main gate: the user-namespace test,
+  # the default run and the FIPS 140-3 strict run, on the content-addressed
+  # image this job names and leases, which scripts/integration-image.sh builds
+  # when the runner lacks it and trivy-scans once. Docker is a hard
+  # requirement: the targets fail, never skip, without docker, Compose v2 or a
+  # reachable daemon. No event value reaches these targets; they take none.
+  # trivy is not on the runner host, so it is copied out of the toolchain
+  # image, which carries it at the pin in scripts/tool-pins.sh; nothing is
+  # downloaded. go-enclave needs no module credential, so no credential file
+  # is written.
   integration:
-    name: Integration
-    needs: [verify, lint, build]
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
+    name: Integration [integration image]
+    needs: [verify, gate]
+    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'bigdisk' }}
+    timeout-minutes: 60
+    env:
+      CI_STACK_PREFIX: ${{ github.event.repository.name }}-ci-
+      IT_PROJECT: ${{ github.event.repository.name }}-ci-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ needs.verify.outputs.sha }}   # the commit Verify saw, never the tag again
 
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
-        with:
-          go-version-file: go.mod
+      - name: Mask the forge credentials
+        run: |
+          for v in GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0; do
+            val=${!v:-}
+            [ -n "$val" ] || continue
+            echo "::add-mask::$val"
+            case $val in *://*:*@*) t=${val#*://}; t=${t%%@*}; echo "::add-mask::${t#*:}" ;; esac
+          done
+
+      # The suites' own compose projects (go-enclave-it-*, go-enclave-userns-*)
+      # are reaped beside the repo's CI prefix (as in ci.yml).
+      - name: Reap stale CI stacks
+        run: |
+          scripts/reap-stale-ci-stacks.sh "$CI_STACK_PREFIX"
+          scripts/reap-stale-ci-stacks.sh go-enclave-it
+          scripts/reap-stale-ci-stacks.sh go-enclave-userns-
+
+      - name: Name the integration image
+        run: echo "IT_IMAGE=$(make -s it-image)" >> "$GITHUB_ENV"
+
+      # A lease on the integration image, so another run's reap step cannot
+      # remove it while this job needs it (ci.yml's Integration job documents
+      # the lease: bounded, building the image once if it is missing, and
+      # exporting the leased id as IT_LEASE_ID).
+      - name: Lease the integration image
+        run: |
+          lease="${CI_STACK_PREFIX}lease-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
+          take_lease() {
+            id=$(docker image inspect -f '{{.Id}}' "$IT_IMAGE" 2>/dev/null) || return 1
+            docker create --pull never --name "$lease" "$id" true >/dev/null || return 1
+            [ "$(docker image inspect -f '{{.Id}}' "$IT_IMAGE" 2>/dev/null)" = "$id" ] && return 0
+            docker rm "$lease" >/dev/null 2>&1 || true
+            return 1
+          }
+          if ! take_lease; then
+            echo "integration image $IT_IMAGE is missing or went before its lease; building it once"
+            rc=0
+            make docker-build IT_IMAGE="$IT_IMAGE" || rc=$?
+            if [ "$rc" -ne 0 ]; then
+              echo "::error::building the integration image $IT_IMAGE failed (exit $rc)"
+              exit "$rc"
+            fi
+            if ! take_lease; then
+              echo "::error::the integration image $IT_IMAGE is missing after one rebuild, so this job holds no lease on it"
+              exit 1
+            fi
+          fi
+          echo "IT_LEASE=$lease" >> "$GITHUB_ENV"
+          echo "IT_LEASE_ID=$id" >> "$GITHUB_ENV"
 
       - name: Pinned trivy from the toolchain image
         run: |
@@ -201,7 +263,16 @@ jobs:
           sh build/ci/toolchain-trivy.sh "$RUNNER_TEMP/bin"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
 
-      - run: make ci-integration
+      - name: make ci-integration (integration image)
+        run: |
+          docker tag "$IT_LEASE_ID" "$IT_IMAGE"
+          make ci-integration IT_PROJECT="$IT_PROJECT" IT_IMAGE="$IT_IMAGE"
+
+      - name: Tear down
+        if: always()
+        run: |
+          IT_IMAGE="$IT_IMAGE" docker compose -f build/docker/devcontainer/compose.yaml -p "$IT_PROJECT" down --volumes || true
+          [ -z "${IT_LEASE:-}" ] || docker rm "$IT_LEASE" >/dev/null || true
 
   consumer:
     name: Consumer
@@ -228,7 +299,7 @@ jobs:
 
   publish:
     name: Publish release
-    needs: [verify, lint, build, security, test, integration, consumer]
+    needs: [verify, gate, integration, consumer]
     # always(): so a failed or skipped stage produces a red, named publish job
     # below rather than a silently skipped one. The server guard keeps the
     # public mirror from ever publishing on its own.
@@ -249,10 +320,7 @@ jobs:
           bad=0
           for r in \
             verify=${{ needs.verify.result }} \
-            lint=${{ needs.lint.result }} \
-            build=${{ needs.build.result }} \
-            security=${{ needs.security.result }} \
-            test=${{ needs.test.result }} \
+            gate=${{ needs.gate.result }} \
             integration=${{ needs.integration.result }} \
             consumer=${{ needs.consumer.result }}
           do
