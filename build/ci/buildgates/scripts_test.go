@@ -906,6 +906,10 @@ func isolatedPath(t *testing.T) string {
 	for _, u := range toolUtilitiesOptional {
 		link(u, false)
 	}
+	// tool.sh's retry waits between attempts; the tests do not, and a
+	// SLEEP_LOG, when set, records each wait.
+	writeExecutable(t, filepath.Join(dir, "sleep"), []byte("#!/bin/sh\n"+
+		"if [ -n \"${SLEEP_LOG-}\" ]; then echo \"$*\" >> \"$SLEEP_LOG\"; fi\n"))
 	return dir
 }
 
@@ -1143,6 +1147,7 @@ const gosecBuild = " mod init gosec-build"
 // names, and keeps the version stamp tool.sh verifies it by.
 func TestScriptsToolResolve_GosecBuildsAgainstThePinnedXTools(t *testing.T) {
 	log := filepath.Join(t.TempDir(), "go.log")
+	sleepLog := filepath.Join(t.TempDir(), "sleep.log")
 	goCmd := filepath.Join(t.TempDir(), "go")
 	writeExecutable(t, goCmd, []byte("#!/bin/sh\n"+
 		"echo \"GOTOOLCHAIN=$GOTOOLCHAIN CGO_ENABLED=${CGO_ENABLED-} $*\" >> "+log+"\n"+
@@ -1153,15 +1158,22 @@ func TestScriptsToolResolve_GosecBuildsAgainstThePinnedXTools(t *testing.T) {
 		// As the devcontainer sets it (-race needs cgo): the install still
 		// builds a static gosec.
 		"CGO_ENABLED": "1",
+		"SLEEP_LOG":   sleepLog,
 	})
 	out, ok := runScript(t, t.TempDir(), env, "tool.sh", "gosec", "v2.29.0")
 	calls, _ := os.ReadFile(log)
-	want := "GOTOOLCHAIN=go1.27.1 CGO_ENABLED=1 mod init gosec-build\n" +
-		"GOTOOLCHAIN=go1.27.1 CGO_ENABLED=1 get github.com/securego/gosec/v2/cmd/gosec@v2.29.0 golang.org/x/tools@v0.52.0\n" +
-		"GOTOOLCHAIN=go1.27.1 CGO_ENABLED=0 install -ldflags -X main.Version=v2.29.0 github.com/securego/gosec/v2/cmd/gosec\n"
+	// A failed build is retried from a fresh module, three attempts in all,
+	// 10 s then 20 s apart, before tool.sh fails as it always has.
+	want := strings.Repeat("GOTOOLCHAIN=go1.27.1 CGO_ENABLED=1 mod init gosec-build\n"+
+		"GOTOOLCHAIN=go1.27.1 CGO_ENABLED=1 get github.com/securego/gosec/v2/cmd/gosec@v2.29.0 golang.org/x/tools@v0.52.0\n"+
+		"GOTOOLCHAIN=go1.27.1 CGO_ENABLED=0 install -ldflags -X main.Version=v2.29.0 github.com/securego/gosec/v2/cmd/gosec\n", 3)
 	if ok || string(calls) != want || !strings.Contains(out, "against golang.org/x/tools v0.52.0 failed") {
 		t.Fatalf("gosec was not built in a module raising x/tools (ok=%v, go calls %q):\n%s", ok, calls, out)
 	}
+	if waits, _ := os.ReadFile(sleepLog); string(waits) != "10\n20\n" {
+		t.Fatalf("gosec attempts were not 10 s then 20 s apart (waits %q)", waits)
+	}
+	env["SLEEP_LOG"] = ""
 
 	env["XTOOLS_VERSION"] = "latest"
 	if out, ok := runScript(t, t.TempDir(), env, "tool.sh", "gosec", "v2.29.0"); ok || !strings.Contains(out, "XTOOLS_VERSION 'latest' is not a pinned") {

@@ -202,6 +202,33 @@ install_archive() {
   chmod 0755 "$tmp/$tool"
 }
 
+# retry runs "$@" up to three times, 10 s then 20 s apart, each attempt from
+# a clean $tmp (no $tmp/mod, no $tmp/$tool, the only paths a Go build
+# writes there) so a partial build from a failed one is never used: a
+# transient module-proxy error must not fail the toolchain image (m850).
+retry() {
+  attempt=0
+  until rm -rf "${tmp:?}/mod" "${tmp:?}/$tool" && "$@"; do
+    attempt=$((attempt + 1))
+    [ "$attempt" -lt 3 ] || return 1
+    sleep $((attempt * 10))
+  done
+}
+
+# go_install_once makes one attempt at installing a Go tool into $tmp.
+go_install_once() { GOTOOLCHAIN=$TOOLCHAIN GOBIN=$tmp "$go" install "$pkg@$want"; }
+
+# gosec_once makes one attempt at build_gosec's throwaway-module build.
+gosec_once() {
+  mkdir "$tmp/mod" &&
+    (
+      cd "$tmp/mod" &&
+        GOTOOLCHAIN=$TOOLCHAIN "$go" mod init gosec-build >&2 &&
+        GOTOOLCHAIN=$TOOLCHAIN "$go" get "$pkg@$want" "golang.org/x/tools@$XTOOLS_VERSION" >&2 &&
+        GOTOOLCHAIN=$TOOLCHAIN CGO_ENABLED=0 GOBIN=$tmp "$go" install -ldflags "$ldflags" "$pkg" >&2
+    )
+}
+
 # build_gosec writes gosec to $tmp/gosec, built in a throwaway module so
 # golang.org/x/tools can be raised to XTOOLS_VERSION: the version gosec's
 # go.mod names cannot read the export data Go 1.27 writes, so every import
@@ -209,13 +236,7 @@ install_archive() {
 build_gosec() {
   matches "${XTOOLS_VERSION-}" '^v[0-9]+\.[0-9]+\.[0-9]+$' ||
     die "gosec: XTOOLS_VERSION '${XTOOLS_VERSION-}' is not a pinned vX.Y.Z version (scripts/tool-pins.sh)"
-  mkdir "$tmp/mod"
-  (
-    cd "$tmp/mod" &&
-      GOTOOLCHAIN=$TOOLCHAIN "$go" mod init gosec-build >&2 &&
-      GOTOOLCHAIN=$TOOLCHAIN "$go" get "$pkg@$want" "golang.org/x/tools@$XTOOLS_VERSION" >&2 &&
-      GOTOOLCHAIN=$TOOLCHAIN CGO_ENABLED=0 GOBIN=$tmp "$go" install -ldflags "$ldflags" "$pkg" >&2
-  ) || die "installing $tool $want against golang.org/x/tools $XTOOLS_VERSION failed"
+  retry gosec_once || die "installing $tool $want against golang.org/x/tools $XTOOLS_VERSION failed"
   rm -rf "$tmp/mod"
 }
 
@@ -303,7 +324,7 @@ case $mode in
       elif [ "$tool" = gosec ]; then
         build_gosec
       else
-        GOTOOLCHAIN=$TOOLCHAIN GOBIN=$tmp "$go" install "$pkg@$want" >&2 ||
+        retry go_install_once >&2 ||
           die "installing $tool $want failed"
       fi
       mkdir -p "$dir"
