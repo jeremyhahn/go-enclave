@@ -18,7 +18,9 @@
 #   build   build both shipped stages (`make docker-build`): the toolchain,
 #           tagged <tag> and go-enclave-toolchain:latest, then the integration
 #           image through compose, tagged $GO_ENCLAVE_IT_IMAGE (default
-#           <it-tag>), only when the daemon does not hold that tag already.
+#           <it-tag>). A stage whose content tag the daemon holds already
+#           is not built (the toolchain's :latest is still set), and a build
+#           that fails while another job tags the same content counts as built.
 #   run     run a command in the toolchain image with the checkout mounted,
 #           offline, as the invoking user (`make docker-run CMD='make lint'`);
 #           the command is one string, run by bash -c. Without one, the
@@ -90,6 +92,14 @@ docker_ok() {
   command -v docker >/dev/null 2>&1 || die "docker is required for '$1'"
 }
 
+# held <ref>: the daemon holds the tag. Every tag build makes is content
+# addressed, so a held tag is the image this tree builds. Two jobs on one
+# daemon race to the same content tag: the loser's BuildKit export fails with
+# "already exists", and a tag held after a failed build counts as built.
+held() {
+  docker image inspect "$1" >/dev/null 2>&1
+}
+
 [ $# -ge 1 ] || die "usage: $0 tag | it-tag | inputs | build | run [command]"
 case $1 in
   tag)
@@ -108,14 +118,22 @@ case $1 in
     [ $# -eq 1 ] || die "usage: $0 build"
     docker_ok build
     ref=$(image)
-    docker build -f "$dockerfile" --target toolchain -t "$ref" -t "$repo:latest" .
-    if [ -n "${GO_ENCLAVE_IT_IMAGE:-}" ]; then it=$GO_ENCLAVE_IT_IMAGE; else it=$(it_image); fi
-    if docker image inspect "$it" >/dev/null 2>&1; then
-      echo "built $ref ($repo:latest); $it is already held"
-    else
-      GO_ENCLAVE_IT_IMAGE=$it docker compose -f "$compose" -p "$project" build integration
-      echo "built $ref ($repo:latest) and $it"
+    if held "$ref"; then
+      docker tag "$ref" "$repo:latest"
+      echo "$ref is already held; tagged $repo:latest"
+    elif ! docker build -f "$dockerfile" --target toolchain -t "$ref" -t "$repo:latest" .; then
+      held "$ref" || die "building $ref failed"
+      docker tag "$ref" "$repo:latest"
+      echo "$ref was built by another job meanwhile; tagged $repo:latest"
     fi
+    if [ -n "${GO_ENCLAVE_IT_IMAGE:-}" ]; then it=$GO_ENCLAVE_IT_IMAGE; else it=$(it_image); fi
+    if held "$it"; then
+      echo "$it is already held"
+    elif ! GO_ENCLAVE_IT_IMAGE=$it docker compose -f "$compose" -p "$project" build integration; then
+      held "$it" || die "building $it failed"
+      echo "$it was built by another job meanwhile"
+    fi
+    echo "built $ref ($repo:latest) and $it"
     ;;
   run)
     [ $# -le 2 ] || die "usage: $0 run [command]"

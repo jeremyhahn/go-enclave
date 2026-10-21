@@ -1,4 +1,21 @@
-# ci-template: v1.25 (customized)
+# ci-template: v1.25.2 (customized)
+# v1.25.2 (2026-10-21, from a Codex review): a job keeps the integration
+# image's tag while it holds the lease. Two trees that differ only in a file
+# the build ignores share one image id under two tags, and the reaper's
+# `docker image rm <tag>` untagged that id even while a lease held it, so a
+# later `docker save` or integration run on the tag failed. The lease step
+# exports the leased id as IT_LEASE_ID, and docker save, make
+# integration-test and each soak iteration first run `docker tag
+# "$IT_LEASE_ID" "$IT_IMAGE"`. Ships reap-stale-ci-stacks.sh v4, which keeps
+# every tag of an image id a container uses.
+# v1.25.1 (2026-10-20, from a Codex review): the "Lease the integration
+# image" step in the image, integration and soak jobs is bounded and never
+# skipped. v1.23 leased only an image it found, and a failed `docker create`
+# did not fail the step, so an image reaped before its lease left the job
+# unleased and green. The step now inspects the image, leases it by id with
+# --pull never and inspects the tag again for the same id; if the image is
+# gone it runs `make docker-build` once, leases and inspects again, and fails
+# with an error if the image is still missing. Only that step changes.
 # v1.25 (Company Agent m857, 2026-10-20): main has one concurrency group per
 # event, so a newer push to main cancels the older in-progress main push run.
 # At 20:00Z go-qrdb had three main-push runs in progress on three commits and
@@ -499,12 +516,54 @@ jobs:
       # because `docker image rm` refuses an image a container uses. Tear down
       # removes the lease; one a dead job leaves behind is a stale container,
       # which the reap step removes after the job timeout like any other.
+      # v1.25.1 (2026-10-20, from a Codex review): the lease is bounded and
+      # never skipped. v1.23 leased only an image it found, so an
+      # image reaped before the lease (or a failed `docker create`) left the
+      # job running unleased and green. Now the step inspects the image, leases
+      # it by id (--pull never), and inspects the tag again for the same id. If
+      # the image is gone at either inspect it builds it once with
+      # `make docker-build`, leases and inspects again, and fails the step if
+      # it is still missing. A missing image is never a success.
+      # v1.25.2 (2026-10-21, from a Codex review): the lease holds the image
+      # id, not the tag. Two trees that differ only in a file the build ignores
+      # share one image id under two tags, and `docker image rm <tag>` untags
+      # such an image even while a container uses it. The step exports the
+      # leased id as IT_LEASE_ID, and every later step that names IT_IMAGE
+      # (docker save, make integration-test, each soak iteration) first runs
+      # `docker tag "$IT_LEASE_ID" "$IT_IMAGE"`, which puts back a tag a
+      # reaper removed before the lease. docker save keeps the tag, so the
+      # archive keeps its repo tag. reap-stale-ci-stacks.sh v4 also keeps
+      # every tag of an id a container uses.
       - name: Lease the integration image
         run: |
-          if docker image inspect "$IT_IMAGE" >/dev/null 2>&1; then
-            lease="${CI_STACK_PREFIX}lease-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
-            docker create --name "$lease" "$IT_IMAGE" true >/dev/null && echo "IT_LEASE=$lease" >> "$GITHUB_ENV"
+          lease="${CI_STACK_PREFIX}lease-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
+          take_lease() {
+            id=$(docker image inspect -f '{{.Id}}' "$IT_IMAGE" 2>/dev/null) || return 1
+            docker create --pull never --name "$lease" "$id" true >/dev/null || return 1
+            [ "$(docker image inspect -f '{{.Id}}' "$IT_IMAGE" 2>/dev/null)" = "$id" ] && return 0
+            docker rm "$lease" >/dev/null 2>&1 || true
+            return 1
+          }
+          if ! take_lease; then
+            echo "integration image $IT_IMAGE is missing or went before its lease; building it once"
+            ( umask 077; : > "$RUNNER_TEMP/gomodauth.env"
+              for v in GOPRIVATE GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0; do
+                if [ -n "${!v:-}" ]; then printf '%s=%s\n' "$v" "${!v}" >> "$RUNNER_TEMP/gomodauth.env"; fi
+              done )
+            rc=0
+            make docker-build MODULE_ENV_FILE="$RUNNER_TEMP/gomodauth.env" IT_IMAGE="$IT_IMAGE" || rc=$?
+            rm -f "$RUNNER_TEMP/gomodauth.env"
+            if [ "$rc" -ne 0 ]; then
+              echo "::error::building the integration image $IT_IMAGE failed (exit $rc)"
+              exit "$rc"
+            fi
+            if ! take_lease; then
+              echo "::error::the integration image $IT_IMAGE is missing after one rebuild, so this job holds no lease on it"
+              exit 1
+            fi
           fi
+          echo "IT_LEASE=$lease" >> "$GITHUB_ENV"
+          echo "IT_LEASE_ID=$id" >> "$GITHUB_ENV"
 
       # v1.22: bound this repo's cache volumes on the host before the stages
       # add to them (ci-standard.md §6). It never fails the job.
@@ -597,6 +656,7 @@ jobs:
         env:
           IN_IMAGE_NETWORK: bridge
         run: |
+          docker tag "$IT_LEASE_ID" "$IT_IMAGE"
           docker save -o it-image.tar "$IT_IMAGE"
           scripts/in-toolchain-image.sh "$TOOLCHAIN_IMAGE" \
             trivy image --input it-image.tar --ignore-unfixed --skip-dirs /opt/go/mod --severity CRITICAL,HIGH --exit-code 1 \
@@ -696,12 +756,37 @@ jobs:
       # because `docker image rm` refuses an image a container uses. Tear down
       # removes the lease; one a dead job leaves behind is a stale container,
       # which the reap step removes after the job timeout like any other.
+      # v1.25.1: bounded, building the image once if it is missing (as in the
+      # image job); a missing image fails the step.
+      # v1.25.2: exports the leased id as IT_LEASE_ID, which the suite's step
+      # tags as IT_IMAGE before it runs (as in the image job).
+      # CUSTOMIZE: go-enclave needs no module credential, so the rebuild
+      # writes no credential file (as the FIPS job's build).
       - name: Lease the integration image
         run: |
-          if docker image inspect "$IT_IMAGE" >/dev/null 2>&1; then
-            lease="${CI_STACK_PREFIX}lease-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
-            docker create --name "$lease" "$IT_IMAGE" true >/dev/null && echo "IT_LEASE=$lease" >> "$GITHUB_ENV"
+          lease="${CI_STACK_PREFIX}lease-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
+          take_lease() {
+            id=$(docker image inspect -f '{{.Id}}' "$IT_IMAGE" 2>/dev/null) || return 1
+            docker create --pull never --name "$lease" "$id" true >/dev/null || return 1
+            [ "$(docker image inspect -f '{{.Id}}' "$IT_IMAGE" 2>/dev/null)" = "$id" ] && return 0
+            docker rm "$lease" >/dev/null 2>&1 || true
+            return 1
+          }
+          if ! take_lease; then
+            echo "integration image $IT_IMAGE is missing or went before its lease; building it once"
+            rc=0
+            make docker-build IT_IMAGE="$IT_IMAGE" || rc=$?
+            if [ "$rc" -ne 0 ]; then
+              echo "::error::building the integration image $IT_IMAGE failed (exit $rc)"
+              exit "$rc"
+            fi
+            if ! take_lease; then
+              echo "::error::the integration image $IT_IMAGE is missing after one rebuild, so this job holds no lease on it"
+              exit 1
+            fi
           fi
+          echo "IT_LEASE=$lease" >> "$GITHUB_ENV"
+          echo "IT_LEASE_ID=$id" >> "$GITHUB_ENV"
 
       # CUSTOMIZE: host tuning the suite needs goes here, as in the test job.
 
@@ -724,7 +809,9 @@ jobs:
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
 
       - name: make ci-integration (integration image)
-        run: make ci-integration IT_PROJECT="$IT_PROJECT" IT_IMAGE="$IT_IMAGE" GO_BUILD_TAGS="$GO_BUILD_TAGS"
+        run: |
+          docker tag "$IT_LEASE_ID" "$IT_IMAGE"
+          make ci-integration IT_PROJECT="$IT_PROJECT" IT_IMAGE="$IT_IMAGE" GO_BUILD_TAGS="$GO_BUILD_TAGS"
 
       - name: Tear down
         if: always()
@@ -781,12 +868,37 @@ jobs:
       # because `docker image rm` refuses an image a container uses. Tear down
       # removes the lease; one a dead job leaves behind is a stale container,
       # which the reap step removes after the job timeout like any other.
+      # v1.25.1: bounded, building the image once if it is missing (as in the
+      # image job); a missing image fails the step.
+      # v1.25.2: exports the leased id as IT_LEASE_ID, which the suite's step
+      # tags as IT_IMAGE before it runs (as in the image job).
+      # CUSTOMIZE: go-enclave needs no module credential, so the rebuild
+      # writes no credential file (as the FIPS job's build).
       - name: Lease the integration image
         run: |
-          if docker image inspect "$IT_IMAGE" >/dev/null 2>&1; then
-            lease="${CI_STACK_PREFIX}lease-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
-            docker create --name "$lease" "$IT_IMAGE" true >/dev/null && echo "IT_LEASE=$lease" >> "$GITHUB_ENV"
+          lease="${CI_STACK_PREFIX}lease-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
+          take_lease() {
+            id=$(docker image inspect -f '{{.Id}}' "$IT_IMAGE" 2>/dev/null) || return 1
+            docker create --pull never --name "$lease" "$id" true >/dev/null || return 1
+            [ "$(docker image inspect -f '{{.Id}}' "$IT_IMAGE" 2>/dev/null)" = "$id" ] && return 0
+            docker rm "$lease" >/dev/null 2>&1 || true
+            return 1
+          }
+          if ! take_lease; then
+            echo "integration image $IT_IMAGE is missing or went before its lease; building it once"
+            rc=0
+            make docker-build IT_IMAGE="$IT_IMAGE" || rc=$?
+            if [ "$rc" -ne 0 ]; then
+              echo "::error::building the integration image $IT_IMAGE failed (exit $rc)"
+              exit "$rc"
+            fi
+            if ! take_lease; then
+              echo "::error::the integration image $IT_IMAGE is missing after one rebuild, so this job holds no lease on it"
+              exit 1
+            fi
           fi
+          echo "IT_LEASE=$lease" >> "$GITHUB_ENV"
+          echo "IT_LEASE_ID=$id" >> "$GITHUB_ENV"
 
       # CUSTOMIZE: host tuning the suite needs goes here, as in the test job.
 
@@ -808,6 +920,7 @@ jobs:
             p="$IT_PROJECT-$i"
             echo "$p" > "$RUNNER_TEMP/soak-project"
             echo "soak iteration $i"
+            docker tag "$IT_LEASE_ID" "$IT_IMAGE"
             rc=0
             make "$SOAK_TARGET" IT_PROJECT="$p" IT_IMAGE="$IT_IMAGE" GO_BUILD_TAGS="$GO_BUILD_TAGS" || rc=$?
             IT_IMAGE="$IT_IMAGE" docker compose -f build/docker/devcontainer/compose.yaml -p "$p" down --volumes || true

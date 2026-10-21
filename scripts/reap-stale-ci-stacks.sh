@@ -36,6 +36,14 @@
 # `.Created` but re-tags the image, so v2 saw a just-rebuilt image as stale and
 # a parallel job's reaper removed it between its build and its lease
 # (go-quicraft main runs 57389 and 57484).
+# v4 (ci-template v1.25.2, 2026-10-21, from a Codex review): a tag is kept
+# while any container, running or created, uses its image id. Two trees that
+# differ only in a file the build ignores get two <prefix>it tags on one cached
+# image id. `docker image rm <tag>` on such an image only untags it, and it
+# succeeds even while a lease holds the id, so v3 could remove the tag a leased
+# job later saves or runs. Now the reaper resolves the tag's id and skips the
+# tag, with a log line, when `docker ps -a --filter ancestor=<id>` lists a
+# container. A failed lookup also keeps the tag.
 #
 # Stale: exited or dead and finished at least <min-age-seconds> ago, or
 # created and never started at least that long ago. A project with any
@@ -131,12 +139,21 @@ docker ps -a --filter "name=^$prefix" \
 images=0
 for ref in $(docker images --filter "reference=${prefix}it" --format '{{.Repository}}:{{.Tag}}'); do
   case $ref in "${prefix}it:"*) ;; *) continue ;; esac
-  read -r created tagged < <(docker image inspect -f '{{.Created}} {{.Metadata.LastTagTime.Unix}}' "$ref" 2>/dev/null) || continue
+  read -r id created tagged < <(docker image inspect -f '{{.Id}} {{.Created}} {{.Metadata.LastTagTime.Unix}}' "$ref" 2>/dev/null) || continue
   t=$(date -d "$created" +%s 2>/dev/null) || continue
   # A never-tagged image reports the zero time, a large negative number.
   case $tagged in ''|*[!0-9]*) ;; *) [ "$tagged" -le "$t" ] || t=$tagged ;; esac
   if [ $((now - t)) -lt "$image_min_age" ]; then
     echo "keep  image $ref (created or tagged within ${image_min_age}s)"
+    continue
+  fi
+  # v4: a container on the id (a lease or a stack) keeps every tag of it.
+  if ! users=$(docker ps -a -q --filter "ancestor=$id" 2>/dev/null); then
+    echo "keep  image $ref (could not list the containers on $id)"
+    continue
+  fi
+  if [ -n "$users" ]; then
+    echo "keep  image $ref (in use: $(echo "$users" | wc -l) container(s) on $id)"
     continue
   fi
   echo "reap  image $ref"
