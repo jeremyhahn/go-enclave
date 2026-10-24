@@ -350,15 +350,15 @@ on:
   schedule:
     - cron: '0 4 * * *'
 
-# v1.25: on main the group is the workflow and the event, so a push to main
-# cancels the in-progress main push run of an older commit, and a schedule or
-# workflow_dispatch run cancels only an older run of its own event (Company
-# Agent m857, m774 option (i)). Every other ref is one group, so a PR's newer
-# run cancels the older. No expression reaches cancel-in-progress: Gitea
-# 1.27.1 never released go-qrdb main run 57063, the first run after v1.22.1
-# set it to an expression (Company Agent m695).
+# On main the group is the workflow, the event and the commit, so main runs
+# never cancel each other: a push to main leaves the in-progress run of the
+# previous main commit to finish, and every merge keeps a completed run
+# (issue #246). Every other ref is one group, so a PR's newer run cancels the
+# older. No expression reaches cancel-in-progress: Gitea 1.27.1 never released
+# go-qrdb main run 57063, the first run after v1.22.1 set it to an expression
+# (Company Agent m695).
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && format('main-{0}', github.event_name) || github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && format('main-{0}-{1}', github.event_name, github.sha) || github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -677,7 +677,7 @@ jobs:
   fips:
     name: FIPS
     if: ${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full') }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'bigdisk' }}
     timeout-minutes: 60
     env:
       CI_STACK_PREFIX: ${{ github.event.repository.name }}-ci-

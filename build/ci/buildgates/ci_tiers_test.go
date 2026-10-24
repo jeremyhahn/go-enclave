@@ -50,9 +50,9 @@ const (
 	// gate's NIGHTLY value.
 	nightlyTierIf = "${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}"
 	// refConcurrencyGroup is the group of every pull_request workflow: keyed
-	// by ref, and on main by event, so a schedule or a dispatch never cancels
-	// a main push run (ci-template v1.25).
-	refConcurrencyGroup = "${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && format('main-{0}', github.event_name) || github.ref }}"
+	// by ref, and on main by event and commit, so a main run never cancels
+	// another main run (issue #246) while a PR's newer run cancels the older.
+	refConcurrencyGroup = "${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && format('main-{0}-{1}', github.event_name, github.sha) || github.ref }}"
 	// ciSchedule is the one CI schedule, ci.yml's nightly cron.
 	ciSchedule = "0 4 * * *"
 	// mergeSweepWorkflow is the one other workflow allowed a `schedule:`.
@@ -437,7 +437,8 @@ func TestCIGateTiers_RefusesWhatItMustRefuse(t *testing.T) {
 		{"pull_request, no cancel", "x.yml", "on:\n  pull_request:\nconcurrency:\n  group: ${{ github.workflow }}-${{ github.ref }}\njobs: {}\n", true},
 		{"pull_request, main shares the ref group", "x.yml", "on:\n  pull_request:\nconcurrency:\n  group: ${{ github.workflow }}-${{ github.ref }}\n  cancel-in-progress: true\njobs: {}\n", true},
 		{"pull_request, cancel by expression", "x.yml", "on:\n  pull_request:\nconcurrency:\n  group: " + refConcurrencyGroup + "\n  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}\njobs: {}\n", true},
-		{"pull_request, v1.25 group", "x.yml", "on:\n  pull_request:\n" + wantConc + "jobs: {}\n", false},
+		{"pull_request, main pushes share a group", "x.yml", "on:\n  pull_request:\nconcurrency:\n  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && format('main-{0}', github.event_name) || github.ref }}\n  cancel-in-progress: true\njobs: {}\n", true},
+		{"pull_request, per-commit main group", "x.yml", "on:\n  pull_request:\n" + wantConc + "jobs: {}\n", false},
 		{"push only, no concurrency", "x.yml", "on:\n  push:\njobs: {}\n", false},
 		{"scheduled", "nightly.yml", "on:\n  schedule:\n    - cron: '0 3 * * *'\n  workflow_dispatch:\njobs: {}\n", true},
 		{"scheduled automerge", "automerge.yml", "on:\n  schedule:\n    - cron: '0 3 * * *'\njobs: {}\n", false},

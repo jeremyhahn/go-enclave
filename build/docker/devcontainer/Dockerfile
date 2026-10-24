@@ -102,7 +102,7 @@
 # the toolchain's content tag (scripts/devcontainer.sh inputs); build/ci/buildgates
 # fails when the two disagree.
 
-ARG GO_IMAGE=golang:1.27.3-alpine3.24@sha256:f2c872bcee949b7be9c490efd02b48a8a2fbf947cdf533f1c58525ec9d8170fd
+ARG GO_IMAGE=golang:1.27.3-alpine3.24@sha256:b8c9b82affbbb82a020bbcf998dad2ba9516944ac7e883524642a481a9505e9c
 ARG GO_BUILD_PROXY=https://proxy.golang.org,direct
 
 # ---------------------------------------------------------------------------
