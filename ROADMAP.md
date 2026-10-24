@@ -41,21 +41,19 @@ Nothing queued. New work arrives as issues.
 
 ## Future
 
-- **se052f-secure-element** — a backend on the EdgeLock SE052F secure element implementing the backend seam — [#191](../../issues/191) — open
-- **optiga-trust-m** — the host-side Go backend for the Infineon OPTIGA Trust M I2C element implementing the backend seam — [#196](../../issues/196) — open
 - **mac-secure-enclave** — a backend on the Mac Secure Enclave implementing the backend seam — [#192](../../issues/192) — open
 - **intel-sgx** — a backend on Intel SGX implementing the backend seam — [#193](../../issues/193) — open
 - **amd-sev** — a backend on AMD SEV implementing the backend seam — [#194](../../issues/194) — open
 - **imx-edgelock-enclave** — a backend that binds xkmsd to the trusted-imx95 secure world through that repo's interface — [#195](../../issues/195) — open
 - **intel-tdx** — a backend on Intel TDX implementing the backend seam — [#199](../../issues/199) — open
 - **nvidia-blackwell** — a backend on NVIDIA Blackwell confidential computing implementing the backend seam — [#200](../../issues/200) — open
-- **bsd-windows-runtime-testing** — the BSDs and Windows run the test suite, not only compile — [#188](../../issues/188) — blocked: Linux only for now
+- **arm-trustzone** — a host-side backend over the GlobalPlatform TEE Client API implementing the backend seam, on OP-TEE — [#206](../../issues/206) — blocked: waits on trusted-firmware's OP-TEE row
 
 ## Dependencies
 
 - Up: none in-house, as the base layer it embeds no project; the only module dependency is `golang.org/x/sys` v0.49.0 — memory-enclave.
 - Down: Every layer above, from go-quicraft up, consumes the enclave interface (enclave-interface) and re-exports it through its own SDK. Today luks2, xkms, quicraft, qrdb and quicbaas hold concrete pointers — memory-enclave, sealing, enclave-interface.
 - Out of tree: the hardware backend rows depend on go-enclave, never the reverse; the TPM backend and TPM, HSM and KMS providers belong to go-xkms — the hardware backend rows, sealing.
-- trusted-firmware: owns the on-device C driver for the NXP EdgeLock SE052F as its element tier, and the on-device driver for the Infineon OPTIGA Trust M; go-enclave's backends for the same parts are the host-side Go backends — se052f-secure-element, optiga-trust-m.
+- trusted-firmware: owns the on-device C driver for the NXP EdgeLock SE052F as its element tier, and the on-device driver for the Infineon OPTIGA Trust M; go-enclave declined host-side backends for those parts (no hardware; owner 2026-10-17). trusted-firmware also owns the OP-TEE secure world that go-enclave's TrustZone backend binds to — arm-trustzone.
 - trusted-imx95: owns the i.MX 95 secure world and its secure key handling code; go-enclave's backend binds xkmsd to it through that repo's interface, and nothing device-specific is implemented here — imx-edgelock-enclave.
 - Handbook: names match the `MemoryEnclave` → `Memory` and `SealedEnclave` → `Sealed` renames (handbook#275, closed) — memory-enclave, sealing.
