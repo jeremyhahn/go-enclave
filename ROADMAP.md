@@ -12,7 +12,7 @@ Its layer is the base of the stack, under go-quicraft: [SPEC purpose](docs/SPEC.
 ## Milestones
 
 - First public release — target kind: release (`vX.Y.Z`), the version confirmed at the owner's publish approval — criteria: [SPEC release criteria](docs/SPEC.md#release-criteria)
-- [v0.10.0 dev complete](../../milestone/39) — target kind: dev complete — 1 open, 0 closed issues
+- [v0.10.0 dev complete](../../milestone/39) — target kind: dev complete
 
 ## Complete
 
