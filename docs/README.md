@@ -28,6 +28,7 @@ ruling on #188 ([runtime testing](memory-enclave/runtime-testing.md)).
 | [backend-conformance](backend-conformance/user.md) | `backendtest`: the conformance suite for `Backend` and `Handle` authors |
 | [backends](backends/user.md) | The seam for hardware enclaves: `Handle`, `Backend`, capabilities, the named registry, `As`, the sealing wiring (`WithBackend`, `OpenIn`, `SealFrom`) |
 | [backend-detection](backend-detection/user.md) | `Detect(ctx)`: the `Prober` rank and probe, selecting the most secure usable registered backend with locked memory as the floor, and why each other was passed over |
+| [linux-secretmem](backends/linux-secretmem.md) | Planned, a proposal in the backends folder until code lands: a Linux-only backend on `memfd_secret(2)` memory, out of the kernel direct map; what it adds over the memory enclave, kernel requirements, failure modes, open questions |
 
 How a change is built and gated, and how a signed release is cut, verified and
 published: [build and release](build-and-release.md).

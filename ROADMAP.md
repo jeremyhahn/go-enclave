@@ -1,6 +1,6 @@
 # go-enclave roadmap
 
-> **Status: REFERENCE** · Owner: Software Department · Last verified: 2026-10-20
+> **Status: REFERENCE** · Owner: Software Department · Last verified: 2026-10-26
 > Changes are proposed by docs-only PR. Agrees with [docs/SPEC.md](docs/SPEC.md), which lists every feature named below.
 
 ## Mission
@@ -37,7 +37,7 @@ Nothing queued. New work arrives as issues.
 
 ## Later
 
-Nothing queued. New work arrives as issues.
+- **linux-secretmem** — a Linux-only software backend on `memfd_secret(2)`, ranked above the memory enclave and below every hardware backend; docs first, code after the owner answers its open questions — [#253](../../issues/253) — open
 
 ## Future
 
