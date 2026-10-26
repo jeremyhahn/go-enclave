@@ -44,6 +44,20 @@
 # job later saves or runs. Now the reaper resolves the tag's id and skips the
 # tag, with a log line, when `docker ps -a --filter ancestor=<id>` lists a
 # container. A failed lookup also keeps the tag.
+# v5 (ci-template v1.25.3, 2026-10-21, from a Codex review): the image loop
+# runs under the daemon's image lock. v4's in-use check and its `docker image
+# rm` were two calls, so a job could take its lease and re-tag between them
+# and still lose the tag. The lock is a created, never-started container
+# named <prefix>image-lock, made from <prefix>image-lock:base (an empty
+# image this script imports when it is missing); the daemon refuses a second
+# container of that name, so one holder at a time. The ci.yml lease step and
+# every re-tag take the same lock. A lock created more than 600 s ago is a
+# dead holder's and is removed by its id. The reaper waits up to
+# REAP_LOCK_WAIT seconds (default 60) for it, and without it removes no
+# image that run. v5 also reads the tag time as a string: on Docker 29
+# `{{.Metadata.LastTagTime.Unix}}` is a template error, the inspect line came
+# back without an id, and v3 and v4 then removed the tag whatever its age or
+# lease. An image the inspect gives no id for is now kept.
 #
 # Stale: exited or dead and finished at least <min-age-seconds> ago, or
 # created and never started at least that long ago. A project with any
@@ -77,6 +91,11 @@ case $image_min_age in
   '' | *[!0-9]*) echo "REAP_IMAGE_MIN_AGE must be a number: $image_min_age" >&2; exit 2 ;;
 esac
 
+lock_wait=${REAP_LOCK_WAIT:-60}
+case $lock_wait in
+  '' | *[!0-9]*) echo "REAP_LOCK_WAIT must be a number: $lock_wait" >&2; exit 2 ;;
+esac
+
 now=$(date +%s)
 
 # run <command...>: the command, or only its echo under REAP_DRY_RUN=1.
@@ -96,6 +115,33 @@ stale() {
   t=$(date -d "$t" +%s 2>/dev/null) || return 1
   [ $((now - t)) -ge "$min_age" ]
 }
+
+# image_lock: take the daemon's image lock (v5, above), waiting up to
+# REAP_LOCK_WAIT seconds; 1 when it is not taken. image_unlock drops it.
+lock="${prefix}image-lock"
+lock_id=
+image_lock() {
+  local base="$lock:base" held at t i
+  for ((i = 0; i < lock_wait; i++)); do
+    docker image inspect "$base" >/dev/null 2>&1 ||
+      head -c 1024 /dev/zero | docker import - "$base" >/dev/null 2>&1
+    lock_id=$(docker create --pull never --name "$lock" "$base" true 2>/dev/null) && return 0
+    lock_id=
+    if read -r held at < <(docker inspect -f '{{.Id}} {{.Created}}' "$lock" 2>/dev/null) &&
+      t=$(date -d "$at" +%s 2>/dev/null) && [ $(($(date +%s) - t)) -ge 600 ]; then
+      echo "lock  removing the stale $lock (created $at)"
+      docker rm "$held" >/dev/null 2>&1
+      continue
+    fi
+    sleep 1
+  done
+  return 1
+}
+image_unlock() {
+  [ -z "$lock_id" ] || docker rm "$lock_id" >/dev/null 2>&1
+  lock_id=
+}
+trap image_unlock EXIT
 
 reaped=0
 
@@ -135,13 +181,28 @@ docker ps -a --filter "name=^$prefix" \
     fi
   done
 
-# Content-addressed integration images (v2, above).
+# Content-addressed integration images (v2, above), under the image lock (v5).
 images=0
-for ref in $(docker images --filter "reference=${prefix}it" --format '{{.Repository}}:{{.Tag}}'); do
+refs=
+if [ "${REAP_DRY_RUN:-0}" = 1 ] || image_lock; then
+  refs=$(docker images --filter "reference=${prefix}it" --format '{{.Repository}}:{{.Tag}}')
+else
+  echo "keep  every ${prefix}it image (the image lock was not free within ${lock_wait}s)"
+fi
+for ref in $refs; do
   case $ref in "${prefix}it:"*) ;; *) continue ;; esac
-  read -r id created tagged < <(docker image inspect -f '{{.Id}} {{.Created}} {{.Metadata.LastTagTime.Unix}}' "$ref" 2>/dev/null) || continue
+  id='' created=''
+  read -r id created < <(docker image inspect -f '{{.Id}} {{.Created}}' "$ref" 2>/dev/null)
+  if [ -z "$id" ] || [ -z "$created" ]; then
+    echo "keep  image $ref (docker image inspect gave no id)"
+    continue
+  fi
   t=$(date -d "$created" +%s 2>/dev/null) || continue
-  # A never-tagged image reports the zero time, a large negative number.
+  # Go prints the tag time as "2026-10-21 00:35:47.26 +0000 UTC"; date -d
+  # takes it without the fraction and the zone name. A never-tagged image
+  # reports the zero time, a large negative number.
+  tagged=$(docker image inspect -f '{{.Metadata.LastTagTime}}' "$ref" 2>/dev/null | sed -E 's/\.[0-9]+//; s/ [A-Z]+$//')
+  tagged=$(date -d "$tagged" +%s 2>/dev/null) || tagged=
   case $tagged in ''|*[!0-9]*) ;; *) [ "$tagged" -le "$t" ] || t=$tagged ;; esac
   if [ $((now - t)) -lt "$image_min_age" ]; then
     echo "keep  image $ref (created or tagged within ${image_min_age}s)"
@@ -159,6 +220,7 @@ for ref in $(docker images --filter "reference=${prefix}it" --format '{{.Reposit
   echo "reap  image $ref"
   if run docker image rm "$ref"; then images=$((images + 1)); else echo "warn  image $ref not removed (in use?)"; fi
 done
+image_unlock
 
 if [ "${REAP_DRY_RUN:-0}" = 1 ]; then done_as="would be removed"; else done_as=removed; fi
 echo "reaper: $reaped compose project(s) and $images image(s) $done_as for prefix '$prefix'"

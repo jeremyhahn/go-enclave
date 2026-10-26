@@ -1,5 +1,8 @@
-# batch-template: v1.1 — token-free CPU work on the batch runners: fuzz,
+# batch-template: v1.2 — token-free CPU work on the batch runners: fuzz,
 # race-full, soak, bench. Dispatch only; never in a merge gate.
+# v1.2 (2026-10-21): the template's GO_VERSION moves 1.27.1 -> 1.27.3 for
+# GO-2026-6809 (crypto/x509, fixed in go1.27.3). go-enclave carries no
+# GO_VERSION: setup-go reads go.mod (see below), so nothing changes here.
 #
 # Owner order 2026-10-12 10:43 EDT (relayed by the Company Agent 17:24Z):
 # "the fleet is still not working hard. omega is 21%, both dell servers are

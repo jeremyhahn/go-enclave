@@ -531,6 +531,14 @@ check-changelog-assembly: vet-buildgates
 check-scripts: vet-buildgates
 	@$(call gates,-run '^TestScripts')
 
+## lint-gates: the repository's own gates beside lint: check-buildgates, check-releasability, check-changelog-assembly, check-scripts (CI's lint-gates job)
+# ci.yml runs this as its own job, in parallel with `make lint`, so make lint
+# does not list it. tidy-check, lint-runtimesecret and lint-integration stay
+# in the image job.
+.PHONY: lint-gates
+lint-gates: check-buildgates check-releasability check-changelog-assembly check-scripts
+	@echo "lint-gates completed successfully"
+
 # CI AGGREGATES. ci.yml and release.yml each call these, one per job, so a job
 # is one `make` line and the two workflows cannot drift apart. Each target runs
 # once per invocation, however many others depend on it: lint-go carries vet,

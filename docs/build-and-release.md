@@ -124,6 +124,7 @@ its own. Each target runs `vet-buildgates` first and selects tests by prefix.
 | `make check-changelog-assembly` | `^TestChangelogAssemble` | `changelog-assemble.sh` folds fragments into the shape `release-check-tag.sh` accepts |
 | `make check-scripts` | `^TestScripts` | The release, publish, tool-resolution, feature and devcontainer scripts and the Makefile entry points, driven on scratch inputs, refuse what they must; needs `jq` |
 | `make check-buildgates` | every other test | Actions pinned to commit SHAs and images to digests; least-privilege workflow permissions; checkouts that write do not persist credentials; publish waits on every gate; the CI Gate's tiers match the jobs; every source file, integration test and docs folder belongs to one feature in `scripts/features.map`; the toolchain image's Go matches `go.mod`; shipped source cites no issue numbers; the integration image is scanned before any suite runs on it |
+| `make lint-gates` | the four rows above | Runs `check-buildgates`, `check-releasability`, `check-changelog-assembly` and `check-scripts`: the repository's own gates beside lint. CI runs it as the Lint Gates job; `make lint` does not list it |
 | `make tidy-check` | — | `go.mod` and `go.sum` are tidy, in the root and in `build/ci/buildgates` |
 
 ### Aggregates
@@ -144,7 +145,7 @@ Which integration test covers which feature: [COVERAGE.md](../test/integration/C
 
 ## CI
 
-`ci.yml` follows the ci-template v1.25.2 shape. Every stage runs in the
+`ci.yml` follows the ci-template v1.27.0 shape. Every stage runs in the
 devcontainer image that `make docker-build` builds from the commit under test.
 No job installs Go or a tool on the runner. `scripts/in-toolchain-image.sh`
 copies the checkout into a toolchain container, because a bind mount would
@@ -160,7 +161,8 @@ repository's volumes on that host exceed `CI_CACHE_MAX_GIB` (32).
 
 | Job | Tier | Runs |
 |---|---|---|
-| Devcontainer image | PR | One job on `bigdisk`. Each stage is a step in the toolchain image: `make lint`; the static checks `make ci-lint` adds (`tidy-check lint-runtimesecret lint-integration check-buildgates check-releasability check-changelog-assembly check-scripts`); `make build`; `make cross-build`; `make coverage`; `make test-runtimesecret`; then, on the full tier only, `make security`, `make deps-check` and `trivy image` on the integration image. A failed step does not stop the later ones. `security`, `deps-check` and `trivy image` get a network for the vulnerability databases and the module proxy. `deps-check` reports, and does not fail on, a module behind a latest release published under 7 days ago without a `// held: <reason>` comment |
+| Devcontainer image | PR | One job on `bigdisk`. Each stage is a step in the toolchain image: `make lint`; the static checks `make ci-lint` adds beside the Lint Gates job's (`tidy-check lint-runtimesecret lint-integration`); `make build`; `make cross-build`; `make coverage`; `make test-runtimesecret`; then, on the full tier only, `make security`, `make deps-check` and `trivy image` on the integration image. A failed step does not stop the later ones. `security`, `deps-check` and `trivy image` get a network for the vulnerability databases and the module proxy. `deps-check` reports, and does not fail on, a module behind a latest release published under 7 days ago without a `// held: <reason>` comment |
+| Lint Gates | PR | `make -k lint-gates` in the toolchain image on `bigdisk`, in parallel with the image job's `make lint`, so Lint's wall time is the longer of the two. It builds the toolchain image only when the Makefile defines the target, with no network |
 | Architecture Gates | PR | No go-objstore import (the template's storage-seam check), on the runner's shell |
 | FIPS | full | `make test-fips` in the toolchain image |
 | Integration | full | `make ci-integration` on `bigdisk`: the user-namespace, default and FIPS strict suites, on one scanned integration image |
@@ -172,13 +174,18 @@ and on a pull request labelled `ci:full`. The **nightly tier** runs on the
 schedule (04:00 UTC) and on `workflow_dispatch`. Label a PR `ci:full` when it
 changes the API or fixes the integration suite. The label takes effect on the
 PR's next push or update-branch, or via `workflow_dispatch`, because a label
-change starts no run. A pull request whose every changed file is markdown or
-under `docs/` runs only the lint steps of the PR tier; on the full tier the
-build and test steps always run.
+change starts no run (`pull_request` lists only `opened`, `synchronize` and
+`reopened`). A pull request whose every changed file is markdown or under
+`docs/` runs only the lint steps of the PR tier, the Lint Gates job included;
+on the full tier the build and test steps always run.
 
-A newer run of a pull request cancels its older run. On `main` each event has
-its own group: a push cancels the in-progress push run of an older commit, and
-a scheduled or dispatched run cancels only an older run of its own event.
+A draft pull request (a `WIP:` title) runs no CI: every job but CI Gate skips,
+and CI Gate fails on a draft, so no skipped gate reads as passed. Marking the
+PR ready starts no run; push an empty commit when it leaves draft.
+
+A newer run of a pull request cancels its older run. On `main` each push, and
+each scheduled or dispatched run, is its own group, keyed by event and commit,
+so a merge never cancels the run of an earlier `main` commit.
 
 `make coverage` is the test stage: the race suite across the CPU matrix, failing
 when any package is below `COVERAGE_THRESHOLD` (90). `make security` includes

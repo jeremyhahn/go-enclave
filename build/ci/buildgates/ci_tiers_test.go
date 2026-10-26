@@ -14,10 +14,14 @@ import (
 	"github.com/goccy/go-yaml"
 )
 
-// CI runs in three tiers (ci-template v1.25). The PR tier runs on every
+// CI runs in three tiers (ci-template v1.27.0). The PR tier runs on every
 // event; the full tier runs on every event but a pull_request, and on a PR
 // labeled `ci:full` (from its next push or update-branch: a label event starts
 // no run); the nightly tier runs on the schedule and on workflow_dispatch.
+// A draft pull request runs no job (v1.26): every job but CI Gate skips, and
+// CI Gate fails on a draft, so no skipped gate reads as passed. A PR whose
+// every changed file is docs runs the PR tier's lint class only, and the
+// lint-gates job (v1.27.0), the repository's own gates beside lint, is in it.
 // CI Gate, the one required check, needs every job and names each one in its
 // script with its tier, and build/ci/summary.sh lets a full or nightly job's
 // skip pass only in a run that did not select its tier. These tests hold
@@ -44,6 +48,18 @@ const (
 	// fullTierIf is the `if:` every full-tier job carries, and ci.yml's
 	// workflow-level CI_FULL_TIER, which the gate's FULL_TIER reads.
 	fullTierIf = "${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full') }}"
+	// draftIf is the `if:` that skips a job on a draft pull request (v1.26),
+	// which every PR-tier job carries or inherits through `needs:`.
+	draftIf = "${{ !github.event.pull_request.draft }}"
+	// fullTierJobIf is the `if:` every full-tier job carries (v1.26): the
+	// full tier, and never on a draft, ci:full or not.
+	fullTierJobIf = "${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')) && !github.event.pull_request.draft }}"
+	// gateDraftEnv is the gate's DRAFT value, and gateDraftCheck the guard
+	// that fails the gate on a draft before it reads any result.
+	gateDraftEnv   = "${{ github.event.pull_request.draft == true }}"
+	gateDraftCheck = `[ "${DRAFT}" = true ]`
+	// lintGatesJob is the v1.27.0 job that runs the repository's own gates.
+	lintGatesJob = "lint-gates"
 	// fullTierEnv is the gate's FULL_TIER value.
 	fullTierEnv = "${{ env.CI_FULL_TIER }}"
 	// nightlyTierIf is the `if:` every nightly-tier job carries, and the
@@ -58,6 +74,10 @@ const (
 	// mergeSweepWorkflow is the one other workflow allowed a `schedule:`.
 	mergeSweepWorkflow = "automerge.yml"
 )
+
+// lintGatesTargets are the make targets `make lint-gates` runs (Makefile): no
+// job but lint-gates runs one, so each gate runs once per PR.
+var lintGatesTargets = []string{"lint-gates", "check-buildgates", "check-releasability", "check-changelog-assembly", "check-scripts"}
 
 // ciPullRequestTypes are ci.yml's pull_request activity types. `labeled` is
 // absent (DS-2281): Gitea maps every label add and remove to it, so each label
@@ -85,6 +105,7 @@ type tieredJob struct {
 	RunsOn any      `yaml:"runs-on"`
 	Needs  jobNeeds `yaml:"needs"`
 	Steps  []struct {
+		If   any               `yaml:"if"`
 		Uses string            `yaml:"uses"`
 		Env  map[string]string `yaml:"env"`
 		Run  string            `yaml:"run"`
@@ -190,7 +211,17 @@ func ciTierViolations(src []byte) ([]string, error) {
 	tier := map[string]string{}
 	seen := map[string]int{}
 	tierFlags := false
+	draftGuard := false
 	for _, st := range gate.Steps {
+		// v1.26: the gate fails on a draft before it reads any result.
+		if g := strings.Index(st.Run, gateDraftCheck); g >= 0 && st.Env["DRAFT"] == gateDraftEnv {
+			block := st.Run[g:]
+			if end := strings.Index(block, "\nfi"); end >= 0 && strings.Contains(block[:end], "exit 1") {
+				if s := strings.Index(st.Run, `sh "$script"`); s < 0 || g < s {
+					draftGuard = true
+				}
+			}
+		}
 		if st.Env["FULL_TIER"] == fullTierEnv && st.Env["NIGHTLY"] == nightlyTierIf && strings.Contains(st.Run, `"$FULL_TIER" "$NIGHTLY"`) {
 			tierFlags = true
 		}
@@ -220,6 +251,64 @@ func ciTierViolations(src []byte) ([]string, error) {
 		bad = append(bad, fmt.Sprintf("job %s: no step passes \"$FULL_TIER\" \"$NIGHTLY\" with env FULL_TIER: %s, NIGHTLY: %s", ciGateJob, fullTierEnv, nightlyTierIf))
 	}
 
+	if !draftGuard {
+		bad = append(bad, fmt.Sprintf("job %s: no step fails on a draft pull request first: env DRAFT: %s and a `%s` block that exits 1 before the summary runs", ciGateJob, gateDraftEnv, gateDraftCheck))
+	}
+
+	// v1.26: a PR-tier job is skipped on a draft by its own `if:` or by a
+	// needed job that is, so no job of a draft run reaches a docker daemon.
+	var skipsOnDraft func(name string, depth int) bool
+	skipsOnDraft = func(name string, depth int) bool {
+		j := wf.Jobs[name]
+		if j.If == draftIf {
+			return true
+		}
+		return depth < len(wf.Jobs) && slices.ContainsFunc(j.Needs, func(n string) bool { return skipsOnDraft(n, depth+1) })
+	}
+
+	// v1.27.0: the lint-gates job runs the repository's own gates, on every
+	// PR (a docs-only PR included, so it never waits on the changes job),
+	// and nowhere else, so each gate runs once.
+	for _, name := range jobs {
+		job := wf.Jobs[name]
+		runsLintGates := false
+		for _, st := range job.Steps {
+			for _, target := range lintGatesTargets {
+				if name != lintGatesJob && strings.Contains(st.Run, target) {
+					bad = append(bad, fmt.Sprintf("job %s runs `%s`, which the %s job runs; the gates would run twice", name, target, lintGatesJob))
+				}
+			}
+			if name == lintGatesJob && strings.Contains(st.Run, "make -k lint-gates") {
+				runsLintGates = true
+			}
+			if name == lintGatesJob && strings.Contains(fmt.Sprint(st.If), "docs_only") {
+				bad = append(bad, fmt.Sprintf("job %s: a step is conditioned on docs_only; a docs-only PR runs the lint class", name))
+			}
+		}
+		if name == lintGatesJob {
+			if !runsLintGates {
+				bad = append(bad, fmt.Sprintf("job %s: no step runs `make -k lint-gates`", name))
+			}
+			if len(job.Needs) != 0 {
+				bad = append(bad, fmt.Sprintf("job %s: needs %v, want none: it runs on a docs-only PR too", name, []string(job.Needs)))
+			}
+			if tier[name] != "pr" {
+				bad = append(bad, fmt.Sprintf("job %s is tagged %q, want pr", name, tier[name]))
+			}
+		}
+	}
+	if _, ok := wf.Jobs[lintGatesJob]; !ok {
+		bad = append(bad, fmt.Sprintf("no %s job", lintGatesJob))
+	}
+
+	// v1.24 and v1.26.1: the docs-only pattern and the releasability test's
+	// arguments are declared, so a docs-only PR has a reduced set to run.
+	for _, k := range []string{"DOCS_ONLY_PATTERN", "RELEASABILITY_TEST"} {
+		if _, ok := wf.Env[k]; !ok {
+			bad = append(bad, fmt.Sprintf("env %s is not declared", k))
+		}
+	}
+
 	for _, name := range jobs {
 		job := wf.Jobs[name]
 		if seen[name] != 1 {
@@ -227,16 +316,19 @@ func ciTierViolations(src []byte) ([]string, error) {
 		}
 		switch tier[name] {
 		case "full":
-			if job.If != fullTierIf {
-				bad = append(bad, fmt.Sprintf("job %s is tagged full but its if is %v, want %s", name, job.If, fullTierIf))
+			if job.If != fullTierJobIf {
+				bad = append(bad, fmt.Sprintf("job %s is tagged full but its if is %v, want %s", name, job.If, fullTierJobIf))
 			}
 		case "nightly":
 			if job.If != nightlyTierIf {
 				bad = append(bad, fmt.Sprintf("job %s is tagged nightly but its if is %v, want %s", name, job.If, nightlyTierIf))
 			}
 		case "pr":
-			if job.If != nil {
-				bad = append(bad, fmt.Sprintf("job %s is tagged pr but has a job-level if: %v", name, job.If))
+			if job.If != nil && job.If != draftIf {
+				bad = append(bad, fmt.Sprintf("job %s is tagged pr but has a job-level if: %v, want none or %s", name, job.If, draftIf))
+			}
+			if !skipsOnDraft(name, 0) {
+				bad = append(bad, fmt.Sprintf("job %s is tagged pr and would run on a draft: want if: %s, or a needed job that has it", name, draftIf))
 			}
 			for _, n := range job.Needs {
 				if tier[n] == "full" || tier[n] == "nightly" {
@@ -363,7 +455,8 @@ func TestCIGateTiers_RefusesWhatItMustRefuse(t *testing.T) {
 		t.Fatalf("read %s: %v", ciWorkflowFile, err)
 	}
 	ci := string(src)
-	const fullIf = "    if: " + fullTierIf + "\n"
+	const fullIf = "    # v1.26: never on a draft PR, ci:full or not.\n    if: " + fullTierJobIf + "\n"
+	const archIf = "    runs-on: ubuntu-latest\n    if: " + draftIf + "   # v1.26\n"
 	const nightlyIf = "    if: " + nightlyTierIf + "\n"
 	for _, tc := range []struct{ name, old, new string }{
 		{"full job tagged pr", "full:fips=", "pr:fips="},
@@ -375,11 +468,27 @@ func TestCIGateTiers_RefusesWhatItMustRefuse(t *testing.T) {
 		{"check names another job", `pr:arch-gates="${{ needs.arch-gates`, `pr:arch-gates="${{ needs.image`},
 		{"job missing from the gate", "            pr:image=\"${{ needs.image.result }}\" \\\n", ""},
 		{"job checked twice", "            pr:image=\"${{ needs.image.result }}\" \\\n", "            pr:image=\"${{ needs.image.result }}\" \\\n            pr:image=\"${{ needs.image.result }}\" \\\n"},
-		{"gate misses a need", "needs: [changes, image, fips, integration, soak, arch-gates]", "needs: [changes, image, fips, integration, arch-gates]"},
+		{"gate misses a need", "needs: [changes, image, lint-gates, fips, integration, soak, arch-gates]", "needs: [changes, image, lint-gates, fips, integration, arch-gates]"},
+		{"gate misses lint-gates", "needs: [changes, image, lint-gates, fips,", "needs: [changes, image, fips,"},
+		{"lint-gates missing from the gate checks", "            pr:lint-gates=\"${{ needs.lint-gates.result }}\" \\\n", ""},
+		{"lint-gates tagged full", "pr:lint-gates=", "full:lint-gates="},
+		{"lint-gates job does not run make lint-gates", "make -k lint-gates GO_BUILD_TAGS", "make -k lint GO_BUILD_TAGS"},
+		{"lint-gates waits on the changes job", "    name: Lint Gates [toolchain image]\n", "    name: Lint Gates [toolchain image]\n    needs: changes\n"},
+		{"lint-gates skipped on a docs-only PR", "      - name: make lint-gates\n        if: ${{ !cancelled() &&", "      - name: make lint-gates\n        if: ${{ needs.changes.outputs.docs_only != 'true' && !cancelled() &&"}, //nolint:misspell // the Actions cancelled() function
+		{"lint-gates job without its draft if", "    name: Lint Gates [toolchain image]\n    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'bigdisk' }}\n    if: " + draftIf + "   # v1.26\n", "    name: Lint Gates [toolchain image]\n    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'bigdisk' }}\n"},
+		{"the image job runs a lint-gates gate too", "\"$TOOLCHAIN_IMAGE\" make tidy-check lint-runtimesecret lint-integration\n", "\"$TOOLCHAIN_IMAGE\" make tidy-check lint-runtimesecret lint-integration check-scripts\n"},
+		{"changes job without its draft if", "    if: " + draftIf + "\n    steps:\n", "    steps:\n"},
+		{"arch-gates job without its draft if", archIf, "    runs-on: ubuntu-latest\n"},
+		{"arch-gates job on a draft's looser if", archIf, "    runs-on: ubuntu-latest\n    if: always()\n"},
+		{"full job runs on a draft", "    if: " + fullTierJobIf + "\n", "    if: " + fullTierIf + "\n"},
+		{"gate does not fail on a draft", gateDraftCheck, `[ "${DRAFT}" = never ]`},
+		{"gate DRAFT flag differs", "          DRAFT: " + gateDraftEnv, "          DRAFT: ${{ github.event.pull_request.draft == false }}"},
+		{"gate draft check does not exit", "            exit 1\n          fi\n          script=$(mktemp)", "            :\n          fi\n          script=$(mktemp)"},
+		{"docs-only pattern undeclared", "  DOCS_ONLY_PATTERN:", "  DOCS_ONLY_PATTERN_X:"},
+		{"releasability test undeclared", "  RELEASABILITY_TEST:", "  RELEASABILITY_TEST_X:"},
 		{"gate not always", "    runs-on: " + ciGateRunner + "\n    if: always()\n", "    runs-on: " + ciGateRunner + "\n    if: success()\n"},
 		{"full job without its if", "    name: FIPS\n" + fullIf, "    name: FIPS\n"},
 		{"full job with a looser if", "    name: FIPS\n" + fullIf, "    name: FIPS\n    if: github.event_name == 'push' || github.event_name == 'pull_request'\n"},
-		{"pr job with an if", "    name: Architecture Gates\n", "    name: Architecture Gates\n    if: always()\n"},
 		{"nightly job without its if", "    name: Soak [integration image]\n" + nightlyIf, "    name: Soak [integration image]\n"},
 		{"nightly job on the full tier's if", "    name: Soak [integration image]\n" + nightlyIf, "    name: Soak [integration image]\n" + fullIf},
 		{"pr job needs a full job", "    name: Architecture Gates\n", "    name: Architecture Gates\n    needs: [fips]\n"},

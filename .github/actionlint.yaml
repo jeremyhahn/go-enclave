@@ -8,3 +8,8 @@ self-hosted-runner:
     - batch
     # The Dell and omega runners: the Devcontainer image job (workflows/ci.yml, #225).
     - bigdisk
+    # actionlint-template v6: the template ships every self-hosted label, so a
+    # copy takes no per-project waiver. qwen is where code-review.yml's review
+    # job runs; dells names the Dell runners a ci.yml may use.
+    - qwen
+    - dells
