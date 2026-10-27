@@ -61,6 +61,9 @@ func causeErrorCases() []causeErrorCase {
 		{"SealerWipedError", &SealerWipedError{},
 			func(c error) error { return &SealerWipedError{Cause: c} },
 			ErrSealerWiped, asType[*SealerWipedError]},
+		{"MemfdSecretError", &MemfdSecretError{},
+			func(c error) error { return &MemfdSecretError{Cause: c} },
+			ErrMemfdSecretUnavailable, asType[*MemfdSecretError]},
 	}
 }
 

@@ -1,7 +1,7 @@
-# Linux secretmem backend — architecture (proposal)
+# Linux secretmem backend — architecture
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-26
-> Conflicts with this document are defects. A planned feature ([SPEC](../SPEC.md#features)): no code exists, and no code is written until the owner decides the [open questions](#open-questions); each answer then replaces its options here. The feature gets its own `docs/linux-secretmem/` folder with its code, when it gains sources and tests in `scripts/features.map`.
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-27
+> Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Problem
 
@@ -20,9 +20,9 @@ process's memory:
   direct map without walking the process's page tables.
 
 `memfd_secret(2)` (Linux 5.14) creates memory that closes these paths, with no
-special hardware. The backend proposed here holds material in it, so a Linux
-host that allows it gets a stronger software floor than the memory enclave,
-while every hardware backend still ranks above it.
+special hardware. The secretmem backend holds material in it, so a Linux host
+that allows it gets a stronger software floor than the memory enclave, while
+every hardware backend still ranks above it.
 
 ## What secretmem adds over the memory enclave
 
@@ -54,22 +54,29 @@ and its [kernel-parameters](https://www.kernel.org/doc/html/latest/admin-guide/k
 - **Linux 5.14 or later**, built with `CONFIG_SECRETMEM`, on an architecture
   that can remove pages from the direct map (x86-64, arm64, riscv64, s390x among
   them). `golang.org/x/sys/unix` carries the syscall number
-  (`SYS_MEMFD_SECRET`) but no wrapper, so the call is a raw syscall.
+  (`SYS_MEMFD_SECRET`) but no wrapper, so the call is a raw syscall. x/sys has
+  the number on 386, amd64, arm64, loong64, riscv64 and s390x only; every other
+  Linux architecture builds the stub.
 - **Enabled.** From 5.14 to 6.4 it is off unless the kernel boots with
   `secretmem.enable=1`; from 6.5 it is on unless booted with
   `secretmem.enable=0`. Disabled, the syscall fails `ENOSYS`.
 - **Not filtered.** A seccomp profile or LSM that does not allow
-  `memfd_secret` refuses it (`EPERM` or `ENOSYS`, as the filter chooses); container
-  runtimes' default profiles may.
+  `memfd_secret` refuses it (`EPERM` or `ENOSYS`, as the filter chooses).
+  Docker's default seccomp profile allows it on the toolchain image's host
+  (Linux 7.0); other runtimes' profiles may not.
 - **Counted against `RLIMIT_MEMLOCK`.** `mmap` of a secretmem file is refused
   (`EAGAIN`) past the limit, as `mlock` is, unless the process has
   `CAP_IPC_LOCK`.
+- **Locked by the kernel, never by `mlock`.** The mapping is `VM_LOCKED` from
+  `mmap`, and `mlock` on it fails `ENOMEM`: its populate step is the GUP path
+  secretmem refuses. The backend therefore does not `mlock` or `munlock` the
+  material pages; `munmap` drops the lock.
 - **Shared mapping only.** The file is sized with `ftruncate` and mapped
   `MAP_SHARED`; a private mapping is `EINVAL`.
 - **Allocation at first touch.** A page is allocated and removed from the
   direct map when first faulted. A failure there (no memory, or the direct map
-  cannot be split) is a `SIGBUS`, not an error return, so the backend must
-  touch every page while Go's `debug.SetPanicOnFault` turns the fault into a
+  cannot be split) is a `SIGBUS`, not an error return, so the backend touches
+  every page while Go's `debug.SetPanicOnFault` turns the fault into a
   recoverable panic, as `Seal` already does for a read-only source
   ([sealing](../backends/architecture.md#sealer-and-sealed)).
 - **Hibernation blocked.** While any secretmem mapping exists the kernel
@@ -78,9 +85,7 @@ and its [kernel-parameters](https://www.kernel.org/doc/html/latest/admin-guide/k
   huge pages, which costs TLB reach for the whole kernel. Many small,
   short-lived enclaves cost more than a few long-lived ones.
 
-## Shape proposed
-
-Recommended answers to the open questions are marked; none is decided.
+## Design
 
 ```mermaid
 flowchart LR
@@ -92,104 +97,103 @@ flowchart LR
   sm -->|"Import: memfd_secret, ftruncate, mmap MAP_SHARED, touch, mprotect"| h[Handle: ByteAccess, Freezer]
 ```
 
-- A separate backend (Q2) in the root package (Q1), registered by `main` like
-  any other; nothing registers it at import.
+- A separate backend ([D2](#d2-a-separate-backend)) in the root package
+  ([D1](#d1-in-tree)), registered by `main` like any other; nothing registers
+  it at import.
 - It implements `Backend`, `Importer` and `Prober`, and its handles implement
   `ByteAccess` and `Freezer`, as locked memory's do
   ([what each backend class provides](../backends/architecture.md#what-each-backend-class-provides)).
-- Each handle is one secretmem mapping between guard pages, with the memory
-  enclave's canary, wipe, freeze and release rules; the fd is opened
-  `O_CLOEXEC` and closed once mapped, and `MADV_DONTFORK` keeps it from a
-  `fork` child.
-- Rank 1 (Q3); the probe runs only from `Detect` (Q4).
+- Each handle is one secretmem mapping between anonymous guard pages, with the
+  memory enclave's canary, wipe, freeze and release rules: the mapping layer
+  reserves the guarded region, the backend maps the secretmem file over its
+  inner pages with `MAP_FIXED`, and the layer then applies `MADV_DONTDUMP`,
+  `MADV_DONTFORK`, the canary and the guards as it does for locked memory. The
+  fd is opened `O_CLOEXEC` and closed once mapped. [`WipeAll`](../shutdown-sweep/user.md)
+  sweeps each handle.
+- Each handle is admitted through an `Allocator`, so one budget covers this
+  backend and locked memory, and the charge matches `RLIMIT_MEMLOCK`'s.
+- Rank 1 ([D3](#d3-rank-1)); the probe runs only from `Detect` ([D4](#d4-the-detection-probe)).
 - It passes `backendtest`.
-- It builds on every GOOS of the platform contract: off Linux a stub compiles
-  whose constructor and probe return the typed unavailable error, so a
-  cross-platform `main` that registers it builds everywhere and selects the
-  memory enclave.
+- It builds on every GOOS of the platform contract: off Linux, and on a Linux
+  architecture without `SYS_MEMFD_SECRET`, a stub compiles whose constructor
+  returns `ErrMemfdSecretUnavailable`, so a cross-platform `main` that
+  registers it builds everywhere and selects the memory enclave.
 
 ## Failure modes
 
-Every failure is a typed error. The names are proposals, named for the
-mechanism (the syscall), not the contents; the root package's existing errors
-are reused where their meaning holds.
+Every failure is a typed error, named for the mechanism (the syscall), not the
+contents; the root package's existing errors are reused where their meaning
+holds.
 
-| Failure | Where | Proposed error |
+| Failure | Where | Error |
 |---|---|---|
 | `memfd_secret` unimplemented or disabled (`ENOSYS`), filtered (`EPERM`), out of descriptors (`EMFILE`, `ENFILE`) or memory (`ENOMEM`) | probe, construction | `*MemfdSecretError{Cause}` matching `ErrMemfdSecretUnavailable`; `Cause` is the `*os.SyscallError` |
-| `ftruncate` or `mmap` refused, `RLIMIT_MEMLOCK` included (`EAGAIN`) | probe, construction | the same, `Cause` naming the call |
+| `ftruncate`, `mmap`, `close` or the probe's `munmap` refused, `RLIMIT_MEMLOCK` included (`EAGAIN`) | probe, construction | the same, `Cause` naming the call |
 | A page fault at first touch (`SIGBUS` caught as a panic) | probe, construction | the same, its `Cause` the recovered fault as an error |
-| Non-Linux build | probe, construction | `ErrMemfdSecretUnavailable` with no cause |
+| Non-Linux build, or a Linux architecture without the syscall | `NewSecretMemory` | `ErrMemfdSecretUnavailable` with no cause |
 | Budget refused by an `Allocator` | construction | the existing `*BudgetError` |
 | `mprotect`, `munmap` refused; canary mismatch | `Freeze`, `Destroy` | the memory enclave's existing `ErrLockedMemoryUnavailable`, `ErrReleasedWithoutWipe`, `ErrEnclaveCorrupted` |
 
 A probe failure reaches `main` wrapped in `Detect`'s `*ProbeError`, and the
 memory enclave stays selected. Construction never falls back to the memory
 enclave: a backend that probed usable and then fails returns its error
-([a missing capability](../backends/architecture.md#a-missing-capability)).
+([a missing capability](../backends/architecture.md#a-missing-capability)),
+and the budget it charged is refunded.
 
-## Open questions
+## Decisions
 
-### Q1: in-tree or out-of-tree
+### D1: in tree
 
-- **In tree** (recommended): a `secretmem_linux.go` backend in the root package
-  with a `secretmem_unsupported.go` stub, one implementation per GOOS as the
-  [platform contract](../memory-enclave/engineering.md#platform-contract)
-  requires. It is software on a stock kernel, needs nothing but
-  `golang.org/x/sys`, and shares the memory enclave's mapping, canary, wipe and
-  ledger code, which is unexported. The boundary "no hardware code in this
-  module" ([SPEC](../SPEC.md#boundaries)) does not reach it.
-- **Out of tree**, its own module like the hardware rows: it would have to
-  re-implement the mapping layer from exported API only, or the root package
-  would have to export it, widening the API for one backend.
+A `secretmem_linux.go` backend in the root package with a
+`secretmem_unsupported.go` stub, one implementation per GOOS as the
+[platform contract](../memory-enclave/engineering.md#platform-contract)
+requires. It is software on a stock kernel, needs nothing but
+`golang.org/x/sys`, and shares the memory enclave's mapping, canary, wipe and
+ledger code, which is unexported. The boundary "no hardware code in this
+module" ([SPEC](../SPEC.md#boundaries)) does not reach it. Out of tree, it would
+have to re-implement the mapping layer from exported API only, or the root
+package would have to export it.
 
-### Q2: a separate backend or a mode of the memory enclave
+### D2: a separate backend
 
-- **A separate backend** (recommended): detection selects it by rank and
-  reports why it was passed over, `main` chooses it, and the memory enclave
-  stays the always-usable floor at rank 0. A failure is its own typed error,
-  never a silent downgrade.
-- **A mode of the memory enclave** that uses secretmem pages when the host
-  allows: every caller gains it without a change, but the choice is invisible
-  to `Detect`, the same call gives different protection on different hosts, and
-  a host where secretmem fails mid-run would either fail allocations the floor
-  must always serve or fall back silently, which the
-  [backend seam](../backends/architecture.md#a-missing-capability) forbids.
+Detection selects it by rank and reports why it was passed over, `main`
+chooses it, and the memory enclave stays the always-usable floor at rank 0. A
+failure is its own typed error, never a silent downgrade. A mode of the memory
+enclave was rejected: the choice would be invisible to `Detect`, the same call
+would give different protection on different hosts, and a mid-run secretmem
+failure would either fail allocations the floor must always serve or fall back
+silently, which the [backend seam](../backends/architecture.md#a-missing-capability)
+forbids. Because the pages count against `RLIMIT_MEMLOCK`, the backend admits
+through an `Allocator`, so one budget covers both.
 
-Either way the pages count against `RLIMIT_MEMLOCK`, so the `Allocator` budget
-applies to them: the backend should admit through an `Allocator` as the memory
-enclave does, so one budget covers both.
+### D3: rank 1
 
-### Q3: rank
+Above locked memory (0) and below every hardware backend, each of which then
+reports a rank above 1. Rank stays each backend's own property, as detection
+requires; "0 is locked memory" gains "1 is secretmem", so hardware rows know
+the value to beat. A wider gap was rejected: a number with no meaning but its
+order.
 
-- **Rank 1** (recommended): above locked memory (0) and below every hardware
-  backend, each of which then reports a rank above 1. Rank stays each backend's
-  own property, as detection requires; the scope fence's "0 is locked memory"
-  gains "1 is secretmem" so hardware rows know the value to beat.
-- **A wider gap** (for example 10): room for further software backends between
-  them, at the cost of a number with no meaning but its order.
+### D4: the detection probe
 
-### Q4: the detection probe
+`Probe(ctx)` checks `ctx`, then calls `memfd_secret(O_CLOEXEC)`, `ftruncate`
+to one page, `mmap` it `MAP_SHARED`, closes the fd, touches the page under
+`debug.SetPanicOnFault`, and unmaps it, leaving nothing behind. It runs only
+from `Detect`. Any refusal returns `*MemfdSecretError` naming the failed call
+and its errno, so the `ProbeResult` says why the memory enclave was kept
+(`ENOSYS`: disabled or too old; `EPERM`: filtered; `EAGAIN`, `ENOMEM`: no
+memory or no lock headroom). It costs one locked page and one split of the
+direct map once per `Detect`. A syscall-only probe was rejected: it passes a
+host whose `mmap` or first fault would fail, such as one at its
+`RLIMIT_MEMLOCK`. The probe cannot see whether the host hibernates; a
+deployment that does must not register the backend ([user guide](user.md#prerequisites)).
 
-- **Recommended:** `Probe(ctx)` checks `ctx`, then calls
-  `memfd_secret(O_CLOEXEC)`, `ftruncate` to one page, `mmap` it `MAP_SHARED`,
-  touches it under `debug.SetPanicOnFault`, and unmaps and closes, leaving
-  nothing behind. Any refusal returns `*MemfdSecretError` naming the failed
-  call and its errno, so the `ProbeResult` says why the memory enclave was
-  kept (`ENOSYS`: disabled or too old; `EPERM`: filtered; `EAGAIN`, `ENOMEM`: no
-  memory or no lock headroom). It costs one locked page and one split of the
-  direct map once per `Detect`.
-- **Syscall only** (`memfd_secret` then `close`): cheaper, but passes a host
-  whose `mmap` or first fault would fail, such as one at its `RLIMIT_MEMLOCK`.
-- **Hibernation:** the probe cannot see whether the host hibernates. A
-  deployment that does should not register the backend; the user doc will say so.
-
-### Q5: consumers
+### D5: no consumer row
 
 No seam changes: the backend implements the existing `Backend`, `Importer` and
 `Prober`, so a consumer that takes the enclave interface and calls `Detect`
-gains it when its `main` registers it, with no code change. Recommended: no row
-in any consumer's SPEC. A consumer that still holds a concrete memory enclave
+gains it when its `main` registers it, with no code change. No consumer's SPEC
+gains a row. A consumer that still holds a concrete memory enclave
 ([ROADMAP dependencies](../../ROADMAP.md#dependencies)) gains nothing until it
 moves to the interface, which its existing enclave-interface work already
 covers.
@@ -197,9 +201,8 @@ covers.
 One limit applies to every consumer: `OpenIn` into a non-locked-memory backend
 decrypts into a locked-memory scratch enclave and imports from it
 ([`Sealer` and `Sealed`](../backends/architecture.md#sealer-and-sealed)), so
-opened plaintext passes briefly through direct-mapped pages. Whether `OpenIn`
-should decrypt straight into a secretmem handle is a question for the
-implementing slice.
+opened plaintext passes briefly through direct-mapped pages. This backend
+keeps that path unchanged.
 
 ## Rejected alternatives
 

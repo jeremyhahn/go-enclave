@@ -324,9 +324,10 @@ type Prober interface {
 	Backend
 
 	// Rank reports how secure the backend is: [Detect] prefers the usable
-	// backend with the highest rank. The locked-memory backend reports 0; a
-	// backend that holds material beyond the reach of this process's own
-	// memory, such as a TEE or a secure element, reports more. It is fixed for
+	// backend with the highest rank. The locked-memory backend reports 0 and
+	// the secretmem backend ([NewSecretMemory]) 1; a backend that holds
+	// material beyond the reach of this process's own memory, such as a TEE
+	// or a secure element, reports more than 1. It is fixed for
 	// the backend's life, and it never blocks.
 	Rank() int
 

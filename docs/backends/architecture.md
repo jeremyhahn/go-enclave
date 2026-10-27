@@ -147,6 +147,10 @@ its `ByteAccess`.
 
 [^tpm]: the TPM backend is go-xkms's, out of tree; see [SPEC Boundaries](../SPEC.md#boundaries)
 
+The [secretmem backend](../linux-secretmem/architecture.md) is locked memory in
+`memfd_secret(2)` pages: it provides what the locked-memory column does, except
+that its `Prober` ranks 1 and probes for `memfd_secret`.
+
 ### Opaque operations
 
 Opaque signing and decryption handles implement the standard library's

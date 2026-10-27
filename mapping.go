@@ -116,6 +116,15 @@ func newMapping(size int) (*mapping, error) {
 // mapLocked is newMapping for a caller that has already rounded size up to
 // innerLen with lockedSize, as the allocator does to charge its budget.
 func mapLocked(size int, innerLen int64) (*mapping, error) {
+	return mapBacked(size, innerLen, nil)
+}
+
+// mapBacked is mapLocked with back, when non-nil, replacing the anonymous
+// pages of inner before anything is locked or written: the secretmem backend
+// maps its file over them there (mapSecret). The guard pages stay anonymous.
+// back's error is the construction's failure, and the pages are released. A
+// backed inner is not mlock'd: the backing is locked by the kernel already.
+func mapBacked(size int, innerLen int64, back func(inner []byte) error) (*mapping, error) {
 	total := int(innerLen) + 2*int(pageSize)
 
 	// Anonymous pages arrive zero-filled.
@@ -138,11 +147,21 @@ func mapLocked(size int, innerLen int64) (*mapping, error) {
 	}
 
 	locked := false
-	// Lock before anything sensitive is written.
-	if err := lockMemory(m.inner); err != nil {
-		return nil, m.abandon(err, locked)
+	if back != nil {
+		if err := back(m.inner); err != nil {
+			return nil, m.abandon(err, locked)
+		}
+		// The kernel maps secretmem VM_LOCKED and drops the lock with the
+		// mapping. mlock would fail: its populate step is the GUP path
+		// secretmem refuses. So inner is never mlock'd or munlock'd here.
+		m.unlocked = true
+	} else {
+		// Lock before anything sensitive is written.
+		if err := lockMemory(m.inner); err != nil {
+			return nil, m.abandon(err, locked)
+		}
+		locked = true
 	}
-	locked = true
 
 	if err := excludeCoreDump(m.inner); err != nil {
 		return nil, m.abandon(err, locked)
@@ -176,6 +195,10 @@ func mapLocked(size int, innerLen int64) (*mapping, error) {
 // pagesHeldError, marked verified so its half-built canary is never checked.
 func (m *mapping) abandon(cause error, locked bool) error {
 	failure := error(&LockedMemoryError{Cause: cause})
+	if errors.As(cause, new(*MemfdSecretError)) {
+		// The secretmem backend's own typed failure, not locked memory's.
+		failure = cause
+	}
 
 	var cleanup []error
 	m.unlocked = !locked

@@ -26,6 +26,7 @@ Its layer is the base of the stack, under go-quicraft: [SPEC purpose](docs/SPEC.
 - **build-and-release** — pinned tools and Makefile-driven CI, changelog fragments, the integration suite, `make release VERSION=…` for every release kind, release safety and build gates, signed release artifacts — [#48](../../issues/48) — done
 - **backend-detection** — `Detect`, on an explicit call from `main`, selects the most secure of the registered backends by the rank each reports, the memory enclave when nothing else is usable — [#190](../../issues/190) — done
 - **enclave-interface** — the one public interface upstream consumes; constructors return it — [#138](../../issues/138) — done
+- **linux-secretmem** — a Linux-only software backend on `memfd_secret(2)`, ranked above the memory enclave and below every hardware backend — [#261](../../issues/261) — done
 
 ## Now
 
@@ -37,7 +38,7 @@ Nothing queued. New work arrives as issues.
 
 ## Later
 
-- **linux-secretmem** — a Linux-only software backend on `memfd_secret(2)`, ranked above the memory enclave and below every hardware backend; docs first, code after the owner answers its open questions — [#253](../../issues/253) — open
+Nothing queued.
 
 ## Future
 

@@ -52,6 +52,50 @@ func TestBackendConformance_Allocator(t *testing.T) {
 	}
 }
 
+// The secretmem backend passes the suite wherever the host allows
+// memfd_secret(2); elsewhere it skips, naming the refusal.
+func TestBackendConformance_SecretMemory(t *testing.T) {
+	newSecretMemory := func() (enclave.Backend, error) {
+		a, err := enclave.NewAllocator(1 << 20)
+		if err != nil {
+			return nil, err
+		}
+		return enclave.NewSecretMemory(a)
+	}
+	b, err := newSecretMemory()
+	if errors.Is(err, enclave.ErrMemfdSecretUnavailable) {
+		t.Skipf("this platform has no memfd_secret: %v", err)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.(enclave.Prober).Probe(context.Background()); err != nil {
+		t.Skipf("the host refuses memfd_secret: %v", err)
+	}
+	cfg := Config{
+		New:                 newSecretMemory,
+		BackendCapabilities: []enclave.Capability{enclave.CapabilityImport, enclave.CapabilityProbe},
+		Handles: []HandleCase{
+			{
+				Name:       "material",
+				Import:     []enclave.ImportOption{enclave.WithPurpose(enclave.PurposeMaterial)},
+				ImportSize: materialBytes,
+				Capabilities: []enclave.Capability{
+					enclave.CapabilityBytes,
+					enclave.CapabilityFreeze,
+				},
+			},
+		},
+		Logf: t.Logf,
+		// The sweep reads the process through /proc/self/mem, which the
+		// kernel refuses for secretmem pages: the property this backend adds.
+		SkipResidueSweep: "memfd_secret pages are unreadable through /proc/self/mem",
+	}
+	if err := TestBackend(context.Background(), cfg); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // TestBackendConformance_Fake pins that the fake every broken fake is built
 // from passes, so each finding below is its fault's alone.
 func TestBackendConformance_Fake(t *testing.T) {

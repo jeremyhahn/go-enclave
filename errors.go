@@ -712,6 +712,33 @@ func (e *ProbeError) Is(target error) bool { return target == ErrBackendUnavaila
 // Unwrap returns what the backend's Probe returned.
 func (e *ProbeError) Unwrap() error { return e.Cause }
 
+// The secretmem backend.
+
+// ErrMemfdSecretUnavailable reports that the host refused secretmem memory
+// ([NewSecretMemory]): memfd_secret(2) is unimplemented, disabled or filtered,
+// the ftruncate, mmap or first touch of its pages failed, or the build is for
+// a platform without it. Every [MemfdSecretError] matches it.
+var ErrMemfdSecretUnavailable = errors.New("enclave: memfd_secret memory is unavailable")
+
+// MemfdSecretError is the error behind [ErrMemfdSecretUnavailable], which
+// errors.Is reports for every MemfdSecretError. Its Cause is the refused
+// call's *os.SyscallError, naming memfd_secret, ftruncate, mmap, munmap or
+// close, or the fault the first touch of a page raised; Unwrap returns it.
+type MemfdSecretError struct {
+	// Cause is the refused call's error or the recovered fault.
+	Cause error
+}
+
+// Error is [ErrMemfdSecretUnavailable]'s text, followed by the cause's when
+// there is one.
+func (e *MemfdSecretError) Error() string { return causeText(ErrMemfdSecretUnavailable, e.Cause) }
+
+// Is reports every MemfdSecretError as [ErrMemfdSecretUnavailable].
+func (e *MemfdSecretError) Is(target error) bool { return target == ErrMemfdSecretUnavailable }
+
+// Unwrap returns the cause.
+func (e *MemfdSecretError) Unwrap() error { return e.Cause }
+
 // Handle cleanup.
 
 // ErrCleanupFailed reports that cleanup an operation did failed alongside

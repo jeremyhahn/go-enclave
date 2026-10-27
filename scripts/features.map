@@ -25,4 +25,5 @@ shutdown-sweep        enclave      enclave TestShutdownSweep_        registry.go
 backends              enclave      enclave TestBackends_             backend.go
 backend-detection     enclave      enclave TestBackendDetection_     detection.go
 backend-conformance   backendtest  enclave TestBackendConformance_   backendtest/*.go
+linux-secretmem       enclave      enclave TestLinuxSecretmem_       secretmem*.go
 provider-conformance  providertest enclave TestProviderConformance_  provider_software.go providertest/*.go
