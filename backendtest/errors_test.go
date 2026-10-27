@@ -43,7 +43,7 @@ func TestAbortedError(t *testing.T) {
 // NotMeasuredError and UncheckedCapabilityError match their own sentinel only,
 // and that a PropertyError matches none.
 func TestDetailErrorsMatchTheirSentinels(t *testing.T) {
-	sentinels := []error{ErrInvalidConfig, ErrNotMeasured, ErrUncheckedCapability, ErrAborted}
+	sentinels := []error{ErrInvalidConfig, ErrNotMeasured, ErrUncheckedCapability, ErrAborted, ErrNoEndpoint, ErrNoRegistration}
 	tests := []struct {
 		err  error
 		want error
@@ -51,6 +51,8 @@ func TestDetailErrorsMatchTheirSentinels(t *testing.T) {
 		{err: &ConfigError{Field: "New", Reason: "is nil"}, want: ErrInvalidConfig},
 		{err: &NotMeasuredError{Property: "p", Reason: "r"}, want: ErrNotMeasured},
 		{err: &UncheckedCapabilityError{Capability: enclave.CapabilitySign, Reason: "r"}, want: ErrUncheckedCapability},
+		{err: &EndpointError{Variable: "V"}, want: ErrNoEndpoint},
+		{err: &RegistrationError{Backend: "b"}, want: ErrNoRegistration},
 		{err: &PropertyError{Property: "p", Detail: "d"}},
 	}
 	for _, tc := range tests {

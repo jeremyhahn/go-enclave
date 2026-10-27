@@ -123,6 +123,52 @@ func (e *NotMeasuredError) Error() string {
 // Is reports whether target is [ErrNotMeasured].
 func (e *NotMeasuredError) Is(target error) bool { return target == ErrNotMeasured }
 
+// ErrNoEndpoint matches the error a conformance harness reports when the
+// endpoint it reaches a backend's device through, such as a TEE client
+// device, is not set: the environment variable that names it is empty. No
+// backend was tested, which is neither a pass nor a finding.
+var ErrNoEndpoint = errors.New("backendtest: no endpoint is set for the backend")
+
+// EndpointError is the concrete error behind [ErrNoEndpoint]: which
+// environment variable was empty. It matches ErrNoEndpoint under errors.Is.
+type EndpointError struct {
+	// Variable is the environment variable that names the endpoint.
+	Variable string
+}
+
+// Error renders as "backendtest: no endpoint is set for the backend:
+// $<Variable> is empty".
+func (e *EndpointError) Error() string {
+	return ErrNoEndpoint.Error() + ": $" + e.Variable + " is empty"
+}
+
+// Is reports whether target is [ErrNoEndpoint].
+func (e *EndpointError) Is(target error) bool { return target == ErrNoEndpoint }
+
+// ErrNoRegistration matches the error a conformance harness reports when the
+// test binary carries no in-process registration of the backend it tests: no
+// file built into it registers the backend with [enclave.Register]. A fixture
+// in another process cannot fill this process's registry. No backend was
+// tested, which is neither a pass nor a finding.
+var ErrNoRegistration = errors.New("backendtest: no in-process registration of the backend is built in")
+
+// RegistrationError is the concrete error behind [ErrNoRegistration]: which
+// backend has no registration in the binary. It matches ErrNoRegistration
+// under errors.Is.
+type RegistrationError struct {
+	// Backend is the name the backend would register under.
+	Backend string
+}
+
+// Error renders as "backendtest: no in-process registration of the backend
+// is built in: <Backend>".
+func (e *RegistrationError) Error() string {
+	return ErrNoRegistration.Error() + ": " + e.Backend
+}
+
+// Is reports whether target is [ErrNoRegistration].
+func (e *RegistrationError) Is(target error) bool { return target == ErrNoRegistration }
+
 // ErrUncheckedCapability matches the error [TestBackend] returns for a
 // capability the backend or a handle case declares but whose contract the
 // suite cannot exercise: one the enclave package does not name, or one whose

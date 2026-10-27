@@ -19,6 +19,8 @@ The suite holds a backend to the contract in
 | `ErrNotMeasured`, `NotMeasuredError{Property, Reason}` | A property could not be measured on this host and the `Config` did not accept that. |
 | `ErrAborted`, `AbortedError{Cause}` | `ctx` ended before the run finished. Matches `ErrAborted`, unwraps to `Cause` (`context.Canceled`, `context.DeadlineExceeded`). |
 | `FindingsError{Findings []error}` | Every finding of the run, in the order found, never empty. `Unwrap() []error` returns them, so `errors.Is` and `errors.As` reach each one. `Error()` prints one finding per line. |
+| `ErrNoEndpoint`, `EndpointError{Variable}` | Never returned by `TestBackend`. A harness reports it when the environment variable that names the endpoint it reaches the backend's device through is empty, so no backend was tested ([arm-trustzone harness](#the-arm-trustzone-harness)). Text: `backendtest: no endpoint is set for the backend: $<Variable> is empty`. |
+| `ErrNoRegistration`, `RegistrationError{Backend}` | Never returned by `TestBackend`. A harness reports it when no file built into the test binary registers the backend it tests in-process, so no backend was tested ([arm-trustzone harness](#the-arm-trustzone-harness)). Text: `backendtest: no in-process registration of the backend is built in: <Backend>`. |
 | `PropertyError{Property, Detail}` | One property of the seam the backend did not honor. Several may share a `Property`. Text: `backendtest: <Property>: <Detail>`. |
 
 ### `Config`
@@ -228,6 +230,46 @@ tests named `TestBackendConformance_` in
 `test/integration/enclave/backend_conformance_test.go`: the `Allocator`
 passes, a backend that under-claims a capability is a finding, and an invalid
 config is refused.
+
+### The arm-trustzone harness
+
+`test/integration/enclave/arm_trustzone_test.go` runs `TestBackend` against the
+[arm-trustzone](../SPEC.md) backend on OP-TEE ([#250](../../../../issues/250)).
+It is built only with the `optee` tag (`//go:build integration && optee`), so
+no other run compiles it, `make integration-test-backend-conformance`
+included. `make integration-test-arm-trustzone` builds it with
+`-tags=integration,optee`, runs the tests named `TestBackendConformance_ArmTrustZone`
+in the devcontainer, and passes `GO_ENCLAVE_OPTEE_ENDPOINT` in. It refuses
+while `TRUSTED_FIRMWARE_TAG` is empty.
+
+- **Fixture.** trusted-firmware's `make optee-run` (a QEMU virt guest with the
+  OP-TEE trusted application) from a checkout at `TRUSTED_FIRMWARE_TAG`. It
+  sets `GO_ENCLAVE_OPTEE_ENDPOINT` to the TEE client endpoint. It is a CI
+  fixture in another process, so it cannot register anything in the test
+  binary's registry.
+- **Registration.** The registry is per process. The #206 backend supplies the
+  in-process registration the [arm-trustzone SPEC row](../SPEC.md) names:
+  `test/integration/enclave/arm_trustzone_register_test.go`, built only with
+  the `optee` tag, registers the backend with `enclave.Register` under
+  `arm-trustzone` and sets `armTrustZoneRegistered` from its `init`. The
+  harness finds the backend with `enclave.Lookup` and never imports it. Until
+  that file exists, the Make target refuses before it builds (exit 2, as for
+  an empty `TRUSTED_FIRMWARE_TAG`).
+- **What it asks of the backend.** The registered backend has
+  `Connect(endpoint string) (enclave.Backend, error)`, and `Config.New` calls it
+  for a fresh backend per check. The connected backend claims
+  `CapabilityProbe`, behind the TA's version command (0x1). Its one handle case,
+  `rng`, is `Random(ctx, 32)`: a `CapabilityBytes` handle filled by the TA's
+  rng command (0x2). Commands 0x3 and 0x4 are held until a SPEC row names them.
+- **Fails, never skips.** An empty `GO_ENCLAVE_OPTEE_ENDPOINT` is a
+  `*backendtest.EndpointError` (`ErrNoEndpoint`). A binary without the
+  registration file is a `*backendtest.RegistrationError`
+  (`ErrNoRegistration`). No backend under the name is
+  `*enclave.BackendNotRegisteredError`, and a backend without `Connect` is
+  `*enclave.CapabilityError`. A skipped run would look like a pass.
+- **Held.** The trusted-firmware pin and the CI job are not part of this
+  slice. They wait on trusted-firmware #253 slice 3 cutting a release tag. No
+  workflow calls the target, and no tag is pinned.
 
 ## Observability
 
