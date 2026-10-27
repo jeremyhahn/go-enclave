@@ -14,7 +14,7 @@ import (
 	"github.com/goccy/go-yaml"
 )
 
-// CI runs in three tiers (ci-template v1.27.0). The PR tier runs on every
+// CI runs in three tiers (ci-template v1.28.0). The PR tier runs on every
 // event; the full tier runs on every event but a pull_request, and on a PR
 // labeled `ci:full` (from its next push or update-branch: a label event starts
 // no run); the nightly tier runs on the schedule and on workflow_dispatch.
@@ -301,6 +301,28 @@ func ciTierViolations(src []byte) ([]string, error) {
 		bad = append(bad, fmt.Sprintf("no %s job", lintGatesJob))
 	}
 
+	// v1.28.0: deps-check is a lint-class gate on the PR tier and runs on
+	// every event, so its step sits in a pr job and is not conditioned on
+	// the full tier.
+	runsDepsCheck := false
+	for _, name := range jobs {
+		for _, st := range wf.Jobs[name].Steps {
+			if !strings.Contains(st.Run, "make deps-check") {
+				continue
+			}
+			runsDepsCheck = true
+			if tier[name] != "pr" {
+				bad = append(bad, fmt.Sprintf("job %s runs `make deps-check` but is tagged %q, want pr", name, tier[name]))
+			}
+			if strings.Contains(fmt.Sprint(st.If), "CI_FULL_TIER") {
+				bad = append(bad, fmt.Sprintf("job %s: the `make deps-check` step is conditioned on CI_FULL_TIER; it runs on every event", name))
+			}
+		}
+	}
+	if !runsDepsCheck {
+		bad = append(bad, "no step runs `make deps-check`")
+	}
+
 	// v1.24 and v1.26.1: the docs-only pattern and the releasability test's
 	// arguments are declared, so a docs-only PR has a reduced set to run.
 	for _, k := range []string{"DOCS_ONLY_PATTERN", "RELEASABILITY_TEST"} {
@@ -499,6 +521,7 @@ func TestCIGateTiers_RefusesWhatItMustRefuse(t *testing.T) {
 		{"workflow CI_FULL_TIER differs", "  CI_FULL_TIER: " + fullTierIf, "  CI_FULL_TIER: ${{ github.event_name == 'push' }}"},
 		{"labeled type added back", "types: [opened, synchronize, reopened]", "types: [opened, synchronize, reopened, labeled]"},
 		{"gate on the shared runner", "    runs-on: " + ciGateRunner + "\n", "    runs-on: ubuntu-latest\n"},
+		{"deps-check back on the full tier", "env.TOOLCHAIN_IMAGE != '' }}\n        env:\n          IN_IMAGE_NETWORK: bridge\n        run: scripts/in-toolchain-image.sh \"$TOOLCHAIN_IMAGE\" make deps-check\n", "env.TOOLCHAIN_IMAGE != '' && env.CI_FULL_TIER == 'true' }}\n        env:\n          IN_IMAGE_NETWORK: bridge\n        run: scripts/in-toolchain-image.sh \"$TOOLCHAIN_IMAGE\" make deps-check\n"},
 		{"gate uses an action", "      - name: Fail closed on any non-success\n", "      - uses: actions/checkout@abc # v7\n      - name: Fail closed on any non-success\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

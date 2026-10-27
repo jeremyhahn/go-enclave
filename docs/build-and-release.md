@@ -145,7 +145,7 @@ Which integration test covers which feature: [COVERAGE.md](../test/integration/C
 
 ## CI
 
-`ci.yml` follows the ci-template v1.27.0 shape. Every stage runs in the
+`ci.yml` follows the ci-template v1.28.0 shape. Every stage runs in the
 devcontainer image that `make docker-build` builds from the commit under test.
 No job installs Go or a tool on the runner. `scripts/in-toolchain-image.sh`
 copies the checkout into a toolchain container, because a bind mount would
@@ -161,7 +161,7 @@ repository's volumes on that host exceed `CI_CACHE_MAX_GIB` (32).
 
 | Job | Tier | Runs |
 |---|---|---|
-| Devcontainer image | PR | One job on `bigdisk`. Each stage is a step in the toolchain image: `make lint`; the static checks `make ci-lint` adds beside the Lint Gates job's (`tidy-check lint-runtimesecret lint-integration`); `make build`; `make cross-build`; `make coverage`; `make test-runtimesecret`; then, on the full tier only, `make security`, `make deps-check` and `trivy image` on the integration image. A failed step does not stop the later ones. `security`, `deps-check` and `trivy image` get a network for the vulnerability databases and the module proxy. `deps-check` reports, and does not fail on, a module behind a latest release published under 7 days ago without a `// held: <reason>` comment |
+| Devcontainer image | PR | One job on `bigdisk`. Each stage is a step in the toolchain image: `make lint`; the static checks `make ci-lint` adds beside the Lint Gates job's (`tidy-check lint-runtimesecret lint-integration`); `make build`; `make cross-build`; `make coverage`; `make test-runtimesecret`; `make deps-check`, a lint-class gate on every event; then, on the full tier only, `make security` and `trivy image` on the integration image. A failed step does not stop the later ones. `security`, `deps-check` and `trivy image` get a network for the vulnerability databases and the module proxy. `deps-check` reports, and does not fail on, a module behind a latest release published under 7 days ago without a `// held: <reason>` comment |
 | Lint Gates | PR | `make -k lint-gates` in the toolchain image on `bigdisk`, in parallel with the image job's `make lint`, so Lint's wall time is the longer of the two. It builds the toolchain image only when the Makefile defines the target, with no network |
 | Architecture Gates | PR | No go-objstore import (the template's storage-seam check), on the runner's shell |
 | FIPS | full | `make test-fips` in the toolchain image |
