@@ -1,3 +1,0 @@
-### Added
-
-- **The linux-secretmem backend.** `enclave.NewSecretMemory(a)` returns a rank-1 `Importer` and `Prober` whose handles are memory enclaves with their material pages in `memfd_secret(2)` memory, which is out of the kernel direct map and refused to `/proc/<pid>/mem`, `ptrace` and `process_vm_readv`. `main` registers it; nothing does on import. Its probe maps one secretmem page, and on a host that refuses it `Detect` keeps the memory enclave, with a `*MemfdSecretError` (matching the new `ErrMemfdSecretUnavailable`) naming the call and errno. Off Linux, and on Linux architectures without the syscall, it is a build-only stub. Docs: `docs/linux-secretmem/`.

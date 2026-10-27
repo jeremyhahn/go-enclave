@@ -1,4 +1,0 @@
-### Added
-
-- **`Sealed.OpenIn` decrypts straight into secretmem.** Opening a sealed value into the linux-secretmem backend (`enclave.NewSecretMemory`) now admits the handle against that backend's budget and decrypts into its `memfd_secret(2)` pages directly. The plaintext no longer passes through a locked-memory scratch enclave and an `Import`. A refused `memfd_secret` is an `ErrOpenFailed` carrying the `*MemfdSecretError`; nothing falls back to locked memory. Every other backend opens as before. Docs: `docs/sealing/`, `docs/linux-secretmem/`.
-- **linux-secretmem tests carry the feature's prefix.** The backend's unit tests, named `TestSecretMemory_` in #262, are now `TestLinuxSecretmem_`, the prefix `scripts/features.map` gives the feature, so one `-run ^TestLinuxSecretmem_` selects every secretmem test.

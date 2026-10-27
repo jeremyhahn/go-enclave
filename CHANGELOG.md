@@ -6,6 +6,40 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [v0.11.0-alpha] - 2026-10-27
+
+### Changed
+
+- **docs: the ROADMAP milestone line links the milestone and no longer repeats its issue count.** The `v0.10.0 dev complete` line in `ROADMAP.md` keeps the milestone link and target kind; the count it repeated went stale on every milestone change, and the milestone link carries it. Nothing changes for Go callers.
+
+- **docs: the arm-trustzone backend is a future row; declined rows leave the roadmap.** `ROADMAP.md` and `docs/SPEC.md` gain the `arm-trustzone` future row, a host-side backend over the GlobalPlatform TEE Client API on OP-TEE, blocked until trusted-firmware's OP-TEE row lands. The `se052f-secure-element` and `optiga-trust-m` rows (declined, no hardware) and the `bsd-windows-runtime-testing` row (closed under the Linux-only ruling) are removed. Nothing changes for Go callers.
+
+- CI adopts ci-template v1.27.0: a draft pull request runs no CI, and the repository's own gates run beside lint as `make lint-gates`. Nothing changes for Go callers.
+
+- **docs: the linux-secretmem backend is a planned row.** `docs/SPEC.md` and `ROADMAP.md` gain `linux-secretmem`, a Linux-only software backend on `memfd_secret(2)` ranked above the memory enclave and below every hardware backend, and `docs/backends/linux-secretmem.md` states what it adds, its kernel requirements, its failure modes and the questions open before any code. Nothing changes for Go callers.
+
+- CI runs `make deps-check` on every pull request (ci-template v1.28.0). Nothing changes for Go callers.
+
+- **docs: the KeyProtector provider seam is a planned row.** `docs/SPEC.md` and `ROADMAP.md` gain `keyprotector-providers`: what go-enclave owns, the four planned `KeyProtector` providers (memory, TrustZone, secure element, TPM), the named consumers (go-xkms's `EnclaveBackend`, trusted-firmware's TA), the ruling still pending on TPM and secure element, and the open item that no document yet defines the blob contract normatively. Nothing changes for Go callers.
+
+### Fixed
+
+- **The release workflow gates the tag in the same toolchain image as CI** (#244). `release.yml` built and tested the tag on the bare runner with the runner's own tools, so a Go bump failed the release's lint until every runner was rebuilt. Its gate now builds the content-addressed toolchain image from the tagged commit and runs lint, build, security with `trivy`, and the unit tests with the FIPS 140-3 strict run in it, and its integration job follows CI's; a Go bump no longer needs a runner rebuild before a release. Nothing changes for Go callers.
+
+- A push to main no longer cancels the CI run of the previous main commit, so every merge keeps a completed run; the FIPS integration job runs on the same runner class as the other integration jobs. Nothing changes for Go callers.
+- The devcontainer and integration images build from the current `golang:1.27.3-alpine3.24` base, which takes the Alpine brotli fix (CVE-2026-111497). Nothing changes for Go callers.
+
+- The integration image applies Alpine's security updates at build time, as the base stage does, and so takes libcurl 8.23.0-r0 (CVE-2026-92392). Nothing changes for Go callers.
+
+### Added
+
+- **test: the arm-trustzone conformance harness, behind the `optee` build tag.** `make integration-test-arm-trustzone` runs `backendtest.TestBackend` against the arm-trustzone backend on OP-TEE. It finds the backend in the registry by name, reaches the TEE through `GO_ENCLAVE_OPTEE_ENDPOINT`, and refuses while `TRUSTED_FIRMWARE_TAG` is empty or while `test/integration/enclave/arm_trustzone_register_test.go`, the optee-tagged file the arm-trustzone backend (#206) supplies to register itself in the test process, is absent; the arm-trustzone SPEC row names that file and the `Connect` and `Random` seam the harness assumes. `backendtest` gains `ErrNoEndpoint` and `EndpointError`, which a harness reports when its endpoint variable is empty, and `ErrNoRegistration` and `RegistrationError`, which it reports when the binary carries no in-process registration of the backend. The trusted-firmware pin and the CI job wait on trusted-firmware #253 slice 3. Nothing changes for callers of the `enclave` package.
+
+- **The linux-secretmem backend.** `enclave.NewSecretMemory(a)` returns a rank-1 `Importer` and `Prober` whose handles are memory enclaves with their material pages in `memfd_secret(2)` memory, which is out of the kernel direct map and refused to `/proc/<pid>/mem`, `ptrace` and `process_vm_readv`. `main` registers it; nothing does on import. Its probe maps one secretmem page, and on a host that refuses it `Detect` keeps the memory enclave, with a `*MemfdSecretError` (matching the new `ErrMemfdSecretUnavailable`) naming the call and errno. Off Linux, and on Linux architectures without the syscall, it is a build-only stub. Docs: `docs/linux-secretmem/`.
+
+- **`Sealed.OpenIn` decrypts straight into secretmem.** Opening a sealed value into the linux-secretmem backend (`enclave.NewSecretMemory`) now admits the handle against that backend's budget and decrypts into its `memfd_secret(2)` pages directly. The plaintext no longer passes through a locked-memory scratch enclave and an `Import`. A refused `memfd_secret` is an `ErrOpenFailed` carrying the `*MemfdSecretError`; nothing falls back to locked memory. Every other backend opens as before. Docs: `docs/sealing/`, `docs/linux-secretmem/`.
+- **linux-secretmem tests carry the feature's prefix.** The backend's unit tests, named `TestSecretMemory_` in #262, are now `TestLinuxSecretmem_`, the prefix `scripts/features.map` gives the feature, so one `-run ^TestLinuxSecretmem_` selects every secretmem test.
+
 ## [v0.10.0-alpha] - 2026-10-21
 
 ### Changed
