@@ -105,6 +105,23 @@ func (s *secretMemory) Import(ctx context.Context, material []byte, opts ...Impo
 	return &secretRegion{lockedRegion: e, backend: s}, nil
 }
 
+// allocRegion implements regionTarget: a writable region of n bytes on
+// memfd_secret pages, admitted as Import admits one, for [Sealed.OpenIn] to
+// decrypt into.
+func (s *secretMemory) allocRegion(n int) (*lockedRegion, error) {
+	if err := s.allocator.usable(); err != nil {
+		return nil, err
+	}
+	return s.allocator.admit(int64(n), func(locked int64) (*mapping, error) {
+		return mapBacked(n, locked, mapSecret)
+	})
+}
+
+// regionHandle implements regionTarget.
+func (s *secretMemory) regionHandle(r *lockedRegion) Handle {
+	return &secretRegion{lockedRegion: r, backend: s}
+}
+
 // secretRegion is a memory enclave the secretmem backend made: everything but
 // Backend is the memory enclave's.
 type secretRegion struct {

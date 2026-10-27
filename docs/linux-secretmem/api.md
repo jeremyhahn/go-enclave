@@ -13,6 +13,7 @@ applicable (see [memory-enclave/api.md](../memory-enclave/api.md#transports)).
 | Build the backend over an `Allocator` | `enclave.NewSecretMemory(a)` | N/A |
 | Probe whether this host allows `memfd_secret` | `Prober.Probe(ctx)` on the backend, or `enclave.Detect(ctx)` once it is registered | N/A |
 | Import material into secretmem memory | `Importer.Import(ctx, material, opts...)` on the backend | N/A |
+| Open a sealed value into secretmem memory | `Sealed.OpenIn(ctx, backend)`: decrypts straight into a handle's secretmem pages | N/A |
 
 Schemas and error mapping: [engineering.md](engineering.md). No permission
 scope; no pagination.

@@ -70,6 +70,19 @@ h, err := backend.(enclave.Importer).Import(ctx, material)
 `Import` wipes `material` on every return path. A refusal is a
 `*enclave.MemfdSecretError`, never a memory enclave in its place.
 
+## Open sealed values into it
+
+```go
+h, err := sealed.OpenIn(ctx, backend)
+```
+
+`OpenIn` decrypts straight into a new handle's secretmem pages, admitted
+against the backend's `Allocator` before anything is decrypted. The plaintext
+never passes through a locked-memory scratch enclave or the heap, and
+`Import` is not called. A refused `memfd_secret` is an `ErrOpenFailed`
+carrying the `*enclave.MemfdSecretError`, a spent budget is a `*BudgetError`,
+and the sealed value stays intact; nothing falls back to locked memory.
+
 ## Troubleshooting
 
 | Error | Cause and fix |

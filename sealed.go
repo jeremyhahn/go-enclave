@@ -75,8 +75,14 @@ type Sealed interface {
 	// For locked memory it decrypts in place, as Open does: [DefaultBackend] is
 	// Open itself, and an [Allocator] from [NewAllocator] or
 	// [NewAllocatorWithinRLimit] admits the destination against its budget, as
-	// below. For any other backend that implements [Importer] it decrypts into
-	// a locked scratch enclave and imports from it with [PurposeMaterial]; the
+	// below. Into the secretmem backend ([NewSecretMemory]) it decrypts straight
+	// into the returned handle's memfd_secret pages, admitted against that
+	// backend's budget before anything is decrypted: the plaintext passes
+	// through no scratch enclave, no import and no heap buffer, and a refusal of
+	// those pages is the backend's failure, as an import's is below. Nothing
+	// falls back to the scratch path. For any other backend that implements
+	// [Importer] it decrypts into a locked scratch enclave and imports from it
+	// with [PurposeMaterial]; the
 	// importer wipes the scratch, which is then destroyed, so the plaintext never
 	// reaches the heap. The caller owns the returned handle and must Destroy it.
 	//
@@ -284,11 +290,43 @@ func (s *sealedValue) OpenIn(ctx context.Context, b Backend) (Handle, error) {
 		}
 		return m, nil
 	}
+	if t, ok := b.(regionTarget); ok {
+		return s.openRegion(ctx, t)
+	}
 	imp, ok := b.(Importer)
 	if !ok {
 		return nil, &CapabilityError{Backend: b.Name(), Capability: CapabilityImport}
 	}
 	return s.openImported(ctx, imp)
+}
+
+// regionTarget is the capability, found by type assertion, of a backend whose
+// handles are locked regions over its own pages: OpenIn decrypts straight into
+// one, with no scratch enclave and no import. allocRegion returns a writable
+// region of n bytes, admitted as the backend admits an import; regionHandle
+// returns the opened, frozen region as the backend's handle. The secretmem
+// backend has it; a backend without it is imported into as before.
+type regionTarget interface {
+	Backend
+	allocRegion(n int) (*lockedRegion, error)
+	regionHandle(r *lockedRegion) Handle
+}
+
+// openRegion is OpenIn into a regionTarget: the destination is t's region,
+// and the plaintext is decrypted into its pages and nowhere else. t's own
+// refusal of the destination is shaped as openImported shapes an import's.
+func (s *sealedValue) openRegion(ctx context.Context, t regionTarget) (Handle, error) {
+	r, err := s.openIn(ctx, func(n int) (*lockedRegion, error) {
+		r, err := t.allocRegion(n)
+		if err != nil {
+			return nil, backendFailure[OpenError](err)
+		}
+		return r, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return t.regionHandle(r), nil
 }
 
 // openAdmitted is OpenIn into a, as a *lockedRegion.

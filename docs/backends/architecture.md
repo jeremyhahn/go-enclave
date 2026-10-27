@@ -284,7 +284,10 @@ in [locked-memory-budget](../locked-memory-budget/architecture.md).
   enclave, the common case, statically typed. Beside it,
   `OpenIn(ctx, b Backend) (Handle, error)` opens into any backend. For locked
   memory (`DefaultBackend()` or an `Allocator`) it decrypts in place, as
-  `Open` does. For any other backend that implements `Importer` it decrypts
+  `Open` does. For the [linux-secretmem](../linux-secretmem/architecture.md)
+  backend, whose handles are locked regions over its own pages, it decrypts
+  straight into a region that backend admits. For any other backend that
+  implements `Importer` it decrypts
   into a locked scratch enclave, left writable (never frozen) because the
   importer wipes it, and imports from inside a borrow of it:
 
@@ -490,7 +493,9 @@ flowchart TD
   SL -->|"wrap with key handles from WithBackend(b)<br/>(AEAD in the device, or ByteAccess in-process)"| SV["Sealed (ciphertext at rest)"]
   SV -->|"OpenIn(ctx, b)"| D{"b is locked memory?"}
   D -- yes --> LM["decrypt in place into a memory enclave"]
-  D -- no --> SC["decrypt into a locked scratch enclave"]
+  D -- no --> R{"b is linux-secretmem?"}
+  R -- yes --> SM["decrypt in place into its memfd_secret pages"]
+  R -- no --> SC["decrypt into a locked scratch enclave"]
   SC -->|"Importer.Import inside a borrow,<br/>wipes the scratch"| BH["Handle of b"]
 ```
 

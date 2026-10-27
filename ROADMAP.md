@@ -27,6 +27,7 @@ Its layer is the base of the stack, under go-quicraft: [SPEC purpose](docs/SPEC.
 - **backend-detection** — `Detect`, on an explicit call from `main`, selects the most secure of the registered backends by the rank each reports, the memory enclave when nothing else is usable — [#190](../../issues/190) — done
 - **enclave-interface** — the one public interface upstream consumes; constructors return it — [#138](../../issues/138) — done
 - **linux-secretmem** — a Linux-only software backend on `memfd_secret(2)`, ranked above the memory enclave and below every hardware backend — [#261](../../issues/261) — done
+- **open-in-secretmem** — `Sealed.OpenIn` decrypts straight into a linux-secretmem handle's pages, with no scratch enclave or import — [#263](../../issues/263) — done
 
 ## Now
 

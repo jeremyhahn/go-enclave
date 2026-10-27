@@ -16,7 +16,7 @@ transport itself, behind the `KeyProtector`/`RootUnsealer` interfaces.
 | Configure a sealer | `enclave.NewSealer(enclave.WithKeyProtector(kp))` or `enclave.NewSealer(enclave.WithRootUnsealer(ru), enclave.WithKEKRotationLimit(n))`; `enclave.WithBackend(b)` for where its keys live, `enclave.WithRequireKeyScheduleErasure()` for strict mode | N/A |
 | Install the process sealer | `enclave.SetSealer(s)` | N/A |
 | Seal under an explicit sealer | `Sealer.Seal(ctx, data)`, `Sealer.SealFrom(ctx, src)`, each returning the `Sealed` interface | N/A |
-| Open (locked memory / another backend) | `Sealed.Open(ctx)` (a `ByteAccess`), `Sealed.OpenIn(ctx, b)` (a `Handle`) | N/A |
+| Open (locked memory / another backend) | `Sealed.Open(ctx)` (a `ByteAccess`), `Sealed.OpenIn(ctx, b)` (a `Handle`; into `NewSecretMemory` it decrypts straight into secretmem pages) | N/A |
 | Read a sealer's mode | `Sealer.Mode()` | N/A |
 | Probe openability | `Sealed.Openable()`, `Sealed.IsAlive()` | N/A |
 | Release ciphertext | `Sealed.Destroy() error` | N/A |

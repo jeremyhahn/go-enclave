@@ -69,7 +69,9 @@ e, err := s.OpenIn(ctx, a) // ErrBudgetExhausted when over budget; value intact
 
 `OpenIn` takes any `Backend` and returns a `Handle`. A backend that cannot
 import key material is refused with a `*CapabilityError`, and the value
-remains intact.
+remains intact. Into the [linux-secretmem](../linux-secretmem/user.md) backend
+it decrypts straight into the handle's `memfd_secret` pages, with no
+locked-memory or heap copy on the way.
 
 `Seal` and `NewSealed` wipe their input, so they refuse a read-only view (the
 slice an opened enclave lends you) with `ErrSealSourceReadOnly`. To re-seal

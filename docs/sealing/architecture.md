@@ -144,9 +144,11 @@ points carry the [backend seam](../backends/architecture.md) into sealing:
   refuses: `Seal` wipes its input, and writing to a read-only page kills the
   process.
 - **`OpenIn(ctx, b)`** opens into any backend that can hold the material
-  instead of only a new memory enclave. Locked memory and an `Allocator` are
-  decrypted into directly (the allocator admits the destination against its
-  budget). Any other `Importer` receives the plaintext from a locked scratch
+  instead of only a new memory enclave. Locked memory, an `Allocator` and the
+  [linux-secretmem](../linux-secretmem/user.md) backend are decrypted into
+  directly (the allocator or backend admits the destination against its
+  budget), so plaintext opened into secretmem never touches direct-mapped
+  pages. Any other `Importer` receives the plaintext from a locked scratch
   enclave that is destroyed once the import returns, so plaintext still never
   lands on the heap.
 

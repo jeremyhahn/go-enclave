@@ -107,7 +107,7 @@ func assertMemfdSecretRefusal(t *testing.T, err error, call string, errno syscal
 	}
 }
 
-func TestSecretMemory_NameAndRank(t *testing.T) {
+func TestLinuxSecretmem_NameAndRank(t *testing.T) {
 	b, _ := newSecretMemoryForTest(t, 1<<20)
 	if b.Name() != SecretMemoryBackendName || !validName(b.Name()) {
 		t.Fatalf("Name() = %q, want a valid %q", b.Name(), SecretMemoryBackendName)
@@ -119,7 +119,7 @@ func TestSecretMemory_NameAndRank(t *testing.T) {
 	var _ Prober = b
 }
 
-func TestSecretMemory_ConstructionNeedsAnAllocator(t *testing.T) {
+func TestLinuxSecretmem_ConstructionNeedsAnAllocator(t *testing.T) {
 	if _, err := NewSecretMemory(nil); !errors.Is(err, ErrNilAllocator) {
 		t.Fatalf("NewSecretMemory(nil) = %v, want ErrNilAllocator", err)
 	}
@@ -132,7 +132,7 @@ func TestSecretMemory_ConstructionNeedsAnAllocator(t *testing.T) {
 	}
 }
 
-func TestSecretMemory_ConstructionMakesNoSystemCall(t *testing.T) {
+func TestLinuxSecretmem_ConstructionMakesNoSystemCall(t *testing.T) {
 	calls := refuseMemfdSecret(t, unix.ENOSYS)
 	newSecretMemoryForTest(t, 1<<20)
 	if calls.Load() != 0 {
@@ -140,7 +140,7 @@ func TestSecretMemory_ConstructionMakesNoSystemCall(t *testing.T) {
 	}
 }
 
-func TestSecretMemory_ProbeChecksCtxFirst(t *testing.T) {
+func TestLinuxSecretmem_ProbeChecksCtxFirst(t *testing.T) {
 	calls := refuseMemfdSecret(t, unix.ENOSYS)
 	b, _ := newSecretMemoryForTest(t, 1<<20)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -157,7 +157,7 @@ func TestSecretMemory_ProbeChecksCtxFirst(t *testing.T) {
 	}
 }
 
-func TestSecretMemory_ProbeRefusalsAreTyped(t *testing.T) {
+func TestLinuxSecretmem_ProbeRefusalsAreTyped(t *testing.T) {
 	for _, errno := range []syscall.Errno{unix.ENOSYS, unix.EPERM, unix.ENOMEM, unix.EMFILE} {
 		t.Run(errno.Error(), func(t *testing.T) {
 			refuseMemfdSecret(t, errno)
@@ -167,20 +167,20 @@ func TestSecretMemory_ProbeRefusalsAreTyped(t *testing.T) {
 	}
 }
 
-func TestSecretMemory_ProbeNamesARefusedMmap(t *testing.T) {
+func TestLinuxSecretmem_ProbeNamesARefusedMmap(t *testing.T) {
 	// A write-sealed memfd refuses a writable shared mapping with EPERM.
 	memfdStandIn(t, unix.F_SEAL_WRITE)
 	b, _ := newSecretMemoryForTest(t, 1<<20)
 	assertMemfdSecretRefusal(t, b.Probe(context.Background()), "mmap", unix.EPERM)
 }
 
-func TestSecretMemory_ProbeNamesARefusedFtruncate(t *testing.T) {
+func TestLinuxSecretmem_ProbeNamesARefusedFtruncate(t *testing.T) {
 	memfdStandIn(t, unix.F_SEAL_GROW)
 	b, _ := newSecretMemoryForTest(t, 1<<20)
 	assertMemfdSecretRefusal(t, b.Probe(context.Background()), "ftruncate", unix.EPERM)
 }
 
-func TestSecretMemory_ProbePassesWhereTheCallsSucceed(t *testing.T) {
+func TestLinuxSecretmem_ProbePassesWhereTheCallsSucceed(t *testing.T) {
 	memfdStandIn(t, 0)
 	b, _ := newSecretMemoryForTest(t, 1<<20)
 	for range 3 {
@@ -190,7 +190,7 @@ func TestSecretMemory_ProbePassesWhereTheCallsSucceed(t *testing.T) {
 	}
 }
 
-func TestSecretMemory_DetectKeepsLockedMemoryOnRefusal(t *testing.T) {
+func TestLinuxSecretmem_DetectKeepsLockedMemoryOnRefusal(t *testing.T) {
 	for _, errno := range []syscall.Errno{unix.ENOSYS, unix.EPERM, unix.ENOMEM} {
 		t.Run(errno.Error(), func(t *testing.T) {
 			refuseMemfdSecret(t, errno)
@@ -213,7 +213,7 @@ func TestSecretMemory_DetectKeepsLockedMemoryOnRefusal(t *testing.T) {
 	}
 }
 
-func TestSecretMemory_DetectRanksAboveLockedMemoryAndBelowHardware(t *testing.T) {
+func TestLinuxSecretmem_DetectRanksAboveLockedMemoryAndBelowHardware(t *testing.T) {
 	memfdStandIn(t, 0)
 	b, _ := newSecretMemoryForTest(t, 1<<20)
 	registerForTest(t, b)
@@ -227,7 +227,7 @@ func TestSecretMemory_DetectRanksAboveLockedMemoryAndBelowHardware(t *testing.T)
 	}
 }
 
-func TestSecretMemory_ImportRefusalIsTypedAndRefunded(t *testing.T) {
+func TestLinuxSecretmem_ImportRefusalIsTypedAndRefunded(t *testing.T) {
 	for _, errno := range []syscall.Errno{unix.ENOSYS, unix.EPERM, unix.ENOMEM} {
 		t.Run(errno.Error(), func(t *testing.T) {
 			refuseMemfdSecret(t, errno)
@@ -248,7 +248,7 @@ func TestSecretMemory_ImportRefusalIsTypedAndRefunded(t *testing.T) {
 	}
 }
 
-func TestSecretMemory_ImportNamesARefusedMmap(t *testing.T) {
+func TestLinuxSecretmem_ImportNamesARefusedMmap(t *testing.T) {
 	memfdStandIn(t, unix.F_SEAL_WRITE)
 	b, a := newSecretMemoryForTest(t, 1<<20)
 	_, err := b.Import(context.Background(), []byte("material"), WithPurpose(PurposeMaterial))
@@ -258,7 +258,7 @@ func TestSecretMemory_ImportNamesARefusedMmap(t *testing.T) {
 	}
 }
 
-func TestSecretMemory_ImportValidatesBeforeAnySystemCall(t *testing.T) {
+func TestLinuxSecretmem_ImportValidatesBeforeAnySystemCall(t *testing.T) {
 	calls := refuseMemfdSecret(t, unix.ENOSYS)
 	b, _ := newSecretMemoryForTest(t, 1<<20)
 	ctx := context.Background()
@@ -281,7 +281,7 @@ func TestSecretMemory_ImportValidatesBeforeAnySystemCall(t *testing.T) {
 	}
 }
 
-func TestSecretMemory_ImportBudgetRefusal(t *testing.T) {
+func TestLinuxSecretmem_ImportBudgetRefusal(t *testing.T) {
 	calls := refuseMemfdSecret(t, unix.ENOSYS)
 	b, _ := newSecretMemoryForTest(t, pageSize)
 	_, err := b.Import(context.Background(), make([]byte, 2*pageSize), WithPurpose(PurposeMaterial))
@@ -328,7 +328,7 @@ func checkSecretHandle(t *testing.T, b *secretMemory, a Allocator, want []byte) 
 	return h
 }
 
-func TestSecretMemory_HandleLifecycle(t *testing.T) {
+func TestLinuxSecretmem_HandleLifecycle(t *testing.T) {
 	memfdStandIn(t, 0)
 	b, a := newSecretMemoryForTest(t, 1<<20)
 	h := checkSecretHandle(t, b, a, []byte("secretmem material"))
@@ -346,7 +346,7 @@ func TestSecretMemory_HandleLifecycle(t *testing.T) {
 	}
 }
 
-func TestSecretMemory_WipeAllSweepsItsHandles(t *testing.T) {
+func TestLinuxSecretmem_WipeAllSweepsItsHandles(t *testing.T) {
 	memfdStandIn(t, 0)
 	b, a := newSecretMemoryForTest(t, 1<<20)
 	h := checkSecretHandle(t, b, a, []byte("swept"))
@@ -358,7 +358,7 @@ func TestSecretMemory_WipeAllSweepsItsHandles(t *testing.T) {
 	}
 }
 
-func TestSecretMemory_TouchFaultIsTyped(t *testing.T) {
+func TestLinuxSecretmem_TouchFaultIsTyped(t *testing.T) {
 	// A shared mapping past the end of an empty memfd faults with SIGBUS on
 	// first touch, as a secretmem page the kernel cannot allocate does.
 	fd, err := unix.MemfdCreate("secretmem-fault", unix.MFD_CLOEXEC)
@@ -395,7 +395,7 @@ func requireMemfdSecret(t *testing.T, b *secretMemory) {
 	}
 }
 
-func TestSecretMemory_RealMemfdSecret(t *testing.T) {
+func TestLinuxSecretmem_RealMemfdSecret(t *testing.T) {
 	b, a := newSecretMemoryForTest(t, 1<<20)
 	requireMemfdSecret(t, b)
 	want := []byte("held in memfd_secret pages")

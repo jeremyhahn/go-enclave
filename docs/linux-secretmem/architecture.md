@@ -198,11 +198,15 @@ gains a row. A consumer that still holds a concrete memory enclave
 moves to the interface, which its existing enclave-interface work already
 covers.
 
-One limit applies to every consumer: `OpenIn` into a non-locked-memory backend
-decrypts into a locked-memory scratch enclave and imports from it
+`OpenIn` into a non-locked-memory backend decrypts into a locked-memory
+scratch enclave and imports from it
 ([`Sealer` and `Sealed`](../backends/architecture.md#sealer-and-sealed)), so
-opened plaintext passes briefly through direct-mapped pages. This backend
-keeps that path unchanged.
+opened plaintext passes briefly through direct-mapped pages. This backend is
+the exception: its handles are locked regions
+over its own pages, so `OpenIn` admits one against its budget and decrypts
+straight into it. No scratch enclave, import or heap buffer holds the
+plaintext, and a refused `memfd_secret` fails the open rather than falling
+back to the scratch path.
 
 ## Rejected alternatives
 

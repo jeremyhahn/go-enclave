@@ -12,6 +12,7 @@ package enclave_test
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"testing"
 
@@ -105,4 +106,45 @@ func TestLinuxSecretmem_DetectSelectsItAboveLockedMemory(t *testing.T) {
 			t.Fatalf("EqualTo = %t, %v; want the imported material", eq, err)
 		}
 	})
+}
+
+func TestLinuxSecretmem_OpenInDecryptsIntoSecretmem(t *testing.T) {
+	requireSecretMemory(t)
+	b, err := newSecretMemory()
+	if err != nil {
+		t.Fatalf("NewSecretMemory: %v", err)
+	}
+	imp := b.(enclave.Importer)
+
+	// The material is imported into secretmem and sealed from that handle,
+	// so it reaches the sealed value without a heap copy.
+	want := []byte("opened into memfd_secret pages")
+	src, err := imp.Import(t.Context(), bytes.Clone(want), enclave.WithPurpose(enclave.PurposeMaterial))
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	t.Cleanup(func() { _ = src.Destroy() })
+	s, err := enclave.NewSealedFrom(t.Context(), src)
+	if err != nil {
+		t.Fatalf("NewSealedFrom: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Destroy() })
+
+	h, err := s.OpenIn(t.Context(), b)
+	if err != nil {
+		t.Fatalf("OpenIn(secretmem): %v", err)
+	}
+	t.Cleanup(func() { _ = h.Destroy() })
+	if h.Backend() != b {
+		t.Fatalf("OpenIn returned a handle of %q, want %q", h.Backend().Name(), enclave.SecretMemoryBackendName)
+	}
+	if eq, err := h.(enclave.ByteAccess).EqualTo(want); err != nil || !eq {
+		t.Fatalf("EqualTo = %t, %v; want the sealed material", eq, err)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if h, err := s.OpenIn(ctx, b); h != nil || !errors.Is(err, enclave.ErrOpenFailed) || !errors.Is(err, context.Canceled) {
+		t.Fatalf("OpenIn(canceled) = %v, %v; want ErrOpenFailed carrying context.Canceled", h, err)
+	}
 }
