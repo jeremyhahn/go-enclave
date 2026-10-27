@@ -225,6 +225,11 @@ TPM, HSM and KMS providers live in higher layers and are injected through
 `NewSealer(WithKeyProtector(p))`, `NewSealer(WithRootUnsealer(p))`, or
 `SetSealer`.
 
+Planned providers behind the `KeyProtector` seam are memory (today's
+`SoftwareProvider`), TrustZone (the OP-TEE TA), secure element and TPM; the
+[keyprotector-providers](../SPEC.md#features) row names them, their consumers
+and the ruling still pending.
+
 Sealing is built on go-enclave's
 [locked memory](../memory-enclave/architecture.md#component-boundaries); no
 consumer hand-rolls locked-memory handling. Hardware and cloud crypto belongs to
