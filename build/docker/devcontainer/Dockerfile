@@ -222,8 +222,11 @@ FROM base AS integration
 ENV HOME=/home/dev
 RUN install -d -o dev -g dev -m 0700 /home/dev
 # For the CI `container:` job's actions only (see the header); the suite's
-# scripts are /bin/sh and use none of them.
-RUN apk add --no-cache bash git tar nodejs
+# scripts are /bin/sh and use none of them. `apk upgrade` first, as in the
+# base stage (see its comment): these packages pull in libcurl and friends.
+RUN set -eux; \
+    apk upgrade --no-cache; \
+    apk add --no-cache bash git tar nodejs
 USER dev:dev
 WORKDIR /src
 
