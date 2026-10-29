@@ -74,7 +74,7 @@ it_image() {
   ctx=$(mktemp) || die "could not create a temporary file"
   untracked=$(mktemp) || { rm -f "$ctx"; die "could not create a temporary file"; }
   ok=1
-  printf 'dockerfile %s\ntarget integration\nbuild-args none\n' "$dockerfile" >"$ctx" || ok=0
+  printf 'dockerfile %s\ntarget integration\nbuild-args APK_INDEX_SUM=%s\n' "$dockerfile" "${APK_INDEX_SUM:-}" >"$ctx" || ok=0
   [ "$ok" = 0 ] || git rev-parse 'HEAD^{tree}' >>"$ctx" || ok=0
   [ "$ok" = 0 ] || git diff --binary HEAD -- >>"$ctx" || ok=0
   [ "$ok" = 0 ] || git ls-files -z --others --exclude-standard >"$untracked" || ok=0

@@ -126,6 +126,10 @@ x-integration: &integration_service
     context: ../../..
     dockerfile: build/docker/devcontainer/Dockerfile
     target: integration
+    # ci-template v1.29: the Alpine package index checksum the image's tag
+    # hashes (scripts/apk-index-sum.sh); empty outside CI.
+    args:
+      APK_INDEX_SUM: ${APK_INDEX_SUM:-}
   user: "10001:10001"
   tmpfs:
     - /tmp:rw,exec,nosuid,nodev,size=1g,mode=1777

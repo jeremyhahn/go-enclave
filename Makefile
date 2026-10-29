@@ -116,6 +116,7 @@ $(call raw_bind,$(EXTERNAL_VARS))
 # data from a workflow and raw-bound like EXTERNAL_VARS.
 ## MODULE_ENV_FILE=<file>: docker-build, integration-test: the forge module variables; go-enclave needs none, so it is never read or printed
 ## IT_IMAGE=<tag>: docker-build, ci-integration: the integration image's tag (default `make -s it-image`)
+## APK_INDEX_SUM=<sum>: docker-build, it-image: the Alpine package index checksum (scripts/apk-index-sum.sh); it-image hashes it, docker-build passes it as --build-arg
 ## IT_PROJECT=<name>: integration-test: accepted; each suite names its own compose project (go-enclave-it-*, go-enclave-userns-*)
 ## GO_BUILD_TAGS=<tags>: lint, build, coverage, security: must stay empty, no package is tag-gated (userns, integration and optee are their suites' tags)
 # GO_BUILD_TAGS is refused rather than ignored: a tag that reached no target
@@ -226,7 +227,7 @@ lint-actions:
 # follows the `. lib.sh` every script sources. build/ci/*.sh are the workflows'
 # scripts, and CI_BASH_SCRIPTS the ci-template's bash ones, taken unchanged
 # from it; each names its own shell on its first line.
-CI_BASH_SCRIPTS := scripts/in-toolchain-image.sh scripts/reap-stale-ci-stacks.sh scripts/trim-ci-caches.sh
+CI_BASH_SCRIPTS := scripts/apk-index-sum.sh scripts/in-toolchain-image.sh scripts/reap-stale-ci-stacks.sh scripts/trim-ci-caches.sh
 .PHONY: lint-scripts
 lint-scripts:
 	@sc=$(call tool,shellcheck,SHELLCHECK) && \

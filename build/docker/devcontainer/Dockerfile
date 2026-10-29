@@ -224,6 +224,11 @@ RUN install -d -o dev -g dev -m 0700 /home/dev
 # For the CI `container:` job's actions only (see the header); the suite's
 # scripts are /bin/sh and use none of them. `apk upgrade` first, as in the
 # base stage (see its comment): these packages pull in libcurl and friends.
+# APK_INDEX_SUM (ci-template v1.29, scripts/apk-index-sum.sh) is the Alpine
+# package index checksum the image's tag hashes: a new sum misses the cache
+# from here on, so a new Alpine release is upgraded into this stage. `base`
+# and `toolchain` do not declare it.
+ARG APK_INDEX_SUM
 RUN set -eux; \
     apk upgrade --no-cache; \
     apk add --no-cache bash git tar nodejs

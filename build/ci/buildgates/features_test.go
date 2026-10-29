@@ -246,6 +246,9 @@ func TestScriptsLib_HelpersAreDefinedOnce(t *testing.T) {
 	}
 	def := regexp.MustCompile(`(?m)^(die|matches|version_anchor|unreleased_pending)\(\)|^(NL|here|VERSION_RE)=`)
 	source := regexp.MustCompile(`(?m)^\. "\$\{0%/\*\}/lib\.sh"$`)
+	// These scripts ship with ci-template and are copied verbatim, so only the
+	// definitions rule binds them.
+	templateScripts := map[string]bool{"apk-index-sum.sh": true}
 	for _, s := range scripts {
 		body, err := os.ReadFile(s)
 		if err != nil {
@@ -258,7 +261,7 @@ func TestScriptsLib_HelpersAreDefinedOnce(t *testing.T) {
 		if m := def.FindString(string(body)); m != "" {
 			t.Errorf("%s defines %q, which scripts/lib.sh owns", name, m)
 		}
-		if strings.HasPrefix(string(body), "#!") && !source.Match(body) {
+		if strings.HasPrefix(string(body), "#!") && !templateScripts[name] && !source.Match(body) {
 			t.Errorf("%s does not source scripts/lib.sh", name)
 		}
 	}

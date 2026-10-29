@@ -14,7 +14,7 @@ import (
 	"github.com/goccy/go-yaml"
 )
 
-// CI runs in three tiers (ci-template v1.28.0). The PR tier runs on every
+// CI runs in three tiers (ci-template v1.29.2). The PR tier runs on every
 // event; the full tier runs on every event but a pull_request, and on a PR
 // labeled `ci:full` (from its next push or update-branch: a label event starts
 // no run); the nightly tier runs on the schedule and on workflow_dispatch.
@@ -278,8 +278,12 @@ func ciTierViolations(src []byte) ([]string, error) {
 					bad = append(bad, fmt.Sprintf("job %s runs `%s`, which the %s job runs; the gates would run twice", name, target, lintGatesJob))
 				}
 			}
-			if name == lintGatesJob && strings.Contains(st.Run, "make -k lint-gates") {
+			// v1.29.1: no -k, so the first failing gate ends the step.
+			if name == lintGatesJob && strings.Contains(st.Run, "make lint-gates") {
 				runsLintGates = true
+			}
+			if strings.Contains(st.Run, "make -k lint-gates") {
+				bad = append(bad, fmt.Sprintf("job %s runs `make -k lint-gates`; v1.29.1 runs it without -k, so the first failing gate ends the step", name))
 			}
 			if name == lintGatesJob && strings.Contains(fmt.Sprint(st.If), "docs_only") {
 				bad = append(bad, fmt.Sprintf("job %s: a step is conditioned on docs_only; a docs-only PR runs the lint class", name))
@@ -287,7 +291,7 @@ func ciTierViolations(src []byte) ([]string, error) {
 		}
 		if name == lintGatesJob {
 			if !runsLintGates {
-				bad = append(bad, fmt.Sprintf("job %s: no step runs `make -k lint-gates`", name))
+				bad = append(bad, fmt.Sprintf("job %s: no step runs `make lint-gates`", name))
 			}
 			if len(job.Needs) != 0 {
 				bad = append(bad, fmt.Sprintf("job %s: needs %v, want none: it runs on a docs-only PR too", name, []string(job.Needs)))
@@ -321,6 +325,20 @@ func ciTierViolations(src []byte) ([]string, error) {
 	}
 	if !runsDepsCheck {
 		bad = append(bad, "no step runs `make deps-check`")
+	}
+
+	// v1.29.0: every job that names the integration image reads the Alpine
+	// package index into APK_INDEX_SUM first, so each names the same tag.
+	for _, name := range jobs {
+		readIndex := false
+		for _, st := range wf.Jobs[name].Steps {
+			if strings.Contains(st.Run, "scripts/apk-index-sum.sh") && strings.Contains(st.Run, "APK_INDEX_SUM=") {
+				readIndex = true
+			}
+			if strings.Contains(st.Run, "make -s it-image") && !readIndex {
+				bad = append(bad, fmt.Sprintf("job %s names the integration image before it reads the Alpine package index (scripts/apk-index-sum.sh into APK_INDEX_SUM)", name))
+			}
+		}
 	}
 
 	// v1.24 and v1.26.1: the docs-only pattern and the releasability test's
@@ -494,7 +512,9 @@ func TestCIGateTiers_RefusesWhatItMustRefuse(t *testing.T) {
 		{"gate misses lint-gates", "needs: [changes, image, lint-gates, fips,", "needs: [changes, image, fips,"},
 		{"lint-gates missing from the gate checks", "            pr:lint-gates=\"${{ needs.lint-gates.result }}\" \\\n", ""},
 		{"lint-gates tagged full", "pr:lint-gates=", "full:lint-gates="},
-		{"lint-gates job does not run make lint-gates", "make -k lint-gates GO_BUILD_TAGS", "make -k lint GO_BUILD_TAGS"},
+		{"lint-gates job does not run make lint-gates", "make lint-gates GO_BUILD_TAGS", "make lint GO_BUILD_TAGS"},
+		{"lint-gates job runs make -k", "make lint-gates GO_BUILD_TAGS", "make -k lint-gates GO_BUILD_TAGS"},
+		{"image job names the image before reading the apk index", "          sum=$(scripts/apk-index-sum.sh)\n", "          sum=none\n"},
 		{"lint-gates waits on the changes job", "    name: Lint Gates [toolchain image]\n", "    name: Lint Gates [toolchain image]\n    needs: changes\n"},
 		{"lint-gates skipped on a docs-only PR", "      - name: make lint-gates\n        if: ${{ !cancelled() &&", "      - name: make lint-gates\n        if: ${{ needs.changes.outputs.docs_only != 'true' && !cancelled() &&"}, //nolint:misspell // the Actions cancelled() function
 		{"lint-gates job without its draft if", "    name: Lint Gates [toolchain image]\n    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'bigdisk' }}\n    if: " + draftIf + "   # v1.26\n", "    name: Lint Gates [toolchain image]\n    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'bigdisk' }}\n"},

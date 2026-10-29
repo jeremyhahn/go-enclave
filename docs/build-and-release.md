@@ -145,7 +145,7 @@ Which integration test covers which feature: [COVERAGE.md](../test/integration/C
 
 ## CI
 
-`ci.yml` follows the ci-template v1.28.0 shape. Every stage runs in the
+`ci.yml` follows the ci-template v1.29.2 shape. Every stage runs in the
 devcontainer image that `make docker-build` builds from the commit under test.
 No job installs Go or a tool on the runner. `scripts/in-toolchain-image.sh`
 copies the checkout into a toolchain container, because a bind mount would
