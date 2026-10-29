@@ -230,7 +230,7 @@ TPM, HSM and KMS providers live in higher layers and are injected through
 Planned providers behind the `KeyProtector` seam are memory (today's
 `SoftwareProvider`), TrustZone (the OP-TEE TA), secure element and TPM; the
 [keyprotector-providers](../SPEC.md#features) row names them, their consumers
-and the ruling still pending.
+and ruling 225(3).
 
 Sealing is built on go-enclave's
 [locked memory](../memory-enclave/architecture.md#component-boundaries); no

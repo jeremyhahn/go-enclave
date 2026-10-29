@@ -35,7 +35,7 @@ Its layer is the base of the stack, under go-quicraft: [SPEC purpose](docs/SPEC.
 
 ## Next
 
-- **keyprotector-providers** — the `KeyProtector` provider seam's planned providers (memory, TrustZone, secure element, TPM) and named consumers (go-xkms's `EnclaveBackend`, trusted-firmware's TA); the blob contract is an open item — [#264](../../issues/264) — planned
+- **keyprotector-providers** — the `KeyProtector` provider seam's planned providers (memory, TrustZone, secure element, TPM) and named consumers (go-xkms's `EnclaveBackend`, trusted-firmware's TA); the blob contract is [contract v1](docs/sealing/engineering.md#blob-contract-v1) — [#264](../../issues/264) — planned
 
 ## Later
 

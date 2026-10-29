@@ -60,6 +60,117 @@
 8. **`Health` does not block** and reports only in-process state; a provider
    whose key lives in a device returns `nil` unconditionally.
 
+## Blob contract v1
+
+This section is normative. It fixes the bytes the code writes today; it adds
+no field to them.
+
+### Sealed envelope
+
+A `Sealed` holds two byte strings side by side in memory (`sealed.go`
+`sealedState`): `blob`, the wrapped data key, and `sealed`, the value under
+that key. The code never concatenates them and writes no length or framing
+between them: that framing is unpinned, because no serialized form exists
+(see [Configuration and persistence](#configuration-and-persistence)).
+
+Each value gets a fresh random data key (DEK) of `dekBytes` = 32 bytes
+(`sealer.go` `seal`). `sealed` is AES-256-GCM (NIST SP 800-38D) under the DEK,
+with a random 96-bit nonce from `cipher.NewGCMWithRandomNonce` (`aead.go`
+`sealWithKey`, `openWithKeyInto`):
+
+| Offset | Length | Field |
+| --- | --- | --- |
+| 0 | 12 | nonce, random |
+| 12 | n | ciphertext; n is the plaintext length |
+| 12 + n | 16 | GCM tag |
+
+The AAD is the whole `blob`, byte for byte. `sealedOverhead` = 12 + 16 = 28
+bytes; n is at least 1 and at most `maxSealedPlaintext` = (2^32 − 2) × 16
+bytes.
+
+`blob` depends on the mode:
+
+- `ModeRootKey`: a wrapped-key blob (below) of kind `blobKindDEK`, carrying
+  the generation of the KEK that wrapped the DEK (`hierarchy.go`
+  `protectRootKey`).
+- `ModePerOperation`: exactly the non-empty bytes the provider's `Protect`
+  returned, copied (`sealer.go` `protectPerOperation`). For a
+  `SoftwareProvider` they are the [SoftwareProvider blob](#softwareprovider-blob);
+  for any other provider they are [generic](#generic-providers).
+
+#### Wrapped-key blob
+
+`keywrap.go` `blobHeader`, `wrapKey`, `parseBlobHeader`, `unwrapKey`:
+
+| Offset | Length | Field |
+| --- | --- | --- |
+| 0 | 1 | version: `blobVersion` = 1 |
+| 1 | 1 | kind: `blobKindDEK` = 1, `blobKindKEK` = 2, `blobKindProvider` = 3 |
+| 2 | 4 | generation, uint32, big-endian |
+| 6 | 12 | nonce, random |
+| 18 | k | wrapped key ciphertext; k is the key length, 32 for every key this package wraps |
+| 18 + k | 16 | GCM tag |
+
+The first `blobHeaderLen` = 6 bytes are the header, and the header is the AAD
+of the wrap. That layout holds when the wrapping key is in locked memory. When
+`WithBackend` puts it in a key handle with `AEAD`, the bytes after the header
+are a random nonce of the handle's `NonceSize`, then the handle's `Seal`
+output; their lengths are the handle's and are unpinned here.
+
+A reader refuses, with `ErrSealedAuthentication`, a blob shorter than 6 bytes
+or with a version other than 1 (`parseBlobHeader`); `unprotectRootKey` also
+refuses a kind other than `blobKindDEK` and a generation the sealer does not
+hold. The AEAD authenticates the rest.
+
+#### Key hierarchy (`ModeRootKey`)
+
+- **Root:** `RootKeyBytes` = 32 bytes from `RootUnsealer.UnsealRoot`.
+- **Wrapping key:** HKDF-SHA256 (RFC 5869) of the root, with a salt of
+  `wrappingSaltBytes` = 32 random bytes drawn once per sealer, info
+  `wrappingKeyInfo` = `"go-enclave v1 ModeRootKey KEK-wrapping key"`, and
+  output length 32 (`hierarchy.go` `deriveWrappingKey`). The salt stays in the
+  sealer's memory and is written into no blob.
+- **KEK:** `kekBytes` = 32 random bytes per generation, wrapped under the
+  wrapping key as a blob of kind `blobKindKEK`; generations count from 1
+  (`hierarchy.go` `newGeneration`, `firstGeneration`). KEK blobs stay in the
+  sealer's memory; no envelope carries one.
+- **Limits:** a KEK wraps at most `kekMessageLimit` = 2^31 DEKs (or the
+  `WithKEKRotationLimit` value) before rotation, and `maxKEKGenerations` =
+  2^31 bounds the generations.
+
+### SoftwareProvider blob
+
+`provider_software.go` `Protect`, `Unprotect`, `deriveProtectKey`:
+
+- **Protect key:** HKDF-SHA256 (RFC 5869) of the provider's 32-byte root, with
+  no salt, info `softwareProtectKeyInfo` =
+  `"go-enclave v1 SoftwareProvider Protect key"`, and output length
+  `RootKeyBytes` = 32.
+- **Blob:** a [wrapped-key blob](#wrapped-key-blob) of kind
+  `blobKindProvider` with generation 0, under the protect key in locked
+  memory: 66 bytes for a 32-byte DEK.
+- **Unprotect** accepts only version 1, kind `blobKindProvider` and
+  generation 0, and only once the provider has protected a key; anything else
+  is `ErrSealedAuthentication`.
+- **Limit:** `softwareProtectLimit` = 2^31 `Protect` calls per provider, then
+  `ErrProviderMessageLimit`.
+
+`UnsealRoot` accepts no blob: it copies the 32-byte root into a destination
+of exactly `RootKeyBytes` (otherwise `ErrInvalidSize`). A `ModeRootKey`
+sealer over a `SoftwareProvider` therefore carries no provider blob.
+
+### Generic providers
+
+[Provider contract](#provider-contract) §4 ("Blob is opaque") still holds for
+every other provider. Contract v1 fixes only the envelope and the
+SoftwareProvider blob. A provider such as the OP-TEE TA implements
+SEAL/UNSEAL (0x3/0x4) against this section; those commands stay held (#250).
+
+### Versioning
+
+Contract v1 is the format as documented here; changing any byte of it is a
+format change and needs the owner's ruling.
+
 ## Invariants
 
 1. **Recovered plaintext only in locked pages.** `Seal` reads the caller's
@@ -395,7 +506,7 @@ use Go's native FIPS 140-3 module.
 
 Configuration is code: `NewSealer` options or `SetSealer`. No environment
 variables. **No persistence**: there is no constructor for sealed bytes, and the
-envelope format is internal, unversioned across releases and keyed to a
+envelope, laid out as [contract v1](#blob-contract-v1), is keyed to a
 process-lifetime `Sealer` (an AST guard test keeps it that way).
 
 ## Test strategy
