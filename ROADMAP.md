@@ -39,7 +39,7 @@ Its layer is the base of the stack, under go-quicraft: [SPEC purpose](docs/SPEC.
 
 ## Later
 
-Nothing queued.
+- **arm-trustzone** — a host-side backend over the GlobalPlatform TEE Client API implementing the backend seam, on OP-TEE; design [docs/backends/arm-trustzone-design.md](docs/backends/arm-trustzone-design.md) — [#206](../../issues/206) — planned
 
 ## Future
 
@@ -49,7 +49,6 @@ Nothing queued.
 - **imx-edgelock-enclave** — a backend that binds xkmsd to the trusted-imx95 secure world through that repo's interface — [#195](../../issues/195) — open
 - **intel-tdx** — a backend on Intel TDX implementing the backend seam — [#199](../../issues/199) — open
 - **nvidia-blackwell** — a backend on NVIDIA Blackwell confidential computing implementing the backend seam — [#200](../../issues/200) — open
-- **arm-trustzone** — a host-side backend over the GlobalPlatform TEE Client API implementing the backend seam, on OP-TEE — [#206](../../issues/206) — blocked: waits on trusted-firmware's OP-TEE row
 
 ## Dependencies
 

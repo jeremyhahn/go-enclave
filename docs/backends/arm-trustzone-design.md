@@ -1,0 +1,196 @@
+# arm-trustzone backend — design proposal
+
+> **Status: PROPOSED** · Scope: go-enclave; trusted-firmware (secure world) · Last verified: 2026-10-30
+> The design of the out-of-tree backend that reaches OP-TEE through the [backend seam](architecture.md). Its harness is [backend-conformance](../backend-conformance/engineering.md#the-arm-trustzone-harness); the secure world and the TA are trusted-firmware's at `v0.4.2-alpha`. Three decisions below are open until Software rules (DS-3097).
+
+This is the design of the `arm-trustzone` backend ([SPEC](../SPEC.md), #206).
+It is PROPOSED: three decisions below are open, each with its options, the
+alternatives rejected and a recommendation. Software rules on them (DS-3097)
+before any code slice. Nothing here is decided.
+
+## Problem
+
+go-enclave's [backend seam](architecture.md) has no backend that
+reaches a Trusted Execution Environment on Arm. The `arm-trustzone` row
+delivers one: an [out-of-tree backend](architecture.md#an-out-of-tree-backend)
+that opens a session with a Trusted Application (TA) in OP-TEE and fills a
+memory enclave handle with random bytes the secure world produced, run by
+`backendtest` against OP-TEE on QEMU `virt`.
+
+The row fixes the seam `backendtest` assumes ([SPEC](../SPEC.md)):
+
+- `Connect(endpoint string) (enclave.Backend, error)`;
+- `Random(ctx, n) (enclave.Handle, error)`;
+- the backend supplies `test/integration/enclave/arm_trustzone_register_test.go`
+  under the `optee` tag.
+
+## Boundaries
+
+| Owner | Holds | Source |
+|---|---|---|
+| go-enclave, root module | the backend seam and the detection that finds a backend | [backends/](architecture.md) |
+| go-enclave | `backendtest` and the arm-trustzone harness, including `make integration-test-arm-trustzone` | [The arm-trustzone harness](../backend-conformance/engineering.md#the-arm-trustzone-harness) |
+| go-enclave, a module still to place | the backend itself: the Go side of the TEE Client API, `Connect`, `Random` and the register file | [Open decision 1](#open-decision-1-where-the-backend-lives) |
+| trusted-firmware, tag `v0.4.2-alpha` (48d7c9f48) | the secure world (TF-A at EL3, OP-TEE OS 4.11.0 at S-EL1), the TA at S-EL0, the fixture `make optee-run` | trusted-firmware row `optee-trustzone`, trusted-firmware#253 |
+
+The root module stays interface-only (#187): a backend depends on go-enclave,
+never the reverse, and the root module keeps its one dependency,
+`golang.org/x/sys`.
+
+The fixture boots the stack headless on QEMU `virt` (Armv8-A), with Linux in
+the normal world running the TEE driver (`/dev/tee0`) and `tee-supplicant`.
+The GP TEE Internal Core API inside is version 1.3.1. `make optee-run` mounts
+the host directory `OPTEE_SHARE` in the guest at `/mnt/host` and exits with
+the status of `OPTEE_GUEST_CMD`; those two variables are an interface that
+extends and does not change meaning.
+
+## The TA interface
+
+As trusted-firmware's tag fixes it in `optee/ta/include/tfw_ta.h`:
+
+| Item | Value | Parameters |
+|---|---|---|
+| UUID | `23751b49-3a76-4e49-b63c-e5853742fa1f` (RFC 9562, version 4) | – |
+| `TFW_TA_CMD_GET_INFO` | `0x00000001` | param 0 `VALUE_OUTPUT`: `a` the interface version, `b` the flags |
+| `TFW_TA_CMD_GET_RANDOM` | `0x00000002` | param 0 `MEMREF_OUTPUT`: 1 to 4096 bytes |
+| `TFW_TA_INTERFACE_VERSION` | `1` | – |
+| `TFW_TA_INFO_FLAGS` | `0` | – |
+| `TFW_TA_RANDOM_MIN` / `_MAX` | `1` / `4096` | – |
+
+Commands `0x3` (SEAL) and `0x4` (UNSEAL) are held (trusted-firmware#250);
+this backend does not call them.
+
+A `Random(ctx, n)` with `n` above 4096 is served in chunks of at most 4096
+bytes, each written straight into the handle; `n` of 0 is refused before the
+TA is called.
+
+## Data flow
+
+1. The conformance test is built as a static `linux/arm64` binary (the
+   `optee` tag composes `arm_trustzone_register_test.go`) and dropped into
+   `OPTEE_SHARE`.
+2. `OPTEE_GUEST_CMD` runs it in the guest from `/mnt/host`, with
+   `GO_ENCLAVE_OPTEE_ENDPOINT=/dev/tee0`. The harness that does this is
+   merged: [The arm-trustzone harness](../backend-conformance/engineering.md#the-arm-trustzone-harness)
+   and the `integration-test-arm-trustzone` target in the
+   [Makefile](../../Makefile).
+3. `Connect(endpoint)` opens the device, initialises a TEE context and opens
+   a session with the TA by its UUID. A missing device, a missing TA or a
+   refused session is a typed error.
+4. `GET_INFO` is the `CapabilityProbe`: the backend accepts interface version
+   1 with flags 0 and refuses anything else with a typed error, so a newer TA
+   is never driven by an older client.
+5. `Random(ctx, n)` allocates a memory enclave handle of `n` bytes and fills
+   it through `GET_RANDOM`.
+
+### Trust boundary
+
+The random bytes cross a buffer shared between the secure world and the
+normal world: the `MEMREF_OUTPUT` parameter. Whatever the TA holds in the
+secure world before it writes that buffer is trusted-firmware's to wipe.
+
+On the go-enclave side the proposal is:
+
+- Where the kernel accepts registered memory (`TEE_IOC_SHM_REGISTER`), the
+  shared buffer *is* the handle's locked, guarded pages: the TA writes into
+  them, there is no copy, and the handle's own zeroisation on `Destroy` wipes
+  the bytes.
+- Otherwise the backend allocates driver shared memory, copies each chunk
+  into the handle, and zeroes the shared buffer before it unmaps and
+  releases it, on every path, including an error or a cancelled `ctx`.
+
+This slice keeps no key in the secure world. The bytes leave it as soon as
+they are produced, and the handle in the normal world is their only holder.
+
+## Open decision 1: where the backend lives
+
+- **(A) A nested module in this repository**, with its own `go.mod` (for
+  example `backends/armtrustzone/`) and prefixed tags
+  (`backends/armtrustzone/v0.1.0-alpha`). trusted-firmware's `sdk/go/` tags
+  are the precedent.
+- **(B) A repository of its own.**
+- **(C) In the root module.** Rejected: it breaks the interface-only rule
+  (#187) and adds platform code to the root.
+
+**Recommendation: (A).** The backend, the seam it implements and the
+`backendtest` harness that drives it change together in one pull request and
+one CI run, while the root module's `go.mod` stays untouched. The dependency
+still runs one way: the nested module requires the root, not the reverse.
+(B) adds a repository, a second CI and a cross-repository version bump for
+every seam change, with no gain while go-enclave is the backend's only
+consumer.
+
+Cost: every release that changes the backend cuts a second, prefixed tag
+under the release targets (alpha tags only); a root API change must be
+tagged before the nested module can require it; and the buildgates and the
+releasability gate learn a second module.
+
+## Open decision 2: how the backend reaches the TEE
+
+- **(A) Pure Go over the Linux TEE subsystem's ioctl interface** on
+  `/dev/tee0` (`include/uapi/linux/tee.h`), through `golang.org/x/sys/unix`.
+  It implements the GP TEE Client API's semantics (`TEEC_InitializeContext`,
+  `TEEC_OpenSession`, `TEEC_InvokeCommand`, the `TEEC_Operation` parameter
+  types, `TEEC_UUID`) with `CGO_ENABLED=0`, and builds a static arm64 binary.
+- **(B) cgo over OP-TEE's `libteec`.** It needs the guest's arm64 sysroot to
+  cross-compile, a cgo toolchain in the image, and dynamic linking in the
+  guest.
+
+**Recommendation: (A).** The test binary stays static and drops into
+`OPTEE_SHARE` as it is; the image needs no cross C toolchain; the backend
+adds no dependency beyond `golang.org/x/sys`; and registered shared memory
+(the [trust boundary](#trust-boundary)) is reachable directly.
+
+Cost: go-enclave carries its own client of the ioctl ABI. The struct layout
+and the ioctl numbers must be checked against the pinned Linux kernel's
+header in the code slice, and a kernel bump re-checks them; `libteec`'s
+behaviour (session login methods, parameter encoding, the `TEEC_UUID` byte
+order of RFC 9562) is reimplemented rather than inherited.
+
+## Open decision 3: where the fixture runs
+
+- **(A) Add trusted-firmware's host packages to go-enclave's toolchain
+  image** (`build/docker/devcontainer`), so `make optee-tools` passes in it.
+- **(B) Run the CI job in trusted-firmware's `optee` image**, as
+  trusted-firmware's own CI does on the `go-warm` runner label.
+
+Either way `OPTEE_CACHE` (outside the checkout) is cached under the key
+`make -s optee-pin` prints: the first `optee-qemu` build fetches and builds
+several GB, about 19 minutes on a 24-thread host.
+
+**Recommendation: (B).** The package set belongs to the fixture, and
+trusted-firmware already maintains an image that carries it; copying it into
+go-enclave's toolchain image would grow every other job's image and drift
+from the pin. The job image and the runner label are the Company Agent's to
+provide, so slice 3 asks for them rather than building them.
+
+Cost: one CI job runs outside the toolchain image, against the devcontainer
+rule for builds, and local runs of the target need that image too.
+
+## What this does not do
+
+- SEAL and UNSEAL (held, trusted-firmware#250), or any key kept in the secure
+  world.
+- Attestation.
+- `Confiner`.
+- Any hardware other than QEMU `virt`. Owner queue 41 allows no simulators or
+  mocks for hardware backends; OP-TEE on QEMU is the one software-only slice.
+
+## Slices
+
+1. This design.
+2. The backend and its register file, against the ruled decisions.
+3. The `TRUSTED_FIRMWARE_TAG=v0.4.2-alpha` pin and the CI job.
+
+## References
+
+- GlobalPlatform, *TEE Client API Specification* v1.0 (GPD_SPE_007):
+  <https://globalplatform.org/specs-library/tee-client-api-specification/>.
+  Its licence forbids a copy; it is referenced by title and URL only.
+- RFC 9562, *Universally Unique IDentifiers (UUIDs)*: the TA's UUID (version
+  4) and its byte layout in `TEEC_UUID`.
+- Linux, `include/uapi/linux/tee.h`: the TEE subsystem's ioctl interface, at
+  the kernel the fixture pins.
+
+Copying RFC 9562 and the uapi header into [docs/reference/](../reference/README.md),
+with their revisions and implementing symbols, is slice 2's work.
