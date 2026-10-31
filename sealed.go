@@ -163,8 +163,13 @@ type sealedState struct {
 	// sealed is nonce || ciphertext || tag under the DEK; nil once destroyed.
 	sealed []byte
 
-	// blob is the wrapped DEK and the AAD sealed was bound to.
+	// blob is the wrapped DEK, bound into sealed's AAD by sealedAAD.
 	blob []byte
+
+	// version is the envelope version, which selects the AAD (sealedAAD).
+	// The zero value is contract v1. Written once at construction, so opens
+	// read it without the lock.
+	version uint8
 
 	// size is the plaintext length; Open sizes its destination exactly so the
 	// AEAD cannot allocate.
@@ -178,6 +183,32 @@ type sealedState struct {
 	// sealedAtGen is the sweep generation at seal time. Written once at
 	// construction, so Openable reads it without the lock.
 	sealedAtGen uint64
+}
+
+// Envelope versions (docs/sealing/engineering.md, "Envelope version").
+const (
+	// sealedVersionV1 is contract v1, the form without a version byte: the
+	// AAD is the whole blob.
+	sealedVersionV1 uint8 = 0
+
+	// sealedVersionV2 binds the version byte into the AAD ahead of the blob.
+	sealedVersionV2 uint8 = 2
+
+	// sealedVersionCurrent is the version every new seal writes.
+	sealedVersionCurrent = sealedVersionV2
+)
+
+// sealedAAD returns a fresh copy of the AAD an envelope of version binds:
+// the blob for contract v1, the version byte then the blob from version 2
+// on. The caller wipes it. An unknown version is ErrUnknownSealedVersion.
+func sealedAAD(version uint8, blob []byte) ([]byte, error) {
+	switch version {
+	case sealedVersionV1:
+		return append([]byte(nil), blob...), nil
+	case sealedVersionV2:
+		return append([]byte{version}, blob...), nil
+	}
+	return nil, ErrUnknownSealedVersion
 }
 
 // NewSealed encrypts data under the process [Sealer] and returns the sealed
@@ -352,7 +383,7 @@ func (s *sealedValue) openImported(ctx context.Context, imp Importer) (Handle, e
 	defer s.unpin(sealer, blob, sealed)
 
 	// Left writable, never frozen: the importer wipes it.
-	scratch, err := sealer.open(ctx, blob, sealed, size, newMemorySized, false)
+	scratch, err := sealer.open(ctx, s.version, blob, sealed, size, newMemorySized, false)
 	if err != nil {
 		return nil, err
 	}
@@ -407,7 +438,7 @@ func (s *sealedValue) openIn(ctx context.Context, dst func(int) (*lockedRegion, 
 	}
 	defer s.unpin(sealer, blob, sealed)
 
-	return sealer.open(ctx, blob, sealed, size, dst, true)
+	return sealer.open(ctx, s.version, blob, sealed, size, dst, true)
 }
 
 // pin registers an open in flight and returns the envelope it may read with

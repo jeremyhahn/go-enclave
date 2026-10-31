@@ -1,6 +1,6 @@
 # Sealing and the provider seam — engineering contract
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-14
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-31
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Exported surface
@@ -84,7 +84,8 @@ with a random 96-bit nonce from `cipher.NewGCMWithRandomNonce` (`aead.go`
 | 12 | n | ciphertext; n is the plaintext length |
 | 12 + n | 16 | GCM tag |
 
-The AAD is the whole `blob`, byte for byte. `sealedOverhead` = 12 + 16 = 28
+The AAD is the whole `blob`, byte for byte (version 2 prefixes it: see
+[Envelope version](#envelope-version)). `sealedOverhead` = 12 + 16 = 28
 bytes; n is at least 1 and at most `maxSealedPlaintext` = (2^32 − 2) × 16
 bytes.
 
@@ -169,7 +170,32 @@ SEAL/UNSEAL (0x3/0x4) against this section; those commands stay held (#250).
 ### Versioning
 
 Contract v1 is the format as documented here; changing any byte of it is a
-format change and needs the owner's ruling.
+format change and needs the owner's ruling. The owner's ruling OD-1(d) (#274)
+used that rule once, for the [envelope version](#envelope-version) alone.
+
+## Envelope version
+
+This section is normative. It adds one field to the [sealed
+envelope](#sealed-envelope) and changes nothing else in contract v1.
+
+- **The field.** `sealedState` holds `version` (`uint8`) beside `blob` and
+  `sealed`. It is a field in memory, not a byte in either string: a reader
+  recognizes contract v1 by the field, never by parsing bytes.
+- **Contract v1 is the zero value**, `sealedVersionV1` = 0, the form without a
+  version byte. Its `sealed`, `blob` and AAD are exactly as in
+  [contract v1](#sealed-envelope); it opens unchanged.
+- **Version 2**, `sealedVersionV2` = 2, binds the version byte into the AAD
+  ahead of the blob: AAD = `0x02` || `blob`. Nothing else changes. Every new
+  seal writes `sealedVersionCurrent` = 2.
+- **One function builds the AAD** for every seal and open: `sealed.go`
+  `sealedAAD(version, blob)`.
+- **An unknown version**, 1 and 3 to 255 included, is refused with
+  `ErrUnknownSealedVersion` before the destination is allocated or any key is
+  touched.
+- **No migration.** Nothing rewrites or upgrades an existing envelope.
+- If a serialized form is ever added, the version byte leads it; that form
+  needs its own owner ruling ([Configuration and
+  persistence](#configuration-and-persistence)).
 
 ## Invariants
 
@@ -296,6 +322,7 @@ format change and needs the owner's ruling.
 | `ErrSealerInstalled`, `ErrNilSealer` | `SetSealer` | One-shot install; a nil or typed-nil sealer. |
 | `ErrProviderMessageLimit` | `SoftwareProvider.Protect` | Per-key message bound reached. |
 | `ErrProviderNotConstructed` | Every `SoftwareProvider` method but `Destroy` | The provider was not built by `NewSoftwareProvider`. Only this package can meet it: the implementation is internal. |
+| `ErrUnknownSealedVersion` | `Open`, `OpenIn` | The envelope's version is neither contract v1 nor 2 ([Envelope version](#envelope-version)). Refused before any allocation or key. |
 | `ErrPlaintextEscaped` | open | Defensive; unreachable while destination capacity is exact. |
 | `ErrCleanupFailed` (`*CleanupError`) | `OpenIn` into an `Importer`, seals and `Destroy` of a `WithBackend` sealer | A handle the operation no longer needed refused its `Destroy` and still holds its material; the sealer keeps it for `Sealer.Destroy` to retry ([invariant 13](#invariants)). `Failure` is the operation's own error, reachable with `errors.Is`, or nil when only the cleanup failed; `Causes` holds what each refused `Destroy` or release returned. It is also how any failure that came with a failed cleanup is reported. |
 

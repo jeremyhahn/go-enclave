@@ -376,6 +376,11 @@ var (
 	// indistinguishable.
 	ErrSealedAuthentication = errors.New("enclave: sealed material failed authentication")
 
+	// ErrUnknownSealedVersion reports a [Sealed] envelope whose version this
+	// package does not read: neither contract v1 (version 0) nor version 2.
+	// It is refused before any key is touched or anything is decrypted.
+	ErrUnknownSealedVersion = errors.New("enclave: sealed envelope version is unknown")
+
 	// ErrPlaintextEscaped reports that the AEAD wrote recovered plaintext
 	// somewhere other than the locked destination. It is unreachable while
 	// every decryption hands crypto/cipher a destination of exact capacity,

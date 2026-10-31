@@ -579,7 +579,7 @@ func (s *envelopeSealer) sealData(ctx context.Context, data []byte) (*sealedValu
 	}
 	defer Wipe(data)
 
-	return s.seal(ctx, len(data), func(fn func([]byte) error) error { return fn(data) })
+	return s.seal(ctx, sealedVersionCurrent, len(data), func(fn func([]byte) error) error { return fn(data) })
 }
 
 // SealFrom implements [Sealer.SealFrom]. It returns [ErrNilSealer] on a nil
@@ -604,7 +604,7 @@ func (s *envelopeSealer) sealFromHandle(ctx context.Context, src Handle) (*seale
 	if size <= 0 && !ba.IsAlive() {
 		return nil, ErrEnclaveDestroyed
 	}
-	return s.seal(ctx, size, ba.WithBytes)
+	return s.seal(ctx, sealedVersionCurrent, size, ba.WithBytes)
 }
 
 // backendName is the name of the backend that made h, guarded against a
@@ -619,7 +619,7 @@ func backendName(h Handle) string {
 
 // seal is the shared body of Seal and SealFrom. read lends the size bytes of
 // material to its argument for one call.
-func (s *envelopeSealer) seal(ctx context.Context, size int, read func(func([]byte) error) error) (*sealedValue, error) {
+func (s *envelopeSealer) seal(ctx context.Context, version uint8, size int, read func(func([]byte) error) error) (*sealedValue, error) {
 	// Before any key is touched, so an empty or oversized input costs nothing.
 	// SealFrom's size comes from a ByteAccess, so a negative one is refused
 	// as empty too.
@@ -655,8 +655,16 @@ func (s *envelopeSealer) seal(ctx context.Context, size int, read func(func([]by
 		return nil, err
 	}
 
-	// The blob is the AAD. The data AEAD runs with mu released, so a long
-	// value never holds off Destroy or a rotation. That is safe because it
+	aad, err := sealedAAD(version, blob)
+	if err != nil {
+		s.releaseBlob(blob)
+		return nil, err
+	}
+	defer Wipe(aad)
+
+	// The blob, under the envelope version, is the AAD (sealedAAD). The data
+	// AEAD runs with mu released, so a long value never holds off Destroy or
+	// a rotation. That is safe because it
 	// uses only dek, which this call made and destroys, never a key of the
 	// hierarchy: those are used only under mu or by the initSlot holder. What
 	// Destroy must prevent is a value sealed under a destroyed sealer
@@ -665,7 +673,7 @@ func (s *envelopeSealer) seal(ctx context.Context, size int, read func(func([]by
 	var sealed []byte
 	err = read(func(p []byte) error {
 		var serr error
-		sealed, serr = sealWithKey(dek, p, blob)
+		sealed, serr = sealWithKey(dek, p, aad)
 		size = len(p)
 		return serr
 	})
@@ -679,7 +687,7 @@ func (s *envelopeSealer) seal(ctx context.Context, size int, read func(func([]by
 
 	return &sealedValue{sealedState: &sealedState{
 		sealer: s, sealed: sealed, blob: blob, size: size,
-		sealedAtGen: sealedAtGen,
+		version: version, sealedAtGen: sealedAtGen,
 	}}, nil
 }
 
@@ -732,13 +740,19 @@ func rewrite(b *byte, v byte) {
 // allocation: an open the budget refuses allocates no locked memory and
 // touches no key, and the unadmitted DEK page exists only behind a granted
 // reservation.
-func (s *envelopeSealer) open(ctx context.Context, blob, sealed []byte, size int, dst func(int) (*lockedRegion, error), freeze bool) (*lockedRegion, error) {
+func (s *envelopeSealer) open(ctx context.Context, version uint8, blob, sealed []byte, size int, dst func(int) (*lockedRegion, error), freeze bool) (*lockedRegion, error) {
 	if err := contextFailure[OpenError](ctx, nil); err != nil {
 		return nil, err
 	}
 	if err := s.usable(); err != nil {
 		return nil, err
 	}
+	// Before the destination or any key: an unknown version allocates nothing.
+	aad, err := sealedAAD(version, blob)
+	if err != nil {
+		return nil, err
+	}
+	defer Wipe(aad)
 
 	out, err := dst(size)
 	if err != nil {
@@ -763,7 +777,7 @@ func (s *envelopeSealer) open(ctx context.Context, blob, sealed []byte, size int
 		// The blob is verified as AAD even though the DEK unwrap already
 		// authenticated it: this refuses two individually authentic halves
 		// that were never sealed together.
-		return openWithKeyInto(dek, sealed, blob, pt)
+		return openWithKeyInto(dek, sealed, aad, pt)
 	})
 	if err == nil {
 		err = s.usable()

@@ -80,6 +80,125 @@ func TestSealed_RoundTrip(t *testing.T) {
 	}
 }
 
+// sealAtVersion seals sealedMaterial through s's own seal path, writing
+// envelope version.
+func sealAtVersion(t *testing.T, s *envelopeSealer, version uint8) *sealedValue {
+	t.Helper()
+	data := append([]byte(nil), sealedMaterial...)
+	v, err := s.seal(t.Context(), version, len(data), func(fn func([]byte) error) error { return fn(data) })
+	if err != nil {
+		t.Fatalf("seal at version %d: %v", version, err)
+	}
+	t.Cleanup(func() { _ = v.Destroy() })
+	return v
+}
+
+// atVersion is v's envelope, copied, under another version. It is never
+// destroyed: it does not own a reference to the blob's generation.
+func atVersion(v *sealedValue, version uint8) *sealedValue {
+	return &sealedValue{sealedState: &sealedState{
+		sealer: v.sealer, sealed: bytes.Clone(v.sealed), blob: bytes.Clone(v.blob),
+		size: v.size, version: version,
+	}}
+}
+
+func TestSealed_EnvelopeVersions(t *testing.T) {
+	for name, opts := range map[string][]SealerOption{
+		"ModeRootKey":      nil,
+		"ModePerOperation": {WithKeyProtector(NewSoftwareProvider())},
+	} {
+		t.Run(name, func(t *testing.T) {
+			sealer, err := NewSealer(opts...)
+			if err != nil {
+				t.Fatalf("NewSealer: %v", err)
+			}
+			t.Cleanup(func() { _ = sealer.Destroy() })
+			s, err := envelopeOf(sealer)
+			if err != nil {
+				t.Fatalf("envelopeOf: %v", err)
+			}
+
+			opens := func(t *testing.T, v *sealedValue) {
+				t.Helper()
+				e, err := v.Open(t.Context())
+				if err != nil {
+					t.Fatalf("Open of a version %d envelope: %v", v.version, err)
+				}
+				defer e.Destroy()
+				if !holds(e, sealedMaterial) {
+					t.Errorf("the version %d envelope did not open to the sealed material", v.version)
+				}
+			}
+			refused := func(t *testing.T, v *sealedValue, want error) {
+				t.Helper()
+				e, err := v.Open(t.Context())
+				if !errors.Is(err, want) {
+					t.Errorf("Open of a version %d envelope = %v, want %v", v.version, err, want)
+				}
+				if e != nil {
+					t.Errorf("Open of a version %d envelope returned an enclave", v.version)
+					e.Destroy()
+				}
+			}
+
+			data := append([]byte(nil), sealedMaterial...)
+			sealed, err := sealer.Seal(t.Context(), data)
+			if err != nil {
+				t.Fatalf("Seal: %v", err)
+			}
+			t.Cleanup(func() { _ = sealed.Destroy() })
+			v2 := sealed.(*sealedValue)
+
+			t.Run("a new seal writes version 2 and round-trips", func(t *testing.T) {
+				if v2.version != sealedVersionV2 {
+					t.Fatalf("version = %d, want %d", v2.version, sealedVersionV2)
+				}
+				opens(t, v2)
+			})
+
+			v1 := sealAtVersion(t, s, sealedVersionV1)
+			t.Run("a contract v1 envelope opens unchanged", func(t *testing.T) {
+				opens(t, v1)
+			})
+
+			t.Run("each version's AAD refuses the other's envelope", func(t *testing.T) {
+				refused(t, atVersion(v2, sealedVersionV1), ErrSealedAuthentication)
+				refused(t, atVersion(v1, sealedVersionV2), ErrSealedAuthentication)
+			})
+
+			t.Run("an unknown version is refused", func(t *testing.T) {
+				for _, version := range []uint8{1, 3, 255} {
+					refused(t, atVersion(v2, version), ErrUnknownSealedVersion)
+				}
+				// The refusal left the envelope intact.
+				opens(t, v2)
+			})
+		})
+	}
+}
+
+func TestSealedAAD(t *testing.T) {
+	blob := []byte{0xb1, 0x0b}
+	for _, c := range []struct {
+		version uint8
+		want    []byte
+	}{
+		{sealedVersionV1, []byte{0xb1, 0x0b}},
+		{sealedVersionV2, []byte{2, 0xb1, 0x0b}},
+	} {
+		got, err := sealedAAD(c.version, blob)
+		if err != nil || !bytes.Equal(got, c.want) {
+			t.Errorf("sealedAAD(%d) = %x, %v; want %x, nil", c.version, got, err, c.want)
+		}
+		if &got[0] == &blob[0] {
+			t.Errorf("sealedAAD(%d) aliases the blob; the caller wipes it", c.version)
+		}
+	}
+	if _, err := sealedAAD(1, blob); !errors.Is(err, ErrUnknownSealedVersion) {
+		t.Errorf("sealedAAD(1) = %v, want ErrUnknownSealedVersion", err)
+	}
+}
+
 // TestNewSealed_ReturnsTheInterface pins the shape of every exported seal
 // constructor: a [Sealed] backed by this package's implementation, an Open
 // that hands out a [ByteAccess], and a nil interface on failure.

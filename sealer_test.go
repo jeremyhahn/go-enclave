@@ -1592,7 +1592,7 @@ func TestSealer_ZeroValueFailsWithoutPanicking(t *testing.T) {
 	if !bytes.Equal(data, make([]byte, len(data))) {
 		t.Error("zero-value Seal did not wipe the caller's material")
 	}
-	if _, err := s.open(ctx, []byte("blob"), []byte("sealed"), 4, newMemorySized, true); !errors.Is(err, ErrSealerNotConstructed) {
+	if _, err := s.open(ctx, sealedVersionCurrent, []byte("blob"), []byte("sealed"), 4, newMemorySized, true); !errors.Is(err, ErrSealerNotConstructed) {
 		t.Errorf("zero-value open = %v, want ErrSealerNotConstructed", err)
 	}
 	if err := s.Destroy(); err != nil {

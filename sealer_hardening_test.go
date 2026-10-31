@@ -365,7 +365,7 @@ func TestSealer_AnOpenInFlightKeepsItsGeneration(t *testing.T) {
 	}
 	defer w.Destroy()
 
-	e, err := sealer.open(ctx, blob, sealed, size, newMemorySized, true)
+	e, err := sealer.open(ctx, v.version, blob, sealed, size, newMemorySized, true)
 	if err != nil {
 		t.Fatalf("the open in flight lost its generation to the value's Destroy: %v", err)
 	}
