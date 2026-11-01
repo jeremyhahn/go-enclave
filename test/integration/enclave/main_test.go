@@ -6,7 +6,7 @@
 // This file is part of go-enclave. Use of this source code is governed by the
 // MIT license that can be found in the LICENSE file.
 
-//go:build integration
+//go:build integration && !optee
 
 // Package enclave_test is go-enclave's integration suite. It drives the public
 // API (memory enclaves, Allocator, Sealer/Sealed, WipeAll) against the real

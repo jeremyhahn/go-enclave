@@ -437,29 +437,46 @@ $(IT_TARGETS): integration-test-%: integration-test-userns
 integration-test-userns:
 	@sh scripts/userns-test.sh
 
-## TRUSTED_FIRMWARE_TAG=<tag>: integration-test-arm-trustzone: the trusted-firmware release whose `make optee-run` is the fixture; empty refuses
-## GO_ENCLAVE_OPTEE_ENDPOINT=<endpoint>: integration-test-arm-trustzone: the TEE client endpoint the fixture exposes, passed into the devcontainer
-# Both are caller-supplied, so raw-bound. No tag is pinned here and no workflow
-# calls the target: the pin and the CI job wait on trusted-firmware #253 slice 3.
-TRUSTED_FIRMWARE_TAG      ?=
-GO_ENCLAVE_OPTEE_ENDPOINT ?=
-$(call raw_bind,TRUSTED_FIRMWARE_TAG GO_ENCLAVE_OPTEE_ENDPOINT)
+## TRUSTED_FIRMWARE_TAG=<tag>: optee-fixture-check, integration-test-arm-trustzone: the trusted-firmware release whose `make optee-run` is the fixture (pinned in scripts/tool-pins.sh); empty refuses
+## TRUSTED_FIRMWARE_COMMIT=<sha>: optee-fixture-check, integration-test-arm-trustzone: the commit the tag peels to (pinned); a checkout at any other commit is refused
+## TRUSTED_FIRMWARE_CACHE=<dir>: optee-fixture-check, integration-test-arm-trustzone: where the checkout lives, one directory per tag (default ~/.cache/go-enclave/trusted-firmware)
+## GO_ENCLAVE_OPTEE_ENDPOINT=<endpoint>: integration-test-arm-trustzone: the TEE client device in the fixture's guest (default /dev/tee0)
+## TRUSTED_FIRMWARE_URL=<url>: optee-fixture-check, integration-test-arm-trustzone: the forge's trusted-firmware clone URL; empty refuses (the pinned commit, not the URL, is what is trusted)
+# The tag and commit come from scripts/tool-pins.sh; a command-line value
+# overrides them and is raw-bound like the other caller-supplied values. No
+# workflow calls these targets yet: the CI job waits on #206 slice 2.
+TRUSTED_FIRMWARE_URL      ?=
+TRUSTED_FIRMWARE_CACHE    ?=
+GO_ENCLAVE_OPTEE_ENDPOINT ?= /dev/tee0
+$(call raw_bind,TRUSTED_FIRMWARE_URL TRUSTED_FIRMWARE_TAG TRUSTED_FIRMWARE_COMMIT TRUSTED_FIRMWARE_CACHE GO_ENCLAVE_OPTEE_ENDPOINT)
 
-## integration-test-arm-trustzone: backendtest against the arm-trustzone backend on OP-TEE, built with the optee tag, in the devcontainer
+## optee-fixture-check: boot the pinned trusted-firmware OP-TEE fixture and run its xtest and TA check (no go-enclave code; host packages, several GB)
+# scripts/optee-fixture.sh clones the tag outside the tree, refuses a checkout
+# whose HEAD is not TRUSTED_FIRMWARE_COMMIT, and runs its make integration-test-optee.
+.PHONY: optee-fixture-check
+optee-fixture-check:
+	@sh scripts/optee-fixture.sh check
+
+## integration-test-arm-trustzone: backendtest against the arm-trustzone backend on OP-TEE: the optee-tagged harness, built for linux/arm64, run in the pinned fixture's guest
 # The tests are named TestBackendConformance_ArmTrustZone…, so the
 # backend-conformance feature owns them; its own target never builds them
-# (no optee tag). A later -tags overrides the one in INTEGRATION_TESTFLAGS. A
-# missing endpoint or backend fails the run, never skips it. The registry is
-# per process, so the run also refuses until the #206 backend supplies
-# ARM_TRUSTZONE_REGISTRATION, the optee-tagged file that registers it in the
-# test binary.
+# (no optee tag). The toolchain image builds them with
+# -tags=integration,optee as a CGO-free linux/arm64 test binary;
+# scripts/optee-fixture.sh shares it
+# with the guest and runs it there under make optee-run, whose status is the
+# target's. A missing endpoint or backend fails the run, never skips it. The
+# registry is per process, so the run also refuses until the #206 backend
+# supplies ARM_TRUSTZONE_REGISTRATION, the optee-tagged file that registers
+# it in the test binary.
 ARM_TRUSTZONE_REGISTRATION := test/integration/enclave/arm_trustzone_register_test.go
+# The harness binary, compiled in the toolchain image into the ignored bin/.
+ARM_TRUSTZONE_BIN := bin/optee/arm-trustzone.test
 .PHONY: integration-test-arm-trustzone
-integration-test-arm-trustzone:
-	@[ -n "$$TRUSTED_FIRMWARE_TAG" ] || { echo "integration-test-arm-trustzone: TRUSTED_FIRMWARE_TAG is empty; set it to the trusted-firmware release whose make optee-run is the fixture (none is pinned yet: trusted-firmware #253 slice 3)" >&2; exit 2; }
+integration-test-arm-trustzone: docker-build
+	@[ -n "$$TRUSTED_FIRMWARE_TAG" ] || { echo "integration-test-arm-trustzone: TRUSTED_FIRMWARE_TAG is empty; set it to the trusted-firmware release whose make optee-run is the fixture (scripts/tool-pins.sh pins it)" >&2; exit 2; }
 	@[ -f "$(ARM_TRUSTZONE_REGISTRATION)" ] || { echo "integration-test-arm-trustzone: $(ARM_TRUSTZONE_REGISTRATION) is absent; the arm-trustzone backend (#206) supplies it to register the backend in the test binary under the optee tag (docs/SPEC.md, arm-trustzone)" >&2; exit 2; }
-	@INTEGRATION_TESTFLAGS="$$INTEGRATION_TESTFLAGS -tags=integration,optee -run ^TestBackendConformance_ArmTrustZone" COVERAGE_THRESHOLD=0 \
-		sh scripts/integration-test.sh enclave "$(INTEGRATION_COVERPKG_enclave)" -e GO_ENCLAVE_OPTEE_ENDPOINT
+	@sh scripts/devcontainer.sh run 'mkdir -p $(dir $(ARM_TRUSTZONE_BIN)) && GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go test -c -tags=integration,optee -o $(ARM_TRUSTZONE_BIN) ./test/integration/enclave'
+	@ARM_TRUSTZONE_BIN=$(ARM_TRUSTZONE_BIN) sh scripts/optee-fixture.sh harness
 
 ## integration-test-fips: every integration suite under FIPS 140-3 strict mode, in the devcontainer
 .PHONY: integration-test-fips

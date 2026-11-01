@@ -237,16 +237,53 @@ config is refused.
 [arm-trustzone](../SPEC.md) backend on OP-TEE ([#250](../../../../issues/250)).
 It is built only with the `optee` tag (`//go:build integration && optee`), so
 no other run compiles it, `make integration-test-backend-conformance`
-included. `make integration-test-arm-trustzone` builds it with
-`-tags=integration,optee`, runs the tests named `TestBackendConformance_ArmTrustZone`
-in the devcontainer, and passes `GO_ENCLAVE_OPTEE_ENDPOINT` in. It refuses
-while `TRUSTED_FIRMWARE_TAG` is empty.
+included. `make integration-test-arm-trustzone` (body:
+`scripts/optee-fixture.sh harness`) builds it with `-tags=integration,optee`
+as a test binary for linux/arm64 with `CGO_ENABLED=0` (`go test -c`), puts it
+in a fresh share directory, and runs the pinned checkout's
+`make optee-run OPTEE_SHARE=<dir> OPTEE_GUEST_CMD=<binary>`. The guest runs the
+tests named `TestBackendConformance_ArmTrustZone` with
+`GO_ENCLAVE_OPTEE_ENDPOINT` set (default `/dev/tee0`, the guest's TEE
+device), and `optee-run`'s status, the binary's, is the target's. It refuses
+while `TRUSTED_FIRMWARE_TAG` is empty. The compile runs in the toolchain image
+(`scripts/devcontainer.sh run`, as `make docker-run` does) into the checkout's
+ignored `bin/optee/`, the script copies it into the share, and only the QEMU orchestration runs on the host; the
+`optee` build's own `TestMain` (`main_optee_test.go`) refuses unless the
+endpoint exists, in place of the devcontainer guard every other build keeps.
 
-- **Fixture.** trusted-firmware's `make optee-run` (a QEMU virt guest with the
-  OP-TEE trusted application) from a checkout at `TRUSTED_FIRMWARE_TAG`. It
-  sets `GO_ENCLAVE_OPTEE_ENDPOINT` to the TEE client endpoint. It is a CI
-  fixture in another process, so it cannot register anything in the test
-  binary's registry.
+- **Fixture.** trusted-firmware's `make optee-run`: an aarch64 QEMU virt
+  guest (qemu_v8) with the OP-TEE trusted application, which mounts
+  `OPTEE_SHARE` at `/mnt/host` and runs `OPTEE_GUEST_CMD` there. It is a CI
+  test fixture, not a Go import: `golang.org/x/sys` stays go-enclave's only
+  dependency. It is another process from the registry's point of view, so it
+  cannot register anything in the test binary's registry.
+- **Pin.** `scripts/tool-pins.sh` pins `TRUSTED_FIRMWARE_TAG=v0.4.2-alpha`
+  and `TRUSTED_FIRMWARE_COMMIT`, the commit the annotated tag peels to
+  (`48d7c9f4817a…`). The clone URL is the forge's, so the caller supplies it
+  as `TRUSTED_FIRMWARE_URL` (empty refuses); the commit, not the URL, is what
+  is trusted. The script clones the tag into `TRUSTED_FIRMWARE_CACHE/<tag>` (default
+  `~/.cache/go-enclave/trusted-firmware`, outside the tree, one directory per
+  tag) and refuses, with one line and a non-zero exit, a checkout whose
+  `HEAD` is not `TRUSTED_FIRMWARE_COMMIT` or whose tracked files are
+  modified: a moved tag is refused, never followed. The pin moves by an
+  ordinary PR that raises the tag and its commit together; a command-line
+  `TRUSTED_FIRMWARE_TAG` without its commit is refused the same way.
+- **Fixture check.** `make optee-fixture-check` (body:
+  `scripts/optee-fixture.sh check`) runs the pinned checkout's
+  `make integration-test-optee`: xtest, then the TA's version and rng
+  commands. It proves the fixture boots and the TA answers, with no
+  go-enclave code involved.
+- **Host.** Both targets run where QEMU runs, not in the devcontainer. One
+  fixture build is several GB and tens of minutes, cached by trusted-firmware
+  in its `OPTEE_CACHE` (default `~/.cache/trusted-firmware/optee`, one
+  directory per pin). It needs Python 3 with cryptography and pyelftools,
+  ninja, meson, glib, pixman and the OpenSSL headers; trusted-firmware
+  refuses with every missing package before it fetches anything. The share
+  path may hold no comma or space (`optee-run` refuses it), so set `TMPDIR`
+  if yours does.
+- **CI.** No workflow runs these targets yet. The CI job is the next #250
+  slice and waits on #206 slice 2: until the backend registers, the harness
+  can only refuse.
 - **Registration.** The registry is per process. The #206 backend supplies the
   in-process registration the [arm-trustzone SPEC row](../SPEC.md) names:
   `test/integration/enclave/arm_trustzone_register_test.go`, built only with
