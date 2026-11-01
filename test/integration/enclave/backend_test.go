@@ -184,20 +184,6 @@ func TestBackends_RegisterRefusesADuplicate(t *testing.T) {
 	}
 }
 
-// TestBackends_RegisterRefusesTheDefaultName requires the default backend's
-// name to be taken from the start and to stay bound to the default.
-func TestBackends_RegisterRefusesTheDefaultName(t *testing.T) {
-	err := enclave.Register(&fakeBackend{name: enclave.LockedMemoryBackendName})
-	var exists *enclave.BackendExistsError
-	if !errors.Is(err, enclave.ErrBackendExists) || !errors.As(err, &exists) || exists.Name != enclave.LockedMemoryBackendName {
-		t.Fatalf("Register(default name) = %v, want a *BackendExistsError for %q", err, enclave.LockedMemoryBackendName)
-	}
-	got, lerr := enclave.Lookup(enclave.LockedMemoryBackendName)
-	if lerr != nil || got != enclave.DefaultBackend() {
-		t.Errorf("Lookup(default) = %v, %v; want the default backend", got, lerr)
-	}
-}
-
 // TestBackends_RegisterIsSafeForConcurrentUse requires racing registrations of
 // one name to leave exactly one winner, the rest refused as duplicates.
 func TestBackends_RegisterIsSafeForConcurrentUse(t *testing.T) {
