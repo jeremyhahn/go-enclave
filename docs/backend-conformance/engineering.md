@@ -283,9 +283,20 @@ binary.
   refuses with every missing package before it fetches anything. The share
   path may hold no comma or space (`optee-run` refuses it), so set `TMPDIR`
   if yours does.
-- **CI.** No workflow runs these targets yet. The job is held: it runs on
-  the `optee-qemu` label, and needs the fixture image and a runner that
-  advertises that label.
+- **CI.** The `optee` job in `.github/workflows/ci.yml` runs
+  `make integration-test-arm-trustzone OPTEE_FIXTURE_IMAGE=<pin>` on the
+  `go-warm` label (ruling 274(9)), full tier and every nightly, when the
+  changes job's `optee` output is true: a change under
+  `backends/armtrustzone/`, to `scripts/optee-fixture.sh`, to
+  `test/integration/enclave/main_optee_test.go`, or to a `TRUSTED_FIRMWARE_*`
+  or `OPTEE_FIXTURE_IMAGE` pin. The test binary is compiled in the toolchain
+  image as above; `scripts/optee-fixture.sh harness` then runs in the fixture
+  image (the [contract](#fixture-image-contract)) with
+  `OPTEE_FIXTURE_PREBUILT=1`, which uses the image's checkout and refuses to
+  clone, so the job never builds the stack (about 155 min cold). The commit
+  check applies to that checkout as to a clone. `OPTEE_FIXTURE_IMAGE` in
+  `scripts/tool-pins.sh` is empty until Infra publishes the image, and the
+  job fails while it is empty, never skips.
 - **Registration.** The registry is per process. The test registers the
   backend in its own binary with `enclave.Register(Connector{})` and finds it
   with `enclave.Lookup`. The root's optee-tagged harness,
@@ -303,6 +314,36 @@ binary.
   `*backendtest.EndpointError` (`ErrNoEndpoint`). A failed registration or
   lookup, or a backend without `Connect`, fails the test. A skipped run would
   look like a pass.
+
+### Fixture image contract
+
+`OPTEE_FIXTURE_IMAGE` is an agent-ci-image Infra builds, publishes and keeps
+(ruling 274(9)), pinned by digest. The optee job runs it with `docker run`,
+the repository mounted read-only at `/src` as the working directory, and
+`sh scripts/optee-fixture.sh harness` as the command, as the image's default
+user. The image holds:
+
+- **The checkout.** trusted-firmware cloned at `TRUSTED_FIRMWARE_TAG`, its
+  `HEAD` at `TRUSTED_FIRMWARE_COMMIT` (both pinned in `scripts/tool-pins.sh`),
+  at `/opt/go-enclave/trusted-firmware/<tag>` (the job's
+  `TRUSTED_FIRMWARE_CACHE`, `OPTEE_FIXTURE_CACHE` in the Makefile), with a
+  `.git` directory, no modified tracked files, and owned by the image's user,
+  so `git rev-parse` and `git status` run there.
+- **The built stack.** QEMU (`qemu-system-aarch64`, virt machine), TF-A,
+  OP-TEE OS 4.11.0 and the Linux guest, built by that checkout into its
+  `OPTEE_CACHE` (the default for the image's user, or `OPTEE_CACHE` set in
+  the image's environment), so `make optee-run` boots without building.
+- **tee-supplicant** in the guest, started at boot, with `/dev/tee0`
+  present.
+- **The tfw TA**, UUID `23751b49-3a76-4e49-b63c-e5853742fa1f`, built from
+  the checkout and installed where the guest's tee-supplicant loads it.
+- **The tools `make optee-run` needs:** `sh`, `git`, GNU `make`, `mktemp`,
+  and the [host](#the-arm-trustzone-harness) packages trusted-firmware checks
+  for (Python 3 with cryptography and pyelftools, ninja, meson, glib, pixman,
+  the OpenSSL headers), with a `TMPDIR` whose path holds no comma or space.
+
+A new trusted-firmware pin needs a new image: the image and the
+`TRUSTED_FIRMWARE_*` pins move in one PR.
 
 ## Observability
 
