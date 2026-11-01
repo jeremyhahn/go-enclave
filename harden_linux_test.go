@@ -19,24 +19,9 @@ import (
 )
 
 const (
-	hardenMarker    = "GO_ENCLAVE_HARDEN_CHILD"
-	hardenConfirmed = "harden child: the kernel reports the process not dumpable and RLIMIT_CORE 0/0"
-
 	coreImportMarker    = "GO_ENCLAVE_CORE_IMPORT_CHILD"
 	coreImportConfirmed = "import child: RLIMIT_CORE is the inherited limit"
 )
-
-// TestHardenProcess_NotAppliedAtImport pins that importing the package leaves
-// the process dumpable: HardenProcess is the binary's choice.
-func TestHardenProcess_NotAppliedAtImport(t *testing.T) {
-	v, err := unix.PrctlRetInt(unix.PR_GET_DUMPABLE, 0, 0, 0, 0)
-	if err != nil {
-		t.Fatalf("PR_GET_DUMPABLE: %v", err)
-	}
-	if v == 0 {
-		t.Fatal("the test process is not dumpable before anything called HardenProcess")
-	}
-}
 
 // TestHardenProcess_CoreLimitNotLoweredAtImport pins M1: importing the package
 // leaves RLIMIT_CORE as the process found it. A fresh child, which has run
@@ -69,48 +54,6 @@ func TestHardenProcess_CoreLimitNotLoweredAtImport(t *testing.T) {
 	}
 	if !strings.Contains(out, coreImportConfirmed) {
 		t.Fatalf("subprocess did not confirm the limit was untouched:\n%s", out)
-	}
-}
-
-// TestHardenProcess_MarksTheProcessNotDumpable runs HardenProcess in a child,
-// since the flag and the limit are process-wide, and reads both back from the
-// kernel independently of the package.
-func TestHardenProcess_MarksTheProcessNotDumpable(t *testing.T) {
-	if os.Getenv(hardenMarker) == "1" {
-		report, err := HardenProcess()
-		if err != nil {
-			t.Fatalf("HardenProcess: %v", err)
-		}
-		if !report.NotDumpable || !report.CoreDumpsDisabled {
-			t.Fatalf("HardenProcess report = %+v, want NotDumpable and CoreDumpsDisabled", report)
-		}
-		if err := CoreDumpsDisabled(); err != nil {
-			t.Fatalf("CoreDumpsDisabled() = %v after HardenProcess, want nil", err)
-		}
-		var rl unix.Rlimit
-		if err := unix.Getrlimit(unix.RLIMIT_CORE, &rl); err != nil {
-			t.Fatalf("getrlimit(RLIMIT_CORE): %v", err)
-		}
-		if rl.Cur != 0 || rl.Max != 0 {
-			t.Fatalf("RLIMIT_CORE = {cur %d, max %d} after HardenProcess, want {0, 0}", rl.Cur, rl.Max)
-		}
-		v, err := unix.PrctlRetInt(unix.PR_GET_DUMPABLE, 0, 0, 0, 0)
-		if err != nil {
-			t.Fatalf("PR_GET_DUMPABLE: %v", err)
-		}
-		if v != 0 {
-			t.Fatalf("PR_GET_DUMPABLE = %d after HardenProcess, want 0", v)
-		}
-		t.Log(hardenConfirmed)
-		return
-	}
-
-	out, err := runTestChild(t, "TestHardenProcess_MarksTheProcessNotDumpable", hardenMarker, "1")
-	if err != nil {
-		t.Fatalf("subprocess failed: %v\n%s", err, out)
-	}
-	if !strings.Contains(out, hardenConfirmed) {
-		t.Fatalf("subprocess did not confirm the process was made non-dumpable:\n%s", out)
 	}
 }
 

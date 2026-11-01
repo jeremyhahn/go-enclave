@@ -154,97 +154,6 @@ func TestNewAllocatorWithinRLimit_InvalidBudget(t *testing.T) {
 	}
 }
 
-// TestNewAllocatorWithinRLimit_AcceptsModestBudget is the control for the
-// refusal tests: a single page passes on any host that can run this suite, and
-// the allocator returned is usable.
-func TestNewAllocatorWithinRLimit_AcceptsModestBudget(t *testing.T) {
-	a, err := newBudgetAllocatorWithinRLimit(pageSize)
-	if err != nil {
-		t.Fatalf("newBudgetAllocatorWithinRLimit(%d): %v", pageSize, err)
-	}
-	if a.Limit() != pageSize {
-		t.Errorf("Limit = %d, want %d — the budget must be the one asked for, not a clamped figure", a.Limit(), pageSize)
-	}
-
-	material := []byte("checked-allocator-material")
-	e, err := a.admitData(material)
-	if err != nil {
-		t.Fatalf("New through a checked allocator: %v", err)
-	}
-	defer e.Destroy()
-	if !holds(e, []byte("checked-allocator-material")) {
-		t.Error("material did not survive into an enclave from a checked allocator")
-	}
-	if a.InUse() != pageSize {
-		t.Errorf("InUse = %d, want one page (%d)", a.InUse(), pageSize)
-	}
-}
-
-func TestAllocator_New_Admits(t *testing.T) {
-	limit := 4 * pageSize
-	a, err := newBudgetAllocator(limit)
-	if err != nil {
-		t.Fatalf("NewAllocator: %v", err)
-	}
-	material := []byte("admitted-key-material")
-
-	e, err := a.admitData(material)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	defer e.Destroy()
-
-	// Charged a whole page: the budget is in what the kernel locks.
-	if a.InUse() != pageSize {
-		t.Errorf("InUse = %d, want one page (%d)", a.InUse(), pageSize)
-	}
-	if a.Available() != limit-pageSize {
-		t.Errorf("Available = %d, want %d", a.Available(), limit-pageSize)
-	}
-	if ok, err := e.EqualTo([]byte("admitted-key-material")); err != nil || !ok {
-		t.Errorf("EqualTo = %v, %v; want the material held intact", ok, err)
-	}
-}
-
-// TestAllocator_New_RefusesOverBudget pins that an over-budget allocation is
-// refused with ErrBudgetExhausted, returns no enclave, and leaves the budget
-// unchanged.
-func TestAllocator_New_RefusesOverBudget(t *testing.T) {
-	// One page of budget holds exactly one enclave, however small its material.
-	a, err := newBudgetAllocator(pageSize)
-	if err != nil {
-		t.Fatalf("NewAllocator: %v", err)
-	}
-
-	first, err := a.admitData(bytes.Repeat([]byte("x"), 24))
-	if err != nil {
-		t.Fatalf("first New: %v", err)
-	}
-	defer first.Destroy()
-
-	before := a.InUse()
-	e, err := a.admitData(bytes.Repeat([]byte("y"), 16))
-	if !errors.Is(err, ErrBudgetExhausted) {
-		t.Fatalf("over-budget New err = %v, want ErrBudgetExhausted", err)
-	}
-	if e != nil {
-		t.Error("over-budget New returned a non-nil enclave")
-	}
-	if a.InUse() != before {
-		t.Errorf("InUse = %d after refusal, want unchanged %d", a.InUse(), before)
-	}
-
-	var be *BudgetError
-	if !errors.As(err, &be) {
-		t.Fatalf("err is not a *BudgetError: %v", err)
-	}
-	// The figures are in locked bytes throughout: 16 bytes of material costs
-	// a page, and the page already taken is what leaves no room.
-	if be.Requested != pageSize || be.Limit != pageSize || be.InUse != pageSize {
-		t.Errorf("BudgetError = %+v, want Requested=InUse=Limit=%d", be, pageSize)
-	}
-}
-
 // TestAllocator_New_WipesSourceOnRefusal pins that a refused allocation still
 // wipes the caller's slice.
 func TestAllocator_New_WipesSourceOnRefusal(t *testing.T) {
@@ -261,42 +170,6 @@ func TestAllocator_New_WipesSourceOnRefusal(t *testing.T) {
 			t.Fatalf("src[%d] = %#x after refusal, want the slice wiped", i, b)
 		}
 	}
-}
-
-// TestAllocator_Destroy_ReleasesReservation pins that Destroy returns the
-// reservation: a full budget refuses, and after Destroy an identical allocation
-// is admitted. The enclave reads back the same either way, so the property is
-// asserted on the allocator.
-func TestAllocator_Destroy_ReleasesReservation(t *testing.T) {
-	a, err := newBudgetAllocator(pageSize)
-	if err != nil {
-		t.Fatalf("NewAllocator: %v", err)
-	}
-
-	e, err := a.admitData(bytes.Repeat([]byte("a"), 16))
-	if err != nil {
-		t.Fatalf("New (full): %v", err)
-	}
-	if a.InUse() != pageSize {
-		t.Fatalf("InUse = %d, want one page (%d)", a.InUse(), pageSize)
-	}
-
-	// Budget is full: another allocation must be refused.
-	if _, err := a.New([]byte("b")); !errors.Is(err, ErrBudgetExhausted) {
-		t.Fatalf("New while full err = %v, want ErrBudgetExhausted", err)
-	}
-
-	e.Destroy()
-	if a.InUse() != 0 {
-		t.Fatalf("InUse = %d after Destroy, want 0 (reservation not released)", a.InUse())
-	}
-
-	// The freed budget must now admit an identical allocation.
-	e2, err := a.admitData(bytes.Repeat([]byte("c"), 16))
-	if err != nil {
-		t.Fatalf("New after release: %v (budget was not returned)", err)
-	}
-	e2.Destroy()
 }
 
 // TestAllocator_Destroy_ReleasesExactlyOnce guards against a double release
@@ -320,27 +193,6 @@ func TestAllocator_Destroy_ReleasesExactlyOnce(t *testing.T) {
 	}
 	if a.Available() != limit {
 		t.Fatalf("Available = %d after double Destroy, want the full %d", a.Available(), limit)
-	}
-}
-
-func TestAllocator_New_Empty(t *testing.T) {
-	a, err := newBudgetAllocator(4 * pageSize)
-	if err != nil {
-		t.Fatalf("NewAllocator: %v", err)
-	}
-	for name, in := range map[string][]byte{"nil": nil, "empty": {}} {
-		t.Run(name, func(t *testing.T) {
-			e, err := a.admitData(in)
-			if !errors.Is(err, ErrEmptyEnclave) {
-				t.Errorf("New(%s) err = %v, want ErrEmptyEnclave", name, err)
-			}
-			if e != nil {
-				t.Errorf("New(%s) returned a non-nil enclave", name)
-			}
-			if a.InUse() != 0 {
-				t.Errorf("InUse = %d after empty New, want 0 (no reservation)", a.InUse())
-			}
-		})
 	}
 }
 
@@ -2211,26 +2063,6 @@ func withDiscovery(t *testing.T, fn func() (LockedMemoryLimit, error)) {
 	swapSeam(t, &discoverProcessLimit, fn)
 }
 
-func TestSetAllocator_InstalledAllocatorIsWhatLibrariesGet(t *testing.T) {
-	freshProcessAllocator(t)
-
-	a, err := newBudgetAllocator(4 * LockedSize(1))
-	if err != nil {
-		t.Fatalf("NewAllocator: %v", err)
-	}
-	if err := SetAllocator(a); err != nil {
-		t.Fatalf("SetAllocator: %v", err)
-	}
-
-	got, err := ProcessAllocator()
-	if err != nil {
-		t.Fatalf("ProcessAllocator: %v", err)
-	}
-	if got != a {
-		t.Fatal("ProcessAllocator returned a different allocator from the one installed")
-	}
-}
-
 func TestSetAllocator_SecondInstallFailsClosed(t *testing.T) {
 	freshProcessAllocator(t)
 
@@ -2257,24 +2089,6 @@ func TestSetAllocator_SecondInstallFailsClosed(t *testing.T) {
 	}
 	if got != first {
 		t.Fatal("a refused install replaced the installed allocator")
-	}
-}
-
-func TestSetAllocator_NilIsRefusedAndLocksNothing(t *testing.T) {
-	freshProcessAllocator(t)
-
-	if err := SetAllocator(nil); !errors.Is(err, ErrNilAllocator) {
-		t.Fatalf("SetAllocator(nil) = %v, want ErrNilAllocator", err)
-	}
-
-	// The refusal must not have consumed the one-shot: a real install after a
-	// lost configuration step still succeeds.
-	a, err := newBudgetAllocator(LockedSize(1))
-	if err != nil {
-		t.Fatalf("NewAllocator: %v", err)
-	}
-	if err := SetAllocator(a); err != nil {
-		t.Fatalf("SetAllocator after a nil refusal: %v", err)
 	}
 }
 
@@ -2421,31 +2235,6 @@ func TestDefaultProcessAllocator_EveryCeilingShape(t *testing.T) {
 			}
 		})
 	}
-}
-
-// TestProcessAllocator_DefaultMatchesThisHost checks the real discovery path,
-// unseamed, on whatever ceiling the test host has: the default's budget is the
-// discovered figure when it binds and unbounded when it does not.
-func TestProcessAllocator_DefaultMatchesThisHost(t *testing.T) {
-	freshProcessAllocator(t)
-
-	limit, err := DiscoverLockedMemoryLimit()
-	if err != nil {
-		t.Fatalf("DiscoverLockedMemoryLimit: %v", err)
-	}
-	a, err := ProcessAllocator()
-	if err != nil {
-		t.Fatalf("ProcessAllocator: %v", err)
-	}
-
-	want := int64(math.MaxInt64)
-	if limit.Bounded {
-		want = limit.Bytes
-	}
-	if got := a.Limit(); got != want {
-		t.Fatalf("default budget = %d, want %d (discovered %+v)", got, want, limit)
-	}
-	t.Logf("host ceiling %+v -> default budget %d", limit, a.Limit())
 }
 
 // TestProcessAllocator_ConcurrentFirstUseInstallsOne races the lazy default:

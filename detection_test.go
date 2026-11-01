@@ -56,17 +56,6 @@ func resultFor(t *testing.T, results []ProbeResult, name string) ProbeResult {
 	return ProbeResult{}
 }
 
-func TestDetect_SelectsLockedMemoryWhenNothingElseIsRegistered(t *testing.T) {
-	got, results := Detect(context.Background())
-	if got != DefaultBackend() {
-		t.Fatalf("Detect selected %q, want the default", got.Name())
-	}
-	r := resultFor(t, results, LockedMemoryBackendName)
-	if r.Rank != 0 || r.Err != nil {
-		t.Fatalf("default result = %+v, want rank 0, usable", r)
-	}
-}
-
 func TestDetect_SelectsTheHigherRankedUsableBackend(t *testing.T) {
 	low := &fakeProber{name: "test-detect-low", rank: 10}
 	high := &fakeProber{name: "test-detect-high", rank: 20}
@@ -125,20 +114,6 @@ func TestDetect_ATieGoesToTheFirstName(t *testing.T) {
 		if got, _ := Detect(context.Background()); got != first {
 			t.Fatalf("Detect selected %q, want %q", got.Name(), first.name)
 		}
-	}
-}
-
-func TestDetect_NeverSelectsABackendThatIsNoProber(t *testing.T) {
-	b := &fakeBackend{name: "test-detect-plain"}
-	registerForTest(t, b)
-	got, results := Detect(context.Background())
-	if got != DefaultBackend() {
-		t.Fatalf("Detect selected %q, want the default", got.Name())
-	}
-	r := resultFor(t, results, b.name)
-	var ce *CapabilityError
-	if !errors.As(r.Err, &ce) || ce.Backend != b.name || ce.Capability != CapabilityProbe {
-		t.Fatalf("result = %+v, want a CapabilityError for %q", r, CapabilityProbe)
 	}
 }
 

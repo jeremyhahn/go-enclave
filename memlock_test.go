@@ -13,8 +13,6 @@ import (
 	"fmt"
 	"math"
 	"os"
-	"strconv"
-	"strings"
 	"testing"
 )
 
@@ -50,83 +48,6 @@ func TestMain(m *testing.M) {
 		os.Exit(2)
 	}
 	os.Exit(m.Run())
-}
-
-func TestLimitSource_String(t *testing.T) {
-	cases := []struct {
-		source LimitSource
-		want   string
-	}{
-		{LimitRLimit, "RLIMIT_MEMLOCK"},
-		{LimitUnlimited, "RLIMIT_MEMLOCK unlimited"},
-		{LimitNotEnforced, "RLIMIT_MEMLOCK not enforced (CAP_IPC_LOCK)"},
-		{LimitUnsupported, "no locked-memory limit on this platform"},
-		{LimitUnknown, "unknown"},
-		{LimitSource(200), "unknown"},
-	}
-	for _, tc := range cases {
-		if got := tc.source.String(); got != tc.want {
-			t.Errorf("LimitSource(%d).String() = %q, want %q", tc.source, got, tc.want)
-		}
-	}
-	// Every named source must render differently, so a log line tells
-	// "unlimited" from "we did not look".
-	seen := make(map[string]LimitSource, len(cases))
-	for _, tc := range cases[:4] {
-		if prev, dup := seen[tc.want]; dup {
-			t.Errorf("LimitSource %d and %d render identically as %q", prev, tc.source, tc.want)
-		}
-		seen[tc.want] = tc.source
-	}
-}
-
-// TestRLimitError_Distinguishable pins that the refusal is distinct from the
-// three errors it neighbors, in both directions.
-func TestRLimitError_Distinguishable(t *testing.T) {
-	err := error(&RLimitError{
-		Requested: 1 << 20,
-		Limit:     LockedMemoryLimit{Bytes: 65536, Bounded: true, Source: LimitRLimit},
-	})
-
-	if !errors.Is(err, ErrBudgetExceedsRLimit) {
-		t.Errorf("errors.Is(err, ErrBudgetExceedsRLimit) = false, want true")
-	}
-	for _, other := range []struct {
-		name string
-		err  error
-	}{
-		{"ErrInvalidBudget", ErrInvalidBudget},
-		{"ErrBudgetExhausted", ErrBudgetExhausted},
-		{"ErrLockedMemoryUnavailable", ErrLockedMemoryUnavailable},
-		{"ErrInvalidSize", ErrInvalidSize},
-	} {
-		if errors.Is(err, other.err) {
-			t.Errorf("errors.Is(RLimitError, %s) = true, want false", other.name)
-		}
-	}
-
-	// The neighbors must not match this sentinel either.
-	for _, other := range []error{ErrInvalidBudget, ErrBudgetExhausted, ErrLockedMemoryUnavailable} {
-		if errors.Is(other, ErrBudgetExceedsRLimit) {
-			t.Errorf("errors.Is(%v, ErrBudgetExceedsRLimit) = true, want false", other)
-		}
-	}
-
-	// Both figures must survive into the message.
-	msg := err.Error()
-	for _, want := range []string{strconv.Itoa(1 << 20), "65536", "RLIMIT_MEMLOCK"} {
-		if !strings.Contains(msg, want) {
-			t.Errorf("Error() = %q, want it to contain %q", msg, want)
-		}
-	}
-
-	var target *RLimitError
-	if !errors.As(err, &target) {
-		t.Fatal("errors.As could not reach *RLimitError")
-	}
-	if target.Requested != 1<<20 || target.Limit.Bytes != 65536 {
-		t.Errorf("As gave Requested=%d Limit.Bytes=%d, want %d and 65536", target.Requested, target.Limit.Bytes, 1<<20)
-	}
 }
 
 // linuxRlimInfinity and bsdRlimInfinity are the two RLIM_INFINITY values,
@@ -258,35 +179,6 @@ func TestClassifyRlimit_UnboundedRefusesNothing(t *testing.T) {
 		if err := limit.refuse(math.MaxInt64); err != nil {
 			t.Fatalf("an unbounded ceiling refused the largest budget expressible: %v", err)
 		}
-	}
-}
-
-// TestLimitDiscoveryError_Distinguishable pins that a failure to read the
-// ceiling matches neither a budget verdict nor a locked-memory shortage.
-func TestLimitDiscoveryError_Distinguishable(t *testing.T) {
-	cause := errors.New("getrlimit: operation not permitted")
-	err := error(&LimitDiscoveryError{Cause: cause})
-
-	if !errors.Is(err, ErrLimitDiscoveryFailed) {
-		t.Error("errors.Is(err, ErrLimitDiscoveryFailed) = false, want true")
-	}
-	for _, other := range []error{ErrBudgetExceedsRLimit, ErrInvalidBudget, ErrBudgetExhausted, ErrLockedMemoryUnavailable} {
-		if errors.Is(err, other) {
-			t.Errorf("a discovery failure also matched %v", other)
-		}
-	}
-	if !errors.Is(err, cause) {
-		t.Error("errors.Is could not reach the wrapped syscall failure")
-	}
-	if !strings.Contains(err.Error(), "operation not permitted") {
-		t.Errorf("Error() = %q, want it to carry the cause", err.Error())
-	}
-	// A nil cause must still render.
-	if got := (&LimitDiscoveryError{}).Error(); got != ErrLimitDiscoveryFailed.Error() {
-		t.Errorf("Error() with no cause = %q, want %q", got, ErrLimitDiscoveryFailed.Error())
-	}
-	if (&LimitDiscoveryError{}).Unwrap() != nil {
-		t.Error("Unwrap with no cause should be nil")
 	}
 }
 

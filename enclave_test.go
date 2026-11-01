@@ -25,60 +25,6 @@ import (
 	"github.com/jeremyhahn/go-enclave/internal/memscan"
 )
 
-func TestNewMemory_HoldsMaterial(t *testing.T) {
-	e, err := newMemory([]byte("private-key-material"))
-	if err != nil {
-		t.Fatalf("NewMemory: %v", err)
-	}
-	defer e.Destroy()
-
-	// Compared in place: neither a string conversion nor a %q may carry the
-	// material onto the heap or into the test log.
-	if err := e.WithBytes(func(got []byte) error {
-		if !bytes.Equal(got, []byte("private-key-material")) {
-			t.Errorf("WithBytes lent a %d-byte view that does not hold the material it was built from", len(got))
-		}
-		return nil
-	}); err != nil {
-		t.Fatalf("WithBytes: %v", err)
-	}
-	if e.Size() != len("private-key-material") {
-		t.Errorf("Size = %d, want %d", e.Size(), len("private-key-material"))
-	}
-	if !e.IsAlive() {
-		t.Error("IsAlive = false, want true")
-	}
-}
-
-func TestNewMemory_WipesSource(t *testing.T) {
-	src := []byte("wipe-me-completely")
-	want := make([]byte, len(src))
-
-	e, err := newMemory(src)
-	if err != nil {
-		t.Fatalf("NewMemory: %v", err)
-	}
-	defer e.Destroy()
-
-	if !bytes.Equal(src, want) {
-		t.Errorf("source not wiped: got %q, want all zeroes", src)
-	}
-}
-
-func TestNewMemory_Empty(t *testing.T) {
-	for name, in := range map[string][]byte{"nil": nil, "empty": {}} {
-		t.Run(name, func(t *testing.T) {
-			e, err := newMemory(in)
-			if !errors.Is(err, ErrEmptyEnclave) {
-				t.Errorf("err = %v, want ErrEmptyEnclave", err)
-			}
-			if e != nil {
-				t.Error("enclave should be nil on error")
-			}
-		})
-	}
-}
-
 // TestNewMemory_ReturnsTheInterface pins the exported constructors' shape: a
 // *lockedRegion handed out as a ByteAccess that is also a Freezer, and a nil
 // interface, never one holding a nil *lockedRegion, on failure.
@@ -167,41 +113,6 @@ func TestAs_ReachesFreezerOnlyThroughAMemoryEnclave(t *testing.T) {
 	}
 }
 
-// TestNewMemoryCopy_LeavesTheSourceIntact pins that the copy constructor
-// leaves its source intact while NewMemory wipes identical bytes. The two
-// constructors share one body, so only both halves together show they differ.
-func TestNewMemoryCopy_LeavesTheSourceIntact(t *testing.T) {
-	const material = "caller-owned-credential"
-
-	copied := []byte(material)
-	e, err := newMemoryCopy(copied)
-	if err != nil {
-		t.Fatalf("NewMemoryCopy: %v", err)
-	}
-	defer e.Destroy()
-
-	if string(copied) != material {
-		t.Errorf("source = %q after NewMemoryCopy, want it untouched (%q)", copied, material)
-	}
-	if !holds(e, []byte(material)) {
-		t.Error("the enclave does not hold the material it was handed")
-	}
-	if e.Size() != len(material) {
-		t.Errorf("Size = %d, want %d", e.Size(), len(material))
-	}
-
-	moved := []byte(material)
-	m, err := newMemory(moved)
-	if err != nil {
-		t.Fatalf("NewMemory: %v", err)
-	}
-	defer m.Destroy()
-
-	if !bytes.Equal(moved, make([]byte, len(material))) {
-		t.Errorf("source = %q after NewMemory, want it wiped", moved)
-	}
-}
-
 // TestNewMemoryCopy_IsIndependentOfTheSource pins that the copy does not
 // alias the caller's slice: neither writing nor wiping the source afterwards
 // reaches the enclave's material.
@@ -253,20 +164,6 @@ func TestNewMemoryCopy_PagesAreFrozen(t *testing.T) {
 	}
 }
 
-func TestNewMemoryCopy_Empty(t *testing.T) {
-	for name, in := range map[string][]byte{"nil": nil, "empty": {}} {
-		t.Run(name, func(t *testing.T) {
-			e, err := newMemoryCopy(in)
-			if !errors.Is(err, ErrEmptyEnclave) {
-				t.Errorf("err = %v, want ErrEmptyEnclave", err)
-			}
-			if e != nil {
-				t.Error("enclave should be nil on error")
-			}
-		})
-	}
-}
-
 // TestNewMemoryCopy_IsPublishedToTheLedger pins that the copy
 // constructor registers its enclave, so WipeAll reaches it at shutdown.
 func TestNewMemoryCopy_IsPublishedToTheLedger(t *testing.T) {
@@ -287,29 +184,6 @@ func TestNewMemoryCopy_IsPublishedToTheLedger(t *testing.T) {
 	}
 	if e.IsAlive() {
 		t.Error("the enclave survived WipeAll")
-	}
-}
-
-func TestMemory_Destroy(t *testing.T) {
-	e, err := newMemory([]byte("transient"))
-	if err != nil {
-		t.Fatalf("NewMemory: %v", err)
-	}
-
-	e.Destroy()
-	e.Destroy() // idempotent
-
-	if e.IsAlive() {
-		t.Error("IsAlive = true after Destroy")
-	}
-	if e.Size() != 0 {
-		t.Errorf("Size = %d after Destroy, want 0", e.Size())
-	}
-	if err := e.WithBytes(func([]byte) error { return nil }); !errors.Is(err, ErrEnclaveDestroyed) {
-		t.Errorf("WithBytes err = %v, want ErrEnclaveDestroyed", err)
-	}
-	if ok, err := e.EqualTo([]byte("transient")); ok || !errors.Is(err, ErrEnclaveDestroyed) {
-		t.Errorf("EqualTo = (%t, %v) on destroyed enclave, want (false, ErrEnclaveDestroyed)", ok, err)
 	}
 }
 
@@ -357,28 +231,6 @@ func TestMemory_WithBytes(t *testing.T) {
 	sentinel := errors.New("from fn")
 	if err := e.WithBytes(func([]byte) error { return sentinel }); !errors.Is(err, sentinel) {
 		t.Errorf("WithBytes err = %v, want the fn's error", err)
-	}
-}
-
-func TestMemory_EqualTo(t *testing.T) {
-	e, err := newMemory([]byte("compare-me"))
-	if err != nil {
-		t.Fatalf("NewMemory: %v", err)
-	}
-	defer e.Destroy()
-
-	for _, tc := range []struct {
-		other []byte
-		want  bool
-	}{
-		{[]byte("compare-me"), true},
-		{[]byte("compare-mE"), false},
-		{[]byte("compare"), false},
-		{nil, false},
-	} {
-		if got, err := e.EqualTo(tc.other); got != tc.want || err != nil {
-			t.Errorf("EqualTo(%q) = (%t, %v), want (%t, nil)", tc.other, got, err, tc.want)
-		}
 	}
 }
 

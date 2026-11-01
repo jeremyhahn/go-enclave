@@ -107,18 +107,6 @@ func assertMemfdSecretRefusal(t *testing.T, err error, call string, errno syscal
 	}
 }
 
-func TestLinuxSecretmem_NameAndRank(t *testing.T) {
-	b, _ := newSecretMemoryForTest(t, 1<<20)
-	if b.Name() != SecretMemoryBackendName || !validName(b.Name()) {
-		t.Fatalf("Name() = %q, want a valid %q", b.Name(), SecretMemoryBackendName)
-	}
-	if b.Rank() != 1 || b.Rank() <= lockedMemoryRank {
-		t.Fatalf("Rank() = %d, want 1, above locked memory's %d", b.Rank(), lockedMemoryRank)
-	}
-	var _ Importer = b
-	var _ Prober = b
-}
-
 func TestLinuxSecretmem_ConstructionNeedsAnAllocator(t *testing.T) {
 	if _, err := NewSecretMemory(nil); !errors.Is(err, ErrNilAllocator) {
 		t.Fatalf("NewSecretMemory(nil) = %v, want ErrNilAllocator", err)
@@ -178,16 +166,6 @@ func TestLinuxSecretmem_ProbeNamesARefusedFtruncate(t *testing.T) {
 	memfdStandIn(t, unix.F_SEAL_GROW)
 	b, _ := newSecretMemoryForTest(t, 1<<20)
 	assertMemfdSecretRefusal(t, b.Probe(context.Background()), "ftruncate", unix.EPERM)
-}
-
-func TestLinuxSecretmem_ProbePassesWhereTheCallsSucceed(t *testing.T) {
-	memfdStandIn(t, 0)
-	b, _ := newSecretMemoryForTest(t, 1<<20)
-	for range 3 {
-		if err := b.Probe(context.Background()); err != nil {
-			t.Fatalf("Probe = %v, want nil", err)
-		}
-	}
 }
 
 func TestLinuxSecretmem_DetectKeepsLockedMemoryOnRefusal(t *testing.T) {

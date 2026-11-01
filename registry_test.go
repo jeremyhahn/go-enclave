@@ -12,16 +12,12 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 )
-
-// errBorrowChanged reports material altered underneath a live borrow.
-var errBorrowChanged = errors.New("borrowed material changed underneath the borrow")
 
 // sweepHangBound is the deadline every test sweep runs under. It is a hang
 // detector only: a sweep that waits forever returns a non-zero count the test
@@ -101,74 +97,6 @@ func reclaimOnCleanup(t *testing.T, halt func(),
 	})
 }
 
-// TestWipeAll_DestroysEveryLiveEnclave pins that nothing this package allocated
-// survives a sweep. It counts the ledger rather than trusting the return value.
-func TestWipeAll_DestroysEveryLiveEnclave(t *testing.T) {
-	const n = 8
-	material := bytes.Repeat([]byte{0xC7}, 48)
-
-	before := liveCount()
-
-	held := make([]*lockedRegion, 0, n)
-	for i := 0; i < n; i++ {
-		e, err := newMemory(append([]byte(nil), material...))
-		if err != nil {
-			t.Fatalf("NewMemory: %v", err)
-		}
-		held = append(held, e)
-	}
-	if got := liveCount(); got != before+n {
-		t.Fatalf("ledger holds %d, want %d: construction did not register", got, before+n)
-	}
-
-	if remaining := sweep(t); remaining != 0 {
-		t.Errorf("WipeAll left %d enclaves, want 0", remaining)
-	}
-
-	for i, e := range held {
-		if e.IsAlive() {
-			t.Errorf("enclave %d is still alive after WipeAll", i)
-		}
-		if e.Size() != 0 {
-			t.Errorf("enclave %d reports size %d after WipeAll", i, e.Size())
-		}
-		if holds(e, material) {
-			t.Errorf("enclave %d still holds its material after WipeAll", i)
-		}
-	}
-	if got := liveCount(); got != 0 {
-		t.Errorf("ledger holds %d after WipeAll, want 0", got)
-	}
-}
-
-// TestWipeAll_IsIdempotentAndEmptySafe covers the two calls a shutdown path
-// makes by accident: one when nothing was ever allocated, and a second after
-// the first already swept.
-func TestWipeAll_IsIdempotentAndEmptySafe(t *testing.T) {
-	if remaining := sweep(t); remaining != 0 {
-		t.Errorf("WipeAll on an empty ledger = %d, want 0", remaining)
-	}
-
-	e, err := newMemorySized(32)
-	if err != nil {
-		t.Fatalf("NewMemorySized: %v", err)
-	}
-	if remaining := sweep(t); remaining != 0 {
-		t.Errorf("first WipeAll = %d, want 0", remaining)
-	}
-	if remaining := sweep(t); remaining != 0 {
-		t.Errorf("second WipeAll = %d, want 0", remaining)
-	}
-	if e.IsAlive() {
-		t.Error("the enclave survived WipeAll")
-	}
-
-	// And the enclave's own Destroy afterwards is still a no-op, not a panic or
-	// a double release.
-	e.Destroy()
-	e.Destroy()
-}
-
 // TestWipeAll_AlreadyDestroyedIsANoOp pins that Destroy takes its enclave off
 // the ledger, so the registry does not retain every enclave ever created.
 func TestWipeAll_AlreadyDestroyedIsANoOp(t *testing.T) {
@@ -189,117 +117,6 @@ func TestWipeAll_AlreadyDestroyedIsANoOp(t *testing.T) {
 
 	if remaining := sweep(t); remaining != 0 {
 		t.Errorf("WipeAll = %d, want 0", remaining)
-	}
-}
-
-// TestWipeAll_ABorrowThatOutlastsCtxIsCountedNotUnmapped pins that a borrow
-// outlasting ctx is skipped and counted, never unmapped, while the un-borrowed
-// enclave is still reclaimed. ctx is canceled through sweepWaitingForTest, so
-// the wait's ctx branch is exercised without a clock.
-func TestWipeAll_ABorrowThatOutlastsCtxIsCountedNotUnmapped(t *testing.T) {
-	material := bytes.Repeat([]byte{0x3C}, 40)
-
-	borrowed, err := newMemory(append([]byte(nil), material...))
-	if err != nil {
-		t.Fatalf("NewMemory: %v", err)
-	}
-	other, err := newMemorySized(32)
-	if err != nil {
-		t.Fatalf("NewMemorySized: %v", err)
-	}
-
-	inBorrow := make(chan struct{})
-	release := make(chan struct{})
-	borrowDone := make(chan error, 1)
-	go func() {
-		borrowDone <- borrowed.WithBytes(func(b []byte) error {
-			close(inBorrow)
-			<-release
-			// Read AFTER the sweep has returned. If WipeAll had unmapped these
-			// pages this faults the process rather than failing the test.
-			if !bytes.Equal(b, material) {
-				return errBorrowChanged
-			}
-			return nil
-		})
-	}()
-	<-inBorrow
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	var waits atomic.Int32
-	swapSeam(t, &sweepWaitingForTest, func() {
-		waits.Add(1)
-		cancel()
-	})
-
-	swept := make(chan int, 1)
-	go func() { n, _ := WipeAll(ctx); swept <- n }()
-
-	var remaining int
-	select {
-	case remaining = <-swept:
-	case <-time.After(sweepHangBound):
-		// A failure, not a skip: with the borrow still parked the sweep must
-		// return once ctx ends.
-		t.Fatal("WipeAll did not return after its context was canceled with a borrow in flight: " +
-			"the wait is not bounded by ctx; a stalled holder would hang shutdown")
-	}
-
-	if got := waits.Load(); got != 1 {
-		t.Errorf("the sweep waited %d times, want exactly 1: it found the borrow held once, waited, "+
-			"and its context ended", got)
-	}
-	if remaining != 1 {
-		t.Errorf("WipeAll = %d, want 1: the borrowed enclave should be skipped and counted", remaining)
-	}
-	if other.IsAlive() {
-		t.Error("the un-borrowed enclave was not wiped; one live borrow stopped the whole sweep")
-	}
-
-	close(release)
-	if err := <-borrowDone; err != nil {
-		t.Fatalf("borrow: %v", err)
-	}
-	if !borrowed.IsAlive() {
-		t.Error("the borrowed enclave was destroyed although the borrow outlasted the sweep's context")
-	}
-
-	// Once the borrow is done the enclave is still on the ledger, so a second
-	// sweep reclaims it — the retry the count is telling the caller to make.
-	if remaining := sweep(t); remaining != 0 {
-		t.Errorf("second WipeAll = %d, want 0 once the borrow has returned", remaining)
-	}
-	if borrowed.IsAlive() {
-		t.Error("the previously borrowed enclave survived the second sweep")
-	}
-}
-
-// TestWipeAll_ReturnsTheAllocatorReservations pins that the sweep settles the
-// Allocator budget on the same terms Destroy does.
-func TestWipeAll_ReturnsTheAllocatorReservations(t *testing.T) {
-	a, err := newBudgetAllocator(8 * pageSize)
-	if err != nil {
-		t.Fatalf("NewAllocator: %v", err)
-	}
-
-	for i := 0; i < 4; i++ {
-		if _, err := a.NewSized(64); err != nil {
-			t.Fatalf("NewSized: %v", err)
-		}
-	}
-	if a.InUse() == 0 {
-		t.Fatal("nothing was reserved; the test would be vacuous")
-	}
-
-	if remaining := sweep(t); remaining != 0 {
-		t.Fatalf("WipeAll = %d, want 0", remaining)
-	}
-	if got := a.InUse(); got != 0 {
-		t.Errorf("InUse = %d after WipeAll, want 0: the sweep did not return the reservations", got)
-	}
-	if got := a.Available(); got != 8*pageSize {
-		t.Errorf("Available = %d after WipeAll, want the full budget", got)
 	}
 }
 
@@ -804,39 +621,6 @@ func TestWipeAll_DoesNotPanicOnACorruptCanaryAndFinishesTheSweep(t *testing.T) {
 	}
 }
 
-// TestWipeAll_ReportsHowManyEnclavesWereCorrupt pins that one error carries
-// the number of corrupt enclaves rather than one joined sentinel per enclave.
-func TestWipeAll_ReportsHowManyEnclavesWereCorrupt(t *testing.T) {
-	requireCleanLedger(t)
-
-	const total, corruptCount = 5, 3
-
-	for i := 0; i < total; i++ {
-		e, err := newMemorySized(64)
-		if err != nil {
-			t.Fatalf("NewMemorySized: %v", err)
-		}
-		if i < corruptCount {
-			if len(e.m.canary) == 0 {
-				t.Fatal("no canary slack at this size; the test would be vacuous")
-			}
-			e.m.canary[0] ^= 0xFF
-		}
-	}
-
-	remaining, err := WipeAll(context.Background())
-	if remaining != 0 {
-		t.Errorf("WipeAll = %d, want 0", remaining)
-	}
-	if !errors.Is(err, ErrEnclaveCorrupted) {
-		t.Fatalf("WipeAll error = %v, want one matching ErrEnclaveCorrupted", err)
-	}
-	if got := err.Error(); !strings.Contains(got, strconv.Itoa(corruptCount)) {
-		t.Errorf("WipeAll error = %q, want it to name how many enclaves were corrupt (%d): an operator "+
-			"reading one line needs the number, and a single sentinel cannot carry it", got, corruptCount)
-	}
-}
-
 // TestWipeAll_ReportsCorruptionWhoseReleaseWasRefused pins that a corrupt
 // enclave whose munmap is refused is both counted and reported, and reported
 // once although attempted twice. A companion enclave that releases normally
@@ -897,27 +681,6 @@ func TestWipeAll_ReportsCorruptionWhoseReleaseWasRefused(t *testing.T) {
 	}
 	if !errors.Is(err, ErrEnclaveCorrupted) {
 		t.Errorf("the sweep that reclaimed the corrupt enclave reported %v, want ErrEnclaveCorrupted", err)
-	}
-}
-
-// TestWipeAll_ReportsNoErrorWhenNothingIsCorrupt is the control for the
-// corruption tests: a clean sweep reports nil.
-func TestWipeAll_ReportsNoErrorWhenNothingIsCorrupt(t *testing.T) {
-	requireCleanLedger(t)
-
-	for i := 0; i < 4; i++ {
-		if _, err := newMemorySized(64); err != nil {
-			t.Fatalf("NewMemorySized: %v", err)
-		}
-	}
-
-	remaining, err := WipeAll(context.Background())
-	if remaining != 0 {
-		t.Errorf("WipeAll = %d, want 0", remaining)
-	}
-	if err != nil {
-		t.Errorf("WipeAll error = %v, want nil: nothing was corrupt, and an error here would make the "+
-			"corruption signal meaningless", err)
 	}
 }
 

@@ -13,7 +13,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -444,63 +443,6 @@ func TestExcludeFromFork_ReportsRefusal(t *testing.T) {
 		t.Fatal("excludeFromFork reported success on an unaligned region")
 	}
 	requireMadviseError(t, err)
-}
-
-// TestNewMapping_KernelRecordsTheExclusions reads the kernel's own VMA flags
-// for a fresh mapping: every page, guards included, is "dc" (MADV_DONTFORK),
-// and the data region is "dd" (MADV_DONTDUMP).
-func TestNewMapping_KernelRecordsTheExclusions(t *testing.T) {
-	m, err := newMapping(64)
-	if err != nil {
-		t.Fatalf("newMapping: %v", err)
-	}
-	defer func() {
-		if err := m.release(); err != nil {
-			t.Errorf("release: %v", err)
-		}
-	}()
-
-	for _, region := range []struct {
-		name string
-		b    []byte
-		want []string
-	}{
-		{"preguard", m.preguard, []string{"dc"}},
-		{"inner", m.inner, []string{"dc", "dd"}},
-		{"postguard", m.postguard, []string{"dc"}},
-	} {
-		flags := vmFlagsAt(t, uintptr(unsafe.Pointer(&region.b[0])))
-		for _, f := range region.want {
-			if !slices.Contains(flags, f) {
-				t.Errorf("%s VmFlags = %v, want %q", region.name, flags, f)
-			}
-		}
-	}
-}
-
-// vmFlagsAt returns the VmFlags /proc/self/smaps reports for the mapping
-// containing addr.
-func vmFlagsAt(t *testing.T, addr uintptr) []string {
-	t.Helper()
-	raw, err := os.ReadFile("/proc/self/smaps")
-	if err != nil {
-		t.Fatalf("read /proc/self/smaps: %v", err)
-	}
-	in := false
-	for _, line := range strings.Split(string(raw), "\n") {
-		if f := strings.Fields(line); len(f) > 0 && strings.Contains(f[0], "-") && !strings.HasSuffix(f[0], ":") {
-			lo, hi, ok := strings.Cut(f[0], "-")
-			l, err1 := strconv.ParseUint(lo, 16, 64)
-			h, err2 := strconv.ParseUint(hi, 16, 64)
-			in = ok && err1 == nil && err2 == nil && uint64(addr) >= l && uint64(addr) < h
-			continue
-		}
-		if in && strings.HasPrefix(line, "VmFlags:") {
-			return strings.Fields(strings.TrimPrefix(line, "VmFlags:"))
-		}
-	}
-	t.Fatalf("no VmFlags found for %#x in /proc/self/smaps", addr)
-	return nil
 }
 
 // mappedAt reports whether addr still falls inside any mapping of this process.

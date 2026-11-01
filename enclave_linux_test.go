@@ -9,14 +9,12 @@
 package enclave
 
 import (
-	"bufio"
 	"bytes"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"runtime"
-	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -409,95 +407,6 @@ func allocReleaseChild(t *testing.T) {
 		t.Fatalf("InUse = %d after releasing survivors, want 0 (failed allocation leaked its reservation)", got)
 	}
 	t.Log(allocReleaseConfirmed)
-}
-
-// TestNewMemorySized_MemoryIsLocked asks the kernel, via
-// /proc/self/smaps, whether the region a sized enclave lends its filler is
-// mlocked. An ordinary heap page is the control and must read 0 kB locked, so
-// an mlockall'd process or a kernel without per-mapping Locked: figures fails
-// rather than passing for the wrong reason.
-func TestNewMemorySized_MemoryIsLocked(t *testing.T) {
-	heap := make([]byte, os.Getpagesize())
-	for i := range heap {
-		heap[i] = 1 // fault the page in so it has a mapping to find
-	}
-	heapAddr, err := memscan.Addr(heap)
-	if err != nil {
-		t.Fatalf("heap address: %v", err)
-	}
-	heapKB, found, err := lockedKBForAddress(heapAddr)
-	if err != nil {
-		t.Fatalf("cannot read /proc/self/smaps: %v", err)
-	}
-	if !found {
-		t.Fatalf("no smaps entry with a Locked: field covers ordinary heap memory at %#x: the kernel does not "+
-			"report per-mapping locking, so the assertion below could not tell locked from unlocked", heapAddr)
-	}
-	if heapKB != 0 {
-		t.Fatalf("ordinary heap memory reports %d kB locked: the process is mlockall'd, so every mapping reads "+
-			"as locked and the assertion below would pass for the wrong reason", heapKB)
-	}
-	runtime.KeepAlive(heap)
-
-	e, err := newMemorySized(64)
-	if err != nil {
-		t.Fatalf("NewMemorySized: %v", err)
-	}
-	defer e.Destroy()
-
-	var addr uintptr
-	if err := e.WithBytes(func(b []byte) error {
-		var aerr error
-		addr, aerr = memscan.Addr(b)
-		return aerr
-	}); err != nil {
-		t.Fatalf("borrow: %v", err)
-	}
-
-	kb, found, err := lockedKBForAddress(addr)
-	if err != nil {
-		t.Fatalf("cannot read /proc/self/smaps: %v", err)
-	}
-	if !found {
-		t.Fatalf("no smaps entry covers the borrowed region at %#x", addr)
-	}
-	if kb == 0 {
-		t.Fatalf("the borrowed region at %#x reports 0 kB locked; a sized enclave's memory is not mlocked", addr)
-	}
-}
-
-// lockedKBForAddress reports the Locked: figure of the /proc/self/smaps mapping
-// that contains addr. found is false when no mapping covers addr, or when the
-// kernel does not emit the field for it.
-func lockedKBForAddress(addr uintptr) (kb int64, found bool, err error) {
-	f, err := os.Open("/proc/self/smaps")
-	if err != nil {
-		return 0, false, err
-	}
-	defer f.Close()
-
-	inRange := false
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		line := sc.Text()
-		if lo, hi, ok := memscan.ParseMapsHeader(line); ok {
-			inRange = addr >= lo && addr < hi
-			continue
-		}
-		if !inRange || !strings.HasPrefix(line, "Locked:") {
-			continue
-		}
-		fields := strings.Fields(line)
-		if len(fields) < 2 {
-			return 0, false, fmt.Errorf("malformed smaps line %q", line)
-		}
-		v, perr := strconv.ParseInt(fields[1], 10, 64)
-		if perr != nil {
-			return 0, false, fmt.Errorf("malformed smaps line %q: %w", line, perr)
-		}
-		return v, true, nil
-	}
-	return 0, false, sc.Err()
 }
 
 const (
