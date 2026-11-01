@@ -278,13 +278,48 @@ func TestSealing_KeyScheduleErasureReportsThisBuild(t *testing.T) {
 // release and allocation error types, including the zero value, renders and
 // unwraps to nothing it does not carry.
 func TestMemoryEnclave_EnclaveErrorTypesRenderEveryValue(t *testing.T) {
-	for _, e := range []error{&enclave.UnwipedReleaseError{}, &enclave.LockedMemoryError{}} {
+	for _, e := range []error{&enclave.UnwipedReleaseError{}, &enclave.LockedMemoryError{}, &enclave.OpenError{},
+		&enclave.SealerWipedError{}, &enclave.BackendNotRegisteredError{}, &enclave.BackendExistsError{},
+		&enclave.ProbeError{}, &enclave.MemfdSecretError{}} {
 		if msg := e.Error(); !strings.HasPrefix(msg, "enclave: ") {
 			t.Errorf("%T{}.Error() = %q, want a message in the package's voice", e, msg)
 		}
 	}
 	if errors.Unwrap(&enclave.LockedMemoryError{}) != nil {
 		t.Error("a LockedMemoryError with no cause unwraps to something")
+	}
+	memfd := &enclave.MemfdSecretError{Cause: errors.ErrUnsupported}
+	if !errors.Is(memfd, enclave.ErrMemfdSecretUnavailable) {
+		t.Error("a MemfdSecretError does not match ErrMemfdSecretUnavailable")
+	}
+	if errors.Unwrap(memfd) != errors.ErrUnsupported {
+		t.Error("a MemfdSecretError does not unwrap to its cause")
+	}
+}
+
+// TestLockedMemoryBudget_ForceLimitRaisesHoldsAndRefuses: ForceLimit refuses a
+// negative budget, leaves an equal one as it is, and grants a raise at once,
+// reporting no excess on either.
+func TestLockedMemoryBudget_ForceLimitRaisesHoldsAndRefuses(t *testing.T) {
+	page := enclave.LockedSize(1)
+	a, err := enclave.NewAllocator(2 * page)
+	if err != nil {
+		t.Fatalf("NewAllocator: %v", err)
+	}
+	if _, err := a.ForceLimit(-1); !errors.Is(err, enclave.ErrInvalidBudget) {
+		t.Errorf("ForceLimit(-1) = %v, want ErrInvalidBudget", err)
+	}
+	if excess, err := a.ForceLimit(2 * page); excess != 0 || err != nil {
+		t.Errorf("ForceLimit(equal) = (%d, %v), want (0, nil)", excess, err)
+	}
+	if excess, err := a.ForceLimit(4 * page); excess != 0 || err != nil {
+		t.Errorf("ForceLimit(raise) = (%d, %v), want (0, nil)", excess, err)
+	}
+	if got := a.Limit(); got != 4*page {
+		t.Errorf("Limit after the raise = %d, want %d", got, 4*page)
+	}
+	if got := a.Available(); got != 4*page {
+		t.Errorf("Available after the raise = %d, want %d", got, 4*page)
 	}
 }
 
