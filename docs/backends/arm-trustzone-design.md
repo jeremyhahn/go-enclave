@@ -2,13 +2,14 @@
 
 > **Status: NORMATIVE** · Scope: go-enclave; trusted-firmware (secure world) · Last verified: 2026-10-31
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it. Slice 2 (the backend) is shipped.
-> The design of the out-of-tree backend that reaches OP-TEE through the [backend seam](architecture.md). Its harness is [backend-conformance](../backend-conformance/engineering.md#the-arm-trustzone-harness); the secure world and the TA are trusted-firmware's at `v0.4.2-alpha`. Decisions 1 and 2 are ruled (A); decision 3 is open (DS-3097).
+> The design of the out-of-tree backend that reaches OP-TEE through the [backend seam](architecture.md). Its harness is [backend-conformance](../backend-conformance/engineering.md#the-arm-trustzone-harness); the secure world and the TA are trusted-firmware's at `v0.4.2-alpha`. All three decisions are ruled: 1 and 2 (A), 3 (B).
 
 This is the design of the `arm-trustzone` backend ([SPEC](../SPEC.md), #206).
 Ruling 176434 (#254) took recommendation (A) for decisions 1 and 2, and slice
 2 ships them: the nested module `backends/armtrustzone`, pure Go over
 `/dev/tee0` ([user](user.md#arm-trustzone), [engineering](engineering.md#arm-trustzone)).
-Decision 3, where the fixture runs, is still open and is slice 3's.
+Ruling 274(9) took (B) for decision 3, where the fixture runs. Slice 3 ships
+with the CI job, which waits on Infra's fixture image.
 
 ## Problem
 
@@ -149,22 +150,29 @@ header in the code slice, and a kernel bump re-checks them; `libteec`'s
 behaviour (session login methods, parameter encoding, the `TEEC_UUID` byte
 order of RFC 9562) is reimplemented rather than inherited.
 
-## Open decision 3: where the fixture runs
+## Decision 3: where the fixture runs (ruled: B)
+
+Ruling 274(9) chose (B): the one CI job that runs outside the toolchain image,
+the `optee` job, runs on an OP-TEE QEMU fixture image that Infra builds and
+keeps, on the `go-warm` runner label. What the job needs of that image is the
+[fixture image contract](../backend-conformance/engineering.md#fixture-image-contract).
 
 - **(A) Add trusted-firmware's host packages to go-enclave's toolchain
   image** (`build/docker/devcontainer`), so `make optee-tools` passes in it.
 - **(B) Run the CI job in trusted-firmware's `optee` image**, as
   trusted-firmware's own CI does on the `go-warm` runner label.
 
-Either way `OPTEE_CACHE` (outside the checkout) is cached under the key
-`make -s optee-pin` prints: the first `optee-qemu` build fetches and builds
-several GB, about 19 minutes on a 24-thread host.
+A local run caches `OPTEE_CACHE` (outside the checkout) under the key
+`make -s optee-pin` prints: its first fixture build fetches and builds
+several GB, about 19 minutes on a 24-thread host. The CI job uses the
+fixture image's prebuilt stack and never builds it.
 
 **Recommendation: (B).** The package set belongs to the fixture, and
 trusted-firmware already maintains an image that carries it; copying it into
 go-enclave's toolchain image would grow every other job's image and drift
-from the pin. The job image and the runner label are the Company Agent's to
-provide, so slice 3 asks for them rather than building them.
+from the pin. The fixture image is Infra's to build and
+keep, and the runner label is `go-warm`, so slice 3 uses them rather than
+building them.
 
 Cost: one CI job runs outside the toolchain image, against the devcontainer
 rule for builds, and local runs of the target need that image too.
@@ -184,7 +192,8 @@ rule for builds, and local runs of the target need that image too.
 2. The backend and its optee-tagged conformance test, against the ruled
    decisions. Shipped.
 3. The `TRUSTED_FIRMWARE_TAG=v0.4.2-alpha` pin, the harness's wiring to the
-   conformance test, and the CI job.
+   conformance test, and the CI job. Shipped by the `optee` CI job and the
+   `OPTEE_FIXTURE_IMAGE` pin; the job waits on Infra's fixture image.
 
 ## References
 
