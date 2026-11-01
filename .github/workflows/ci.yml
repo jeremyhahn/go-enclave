@@ -436,12 +436,12 @@
 # CUSTOMIZE (go-enclave, ruling 274(9), #206 comment 179925): the optee job
 # runs make integration-test-arm-trustzone with the harness in the OP-TEE
 # fixture image (OPTEE_FIXTURE_IMAGE, scripts/tool-pins.sh) on the go-warm
-# label, timeout 180. It is path-gated (v1.29.2): the changes job's `optee`
-# output, true on every schedule and workflow_dispatch, and the image job's
-# `built`. It runs in the full tier when `optee` is true, but only schedule
-# and workflow_dispatch always select it, so CI Gate tags it `nightly`: a
-# skip passes the gate on any other run and fails it on those, and a failure
-# fails it on every run. An empty pin fails the job, never skips it.
+# label, timeout 180. CI Gate tags it `full` and it carries the full tier's
+# `if:` with no path condition, so it never skips on a full-tier run. Its
+# path gate is its first step, which reads the changes job's `optee` output
+# (true on every schedule and workflow_dispatch): when no OP-TEE path
+# changed, every later step is skipped and the job succeeds without running
+# the harness. When selected, an empty pin fails the job, never skips it.
 
 name: CI
 
@@ -632,8 +632,9 @@ jobs:
     runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'bigdisk' }}
     needs: changes             # v1.24 (CA m749, m751 (a))
     timeout-minutes: 90       # CUSTOMIZE: give the stages honest headroom
-    # CUSTOMIZE (v1.29.2): `built` is set by the build step, and the path-gated
-    # optee job tests it in its `if:`.
+    # CUSTOMIZE (v1.29.2): `built` is set by the build step, for a path-gated
+    # job's `if:` (header note). The optee job gates in a step instead, since
+    # CI Gate requires the full tier's own `if:` of it.
     outputs:
       built: ${{ steps.build.outputs.built }}
     env:
@@ -1387,20 +1388,39 @@ jobs:
   # Infra builds and keeps, whose prebuilt stack it boots: this job never
   # builds the stack (about 155 min cold). What the image holds is the
   # fixture image contract in docs/backend-conformance/engineering.md
-  # (#fixture-image-contract). Path-gated (v1.29.2, header): the changes
-  # job's `optee` output and the image job's `built`; full tier.
+  # (#fixture-image-contract). Full tier, with the tier `if:` CI Gate requires
+  # of a full job and no path condition there: the first step reads the
+  # changes job's `optee` output, and when no OP-TEE path changed every later
+  # step is skipped, so the job succeeds without running the harness.
   optee:
     name: OP-TEE [arm-trustzone harness, fixture image]
     needs: [changes, image]
-    if: ${{ !cancelled() && needs.image.outputs.built == 'true' && !github.event.pull_request.draft && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')) && needs.changes.outputs.optee == 'true' }}
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')) && !github.event.pull_request.draft }}
     runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'go-warm' }}
     timeout-minutes: 180
     steps:
+      # The path gate: selected only when the changes job's `optee` output
+      # is true. Every later step tests the `run` output this step sets.
+      - name: Select the OP-TEE harness
+        id: select
+        env:
+          OPTEE: ${{ needs.changes.outputs.optee }}
+        run: |
+          if [ "$OPTEE" = true ]; then
+            echo "optee selected: OP-TEE paths changed"
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "optee not selected: no OP-TEE paths changed"
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        if: steps.select.outputs.run == 'true'
 
       # v1.21.1: mask the forge credentials before any other step (as in the
       # integration job).
       - name: Mask the forge credentials
+        if: steps.select.outputs.run == 'true'
         run: |
           for v in GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0; do
             val=${!v:-}
@@ -1412,6 +1432,7 @@ jobs:
       # Fails closed: until Infra publishes the image, the pin is empty and
       # this job fails here, never skips.
       - name: Require the fixture image pin
+        if: steps.select.outputs.run == 'true'
         run: |
           OPTEE_FIXTURE_IMAGE=$(make -s optee-fixture-image)
           if [ -z "$OPTEE_FIXTURE_IMAGE" ]; then
@@ -1421,6 +1442,7 @@ jobs:
           echo "OPTEE_FIXTURE_IMAGE=$OPTEE_FIXTURE_IMAGE" >> "$GITHUB_ENV"
 
       - name: make integration-test-arm-trustzone (fixture image)
+        if: steps.select.outputs.run == 'true'
         run: make integration-test-arm-trustzone OPTEE_FIXTURE_IMAGE="$OPTEE_FIXTURE_IMAGE"
 
   # Architecture gate (v1.20, Company Agent m270 item 9; go-xkms arch-gates).
@@ -1563,5 +1585,5 @@ jobs:
             full:fips="${{ needs.fips.result }}" \
             full:integration="${{ needs.integration.result }}" \
             nightly:soak="${{ needs.soak.result }}" \
-            nightly:optee="${{ needs.optee.result }}" \
+            full:optee="${{ needs.optee.result }}" \
             pr:arch-gates="${{ needs.arch-gates.result }}"
