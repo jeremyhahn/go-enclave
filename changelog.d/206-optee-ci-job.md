@@ -1,3 +1,4 @@
 ### Added
 
 - CI gains an `optee` job that runs the arm-trustzone harness in the OP-TEE QEMU fixture image (`OPTEE_FIXTURE_IMAGE`, pinned by digest in `scripts/tool-pins.sh`) on its prebuilt stack, on the full tier and every nightly when the backend, its harness or their pins change. The job fails while the pin is empty, and `docs/backend-conformance/engineering.md` states the fixture image contract (#206, #250). Nothing changes for Go callers.
+- `make integration-test-arm-trustzone` copies the checkout into the toolchain and fixture containers rather than bind-mounting it, as `scripts/in-toolchain-image.sh` does. A CI job reaches the daemon through its socket, so the bind mount resolved on the daemon's host and the harness build could not write `bin`. The fixture's copy is owned by its user `tfw` (#206, #250).
