@@ -55,6 +55,6 @@ TRUSTED_FIRMWARE_COMMIT=48d7c9f4817aaef1cbdbc034ffc2d2110cf16687
 # in (ruling 274(9)): an agent-ci-image Infra builds, publishes and keeps,
 # holding the stack prebuilt at TRUSTED_FIRMWARE_COMMIT. Pinned by digest
 # (<registry>/<name>@sha256:<64 hex>); raise it with the trusted-firmware pins.
-# Empty until Infra publishes it, and the optee job fails while it is empty.
+# Infra published it 2026-11-01 (tag v0.4.2-alpha-optee-4.11.0, #254 comment 184877); the optee job fails if it is emptied.
 # The contract: docs/backend-conformance/engineering.md#fixture-image-contract.
-OPTEE_FIXTURE_IMAGE=
+OPTEE_FIXTURE_IMAGE=git.example.internal/agent-ci-images/go-enclave-optee-fixture@sha256:7c618b5fb7d0bcdbd0f63b15878e3653c0f46ea0d880a9c1f20fb11c7e2edbd6
