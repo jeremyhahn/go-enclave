@@ -233,23 +233,25 @@ config is refused.
 
 ### The arm-trustzone harness
 
-`test/integration/enclave/arm_trustzone_test.go` runs `TestBackend` against the
-[arm-trustzone](../SPEC.md) backend on OP-TEE ([#250](../../../../issues/250)).
-It is built only with the `optee` tag (`//go:build integration && optee`), so
-no other run compiles it, `make integration-test-backend-conformance`
-included. `make integration-test-arm-trustzone` (body:
-`scripts/optee-fixture.sh harness`) builds it with `-tags=integration,optee`
-as a test binary for linux/arm64 with `CGO_ENABLED=0` (`go test -c`), puts it
-in a fresh share directory, and runs the pinned checkout's
-`make optee-run OPTEE_SHARE=<dir> OPTEE_GUEST_CMD=<binary>`. The guest runs the
-tests named `TestBackendConformance_ArmTrustZone` with
-`GO_ENCLAVE_OPTEE_ENDPOINT` set (default `/dev/tee0`, the guest's TEE
+`make integration-test-arm-trustzone` runs the arm-trustzone conformance test,
+`TestBackendConformance_OnOPTEE` in
+`backends/armtrustzone/conformance_optee_test.go`, against the backend on
+OP-TEE ([#250](../../../../issues/250), [#206](../../../../issues/206)). The
+backend and its design are in
+[arm-trustzone-design.md](../backends/arm-trustzone-design.md). The test is
+built only with the `optee` tag, so no other run compiles it,
+`make integration-test-backend-conformance` included. The target compiles
+`backends/armtrustzone` with `go test -c -tags=optee` as a static linux/arm64
+test binary (`CGO_ENABLED=0`) in the toolchain image (`scripts/devcontainer.sh
+run`, as `make docker-run` does) into the checkout's ignored
+`bin/optee/armtrustzone.test`. `scripts/optee-fixture.sh harness` then copies
+it into a fresh share directory and runs the pinned checkout's
+`make optee-run OPTEE_SHARE=<dir> OPTEE_GUEST_CMD=<binary>` on the host, the
+only step that runs there. The guest runs `TestBackendConformance_OnOPTEE`
+with `GO_ENCLAVE_OPTEE_ENDPOINT` set (default `/dev/tee0`, the guest's TEE
 device), and `optee-run`'s status, the binary's, is the target's. It refuses
-while `TRUSTED_FIRMWARE_TAG` is empty. The compile runs in the toolchain image
-(`scripts/devcontainer.sh run`, as `make docker-run` does) into the checkout's
-ignored `bin/optee/`, the script copies it into the share, and only the QEMU orchestration runs on the host; the
-`optee` build's own `TestMain` (`main_optee_test.go`) refuses unless the
-endpoint exists, in place of the devcontainer guard every other build keeps.
+while `TRUSTED_FIRMWARE_TAG` is empty, and the script refuses a missing
+binary.
 
 - **Fixture.** trusted-firmware's `make optee-run`: an aarch64 QEMU virt
   guest (qemu_v8) with the OP-TEE trusted application, which mounts
@@ -281,17 +283,16 @@ endpoint exists, in place of the devcontainer guard every other build keeps.
   refuses with every missing package before it fetches anything. The share
   path may hold no comma or space (`optee-run` refuses it), so set `TMPDIR`
   if yours does.
-- **CI.** No workflow runs these targets yet. The CI job is the next #250
-  slice and waits on #206 slice 2: until the backend registers, the harness
-  can only refuse.
-- **Registration.** The registry is per process. The #206 backend supplies the
-  in-process registration the [arm-trustzone SPEC row](../SPEC.md) names:
-  `test/integration/enclave/arm_trustzone_register_test.go`, built only with
-  the `optee` tag, registers the backend with `enclave.Register` under
-  `arm-trustzone` and sets `armTrustZoneRegistered` from its `init`. The
-  harness finds the backend with `enclave.Lookup` and never imports it. Until
-  that file exists, the Make target refuses before it builds (exit 2, as for
-  an empty `TRUSTED_FIRMWARE_TAG`).
+- **CI.** No workflow runs these targets yet. The job is held: it runs on
+  the `optee-qemu` label, and needs the fixture image and a runner that
+  advertises that label.
+- **Registration.** The registry is per process. The test registers the
+  backend in its own binary with `enclave.Register(Connector{})` and finds it
+  with `enclave.Lookup`. The root's optee-tagged harness,
+  `test/integration/enclave/arm_trustzone_test.go`, is not run by the target:
+  the root `go.mod` never requires the nested module, so nothing can register
+  the backend in that binary, and its conformance test can only refuse with a
+  `*backendtest.RegistrationError` (`ErrNoRegistration`).
 - **What it asks of the backend.** The registered backend has
   `Connect(endpoint string) (enclave.Backend, error)`, and `Config.New` calls it
   for a fresh backend per check. The connected backend claims
@@ -299,14 +300,9 @@ endpoint exists, in place of the devcontainer guard every other build keeps.
   `rng`, is `Random(ctx, 32)`: a `CapabilityBytes` handle filled by the TA's
   rng command (0x2). Commands 0x3 and 0x4 are held until a SPEC row names them.
 - **Fails, never skips.** An empty `GO_ENCLAVE_OPTEE_ENDPOINT` is a
-  `*backendtest.EndpointError` (`ErrNoEndpoint`). A binary without the
-  registration file is a `*backendtest.RegistrationError`
-  (`ErrNoRegistration`). No backend under the name is
-  `*enclave.BackendNotRegisteredError`, and a backend without `Connect` is
-  `*enclave.CapabilityError`. A skipped run would look like a pass.
-- **Held.** The trusted-firmware pin and the CI job are not part of this
-  slice. They wait on trusted-firmware #253 slice 3 cutting a release tag. No
-  workflow calls the target, and no tag is pinned.
+  `*backendtest.EndpointError` (`ErrNoEndpoint`). A failed registration or
+  lookup, or a backend without `Connect`, fails the test. A skipped run would
+  look like a pass.
 
 ## Observability
 

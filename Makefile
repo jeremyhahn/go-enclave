@@ -114,7 +114,7 @@ $(call raw_bind,$(EXTERNAL_VARS))
 
 # CI VARIABLES (handbook devcontainer.md §6): ci.yml passes them, so they are
 # data from a workflow and raw-bound like EXTERNAL_VARS.
-## MODULE_ENV_FILE=<file>: docker-build, integration-test: the forge module variables; go-enclave needs none, so it is never read or printed
+## MODULE_ENV_FILE=<file>: docker-build, integration-test: the forge module variables; docker-build passes the file, when it exists, as the BuildKit secret gomodauth (the backend modules' private root); never read here or printed
 ## IT_IMAGE=<tag>: docker-build, ci-integration: the integration image's tag (default `make -s it-image`)
 ## APK_INDEX_SUM=<sum>: docker-build, it-image: the Alpine package index checksum (scripts/apk-index-sum.sh); it-image hashes it, docker-build passes it as --build-arg
 ## IT_PROJECT=<name>: integration-test: accepted; each suite names its own compose project (go-enclave-it-*, go-enclave-userns-*)
@@ -141,6 +141,12 @@ PKGDIR_enclave      := .
 PKGDIR_providertest := ./providertest
 PKGDIR_backendtest  := ./backendtest
 PKGDIR_memscan      := ./internal/memscan
+
+# BACKEND MODULES: hardware backends, each its own module at backends/<name>
+# requiring a released root (#206), so the root never depends on them. lint-go,
+# tidy-check, govulncheck, test and cross-build run in each, as for
+# build/ci/buildgates; coverage does not (their device paths need the device).
+BACKEND_MODULES := backends/armtrustzone
 
 # FEATURE MAPPING (local-software-factory §7). A feature is a directory
 # docs/<feature>/, mapped in scripts/features.map to its package, its
@@ -200,6 +206,7 @@ tidy:
 tidy-check:
 	@"$$GOCMD" mod tidy -diff || { echo "go.mod/go.sum are not tidy: run 'make tidy'"; exit 1; }
 	@cd build/ci/buildgates && "$$GOCMD" mod tidy -diff || { echo "build/ci/buildgates/go.mod is not tidy: run 'go mod tidy' there"; exit 1; }
+	@for m in $(BACKEND_MODULES); do (cd "$$m" && "$$GOCMD" mod tidy -diff) || { echo "$$m/go.mod is not tidy: run 'go mod tidy' there"; exit 1; }; done
 
 ## lint: gofmt, golangci-lint (vet, staticcheck, gosec), actionlint, shellcheck (devops §4)
 .PHONY: lint
@@ -212,7 +219,8 @@ lint: fmt-check lint-go lint-actions lint-scripts
 .PHONY: lint-go
 lint-go:
 	@bin=$(call tool,golangci-lint,GOLANGCI) && "$$bin" $(GOLANGCI_FLAGS) $(PKG) && \
-	cd build/ci/buildgates && "$$bin" $(GOLANGCI_FLAGS) $(PKG)
+	(cd build/ci/buildgates && "$$bin" $(GOLANGCI_FLAGS) $(PKG)) && \
+	for m in $(BACKEND_MODULES); do (cd "$$m" && "$$bin" $(GOLANGCI_FLAGS) $(PKG)) || exit 1; done
 
 ## lint-actions: actionlint (pinned) over .github/workflows, with the pinned shellcheck on every run: block
 # The pinned shellcheck is passed explicitly: actionlint silently skips shell
@@ -247,7 +255,7 @@ gosec:
 ## govulncheck: known-vuln scan (pinned; also the toolchain-currency forcing function)
 .PHONY: govulncheck
 govulncheck:
-	@bin=$(call tool,govulncheck,GOVULNCHECK) && SCAN_MODULES=". build/ci/buildgates" sh scripts/scan.sh govulncheck "a vulnerability (a CVE)" "$$bin" $(PKG)
+	@bin=$(call tool,govulncheck,GOVULNCHECK) && SCAN_MODULES=". build/ci/buildgates $(BACKEND_MODULES)" sh scripts/scan.sh govulncheck "a vulnerability (a CVE)" "$$bin" $(PKG)
 
 ## lint-runtimesecret: golangci-lint under GOEXPERIMENT=runtimesecret, which builds secret_erase.go (#136)
 # The default build never compiles the key-erasure file, so no other lint sees it.
@@ -321,7 +329,12 @@ BENCH_TARGETS    := $(addprefix bench-,$(BENCH_PACKAGES))
 
 ## test: unit tests with the race detector, across the CPU matrix
 .PHONY: test
-test: $(TEST_TARGETS)
+test: $(TEST_TARGETS) test-backends
+
+## test-backends: unit tests of each backend module (BACKEND_MODULES)
+.PHONY: test-backends
+test-backends:
+	@for m in $(BACKEND_MODULES); do (cd "$$m" && "$$GOCMD" test $(TEST_RACE) $(TESTFLAGS) $(PKG)) || exit 1; done
 
 ## test-<pkg>, coverage-<pkg>: one package (enclave, providertest, backendtest, memscan); coverage-<pkg> FAILS below COVERAGE_THRESHOLD; bench-enclave: the root package's benchmarks
 .PHONY: $(TEST_TARGETS) $(COVERAGE_TARGETS) $(PROFILE_TARGETS) $(BENCH_TARGETS)
@@ -457,26 +470,23 @@ $(call raw_bind,TRUSTED_FIRMWARE_URL TRUSTED_FIRMWARE_TAG TRUSTED_FIRMWARE_COMMI
 optee-fixture-check:
 	@sh scripts/optee-fixture.sh check
 
-## integration-test-arm-trustzone: backendtest against the arm-trustzone backend on OP-TEE: the optee-tagged harness, built for linux/arm64, run in the pinned fixture's guest
-# The tests are named TestBackendConformance_ArmTrustZone…, so the
-# backend-conformance feature owns them; its own target never builds them
-# (no optee tag). The toolchain image builds them with
-# -tags=integration,optee as a CGO-free linux/arm64 test binary;
-# scripts/optee-fixture.sh shares it
-# with the guest and runs it there under make optee-run, whose status is the
-# target's. A missing endpoint or backend fails the run, never skips it. The
-# registry is per process, so the run also refuses until the #206 backend
-# supplies ARM_TRUSTZONE_REGISTRATION, the optee-tagged file that registers
-# it in the test binary.
-ARM_TRUSTZONE_REGISTRATION := test/integration/enclave/arm_trustzone_register_test.go
-# The harness binary, compiled in the toolchain image into the ignored bin/.
-ARM_TRUSTZONE_BIN := bin/optee/arm-trustzone.test
+## integration-test-arm-trustzone: backendtest against the arm-trustzone backend on OP-TEE: backends/armtrustzone's optee-tagged conformance test, built for linux/arm64 in the toolchain image, run in the pinned fixture's guest
+# The toolchain image builds backends/armtrustzone (its own module) with
+# go test -c -tags=optee as a CGO-free linux/arm64 test binary;
+# scripts/optee-fixture.sh shares it with the guest and runs
+# TestBackendConformance_OnOPTEE there under make optee-run, whose status is
+# the target's. The test registers the backend in-process; a missing endpoint
+# fails the run, never skips it. The root's optee-tagged harness
+# (test/integration/enclave) is not run: the root go.mod never requires the
+# nested module, so nothing registers the backend there.
+ARM_TRUSTZONE_MODULE := backends/armtrustzone
+# The test binary, compiled in the toolchain image into the ignored bin/.
+ARM_TRUSTZONE_BIN := bin/optee/armtrustzone.test
 .PHONY: integration-test-arm-trustzone
 integration-test-arm-trustzone: docker-build
 	@[ -n "$$TRUSTED_FIRMWARE_TAG" ] || { echo "integration-test-arm-trustzone: TRUSTED_FIRMWARE_TAG is empty; set it to the trusted-firmware release whose make optee-run is the fixture (scripts/tool-pins.sh pins it)" >&2; exit 2; }
-	@[ -f "$(ARM_TRUSTZONE_REGISTRATION)" ] || { echo "integration-test-arm-trustzone: $(ARM_TRUSTZONE_REGISTRATION) is absent; the arm-trustzone backend (#206) supplies it to register the backend in the test binary under the optee tag (docs/SPEC.md, arm-trustzone)" >&2; exit 2; }
-	@sh scripts/devcontainer.sh run 'mkdir -p $(dir $(ARM_TRUSTZONE_BIN)) && GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go test -c -tags=integration,optee -o $(ARM_TRUSTZONE_BIN) ./test/integration/enclave'
-	@ARM_TRUSTZONE_BIN=$(ARM_TRUSTZONE_BIN) sh scripts/optee-fixture.sh harness
+	@sh scripts/devcontainer.sh run 'mkdir -p $(dir $(ARM_TRUSTZONE_BIN)) && cd $(ARM_TRUSTZONE_MODULE) && GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go test -c -tags=optee -o "$$OLDPWD/$(ARM_TRUSTZONE_BIN)" .'
+	@ARM_TRUSTZONE_BIN=$(ARM_TRUSTZONE_BIN) OPTEE_TEST_BIN=$(notdir $(ARM_TRUSTZONE_BIN)) sh scripts/optee-fixture.sh harness
 
 ## integration-test-fips: every integration suite under FIPS 140-3 strict mode, in the devcontainer
 .PHONY: integration-test-fips
@@ -535,6 +545,7 @@ build:
 .PHONY: cross-build
 cross-build:
 	@sh scripts/cross-build.sh $(CROSS_TARGETS) -- $(PKG)
+	@for m in $(BACKEND_MODULES); do (cd "$$m" && sh ../../scripts/cross-build.sh $(CROSS_TARGETS) -- $(PKG)) || exit 1; done
 
 # BUILD GATES: their own module under build/ci/buildgates (it needs a YAML parser
 # the root module must not depend on). check-buildgates runs every test the

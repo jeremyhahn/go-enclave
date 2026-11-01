@@ -49,6 +49,8 @@ inputs() {
     go.sum \
     build/ci/buildgates/go.mod \
     build/ci/buildgates/go.sum \
+    backends/armtrustzone/go.mod \
+    backends/armtrustzone/go.sum \
     scripts/lib.sh \
     scripts/tool.sh \
     scripts/tool-pins.sh \
@@ -118,10 +120,18 @@ case $1 in
     [ $# -eq 1 ] || die "usage: $0 build"
     docker_ok build
     ref=$(image)
+    # The forge module variables reach the build only as the BuildKit secret
+    # gomodauth (handbook dependency-resolution.md §6): never an argument, a
+    # layer or a line of output. The backend modules' download needs them.
+    set -- -f "$dockerfile" --target toolchain -t "$ref" -t "$repo:latest"
+    if [ -n "${MODULE_ENV_FILE:-}" ] && [ -f "$MODULE_ENV_FILE" ]; then
+      case $MODULE_ENV_FILE in *,*) die "MODULE_ENV_FILE must not contain a comma (a --secret separator)" ;; esac
+      set -- "$@" --secret "id=gomodauth,src=$MODULE_ENV_FILE"
+    fi
     if held "$ref"; then
       docker tag "$ref" "$repo:latest"
       echo "$ref is already held; tagged $repo:latest"
-    elif ! docker build -f "$dockerfile" --target toolchain -t "$ref" -t "$repo:latest" .; then
+    elif ! DOCKER_BUILDKIT=1 docker build "$@" .; then
       held "$ref" || die "building $ref failed"
       docker tag "$ref" "$repo:latest"
       echo "$ref was built by another job meanwhile; tagged $repo:latest"

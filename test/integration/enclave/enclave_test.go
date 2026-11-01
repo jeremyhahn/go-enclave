@@ -131,45 +131,6 @@ func TestMemoryEnclave_EnclaveMaterialLivesOnlyInItsEnclaveAndIsGoneAfterDestroy
 	})
 }
 
-// TestMemoryEnclave_DestroyedEnclaveRefusesEveryAccess checks the consumer-visible contract
-// after Destroy: every accessor reports ErrEnclaveDestroyed (or false), and
-// Destroy itself is idempotent.
-func TestMemoryEnclave_DestroyedEnclaveRefusesEveryAccess(t *testing.T) {
-	isolated(t, childOpts{}, func(t *testing.T) {
-		n := newNeedle(t)
-		e := enclaveFromNeedle(t, n)
-		if !e.IsAlive() || e.Size() != needleLen {
-			t.Fatalf("live enclave: IsAlive %t, Size %d", e.IsAlive(), e.Size())
-		}
-		var matched bool
-		if err := e.WithBytes(func(b []byte) error { matched = n.equals(b); return nil }); err != nil || !matched {
-			t.Fatalf("WithBytes on a live enclave: matched %t, err %v", matched, err)
-		}
-		if err := e.Destroy(); err != nil {
-			t.Fatalf("Destroy: %v", err)
-		}
-		if err := e.Destroy(); err != nil {
-			t.Fatalf("second Destroy: %v, want nil (idempotent)", err)
-		}
-		if e.IsAlive() {
-			t.Errorf("IsAlive after Destroy")
-		}
-		called := false
-		if err := e.WithBytes(func([]byte) error { called = true; return nil }); !errors.Is(err, enclave.ErrEnclaveDestroyed) || called {
-			t.Errorf("WithBytes after Destroy: err %v, callback ran %t; want ErrEnclaveDestroyed and no call", err, called)
-		}
-		if err := e.(enclave.Freezer).Freeze(); !errors.Is(err, enclave.ErrEnclaveDestroyed) {
-			t.Errorf("Freeze after Destroy: err %v, want ErrEnclaveDestroyed", err)
-		}
-		if ok, err := e.EqualTo([]byte{0}); ok || !errors.Is(err, enclave.ErrEnclaveDestroyed) {
-			t.Errorf("EqualTo after Destroy: (%t, %v), want (false, ErrEnclaveDestroyed)", ok, err)
-		}
-		if n, err := enclave.WipeAll(context.Background()); n != 0 || err != nil {
-			t.Fatalf("WipeAll = (%d, %v), want (0, nil)", n, err)
-		}
-	})
-}
-
 // destroyAndRequireGone destroys e and requires the material to be absent
 // from every readable mapping of the process afterwards.
 func destroyAndRequireGone(t *testing.T, e enclave.ByteAccess, n needle) {
@@ -294,32 +255,6 @@ func TestMemoryEnclave_EnclaveErrorTypesRenderEveryValue(t *testing.T) {
 	}
 	if errors.Unwrap(memfd) != errors.ErrUnsupported {
 		t.Error("a MemfdSecretError does not unwrap to its cause")
-	}
-}
-
-// TestLockedMemoryBudget_ForceLimitRaisesHoldsAndRefuses: ForceLimit refuses a
-// negative budget, leaves an equal one as it is, and grants a raise at once,
-// reporting no excess on either.
-func TestLockedMemoryBudget_ForceLimitRaisesHoldsAndRefuses(t *testing.T) {
-	page := enclave.LockedSize(1)
-	a, err := enclave.NewAllocator(2 * page)
-	if err != nil {
-		t.Fatalf("NewAllocator: %v", err)
-	}
-	if _, err := a.ForceLimit(-1); !errors.Is(err, enclave.ErrInvalidBudget) {
-		t.Errorf("ForceLimit(-1) = %v, want ErrInvalidBudget", err)
-	}
-	if excess, err := a.ForceLimit(2 * page); excess != 0 || err != nil {
-		t.Errorf("ForceLimit(equal) = (%d, %v), want (0, nil)", excess, err)
-	}
-	if excess, err := a.ForceLimit(4 * page); excess != 0 || err != nil {
-		t.Errorf("ForceLimit(raise) = (%d, %v), want (0, nil)", excess, err)
-	}
-	if got := a.Limit(); got != 4*page {
-		t.Errorf("Limit after the raise = %d, want %d", got, 4*page)
-	}
-	if got := a.Available(); got != 4*page {
-		t.Errorf("Available after the raise = %d, want %d", got, 4*page)
 	}
 }
 

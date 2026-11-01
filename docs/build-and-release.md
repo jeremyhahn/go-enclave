@@ -195,8 +195,12 @@ the make variables of handbook devcontainer.md §6. `IT_IMAGE` is
 (the commit's tree, the checkout's diff and every untracked file `.gitignore`
 does not exclude). Every job of one commit names the same image and builds it
 only when the runner's daemon lacks it; each job leases it, and
-`reap-stale-ci-stacks.sh` removes an old unleased one. go-enclave needs no module
-credential, so `MODULE_ENV_FILE` is never read. `GO_BUILD_TAGS` must stay empty,
+`reap-stale-ci-stacks.sh` removes an old unleased one. The root module needs no
+module credential. The toolchain image also downloads each backend module's
+graph (`backends/armtrustzone` requires the private root), so `make
+docker-build` passes `MODULE_ENV_FILE`, when the file exists, to `docker
+build` as the BuildKit secret `gomodauth`; only that download reads it, and
+without it the image build fails naming `MODULE_ENV_FILE`. Nothing prints it. `GO_BUILD_TAGS` must stay empty,
 because no package is gated by a tag; the Makefile refuses any other value.
 
 The **CI Gate** is the one required check. It runs on the `ci-gate` runner

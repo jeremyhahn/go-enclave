@@ -1,0 +1,3 @@
+### Changed
+
+- **test: `make integration-test-arm-trustzone` runs the arm-trustzone backend's conformance test in the OP-TEE fixture.** The target compiles `backends/armtrustzone`'s `optee`-tagged test as a static linux/arm64 binary in the toolchain image, and `scripts/optee-fixture.sh harness` runs `TestBackendConformance_OnOPTEE` in the guest under `make optee-run`, whose status is the target's. The root's optee-tagged harness is no longer run, since the root module never requires the nested one and cannot register the backend. No workflow calls the target yet ([backend conformance](docs/backend-conformance/engineering.md#the-arm-trustzone-harness)).

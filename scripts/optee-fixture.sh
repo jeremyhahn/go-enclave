@@ -9,9 +9,10 @@
 # and refuse unless the checkout's HEAD is TRUSTED_FIRMWARE_COMMIT: a moved tag
 # is refused, never followed. check runs the checkout's
 # `make integration-test-optee` (xtest and the TA's version and rng commands;
-# no go-enclave code). harness takes the optee-tagged arm-trustzone harness,
-# a linux/arm64 test binary the make target compiled in the toolchain image
-# ($ARM_TRUSTZONE_BIN), shares it with the aarch64 guest and exits with
+# no go-enclave code). harness takes backends/armtrustzone's optee-tagged
+# conformance test, a static linux/arm64 test binary the make target compiled
+# in the toolchain image ($ARM_TRUSTZONE_BIN), shares it with the aarch64 guest
+# and exits with
 # the status of `make optee-run`, which is the binary's.
 set -eu
 # shellcheck source=lib.sh
@@ -75,14 +76,21 @@ trap 'rm -rf "$share"' EXIT
 case $share in
   *[,\ ]*) die "the share directory '$share' holds a comma or a space, which optee-run refuses; set TMPDIR" ;;
 esac
-bin=arm-trustzone.test
+# The conformance test is the nested module's: backends/armtrustzone
+# registers its backend in-process. The root's optee-tagged harness is not run:
+# the root go.mod never requires the nested module, so nothing can register
+# the backend in that binary and its conformance test can only refuse.
 # make integration-test-arm-trustzone compiles the binary in the toolchain
 # image (the pinned Go and verified module cache, offline) and names it in
 # ARM_TRUSTZONE_BIN; only the QEMU orchestration below runs on the host.
+bin=${OPTEE_TEST_BIN:-}
+case $bin in
+  '' | .* | *[!A-Za-z0-9._-]*) die "OPTEE_TEST_BIN '$bin' is not a file name; make integration-test-arm-trustzone sets it to armtrustzone.test" ;;
+esac
 out=${ARM_TRUSTZONE_BIN:-}
 [ -n "$out" ] && [ -f "$out" ] || die "ARM_TRUSTZONE_BIN '$out' is not a file; run make integration-test-arm-trustzone, which compiles it in the toolchain image"
 cp "$out" "$share/$bin"
 rc=0
 tfmake optee-run OPTEE_SHARE="$share" \
-  OPTEE_GUEST_CMD="GO_ENCLAVE_OPTEE_ENDPOINT=$endpoint ./$bin -test.v -test.run=^TestBackendConformance_ArmTrustZone" || rc=$?
+  OPTEE_GUEST_CMD="GO_ENCLAVE_OPTEE_ENDPOINT=$endpoint ./$bin -test.v -test.run=^TestBackendConformance_OnOPTEE" || rc=$?
 exit "$rc"

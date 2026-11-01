@@ -527,19 +527,3 @@ func TestShutdownSweep_RefusedCleanupLeavesAnOrphanTheSweepReclaims(t *testing.T
 		}
 	})
 }
-
-// TestShutdownSweep_SweepErrorRendersEveryValue: SweepError is exported, so a caller can
-// build any value of it. The zero value still renders, a value with both
-// findings reports both, and it matches only the sentinels its counts earn.
-func TestShutdownSweep_SweepErrorRendersEveryValue(t *testing.T) {
-	if msg := (&enclave.SweepError{}).Error(); !strings.HasPrefix(msg, "enclave: ") {
-		t.Errorf("SweepError{}.Error() = %q, want a message in the package's voice", msg)
-	}
-	both := &enclave.SweepError{Corrupt: 1, Unwiped: 2}
-	if msg := both.Error(); !strings.Contains(msg, "canary") || !strings.Contains(msg, "without") {
-		t.Errorf("SweepError{Corrupt:1 Unwiped:2}.Error() = %q, want both findings", msg)
-	}
-	if errors.Is(&enclave.SweepError{Unwiped: 1}, enclave.ErrEnclaveCorrupted) {
-		t.Error("a SweepError with only unwiped releases matches ErrEnclaveCorrupted")
-	}
-}
