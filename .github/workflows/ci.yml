@@ -1443,7 +1443,19 @@ jobs:
 
       - name: make integration-test-arm-trustzone (fixture image)
         if: steps.select.outputs.run == 'true'
-        run: make integration-test-arm-trustzone OPTEE_FIXTURE_IMAGE="$OPTEE_FIXTURE_IMAGE"
+        run: |
+          ( umask 077; : > "$RUNNER_TEMP/gomodauth.env"
+            for v in GOPRIVATE GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0; do
+              if [ -n "${!v:-}" ]; then printf '%s=%s\n' "$v" "${!v}" >> "$RUNNER_TEMP/gomodauth.env"; fi
+            done )
+          rc=0
+          make integration-test-arm-trustzone MODULE_ENV_FILE="$RUNNER_TEMP/gomodauth.env" OPTEE_FIXTURE_IMAGE="$OPTEE_FIXTURE_IMAGE" || rc=$?
+          rm -f "$RUNNER_TEMP/gomodauth.env"
+          exit "$rc"
+
+      - name: Remove the module credentials
+        if: always()
+        run: rm -f "$RUNNER_TEMP/gomodauth.env"
 
   # Architecture gate (v1.20, Company Agent m270 item 9; go-xkms arch-gates).
   # go-objstore owns every blob backend (docs/00), and a repo reaches it only
