@@ -454,7 +454,7 @@ integration-test-userns:
 ## TRUSTED_FIRMWARE_COMMIT=<sha>: optee-fixture-check, integration-test-arm-trustzone: the commit the tag peels to (pinned); a checkout at any other commit is refused
 ## TRUSTED_FIRMWARE_CACHE=<dir>: optee-fixture-check, integration-test-arm-trustzone: where the checkout lives, one directory per tag (default ~/.cache/go-enclave/trusted-firmware)
 ## GO_ENCLAVE_OPTEE_ENDPOINT=<endpoint>: integration-test-arm-trustzone: the TEE client device in the fixture's guest (default /dev/tee0)
-## TRUSTED_FIRMWARE_URL=<url>: optee-fixture-check, integration-test-arm-trustzone: the forge's trusted-firmware clone URL; empty refuses (the pinned commit, not the URL, is what is trusted)
+## TRUSTED_FIRMWARE_URL=<url>: optee-fixture-check, integration-test-arm-trustzone: the forge's trusted-firmware clone URL; empty refuses a clone (the pinned commit, not the URL, is what is trusted)
 ## OPTEE_FIXTURE_IMAGE=<image@digest>: integration-test-arm-trustzone: run the harness in this OP-TEE fixture image, on its prebuilt stack (pinned in scripts/tool-pins.sh; empty runs it on the host); the CI optee job refuses an empty pin
 # The tag and commit come from scripts/tool-pins.sh; a command-line value
 # overrides them and is raw-bound like the other caller-supplied values. The

@@ -51,3 +51,10 @@ SHELLCHECK_BIN_SHA256_LINUX_ARM64=127f13925eadd52c341bca0ebaf9ab0dbd78c6468f30a8
 # URL is the forge's and caller-supplied (TRUSTED_FIRMWARE_URL, Makefile).
 TRUSTED_FIRMWARE_TAG=v0.4.2-alpha
 TRUSTED_FIRMWARE_COMMIT=48d7c9f4817aaef1cbdbc034ffc2d2110cf16687
+# The OP-TEE QEMU fixture image the CI optee job runs the arm-trustzone harness
+# in (ruling 274(9)): an agent-ci-image Infra builds, publishes and keeps,
+# holding the stack prebuilt at TRUSTED_FIRMWARE_COMMIT. Pinned by digest
+# (<registry>/<name>@sha256:<64 hex>); raise it with the trusted-firmware pins.
+# Empty until Infra publishes it, and the optee job fails while it is empty.
+# The contract: docs/backend-conformance/engineering.md#fixture-image-contract.
+OPTEE_FIXTURE_IMAGE=
