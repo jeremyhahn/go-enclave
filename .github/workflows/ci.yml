@@ -438,9 +438,10 @@
 # fixture image (OPTEE_FIXTURE_IMAGE, scripts/tool-pins.sh) on the go-warm
 # label, timeout 180. It is path-gated (v1.29.2): the changes job's `optee`
 # output, true on every schedule and workflow_dispatch, and the image job's
-# `built`. It is full tier; CI Gate tags it `full` when `optee` is true and
-# `nightly` otherwise, so an unselected run's skip passes the gate and a
-# selected one's fails it. An empty pin fails the job, never skips it.
+# `built`. It runs in the full tier when `optee` is true, but only schedule
+# and workflow_dispatch always select it, so CI Gate tags it `nightly`: a
+# skip passes the gate on any other run and fails it on those, and a failure
+# fails it on every run. An empty pin fails the job, never skips it.
 
 name: CI
 
@@ -1562,5 +1563,5 @@ jobs:
             full:fips="${{ needs.fips.result }}" \
             full:integration="${{ needs.integration.result }}" \
             nightly:soak="${{ needs.soak.result }}" \
-            ${{ needs.changes.outputs.optee == 'true' && 'full' || 'nightly' }}:optee="${{ needs.optee.result }}" \
+            nightly:optee="${{ needs.optee.result }}" \
             pr:arch-gates="${{ needs.arch-gates.result }}"
