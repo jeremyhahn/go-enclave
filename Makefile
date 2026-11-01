@@ -455,13 +455,24 @@ integration-test-userns:
 ## TRUSTED_FIRMWARE_CACHE=<dir>: optee-fixture-check, integration-test-arm-trustzone: where the checkout lives, one directory per tag (default ~/.cache/go-enclave/trusted-firmware)
 ## GO_ENCLAVE_OPTEE_ENDPOINT=<endpoint>: integration-test-arm-trustzone: the TEE client device in the fixture's guest (default /dev/tee0)
 ## TRUSTED_FIRMWARE_URL=<url>: optee-fixture-check, integration-test-arm-trustzone: the forge's trusted-firmware clone URL; empty refuses (the pinned commit, not the URL, is what is trusted)
+## OPTEE_FIXTURE_IMAGE=<image@digest>: integration-test-arm-trustzone: run the harness in this OP-TEE fixture image, on its prebuilt stack (pinned in scripts/tool-pins.sh; empty runs it on the host); the CI optee job refuses an empty pin
 # The tag and commit come from scripts/tool-pins.sh; a command-line value
-# overrides them and is raw-bound like the other caller-supplied values. No
-# workflow calls these targets yet: the CI job waits on #206 slice 2.
+# overrides them and is raw-bound like the other caller-supplied values. The
+# CI optee job (ci.yml) runs integration-test-arm-trustzone with
+# OPTEE_FIXTURE_IMAGE; the image's contract is in
+# docs/backend-conformance/engineering.md#fixture-image-contract.
 TRUSTED_FIRMWARE_URL      ?=
 TRUSTED_FIRMWARE_CACHE    ?=
 GO_ENCLAVE_OPTEE_ENDPOINT ?= /dev/tee0
-$(call raw_bind,TRUSTED_FIRMWARE_URL TRUSTED_FIRMWARE_TAG TRUSTED_FIRMWARE_COMMIT TRUSTED_FIRMWARE_CACHE GO_ENCLAVE_OPTEE_ENDPOINT)
+$(call raw_bind,TRUSTED_FIRMWARE_URL TRUSTED_FIRMWARE_TAG TRUSTED_FIRMWARE_COMMIT TRUSTED_FIRMWARE_CACHE GO_ENCLAVE_OPTEE_ENDPOINT OPTEE_FIXTURE_IMAGE)
+# The fixture image's trusted-firmware cache: the checkout is
+# OPTEE_FIXTURE_CACHE/<tag> (the contract's path).
+OPTEE_FIXTURE_CACHE := /opt/go-enclave/trusted-firmware
+
+## optee-fixture-image: print the pinned OP-TEE fixture image (OPTEE_FIXTURE_IMAGE; empty until Infra publishes it)
+.PHONY: optee-fixture-image
+optee-fixture-image:
+	@echo "$$OPTEE_FIXTURE_IMAGE"
 
 ## optee-fixture-check: boot the pinned trusted-firmware OP-TEE fixture and run its xtest and TA check (no go-enclave code; host packages, several GB)
 # scripts/optee-fixture.sh clones the tag outside the tree, refuses a checkout
@@ -486,7 +497,15 @@ ARM_TRUSTZONE_BIN := bin/optee/armtrustzone.test
 integration-test-arm-trustzone: docker-build
 	@[ -n "$$TRUSTED_FIRMWARE_TAG" ] || { echo "integration-test-arm-trustzone: TRUSTED_FIRMWARE_TAG is empty; set it to the trusted-firmware release whose make optee-run is the fixture (scripts/tool-pins.sh pins it)" >&2; exit 2; }
 	@sh scripts/devcontainer.sh run 'mkdir -p $(dir $(ARM_TRUSTZONE_BIN)) && cd $(ARM_TRUSTZONE_MODULE) && GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go test -c -tags=optee -o "$$OLDPWD/$(ARM_TRUSTZONE_BIN)" .'
-	@ARM_TRUSTZONE_BIN=$(ARM_TRUSTZONE_BIN) OPTEE_TEST_BIN=$(notdir $(ARM_TRUSTZONE_BIN)) sh scripts/optee-fixture.sh harness
+	@if [ -z "$$OPTEE_FIXTURE_IMAGE" ]; then \
+	  ARM_TRUSTZONE_BIN=$(ARM_TRUSTZONE_BIN) OPTEE_TEST_BIN=$(notdir $(ARM_TRUSTZONE_BIN)) sh scripts/optee-fixture.sh harness; \
+	else \
+	  docker run --rm -v "$$PWD:/src:ro" -w /src \
+	    -e TRUSTED_FIRMWARE_TAG -e TRUSTED_FIRMWARE_COMMIT -e GO_ENCLAVE_OPTEE_ENDPOINT \
+	    -e TRUSTED_FIRMWARE_CACHE=$(OPTEE_FIXTURE_CACHE) -e OPTEE_FIXTURE_PREBUILT=1 \
+	    -e ARM_TRUSTZONE_BIN=$(ARM_TRUSTZONE_BIN) -e OPTEE_TEST_BIN=$(notdir $(ARM_TRUSTZONE_BIN)) \
+	    "$$OPTEE_FIXTURE_IMAGE" sh scripts/optee-fixture.sh harness; \
+	fi
 
 ## integration-test-fips: every integration suite under FIPS 140-3 strict mode, in the devcontainer
 .PHONY: integration-test-fips
