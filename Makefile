@@ -489,22 +489,31 @@ optee-fixture-check:
 # the target's. The test registers the backend in-process; a missing endpoint
 # fails the run, never skips it. The root's optee-tagged harness
 # (test/integration/enclave) is not run: the root go.mod never requires the
-# nested module, so nothing registers the backend there.
+# nested module, so nothing registers the backend there. Both containers get a
+# copy of the checkout, never a bind mount (as scripts/in-toolchain-image.sh):
+# a CI job reaches the daemon through its socket, so a bind mount resolves on
+# the daemon's host. The fixture's copy is owned by its user tfw (uid 1000).
 ARM_TRUSTZONE_MODULE := backends/armtrustzone
 # The test binary, compiled in the toolchain image into the ignored bin/.
 ARM_TRUSTZONE_BIN := bin/optee/armtrustzone.test
 .PHONY: integration-test-arm-trustzone
 integration-test-arm-trustzone: docker-build
 	@[ -n "$$TRUSTED_FIRMWARE_TAG" ] || { echo "integration-test-arm-trustzone: TRUSTED_FIRMWARE_TAG is empty; set it to the trusted-firmware release whose make optee-run is the fixture (scripts/tool-pins.sh pins it)" >&2; exit 2; }
-	@sh scripts/devcontainer.sh run 'mkdir -p $(dir $(ARM_TRUSTZONE_BIN)) && cd $(ARM_TRUSTZONE_MODULE) && GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go test -c -tags=optee -o "$$OLDPWD/$(ARM_TRUSTZONE_BIN)" .'
+	@mkdir -p $(dir $(ARM_TRUSTZONE_BIN))
+	@bash scripts/in-toolchain-image.sh "$$($(MAKE) -s toolchain-image)" 'cd $(ARM_TRUSTZONE_MODULE) && GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go test -c -tags=optee -o /tmp/$(notdir $(ARM_TRUSTZONE_BIN)) . >&2 && cat /tmp/$(notdir $(ARM_TRUSTZONE_BIN))' > $(ARM_TRUSTZONE_BIN)
+	@chmod 0755 $(ARM_TRUSTZONE_BIN)
 	@if [ -z "$$OPTEE_FIXTURE_IMAGE" ]; then \
 	  ARM_TRUSTZONE_BIN=$(ARM_TRUSTZONE_BIN) OPTEE_TEST_BIN=$(notdir $(ARM_TRUSTZONE_BIN)) sh scripts/optee-fixture.sh harness; \
 	else \
-	  docker run --rm -v "$$PWD:/src:ro" -w /src \
+	  name=go-enclave-optee-$$$$-$$(date +%s); \
+	  trap 'docker rm -f -v "$$name" >/dev/null 2>&1 || true' EXIT; \
+	  docker create --name "$$name" -w /src \
 	    -e TRUSTED_FIRMWARE_TAG -e TRUSTED_FIRMWARE_COMMIT -e GO_ENCLAVE_OPTEE_ENDPOINT \
 	    -e TRUSTED_FIRMWARE_CACHE=$(OPTEE_FIXTURE_CACHE) -e OPTEE_FIXTURE_PREBUILT=1 \
 	    -e ARM_TRUSTZONE_BIN=$(ARM_TRUSTZONE_BIN) -e OPTEE_TEST_BIN=$(notdir $(ARM_TRUSTZONE_BIN)) \
-	    "$$OPTEE_FIXTURE_IMAGE" sh scripts/optee-fixture.sh harness; \
+	    "$$OPTEE_FIXTURE_IMAGE" sh scripts/optee-fixture.sh harness >/dev/null && \
+	  tar -C "$$PWD" --owner=1000 --group=1000 --numeric-owner -cf - . | docker cp -a - "$$name:/src" && \
+	  docker start -a "$$name"; \
 	fi
 
 ## integration-test-fips: every integration suite under FIPS 140-3 strict mode, in the devcontainer
