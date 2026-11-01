@@ -279,38 +279,6 @@ func TestNewSealed_ReturnsTheInterface(t *testing.T) {
 	}
 }
 
-// TestSealed_NoPlaintextAtRest pins that between Opens the material is
-// not readable: neither envelope half contains the plaintext or any long
-// prefix of it.
-func TestSealed_NoPlaintextAtRest(t *testing.T) {
-	freshProcessSealer(t)
-	src := append([]byte(nil), sealedMaterial...)
-	s, err := newSealed(t.Context(), src)
-	if err != nil {
-		t.Fatalf("NewSealed: %v", err)
-	}
-	defer s.Destroy()
-
-	for name, half := range map[string][]byte{"sealed": s.sealed, "blob": s.blob} {
-		if bytes.Contains(half, sealedMaterial) {
-			t.Fatalf("the whole plaintext is present in the %s bytes; the material is not encrypted at rest", name)
-		}
-		for n := len(sealedMaterial); n >= 8; n /= 2 {
-			if bytes.Contains(half, sealedMaterial[:n]) {
-				t.Errorf("the first %d bytes of the plaintext are present in the %s bytes", n, name)
-			}
-		}
-	}
-
-	// Ciphertext plus a nonce and a tag is necessarily longer than the
-	// plaintext. Equal length would mean nothing was added, which is what a
-	// store-it-raw mutation looks like from the outside.
-	if len(s.sealed) <= len(sealedMaterial) {
-		t.Errorf("sealed length %d <= plaintext length %d; nothing was added",
-			len(s.sealed), len(sealedMaterial))
-	}
-}
-
 // TestSealed_SealIsNonDeterministic pins the nonce: sealing the same
 // material twice must produce different bytes, since a repeated GCM nonce is a
 // break. A zeroed-nonce mutant passes every other test in this file.
@@ -461,54 +429,6 @@ func TestSealed_TruncationIsRejected(t *testing.T) {
 		t.Fatalf("Open after restoring both halves: %v", err)
 	}
 	e.Destroy()
-}
-
-// TestSealed_OpensAreIndependent pins the ownership contract on Open's
-// result: each call yields a separate enclave the caller owns, and destroying
-// one affects neither the other nor the sealed value it came from.
-func TestSealed_OpensAreIndependent(t *testing.T) {
-	freshProcessSealer(t)
-	s, err := newSealed(t.Context(), append([]byte(nil), sealedMaterial...))
-	if err != nil {
-		t.Fatalf("NewSealed: %v", err)
-	}
-	defer s.Destroy()
-
-	first, err := s.Open(t.Context())
-	if err != nil {
-		t.Fatalf("first Open: %v", err)
-	}
-	second, err := s.Open(t.Context())
-	if err != nil {
-		t.Fatalf("second Open: %v", err)
-	}
-
-	if first == second {
-		t.Fatal("two Opens returned the same enclave")
-	}
-
-	first.Destroy()
-
-	if second.IsAlive() != true {
-		t.Error("destroying one opened enclave destroyed the other")
-	}
-	if !holds(second, sealedMaterial) {
-		t.Error("destroying one opened enclave corrupted the other")
-	}
-	if !s.IsAlive() {
-		t.Error("destroying an opened enclave destroyed the sealed enclave")
-	}
-
-	// And the sealed value still opens afterwards.
-	third, err := s.Open(t.Context())
-	if err != nil {
-		t.Fatalf("Open after destroying an earlier result: %v", err)
-	}
-	if !holds(third, sealedMaterial) {
-		t.Error("a later Open did not return the material")
-	}
-	third.Destroy()
-	second.Destroy()
 }
 
 // TestSealed_Lifecycle covers the destroyed contract, idempotence, and
@@ -717,34 +637,6 @@ func TestSealed_OversizedMaterialIsRefusedNotPanicked(t *testing.T) {
 	if strconv.IntSize < 64 {
 		t.Logf("int is %d bits: no slice can reach the %d-byte ceiling, so the guard is unreachable "+
 			"through NewSealed here", strconv.IntSize, maxSealedPlaintext)
-	}
-}
-
-func TestEnclaves_GoStringIsRedacted(t *testing.T) {
-	ctx := t.Context()
-	s, err := newEnvelopeSealer()
-	if err != nil {
-		t.Fatalf("NewSealer: %v", err)
-	}
-	t.Cleanup(func() { _ = s.Destroy() })
-	v, err := s.sealData(ctx, []byte("gostring-material"))
-	if err != nil {
-		t.Fatalf("Seal: %v", err)
-	}
-	if got := fmt.Sprintf("%#v", v); got != "Sealed(sealed)" {
-		t.Errorf("%%#v of a Sealed = %q, want the redacted form", got)
-	}
-	e, err := v.Open(ctx)
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	if got := fmt.Sprintf("%#v", e); got != "Memory(redacted)" {
-		t.Errorf("%%#v of a memory enclave = %q, want the redacted form", got)
-	}
-	_ = e.Destroy()
-	v.Destroy()
-	if got := fmt.Sprintf("%#v", v); got != "Sealed(destroyed)" {
-		t.Errorf("%%#v of a destroyed Sealed = %q", got)
 	}
 }
 

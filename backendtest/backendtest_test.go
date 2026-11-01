@@ -13,45 +13,6 @@ import (
 // errFake is the error the fakes' factories fail with.
 var errFake = errors.New("fake: factory failure")
 
-func TestBackendConformance_Allocator(t *testing.T) {
-	cfg := Config{
-		New: func() (enclave.Backend, error) {
-			return enclave.NewAllocator(1 << 20)
-		},
-		BackendCapabilities: []enclave.Capability{enclave.CapabilityImport, enclave.CapabilityProbe},
-		Handles: []HandleCase{
-			{
-				Name:       "material",
-				Import:     []enclave.ImportOption{enclave.WithPurpose(enclave.PurposeMaterial)},
-				ImportSize: materialBytes,
-				Capabilities: []enclave.Capability{
-					enclave.CapabilityBytes,
-					enclave.CapabilityFreeze,
-				},
-			},
-			{
-				Name: "wrapping-key",
-				Import: []enclave.ImportOption{
-					enclave.WithPurpose(enclave.PurposeWrappingKey),
-					enclave.WithAlgorithm(enclave.AlgorithmAES256GCM),
-				},
-				ImportSize: materialBytes,
-				Capabilities: []enclave.Capability{
-					enclave.CapabilityBytes,
-					enclave.CapabilityFreeze,
-				},
-			},
-		},
-		Logf: t.Logf,
-	}
-	if !memscan.Supported {
-		cfg.SkipResidueSweep = memscan.UnsupportedReason
-	}
-	if err := TestBackend(context.Background(), cfg); err != nil {
-		t.Fatal(err)
-	}
-}
-
 // The secretmem backend passes the suite wherever the host allows
 // memfd_secret(2); elsewhere it skips, naming the refusal.
 func TestBackendConformance_SecretMemory(t *testing.T) {

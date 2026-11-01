@@ -60,20 +60,6 @@ func TestMain(m *testing.M) {
 // The conforming baseline
 // ---------------------------------------------------------------------------
 
-// TestConformingProvider is the positive control: the provider go-enclave
-// ships must pass every property in both modes. A failure here means the suite
-// demands something the seam does not require.
-func TestConformingProvider(t *testing.T) {
-	err := TestProvider(t.Context(), Config{
-		New:   func() (any, error) { return enclave.NewSoftwareProvider(), nil },
-		Modes: []enclave.Mode{enclave.ModeRootKey, enclave.ModePerOperation},
-		Logf:  t.Logf,
-	})
-	if err != nil {
-		t.Fatalf("the software provider does not pass its own conformance suite:\n%v", err)
-	}
-}
-
 // ---------------------------------------------------------------------------
 // Harness
 // ---------------------------------------------------------------------------

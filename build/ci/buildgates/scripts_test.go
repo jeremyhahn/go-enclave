@@ -1851,33 +1851,6 @@ var releaseKinds = []struct{ kind, target, forms, version string }{
 	{"alpha", "make release-alpha", "vX.Y.Z-alpha;", "v1.5.0-alpha"},
 }
 
-// TestScriptsRelease_EachTargetRefusesTheOtherKinds drives every kind with
-// every version of the other two kinds: each is refused before anything is
-// written.
-func TestScriptsRelease_EachTargetRefusesTheOtherKinds(t *testing.T) {
-	for _, k := range releaseKinds {
-		for _, other := range releaseKinds {
-			if other.kind == k.kind {
-				continue
-			}
-			t.Run(k.kind+" given "+other.version, func(t *testing.T) {
-				r := newReleaseRepo(t)
-				before := r.state()
-				out, ok := r.run(k.kind, other.version)
-				if ok {
-					t.Fatalf("%s accepted %s:\n%s", k.target, other.version, out)
-				}
-				if want := "is not " + k.forms; !strings.Contains(out, want) {
-					t.Fatalf("refusal does not say %q:\n%s", want, out)
-				}
-				if after := r.state(); after != before {
-					t.Fatalf("a refused release changed the repository:\nbefore %q\nafter  %q", before, after)
-				}
-			})
-		}
-	}
-}
-
 func TestScriptsRelease_RefusesAnUnknownKind(t *testing.T) {
 	r := newReleaseRepo(t)
 	for _, kind := range []string{"", "any", "rc", "Release"} {

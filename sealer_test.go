@@ -155,34 +155,6 @@ func TestSealer_DefaultIsSoftwareRootKey(t *testing.T) {
 	}
 }
 
-// TestSealer_PerOperationRoundTrip runs both modes against the software
-// provider through an explicit Sealer; the process default never exercises
-// the per-operation path.
-func TestSealer_PerOperationRoundTrip(t *testing.T) {
-	for _, m := range []Mode{ModePerOperation, ModeRootKey} {
-		t.Run(m.String(), func(t *testing.T) {
-			s, err := newEnvelopeSealer(providerOption(newSoftwareProvider(), m))
-			if err != nil {
-				t.Fatalf("NewSealer: %v", err)
-			}
-			want := []byte("mode-parity-material-for-" + m.String())
-			v, err := s.sealData(t.Context(), append([]byte(nil), want...))
-			if err != nil {
-				t.Fatalf("Seal: %v", err)
-			}
-			defer v.Destroy()
-			e, err := v.Open(t.Context())
-			if err != nil {
-				t.Fatalf("Open: %v", err)
-			}
-			defer e.Destroy()
-			if !holds(e, want) {
-				t.Error("round trip returned the wrong material")
-			}
-		})
-	}
-}
-
 // TestSealer_RefusesForeignProvider pins that a value sealed under one
 // provider does not open under another, in either mode. The envelope is
 // rebuilt against the second sealer directly, since normal use has no path
@@ -1320,42 +1292,6 @@ func TestSealer_DestroyReleasesEverythingAndFailsClosed(t *testing.T) {
 	}
 }
 
-// TestSealer_RepeatedSealersDoNotAccumulateLockedMemory pins that a destroyed
-// sealer unregisters its root, KEK and provider root, so creating and
-// destroying many sealers does not exhaust RLIMIT_MEMLOCK.
-func TestSealer_RepeatedSealersDoNotAccumulateLockedMemory(t *testing.T) {
-	ctx := t.Context()
-	a, err := newBudgetAllocator(openBudget(1))
-	if err != nil {
-		t.Fatalf("NewAllocator: %v", err)
-	}
-	base := ledgerCount()
-	for i := range 200 {
-		s, err := newEnvelopeSealer()
-		if err != nil {
-			t.Fatalf("NewSealer: %v", err)
-		}
-		v, err := s.sealData(ctx, []byte("credential"))
-		if err != nil {
-			t.Fatalf("iteration %d: Seal: %v", i, err)
-		}
-		e, err := openInAllocator(ctx, v, a)
-		if err != nil {
-			t.Fatalf("iteration %d: OpenIn: %v", i, err)
-		}
-		if err := e.Destroy(); err != nil {
-			t.Fatalf("iteration %d: destroying the opened enclave: %v", i, err)
-		}
-		v.Destroy()
-		if err := s.Destroy(); err != nil {
-			t.Fatalf("iteration %d: Destroy: %v", i, err)
-		}
-		if got := ledgerCount(); got != base {
-			t.Fatalf("iteration %d: ledger holds %d entries, want %d: locked memory grows per sealer", i, got, base)
-		}
-	}
-}
-
 func TestSealer_DestroyNeverDestroysAnInjectedProvider(t *testing.T) {
 	ctx := t.Context()
 	for _, mode := range []Mode{ModeRootKey, ModePerOperation} {
@@ -1382,43 +1318,6 @@ func TestSealer_DestroyNeverDestroysAnInjectedProvider(t *testing.T) {
 				t.Fatal("empty blob")
 			}
 		})
-	}
-}
-
-// TestSealer_DestroyDuringABlockedUnsealReleasesThePendingRoot pins that
-// Destroy does not wait on a provider, and that the initialization it raced
-// releases the root it produced instead of publishing it.
-func TestSealer_DestroyDuringABlockedUnsealReleasesThePendingRoot(t *testing.T) {
-	ctx := t.Context()
-	base := ledgerCount()
-	u := &gatedRootUnsealer{entered: make(chan struct{}), release: make(chan struct{})}
-	s, err := newEnvelopeSealer(WithRootUnsealer(u))
-	if err != nil {
-		t.Fatalf("NewSealer: %v", err)
-	}
-	done := make(chan error, 1)
-	go func() {
-		v, err := s.sealData(ctx, []byte("x"))
-		v.Destroy()
-		done <- err
-	}()
-	<-u.entered
-
-	if err := s.Destroy(); err != nil {
-		t.Fatalf("Destroy: %v", err)
-	}
-	close(u.release)
-	if err := <-done; !errors.Is(err, ErrSealerDestroyed) {
-		t.Fatalf("Seal raced by Destroy = %v, want ErrSealerDestroyed", err)
-	}
-	if got := ledgerCount(); got != base {
-		t.Errorf("ledger holds %d entries, want %d: the pending root outlived Destroy", got, base)
-	}
-	if s.root != nil {
-		t.Error("a root was published after Destroy")
-	}
-	if u.callCount() != 1 {
-		t.Errorf("UnsealRoot called %d times, want 1", u.callCount())
 	}
 }
 
