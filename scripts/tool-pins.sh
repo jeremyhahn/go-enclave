@@ -57,4 +57,5 @@ TRUSTED_FIRMWARE_COMMIT=48d7c9f4817aaef1cbdbc034ffc2d2110cf16687
 # (<registry>/<name>@sha256:<64 hex>); raise it with the trusted-firmware pins.
 # Infra published it 2026-11-01 (tag v0.4.2-alpha-optee-4.11.0, #254 comment 184877); the optee job fails if it is emptied.
 # The contract: docs/backend-conformance/engineering.md#fixture-image-contract.
+# lab-string-ok: the optee job pulls this image from the lab registry by digest (ruling 274(9)); ci.yml has no registry-host source
 OPTEE_FIXTURE_IMAGE=git.example.internal/agent-ci-images/go-enclave-optee-fixture@sha256:7c618b5fb7d0bcdbd0f63b15878e3653c0f46ea0d880a9c1f20fb11c7e2edbd6
