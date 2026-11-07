@@ -23,7 +23,7 @@ import (
 // consumers hash is that same tree, so nothing can be scrubbed from what is
 // published: the scrub has to happen in the source, before tagging, and a gate
 // keeps the next commit from undoing it. The one exception is the set of agent
-// instruction files (CLAUDE.md, AGENTS.md, .claude/, .serena/project.yml), which scaffold §7 has the
+// instruction files (CLAUDE.md, AGENTS.md, .claude/), which scaffold §7 has the
 // publish step strip from the public tree. They are tracked, reported by this
 // gate as strip-at-publish, and their content is not scanned, because it is
 // not published.
@@ -41,7 +41,7 @@ import (
 //     and the retired `task-worker.yml` workflow.
 //
 // Reported, not refused: strip-at-publish files (CLAUDE.md, AGENTS.md,
-// .claude/, .serena/project.yml), logged by the main test so the publish step's input is visible.
+// .claude/), logged by the main test so the publish step's input is visible.
 //
 // The lab-address rule is generic and built in. The lab-host and owner-path
 // rules are site-specific, so they do not live in this public source: the
@@ -203,11 +203,12 @@ var stripAtPublishRules = []internalFileRule{
 	{name: "CLAUDE.md", guidance: "agent instructions: stripped from the public tree at publish (scaffold §7)"},
 	{name: "AGENTS.md", guidance: "agent instructions: stripped from the public tree at publish (scaffold §7)"},
 	{name: ".claude", dir: true, guidance: "agent configuration: stripped from the public tree at publish (scaffold §7)"},
-	{path: ".serena/project.yml", guidance: "Serena project file (#140): stripped from the public tree at publish, like CLAUDE.md"},
 }
 
 var internalFileRules = []internalFileRule{
 	{name: ".serena", dir: true, guidance: "local agent tool state: untrack it, it is in .gitignore"},
+	{name: "scheduled_tasks.lock", guidance: "agent scheduler state: untrack it, it is in .gitignore"},
+	{name: "lane-records", dir: true, guidance: "agent run records: untrack them, they are in .gitignore"},
 	{name: "local.mk", guidance: "per-machine Makefile overrides: untrack it, it is in .gitignore"},
 	{name: "task-worker.yml", guidance: "the retired internal fabric workflow (handbook sdlc.md §8); it has no place in a public tree"},
 }
@@ -732,7 +733,7 @@ func scanTree(root string, files []string, rules []leakPattern) ([]leakFinding, 
 // published at all.
 func internalFile(name string) (leakFinding, bool) {
 	if _, stripped := stripAtPublish(name); stripped {
-		return leakFinding{}, false // .serena/project.yml inside the refused .serena/
+		return leakFinding{}, false
 	}
 	return matchFileRule(name, internalFileRules)
 }
