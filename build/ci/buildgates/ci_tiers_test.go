@@ -70,9 +70,12 @@ const (
 	lintJob = "lint"
 	// scheduleGuardJob is the v1.29.3 job whose verdict gates the bigdisk jobs.
 	scheduleGuardJob = "schedule-guard"
-	// publishJob is the one job outside the gate (v1.30); no `release` runner
-	// serves go-enclave, so it is `if: false` (#277).
+	// publishJob is the one job outside the gate (v1.30); its if holds
+	// publishGuard, so it never runs on github.com, where go-enclave lives and
+	// no `release` runner serves it (#277).
 	publishJob = "publish-images"
+	// publishGuard is the template's term that skips publishJob on github.com.
+	publishGuard = "github.server_url != 'https://github.com'"
 	// fullTierEnv is the gate's FULL_TIER value.
 	fullTierEnv = "${{ env.CI_FULL_TIER }}"
 	// nightlyTierIf is the gate's NIGHTLY value.
@@ -260,9 +263,9 @@ func ciTierViolations(src []byte) ([]string, error) {
 	}
 
 	// v1.30: publish-images is the one job outside the gate; no release
-	// runner serves this repository, so it never runs (#277).
-	if pub, ok := wf.Jobs[publishJob]; !ok || pub.If != false {
-		bad = append(bad, fmt.Sprintf("job %s: if is %v, want false: no release runner serves this repository (#277)", publishJob, pub.If))
+	// runner serves this repository on github.com, so it never runs there (#277).
+	if pub, ok := wf.Jobs[publishJob]; !ok || !slices.Contains(ifTerms(pub.If), publishGuard) {
+		bad = append(bad, fmt.Sprintf("job %s: if is %v, want a top-level %s term: no release runner serves this repository on github.com (#277)", publishJob, pub.If, publishGuard))
 	}
 	if _, ok := wf.Jobs[scheduleGuardJob]; !ok {
 		bad = append(bad, fmt.Sprintf("no %s job", scheduleGuardJob))
@@ -706,7 +709,8 @@ func TestCIGateTiers_RefusesWhatItMustRefuse(t *testing.T) {
 		{"gate on the shared runner", "    runs-on: " + ciGateRunsOn + "\n", "    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'bigdisk' }}\n"},
 		{"deps-check back on the full tier", "env.TOOLCHAIN_IMAGE != '' }}\n        env:\n          IN_IMAGE_NETWORK: bridge\n        run: scripts/in-toolchain-image.sh \"$TOOLCHAIN_IMAGE\" make deps-check\n", "env.TOOLCHAIN_IMAGE != '' && env.CI_FULL_TIER == 'true' }}\n        env:\n          IN_IMAGE_NETWORK: bridge\n        run: scripts/in-toolchain-image.sh \"$TOOLCHAIN_IMAGE\" make deps-check\n"},
 		{"gate uses an action", "      - name: Fail closed on any non-success\n", "      - uses: actions/checkout@abc # v7\n      - name: Fail closed on any non-success\n"},
-		{"publish-images runs", "    if: false\n", "    if: ${{ github.event_name == 'push' }}\n"},
+		{"publish-images runs", "    if: ${{ " + publishGuard + " && ", "    if: ${{ "},
+		{"publish-images guard ored away", "    if: ${{ " + publishGuard + " && ", "    if: ${{ " + publishGuard + " || "},
 		{"publish-images dropped", "  publish-images:\n", "  publish-images-x:\n"},
 		{"timeout off its value", "    timeout-minutes: 56 ", "    timeout-minutes: 90 "},
 		{"job without a timeout", "    timeout-minutes: 5        # v1.30\n", ""},
