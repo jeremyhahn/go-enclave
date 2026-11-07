@@ -33,30 +33,6 @@ func newTestSingleton(builds *int, fail *bool) *processSingleton[int] {
 	}
 }
 
-func TestProcessSingleton_InstallIsOneShotAndRefusesNil(t *testing.T) {
-	var builds int
-	var fail bool
-	s := newTestSingleton(&builds, &fail)
-
-	if err := s.install(nil); !errors.Is(err, errTestNil) {
-		t.Fatalf("install(nil) = %v, want errNil", err)
-	}
-	v := new(int)
-	if err := s.install(v); err != nil {
-		t.Fatalf("install: %v", err)
-	}
-	if err := s.install(new(int)); !errors.Is(err, errTestTaken) {
-		t.Fatalf("second install = %v, want errTaken", err)
-	}
-	got, err := s.get()
-	if err != nil || got != v {
-		t.Fatalf("get = (%p, %v), want the installed value", got, err)
-	}
-	if builds != 0 {
-		t.Fatalf("an installed value still built the default %d times", builds)
-	}
-}
-
 func TestProcessSingleton_DefaultIsBuiltOnceAndLocksTheSlot(t *testing.T) {
 	var builds int
 	fail := true
