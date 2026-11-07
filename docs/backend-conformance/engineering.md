@@ -285,7 +285,8 @@ binary.
   if yours does.
 - **CI.** The `optee` job in `.github/workflows/ci.yml` runs
   `make integration-test-arm-trustzone OPTEE_FIXTURE_IMAGE=<pin>` on the
-  `go-warm` label (ruling 274(9)), full tier and every nightly, when the
+  GitHub-hosted runner `ubuntu-latest` with no module credential, because
+  every module is public (ruling 274(9)), full tier and every nightly, when the
   changes job's `optee` output is true: a change under
   `backends/armtrustzone/`, to `scripts/optee-fixture.sh`, to
   `test/integration/enclave/main_optee_test.go`, or to a `TRUSTED_FIRMWARE_*`

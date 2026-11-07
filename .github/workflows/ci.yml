@@ -436,8 +436,9 @@
 # tiers (pr, full, nightly) and release.yml runs the same file.
 # CUSTOMIZE (go-enclave, ruling 274(9), #206 comment 179925): the optee job
 # runs make integration-test-arm-trustzone with the harness in the OP-TEE
-# fixture image (OPTEE_FIXTURE_IMAGE, scripts/tool-pins.sh) on the go-warm
-# label, timeout 180. CI Gate tags it `full` and it carries the full tier's
+# fixture image (OPTEE_FIXTURE_IMAGE, scripts/tool-pins.sh) on a GitHub-hosted
+# runner (ubuntu-latest), timeout 180, with no module credential (every module
+# is public). CI Gate tags it `full` and it carries the full tier's
 # `if:` with no path condition, so it never skips on a full-tier run. Its
 # path gate is its first step, which reads the changes job's `optee` output
 # (true on every schedule and workflow_dispatch): when no OP-TEE path
@@ -1405,7 +1406,7 @@ jobs:
     name: OP-TEE [arm-trustzone harness, fixture image]
     needs: [changes, image]
     if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')) && !github.event.pull_request.draft }}
-    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'go-warm' }}
+    runs-on: ubuntu-latest
     timeout-minutes: 180
     steps:
       # The path gate: selected only when the changes job's `optee` output
@@ -1452,19 +1453,7 @@ jobs:
 
       - name: make integration-test-arm-trustzone (fixture image)
         if: steps.select.outputs.run == 'true'
-        run: |
-          ( umask 077; : > "$RUNNER_TEMP/gomodauth.env"
-            for v in GOPRIVATE GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0; do
-              if [ -n "${!v:-}" ]; then printf '%s=%s\n' "$v" "${!v}" >> "$RUNNER_TEMP/gomodauth.env"; fi
-            done )
-          rc=0
-          make integration-test-arm-trustzone MODULE_ENV_FILE="$RUNNER_TEMP/gomodauth.env" OPTEE_FIXTURE_IMAGE="$OPTEE_FIXTURE_IMAGE" || rc=$?
-          rm -f "$RUNNER_TEMP/gomodauth.env"
-          exit "$rc"
-
-      - name: Remove the module credentials
-        if: always()
-        run: rm -f "$RUNNER_TEMP/gomodauth.env"
+        run: make integration-test-arm-trustzone OPTEE_FIXTURE_IMAGE="$OPTEE_FIXTURE_IMAGE"
 
   # Architecture gate (v1.20, Company Agent m270 item 9; go-xkms arch-gates).
   # go-objstore owns every blob backend (docs/00), and a repo reaches it only

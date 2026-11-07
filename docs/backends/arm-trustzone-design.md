@@ -154,13 +154,14 @@ order of RFC 9562) is reimplemented rather than inherited.
 
 Ruling 274(9) chose (B): the one CI job that runs outside the toolchain image,
 the `optee` job, runs on an OP-TEE QEMU fixture image that Infra builds and
-keeps, on the `go-warm` runner label. What the job needs of that image is the
+keeps, on a GitHub-hosted runner (`ubuntu-latest`) with no module credential,
+because every module is public. What the job needs of that image is the
 [fixture image contract](../backend-conformance/engineering.md#fixture-image-contract).
 
 - **(A) Add trusted-firmware's host packages to go-enclave's toolchain
   image** (`build/docker/devcontainer`), so `make optee-tools` passes in it.
 - **(B) Run the CI job in trusted-firmware's `optee` image**, as
-  trusted-firmware's own CI does on the `go-warm` runner label.
+  trusted-firmware's own CI does.
 
 A local run caches `OPTEE_CACHE` (outside the checkout) under the key
 `make -s optee-pin` prints: its first fixture build fetches and builds
@@ -171,8 +172,7 @@ fixture image's prebuilt stack and never builds it.
 trusted-firmware already maintains an image that carries it; copying it into
 go-enclave's toolchain image would grow every other job's image and drift
 from the pin. The fixture image is Infra's to build and
-keep, and the runner label is `go-warm`, so slice 3 uses them rather than
-building them.
+keep, so slice 3 uses it rather than building it.
 
 Cost: one CI job runs outside the toolchain image, against the devcontainer
 rule for builds, and local runs of the target need that image too.
