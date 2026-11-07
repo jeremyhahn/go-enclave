@@ -191,8 +191,8 @@
 # in a go-xkms run): the image and integration jobs mask the forge
 # credentials first, and no step or make target prints an env file, the job
 # environment or a matched line; lint steps and `make check-public-literals`
-# report path and line only, and `make stage-gomodauth` runs silent
-# (ci-standard.md §5). Every v1.21 rollout PR adopts v1.21.1 before it merges.
+# report path and line only (ci-standard.md §5). The image build takes no
+# forge credential: its private root module comes through GO_BUILD_PROXY (#293). Every v1.21 rollout PR adopts v1.21.1 before it merges.
 # v1.21 (Company Agent m598 items 1 and 2, 2026-10-18): every stage runs in
 # the project's own devcontainer image (ci-standard.md §2, devcontainer.md §7).
 # Through v1.20 lint, security, build and test installed Go with setup-go on
@@ -206,7 +206,7 @@
 # COVERAGE_THRESHOLD, m601 (c)), security, deps-check (new, ci-standard.md
 # §1) and trivy image on the integration image (it leaves the CUSTOMIZE note).
 # The integration stage stays its own job, `make integration-test` in the
-# integration image. Both run on bigdisk (ubuntu-latest on github.com).
+# integration image. Both run on ubuntu-latest (#293).
 # setup-go, the runner tool installs and the SARIF upload (m601 (d): CI runs
 # on Gitea) are gone, and with them GO_VERSION: the image pins Go. The tag
 # assertion moves to scripts/assert-build-tags.sh (ships beside this file).
@@ -402,8 +402,9 @@
 # v1.1 (2026-08-14): gosec findings now also print to the job log (the SARIF
 # upload only exists on github.com, so on Gitea the findings were invisible).
 # Also NEVER add `GOPROXY: direct` / `GOSUMDB: off` to a repo's env block:
-# GOPRIVATE (injected by the runners, dependency-resolution.md §6) already
-# exempts first-party modules from proxy and sumdb; the blanket override
+# the jobs run on GitHub-hosted runners, which carry no GOPROXY, so the image
+# build uses the Dockerfile's default public proxy and the public root module
+# resolves through it and the checksum database (#293); the blanket override
 # disables checksum-database verification for every third-party dependency
 # and breaks the build when an upstream re-points a tag (go-tpm-tools v0.4.8,
 # 2026-08-14). `ghcr.io` likewise does not exist on Gitea — use the Gitea
@@ -577,20 +578,19 @@ jobs:
   # so the next run rebuilds the image rather than reuse a cached one with the
   # old package (go-enclave main fd83b79ce, CVE-2026-92392).
   #
-  # The forge credentials reach the image build only as the gomodauth BuildKit
-  # secret, from a file outside the context that the job removes.
-  # No step and no make target prints that file, the job environment (`env`,
-  # `printenv`, `set -x`) or a matched line: `make stage-gomodauth` and the
-  # file writes run silent, and lint steps and `make check-public-literals`
-  # report path and line only (ci-standard.md §5, Company Agent m605 item 8).
+  # No forge credential reaches the image build (#293): the root module is
+  # public, a GitHub-hosted runner carries no GOPROXY, and the job passes the
+  # empty GOPROXY to make docker-build as GO_BUILD_PROXY, so the Dockerfile's
+  # default public proxy serves the build. No step and no make target prints the job environment
+  # (`env`, `printenv`, `set -x`) or a matched line: lint steps and `make
+  # check-public-literals` report path and line only (ci-standard.md §5,
+  # Company Agent m605 item 8).
   #
-  # Runners: the image and integration jobs run on bigdisk (Docker and the disk
-  # for the image builds) and CI Gate on ci-gate; on the github.com mirror all
-  # are ubuntu-latest, which has Docker (devops.md §1: host-specific choices
-  # are guarded on github.server_url).
+  # Runners: every job, CI Gate included, runs on ubuntu-latest. A job that
+  # builds an image first frees disk on the runner for the image build.
   image:
     name: Devcontainer image [lint, build, test, security, deps-check, trivy image]
-    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'bigdisk' }}
+    runs-on: ubuntu-latest
     needs: changes             # v1.24 (CA m749, m751 (a))
     timeout-minutes: 90       # CUSTOMIZE: give the stages honest headroom
     env:
@@ -617,6 +617,12 @@ jobs:
             case $val in *://*:*@*) t=${val#*://}; t=${t%%@*}; echo "::add-mask::${t#*:}" ;; esac
           done
 
+      # A GitHub-hosted runner has about 14 GB free; the image build needs more.
+      - name: Free disk for the image build
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
       - name: Reap stale CI stacks
         run: scripts/reap-stale-ci-stacks.sh "$CI_STACK_PREFIX"
 
@@ -641,12 +647,7 @@ jobs:
 
       - name: Build the devcontainer images
         run: |
-          ( umask 077; : > "$RUNNER_TEMP/gomodauth.env"
-            for v in GOPRIVATE GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0; do
-              if [ -n "${!v:-}" ]; then printf '%s=%s\n' "$v" "${!v}" >> "$RUNNER_TEMP/gomodauth.env"; fi
-            done )
-          make docker-build MODULE_ENV_FILE="$RUNNER_TEMP/gomodauth.env" IT_IMAGE="$IT_IMAGE"
-          rm -f "$RUNNER_TEMP/gomodauth.env"
+          make docker-build GO_BUILD_PROXY="${GOPROXY:-}" IT_IMAGE="$IT_IMAGE"
           echo "TOOLCHAIN_IMAGE=$(make -s toolchain-image)" >> "$GITHUB_ENV"
 
       # v1.23: a lease on the integration image (from a Codex review). A
@@ -722,13 +723,8 @@ jobs:
           if ! take_lease; then
             image_unlock
             echo "integration image $IT_IMAGE is missing or went before its lease; building it once"
-            ( umask 077; : > "$RUNNER_TEMP/gomodauth.env"
-              for v in GOPRIVATE GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0; do
-                if [ -n "${!v:-}" ]; then printf '%s=%s\n' "$v" "${!v}" >> "$RUNNER_TEMP/gomodauth.env"; fi
-              done )
             rc=0
-            make docker-build MODULE_ENV_FILE="$RUNNER_TEMP/gomodauth.env" IT_IMAGE="$IT_IMAGE" || rc=$?
-            rm -f "$RUNNER_TEMP/gomodauth.env"
+            make docker-build GO_BUILD_PROXY="${GOPROXY:-}" IT_IMAGE="$IT_IMAGE" || rc=$?
             if [ "$rc" -ne 0 ]; then
               echo "::error::building the integration image $IT_IMAGE failed (exit $rc)"
               exit "$rc"
@@ -858,7 +854,7 @@ jobs:
       - name: Tear down
         if: always()
         run: |
-          rm -f "$RUNNER_TEMP/gomodauth.env" it-image.tar
+          rm -f it-image.tar
           [ -z "${IT_LEASE:-}" ] || docker rm "$IT_LEASE" >/dev/null || true
 
   # v1.27: a repository's `make lint-gates` (its own gates beside `make lint`:
@@ -878,7 +874,7 @@ jobs:
   # and the job; the gates after it run on the next push.
   lint-gates:
     name: Lint Gates [toolchain image]
-    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'bigdisk' }}
+    runs-on: ubuntu-latest
     if: ${{ !github.event.pull_request.draft }}   # v1.26
     timeout-minutes: 45       # CUSTOMIZE: the repo's lint-gates time, with honest headroom
     env:
@@ -897,6 +893,12 @@ jobs:
             echo "::add-mask::$val"
             case $val in *://*:*@*) t=${val#*://}; t=${t%%@*}; echo "::add-mask::${t#*:}" ;; esac
           done
+
+      # A GitHub-hosted runner has about 14 GB free; the image build needs more.
+      - name: Free disk for the image build
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
 
       # A source check on the runner's shell: no make recipe runs here.
       - name: Does the Makefile define lint-gates?
@@ -932,12 +934,7 @@ jobs:
       - name: Build the devcontainer images
         if: ${{ steps.probe.outputs.has_target == 'true' }}
         run: |
-          ( umask 077; : > "$RUNNER_TEMP/gomodauth.env"
-            for v in GOPRIVATE GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0; do
-              if [ -n "${!v:-}" ]; then printf '%s=%s\n' "$v" "${!v}" >> "$RUNNER_TEMP/gomodauth.env"; fi
-            done )
-          make docker-build MODULE_ENV_FILE="$RUNNER_TEMP/gomodauth.env" IT_IMAGE="$IT_IMAGE"
-          rm -f "$RUNNER_TEMP/gomodauth.env"
+          make docker-build GO_BUILD_PROXY="${GOPROXY:-}" IT_IMAGE="$IT_IMAGE"
           echo "TOOLCHAIN_IMAGE=$(make -s toolchain-image)" >> "$GITHUB_ENV"
 
       # v1.22: bound this repo's cache volumes (as in the image job). It never
@@ -953,10 +950,6 @@ jobs:
           IN_IMAGE_NETWORK: none   # go-enclave's gates run offline (scratch trees, a fake forge and a local module proxy)
         run: scripts/in-toolchain-image.sh "$TOOLCHAIN_IMAGE" "make lint-gates GO_BUILD_TAGS='$GO_BUILD_TAGS'"
 
-      - name: Tear down
-        if: always()
-        run: rm -f "$RUNNER_TEMP/gomodauth.env"
-
   # CUSTOMIZE (FIPS 140-3 strict): build and unit tests under GOFIPS140=latest
   # with GODEBUG=fips140=only (security-review.md §6), in the toolchain image,
   # on the full tier (CI_FULL_TIER's expression). Strict mode, never `on`,
@@ -967,7 +960,7 @@ jobs:
     name: FIPS
     # v1.26: never on a draft PR, ci:full or not.
     if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')) && !github.event.pull_request.draft }}
-    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'bigdisk' }}
+    runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
       CI_STACK_PREFIX: ${{ github.event.repository.name }}-ci-
@@ -983,6 +976,12 @@ jobs:
             case $val in *://*:*@*) t=${val#*://}; t=${t%%@*}; echo "::add-mask::${t#*:}" ;; esac
           done
 
+      # A GitHub-hosted runner has about 14 GB free; the image build needs more.
+      - name: Free disk for the image build
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
       - name: Reap stale CI stacks
         run: scripts/reap-stale-ci-stacks.sh "$CI_STACK_PREFIX"
 
@@ -997,7 +996,7 @@ jobs:
 
       - name: Build the toolchain image
         run: |
-          make docker-build IT_IMAGE="$IT_IMAGE"
+          make docker-build GO_BUILD_PROXY="${GOPROXY:-}" IT_IMAGE="$IT_IMAGE"
           echo "TOOLCHAIN_IMAGE=$(make -s toolchain-image)" >> "$GITHUB_ENV"
 
       - name: make test-fips (toolchain image)
@@ -1012,7 +1011,7 @@ jobs:
     name: Integration [integration image]
     # v1.26: never on a draft PR, ci:full or not.
     if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')) && !github.event.pull_request.draft }}
-    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'bigdisk' }}
+    runs-on: ubuntu-latest
     timeout-minutes: 60       # CUSTOMIZE
     env:
       CI_STACK_PREFIX: ${{ github.event.repository.name }}-ci-
@@ -1033,6 +1032,12 @@ jobs:
             echo "::add-mask::$val"
             case $val in *://*:*@*) t=${val#*://}; t=${t%%@*}; echo "::add-mask::${t#*:}" ;; esac
           done
+
+      # A GitHub-hosted runner has about 14 GB free; the image build needs more.
+      - name: Free disk for the image build
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
 
       # CUSTOMIZE: the suites' own compose projects (go-enclave-it-*,
       # go-enclave-userns-*) are reaped beside the repo's CI prefix.
@@ -1106,7 +1111,7 @@ jobs:
             image_unlock
             echo "integration image $IT_IMAGE is missing or went before its lease; building it once"
             rc=0
-            make docker-build IT_IMAGE="$IT_IMAGE" || rc=$?
+            make docker-build GO_BUILD_PROXY="${GOPROXY:-}" IT_IMAGE="$IT_IMAGE" || rc=$?
             if [ "$rc" -ne 0 ]; then
               echo "::error::building the integration image $IT_IMAGE failed (exit $rc)"
               exit "$rc"
@@ -1153,7 +1158,6 @@ jobs:
       - name: Tear down
         if: always()
         run: |
-          rm -f "$RUNNER_TEMP/gomodauth.env"
           IT_IMAGE="$IT_IMAGE" docker compose -f build/docker/devcontainer/compose.yaml -p "$IT_PROJECT" down --volumes || true
           [ -z "${IT_LEASE:-}" ] || docker rm "$IT_LEASE" >/dev/null || true
 
@@ -1166,7 +1170,7 @@ jobs:
   soak:
     name: Soak [integration image]
     if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
-    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'bigdisk' }}
+    runs-on: ubuntu-latest
     timeout-minutes: 90       # CUSTOMIZE: SOAK_MINUTES plus one iteration
     env:
       SOAK_MINUTES: 30        # CUSTOMIZE
@@ -1185,6 +1189,12 @@ jobs:
             echo "::add-mask::$val"
             case $val in *://*:*@*) t=${val#*://}; t=${t%%@*}; echo "::add-mask::${t#*:}" ;; esac
           done
+
+      # A GitHub-hosted runner has about 14 GB free; the image build needs more.
+      - name: Free disk for the image build
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
 
       # CUSTOMIZE: the suites' own compose projects (go-enclave-it-*,
       # go-enclave-userns-*) are reaped beside the repo's CI prefix.
@@ -1258,7 +1268,7 @@ jobs:
             image_unlock
             echo "integration image $IT_IMAGE is missing or went before its lease; building it once"
             rc=0
-            make docker-build IT_IMAGE="$IT_IMAGE" || rc=$?
+            make docker-build GO_BUILD_PROXY="${GOPROXY:-}" IT_IMAGE="$IT_IMAGE" || rc=$?
             if [ "$rc" -ne 0 ]; then
               echo "::error::building the integration image $IT_IMAGE failed (exit $rc)"
               exit "$rc"
@@ -1311,7 +1321,6 @@ jobs:
       - name: Tear down
         if: always()
         run: |
-          rm -f "$RUNNER_TEMP/gomodauth.env"
           if [ -s "$RUNNER_TEMP/soak-project" ]; then
             IT_IMAGE="$IT_IMAGE" docker compose -f build/docker/devcontainer/compose.yaml -p "$(cat "$RUNNER_TEMP/soak-project")" down --volumes || true
           fi
@@ -1371,8 +1380,7 @@ jobs:
   # BOTH the needs list and the results check — a gate that can pass vacuously
   # is worse than no gate. Do not use join(needs.*.result); it evaluates empty
   # on Gitea and reports success while jobs fail.
-  # v1.21: on the ci-gate runners (Company Agent m386: only CI Gate runs there;
-  # a 1-CPU gate runner cannot hold a stage). trivy and fips are in nightly.yml
+  # Runs on ubuntu-latest like every job (#293). trivy and fips are in nightly.yml
   # (v1.9, devops.md §8a: the alpha regime).
   #
   # CUSTOMIZE: the template's check() logic is build/ci/summary.sh, carried
@@ -1382,7 +1390,7 @@ jobs:
   # no action.
   ci-gate:
     name: CI Gate
-    runs-on: ci-gate
+    runs-on: ubuntu-latest
     if: always()
     # CUSTOMIZE: the repo's job list. Add every CUSTOMIZE job here AND as a
     # check line below; remove none of the template's jobs.

@@ -39,10 +39,10 @@ import (
 const (
 	ciWorkflowFile = ".github/workflows/ci.yml"
 	ciGateJob      = "ci-gate"
-	// ciGateRunner is the gate's runner label, reserved so the gate never
-	// queues behind PR jobs. Its runners are 1-CPU slots: the gate uses no
-	// action (no checkout, no toolchain) and carries summary.sh inline.
-	ciGateRunner = "ci-gate"
+	// ciGateRunner is the gate's runner label: a GitHub-hosted runner, like
+	// every CI job. The gate uses no action (no checkout, no toolchain) and
+	// carries summary.sh inline.
+	ciGateRunner = "ubuntu-latest"
 	// gateSummaryHeredoc delimits the inline copy of build/ci/summary.sh.
 	gateSummaryHeredoc = "SUMMARY"
 	// fullTierIf is the `if:` every full-tier job carries, and ci.yml's
@@ -189,7 +189,7 @@ func ciTierViolations(src []byte) ([]string, error) {
 		bad = append(bad, fmt.Sprintf("job %s: if is %v, want always()", ciGateJob, gate.If))
 	}
 	if gate.RunsOn != ciGateRunner {
-		bad = append(bad, fmt.Sprintf("job %s: runs-on is %v, want the reserved label %s", ciGateJob, gate.RunsOn, ciGateRunner))
+		bad = append(bad, fmt.Sprintf("job %s: runs-on is %v, want the hosted runner %s", ciGateJob, gate.RunsOn, ciGateRunner))
 	}
 	for i, st := range gate.Steps {
 		if st.Uses != "" {
@@ -518,7 +518,7 @@ func TestCIGateTiers_RefusesWhatItMustRefuse(t *testing.T) {
 		{"image job names the image before reading the apk index", "          sum=$(scripts/apk-index-sum.sh)\n", "          sum=none\n"},
 		{"lint-gates waits on the changes job", "    name: Lint Gates [toolchain image]\n", "    name: Lint Gates [toolchain image]\n    needs: changes\n"},
 		{"lint-gates skipped on a docs-only PR", "      - name: make lint-gates\n        if: ${{ !cancelled() &&", "      - name: make lint-gates\n        if: ${{ needs.changes.outputs.docs_only != 'true' && !cancelled() &&"}, //nolint:misspell // the Actions cancelled() function
-		{"lint-gates job without its draft if", "    name: Lint Gates [toolchain image]\n    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'bigdisk' }}\n    if: " + draftIf + "   # v1.26\n", "    name: Lint Gates [toolchain image]\n    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'bigdisk' }}\n"},
+		{"lint-gates job without its draft if", "    name: Lint Gates [toolchain image]\n    runs-on: ubuntu-latest\n    if: " + draftIf + "   # v1.26\n", "    name: Lint Gates [toolchain image]\n    runs-on: ubuntu-latest\n"},
 		{"the image job runs a lint-gates gate too", "\"$TOOLCHAIN_IMAGE\" make tidy-check lint-runtimesecret lint-integration\n", "\"$TOOLCHAIN_IMAGE\" make tidy-check lint-runtimesecret lint-integration check-scripts\n"},
 		{"changes job without its draft if", "    if: " + draftIf + "\n    steps:\n", "    steps:\n"},
 		{"arch-gates job without its draft if", archIf, "    runs-on: ubuntu-latest\n"},
@@ -541,7 +541,7 @@ func TestCIGateTiers_RefusesWhatItMustRefuse(t *testing.T) {
 		{"gate drops NIGHTLY", `"$FULL_TIER" "$NIGHTLY"`, `"$FULL_TIER"`},
 		{"workflow CI_FULL_TIER differs", "  CI_FULL_TIER: " + fullTierIf, "  CI_FULL_TIER: ${{ github.event_name == 'push' }}"},
 		{"labeled type added back", "types: [opened, synchronize, reopened]", "types: [opened, synchronize, reopened, labeled]"},
-		{"gate on the shared runner", "    runs-on: " + ciGateRunner + "\n", "    runs-on: ubuntu-latest\n"},
+		{"gate on a self-hosted label", "    name: CI Gate\n    runs-on: " + ciGateRunner + "\n", "    name: CI Gate\n    runs-on: ci-gate\n"},
 		{"deps-check back on the full tier", "env.TOOLCHAIN_IMAGE != '' }}\n        env:\n          IN_IMAGE_NETWORK: bridge\n        run: scripts/in-toolchain-image.sh \"$TOOLCHAIN_IMAGE\" make deps-check\n", "env.TOOLCHAIN_IMAGE != '' && env.CI_FULL_TIER == 'true' }}\n        env:\n          IN_IMAGE_NETWORK: bridge\n        run: scripts/in-toolchain-image.sh \"$TOOLCHAIN_IMAGE\" make deps-check\n"},
 		{"gate uses an action", "      - name: Fail closed on any non-success\n", "      - uses: actions/checkout@abc # v7\n      - name: Fail closed on any non-success\n"},
 	} {
