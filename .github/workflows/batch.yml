@@ -25,9 +25,9 @@
 #              artifact on Gitea)
 # A finding that is already an open issue gets a comment, not a new issue.
 #
-# RUNNERS. `runs-on: batch`: Infrastructure registers "batch" runners with
-# capacity 8, 8 and 3 on three factory hosts. Nothing else uses
-# that label, so batch work never takes a CI slot from a pull request.
+# RUNNERS. `runs-on: ubuntu-latest`: every job runs on a GitHub-hosted
+# runner (#293), which carries no GOPROXY; modules resolve through the
+# public proxy, and the root module is public.
 #
 # ARTIFACTS. actions/upload-artifact v4 and later refuse any server that is
 # not github.com ("not currently supported on GHES"; Gitea presents as one),
@@ -40,15 +40,12 @@
 #   RACE_PKGS              the unit-test package scope, the same as ci.yml's
 #                          Test job (dark or environment-bound suites excluded)
 #   SOAK_CMD               the repo's integration suite. go-quicraft and
-#                          go-qrdb run their cluster suites, and their soak
-#                          job's runs-on names the raft-guest runner label
-#                          where Infrastructure has registered one
+#                          go-qrdb run their cluster suites
 #   BENCH_PKGS             benchmark scope (harness modules excluded)
 # A repo with no Fuzz* targets keeps the fuzz job; it finds none and passes.
 #
 # GO-ENCLAVE (#180). Deviations from the template:
-#   - RUNNERS names the hosts by role, not by machine name: this tree ships
-#     publicly (check-releasability).
+#   - RUNNERS: every job runs on ubuntu-latest, not on a self-hosted label.
 # and, for "never downgrade":
 #   - No GO_VERSION env: setup-go reads `go-version-file: go.mod`, as ci.yml
 #     does, so the toolchain is the module's own (newer than the template's).
@@ -124,7 +121,7 @@ jobs:
   fuzz:
     name: Fuzz (shard ${{ matrix.shard }}/4)
     if: inputs.jobs == 'all' || inputs.jobs == 'fuzz'
-    runs-on: batch
+    runs-on: ubuntu-latest
     timeout-minutes: 180
     strategy:
       fail-fast: false
@@ -212,7 +209,7 @@ jobs:
   race-full:
     name: Race (full, -count=3)
     if: inputs.jobs == 'all' || inputs.jobs == 'race-full'
-    runs-on: batch
+    runs-on: ubuntu-latest
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -244,7 +241,7 @@ jobs:
   soak:
     name: Soak (${{ inputs.soak_minutes }} min)
     if: inputs.jobs == 'all' || inputs.jobs == 'soak'
-    runs-on: batch  # CUSTOMIZE: the raft-guest label for go-quicraft and go-qrdb
+    runs-on: ubuntu-latest
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -301,7 +298,7 @@ jobs:
   bench:
     name: Bench
     if: inputs.jobs == 'all' || inputs.jobs == 'bench'
-    runs-on: batch
+    runs-on: ubuntu-latest
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
