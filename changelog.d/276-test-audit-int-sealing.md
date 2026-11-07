@@ -1,3 +1,3 @@
 ### Changed
 
-- The integration suite's sealing tests that repeated another integration test's path are removed (#276). Nothing changes for Go callers.
+- The integration suite's sealing tests are audited for duplicates (#276); each reaches its own path and all are kept. Nothing changes for Go callers.
