@@ -54,6 +54,20 @@
 # concurrency follows the container CPU quota, so lint takes N with no flag.
 # A 4-CPU slot on the Dells gives 4; never a hardcoded number.
 #
+# The sibling holds the job slot's memory bound the same way (dept-infra #1337,
+# the ruling 235/237 capacity answer; go-trusted-platform #1182 is the twin):
+# the job container's cgroup memory.max (8g when the job has no limit;
+# IN_IMAGE_MEMORY, a size such as 12g, overrides) becomes --memory, and
+# --memory-swap is set to the same size, so the stage gets no swap: a stage
+# that outgrows it is OOM-killed and fails, instead of swapping the shared
+# runner host. The go-enclave-ci-tc-* container's 3 GB /tmp tmpfs is charged
+# to the same limit. A 16g CI job slot gives 16g.
+#
+# CI_CGROUP_PARENT (default ci.slice) is the container's --cgroup-parent, so
+# the runner host's ci.slice bounds every CI container together, wherever the
+# daemon's own default parent points (go-trusted-platform 0216d8e, #1178). Set
+# it empty to pass no --cgroup-parent (a developer host with no ci.slice).
+#
 # The container is named <CI_STACK_PREFIX>tc-<pid>-<random>, under the prefix
 # scripts/reap-stale-ci-stacks.sh reaps (default <checkout dir>-ci-, which in CI
 # is <repo>-ci-), and is removed on every exit. IN_IMAGE_UID is the non-root
@@ -103,6 +117,24 @@ fi
 case $cpus in
   "" | 0 | *[!0-9]*) echo "IN_IMAGE_CPUS must be a positive integer: $cpus" >&2; exit 2 ;;
 esac
+memory=${IN_IMAGE_MEMORY:-}
+if [ -z "$memory" ]; then
+  limit=max
+  if [ -r /sys/fs/cgroup/memory.max ]; then read -r limit < /sys/fs/cgroup/memory.max; fi
+  case $limit in
+    max | "" | *[!0-9]*) memory=8g ;;
+    *) memory=$limit ;;
+  esac
+fi
+if ! [[ $memory =~ ^[1-9][0-9]*[mg]?$ ]]; then
+  echo "IN_IMAGE_MEMORY must be a size in bytes, m or g, e.g. 16g: $memory" >&2
+  exit 2
+fi
+cgroup_parent=${CI_CGROUP_PARENT-ci.slice}
+if [ -n "$cgroup_parent" ] && ! [[ $cgroup_parent =~ ^[A-Za-z0-9][A-Za-z0-9_.@:/-]*$ ]]; then
+  echo "CI_CGROUP_PARENT must be a cgroup name such as ci.slice, or empty: $cgroup_parent" >&2
+  exit 2
+fi
 args=(
   --name "$name"
   --cpus "$cpus"
@@ -112,6 +144,8 @@ args=(
   --cap-drop ALL
   --security-opt no-new-privileges:true
   --pids-limit 4096
+  --memory "$memory"
+  --memory-swap "$memory"
   --ulimit memlock=16777216:16777216 # CUSTOMIZE: compose.yaml's memlock
   --ulimit core=1048576:1048576
   --ulimit nofile=4096:4096 # CUSTOMIZE: compose.yaml's nofile
@@ -122,6 +156,9 @@ args=(
   --env HOME=/tmp
   --env CI="${CI:-}"
 )
+if [ -n "$cgroup_parent" ]; then
+  args+=(--cgroup-parent "$cgroup_parent")
+fi
 modcache=/tmp/gomodcache
 if [ "$cache" = on ]; then
   vols="${prefix}cache-${class}"
