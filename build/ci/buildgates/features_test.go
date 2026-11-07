@@ -261,7 +261,7 @@ func TestScriptsLib_HelpersAreDefinedOnce(t *testing.T) {
 		if m := def.FindString(string(body)); m != "" {
 			t.Errorf("%s defines %q, which scripts/lib.sh owns", name, m)
 		}
-		if strings.HasPrefix(string(body), "#!") && !templateScripts[name] && !source.Match(body) {
+		if strings.HasPrefix(string(body), "#!") && !source.Match(body) {
 			t.Errorf("%s does not source scripts/lib.sh", name)
 		}
 	}
