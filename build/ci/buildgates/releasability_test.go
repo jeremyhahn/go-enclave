@@ -524,6 +524,11 @@ func TestReleasability_InternalFilesAreRefused(t *testing.T) {
 		".serena/memories/notes.md",
 		".serena/project.local.yml",
 		"sub/.serena/project.yml",
+		".serena/project.yml",
+		"scheduled_tasks.lock",
+		"sub/scheduled_tasks.lock",
+		"lane-records/x.env",
+		"sub/lane-records/run.json",
 		"local.mk",
 		".github/workflows/task-worker.yml",
 		".gitea/workflows/task-worker.yml",
@@ -536,6 +541,8 @@ func TestReleasability_InternalFilesAreRefused(t *testing.T) {
 	allowed := []string{
 		"README.md",
 		"docs/claude.md",
+		"docs/lane-records.md",
+		"scheduled_tasks.lock.md",
 		"CLAUDE.md.example",
 		".github/workflows/ci.yml",
 		"build/ci/buildgates/doc.go",
@@ -552,7 +559,7 @@ func TestReleasability_InternalFilesAreRefused(t *testing.T) {
 
 // The agent-instruction files are reported for stripping, not refused.
 func TestReleasability_AgentInstructionsAreStrippedAtPublish(t *testing.T) {
-	for _, p := range []string{"CLAUDE.md", "providertest/CLAUDE.md", "AGENTS.md", ".claude/settings.json", ".claude/agents/x.md", ".serena/project.yml"} {
+	for _, p := range []string{"CLAUDE.md", "providertest/CLAUDE.md", "AGENTS.md", ".claude/settings.json", ".claude/agents/x.md"} {
 		if _, strip := stripAtPublish(p); !strip {
 			t.Errorf("%s is not reported as strip-at-publish", p)
 		}
