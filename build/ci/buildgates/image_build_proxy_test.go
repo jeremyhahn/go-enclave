@@ -33,7 +33,7 @@ var goEnvSet = regexp.MustCompile(`^\s*(?:-\s*)?(?:GOPROXY|GOPRIVATE|GONOPROXY|G
 
 var imageBuildWorkflows = []string{".github/workflows/ci.yml", ".github/workflows/release.yml"}
 
-var hostedWorkflows = []string{".github/workflows/ci.yml", ".github/workflows/release.yml", ".github/workflows/batch.yml"}
+var hostedWorkflows = []string{".github/workflows/ci.yml", ".github/workflows/release.yml"}
 
 // hostedRunnerViolations lists every job in one workflow whose runs-on is
 // not the GitHub-hosted runner.

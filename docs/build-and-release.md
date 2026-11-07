@@ -217,8 +217,6 @@ any other skip, failure or cancellation fails the gate.
 | `ci.yml` | push to `main`, pull request to `main`, nightly schedule, dispatch | The three tiers and the CI Gate; the one CI schedule |
 | `release.yml` | a `v*` tag | The [release flow](#release-flow) |
 | `nightly.yml` | dispatch only | `trivy-misconfig`, `trivy-sarif` |
-| `batch.yml` | dispatch only | Fuzz, full race, soak and bench on the `batch` runners; never part of a merge gate |
-| `automerge.yml` | `pull_request_target`, CI completion, every 30 minutes | Merge trains; it never checks out the PR |
 
 `TOOL_INSTALL=1`, the default, installs a missing pin into `bin/tools/`.
 `TOOL_INSTALL=0` installs nothing and fails closed. `ci.yml` sets neither,

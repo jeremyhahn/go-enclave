@@ -33,8 +33,7 @@ import (
 //
 // Every workflow that runs on pull_request also cancels the superseded run of
 // its ref (devops §9b), and exactly one CI schedule exists, ci.yml's, which
-// runs the full tier and Soak nightly; automerge.yml's merge sweep is the one
-// other scheduled workflow.
+// runs the full tier and Soak weekly; no other workflow has a schedule.
 
 const (
 	ciWorkflowFile = ".github/workflows/ci.yml"
@@ -69,11 +68,9 @@ const (
 	// by ref, and on main by event and commit, so a main run never cancels
 	// another main run (issue #246) while a PR's newer run cancels the older.
 	refConcurrencyGroup = "${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && format('main-{0}-{1}', github.event_name, github.sha) || github.ref }}"
-	// ciSchedule is the one CI schedule, ci.yml's weekly cron: Tuesday night
-	// in the nightly rotation (CA m1919), 04:00 UTC Wednesday.
+	// ciSchedule is the one CI schedule, ci.yml's weekly cron: Tuesday night,
+	// 04:00 UTC Wednesday.
 	ciSchedule = "0 4 * * 3"
-	// mergeSweepWorkflow is the one other workflow allowed a `schedule:`.
-	mergeSweepWorkflow = "automerge.yml"
 )
 
 // lintGatesTargets are the make targets `make lint-gates` runs (Makefile): no
@@ -442,8 +439,8 @@ func workflowTriggerViolations(file string, src []byte) ([]string, error) {
 		if len(crons) != 1 || fmt.Sprint(crons[0]) != fmt.Sprint(map[string]any{"cron": ciSchedule}) {
 			bad = append(bad, fmt.Sprintf("schedule is %v, want exactly one cron: '%s' (the one CI schedule)", sched, ciSchedule))
 		}
-	case ok && base != mergeSweepWorkflow:
-		bad = append(bad, fmt.Sprintf("has a schedule: trigger; the one CI schedule is %s's (and %s's merge sweep)", ciWorkflowFile, mergeSweepWorkflow))
+	case ok:
+		bad = append(bad, fmt.Sprintf("has a schedule: trigger; the one schedule is %s's", ciWorkflowFile))
 	}
 	return bad, nil
 }
@@ -594,7 +591,6 @@ func TestCIGateTiers_RefusesWhatItMustRefuse(t *testing.T) {
 		{"pull_request, per-commit main group", "x.yml", "on:\n  pull_request:\n" + wantConc + "jobs: {}\n", false},
 		{"push only, no concurrency", "x.yml", "on:\n  push:\njobs: {}\n", false},
 		{"scheduled", "nightly.yml", "on:\n  schedule:\n    - cron: '0 3 * * *'\n  workflow_dispatch:\njobs: {}\n", true},
-		{"scheduled automerge", "automerge.yml", "on:\n  schedule:\n    - cron: '0 3 * * *'\njobs: {}\n", false},
 		{"ci.yml scheduled", "ci.yml", "on:\n  schedule:\n    - cron: '" + ciSchedule + "'\njobs: {}\n", false},
 		{"ci.yml unscheduled", "ci.yml", "on:\n  push:\njobs: {}\n", true},
 		{"ci.yml scheduled twice", "ci.yml", "on:\n  schedule:\n    - cron: '" + ciSchedule + "'\n    - cron: '0 16 * * *'\njobs: {}\n", true},
