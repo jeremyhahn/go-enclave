@@ -115,7 +115,7 @@ $(call raw_bind,$(EXTERNAL_VARS))
 # CI VARIABLES (handbook devcontainer.md §6): ci.yml passes them, so they are
 # data from a workflow and raw-bound like EXTERNAL_VARS.
 ## MODULE_ENV_FILE=<file>: integration-test: the forge module variables; never read here or printed
-## GO_BUILD_PROXY=<url>: docker-build: the Go module proxy the image build fetches through, passed as --build-arg when set (CI: a LAN proxy that serves the private root, #293); default the Dockerfile's public proxy
+## GO_BUILD_PROXY=<url>: docker-build: the Go module proxy the image build fetches through, passed as --build-arg when set (CI: the hosted runner's GOPROXY, unset, #293); default the Dockerfile's public proxy
 ## IT_IMAGE=<tag>: docker-build, ci-integration: the integration image's tag (default `make -s it-image`)
 ## APK_INDEX_SUM=<sum>: docker-build, it-image: the Alpine package index checksum (scripts/apk-index-sum.sh); it-image hashes it, docker-build passes it as --build-arg
 ## IT_PROJECT=<name>: integration-test: accepted; each suite names its own compose project (go-enclave-it-*, go-enclave-userns-*)

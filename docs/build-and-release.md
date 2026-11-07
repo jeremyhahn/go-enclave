@@ -161,12 +161,12 @@ repository's volumes on that host exceed `CI_CACHE_MAX_GIB` (32).
 
 | Job | Tier | Runs |
 |---|---|---|
-| Devcontainer image | PR | One job on `bigdisk`. Each stage is a step in the toolchain image: `make lint`; the static checks `make ci-lint` adds beside the Lint Gates job's (`tidy-check lint-runtimesecret lint-integration`); `make build`; `make cross-build`; `make coverage`; `make test-runtimesecret`; `make deps-check`, a lint-class gate on every event; then, on the full tier only, `make security` and `trivy image` on the integration image. A failed step does not stop the later ones. `security`, `deps-check` and `trivy image` get a network for the vulnerability databases and the module proxy. `deps-check` reports, and does not fail on, a module behind a latest release published under 7 days ago without a `// held: <reason>` comment |
-| Lint Gates | PR | `make -k lint-gates` in the toolchain image on `bigdisk`, in parallel with the image job's `make lint`, so Lint's wall time is the longer of the two. It builds the toolchain image only when the Makefile defines the target, with no network |
+| Devcontainer image | PR | One job on `ubuntu-latest`. Each stage is a step in the toolchain image: `make lint`; the static checks `make ci-lint` adds beside the Lint Gates job's (`tidy-check lint-runtimesecret lint-integration`); `make build`; `make cross-build`; `make coverage`; `make test-runtimesecret`; `make deps-check`, a lint-class gate on every event; then, on the full tier only, `make security` and `trivy image` on the integration image. A failed step does not stop the later ones. `security`, `deps-check` and `trivy image` get a network for the vulnerability databases and the module proxy. `deps-check` reports, and does not fail on, a module behind a latest release published under 7 days ago without a `// held: <reason>` comment |
+| Lint Gates | PR | `make -k lint-gates` in the toolchain image on `ubuntu-latest`, in parallel with the image job's `make lint`, so Lint's wall time is the longer of the two. It builds the toolchain image only when the Makefile defines the target, with no network |
 | Architecture Gates | PR | No go-objstore import (the template's storage-seam check), on the runner's shell |
 | FIPS | full | `make test-fips` in the toolchain image |
-| Integration | full | `make ci-integration` on `bigdisk`: the user-namespace, default and FIPS strict suites, on one scanned integration image |
-| Soak | nightly | `make ci-integration` looped on `bigdisk` for 30 minutes, each iteration its own compose project |
+| Integration | full | `make ci-integration` on `ubuntu-latest`: the user-namespace, default and FIPS strict suites, on one scanned integration image |
+| Soak | nightly | `make ci-integration` looped on `ubuntu-latest` for 30 minutes, each iteration its own compose project |
 
 The **PR tier** runs on every event. The **full tier** runs on every event
 but a pull request (a push to `main`, the nightly schedule, `workflow_dispatch`)
@@ -200,10 +200,10 @@ module credential. The toolchain image also downloads each backend module's
 graph (`backends/armtrustzone` requires the private root), so `make
 docker-build` passes `GO_BUILD_PROXY`, when set, to `docker build` as the build
 argument naming the Go module proxy the image build fetches through; unset, the
-Dockerfile's public proxy applies. In CI the
-self-hosted pool's environment carries `GOPROXY`, a LAN proxy that serves the
-private root, and the image jobs, on the `bigdisk` runner, pass it to the build
-as `GO_BUILD_PROXY="${GOPROXY:-}"` (#293). `MODULE_ENV_FILE` serves
+Dockerfile's public proxy applies. In CI every job runs on a GitHub-hosted
+`ubuntu-latest` runner, which carries no `GOPROXY`: the image jobs pass the
+empty value as `GO_BUILD_PROXY="${GOPROXY:-}"`, so the image build uses the
+Dockerfile's default public proxy, which serves the public root module (#293). `MODULE_ENV_FILE` serves
 `integration-test` only. `GO_BUILD_TAGS` must stay empty,
 because no package is gated by a tag; the Makefile refuses any other value.
 

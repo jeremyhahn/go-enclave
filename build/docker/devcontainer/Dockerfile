@@ -210,9 +210,9 @@ RUN set -eux; \
 
 # The backend modules (Makefile BACKEND_MODULES), the same way: each requires
 # a released root, which the root's own download above does not fetch. The
-# root is a private forge module: it comes through GO_BUILD_PROXY, which in CI
-# is a LAN Go module proxy that serves it (#293), so no forge credential
-# reaches this build. The public checksum database cannot know the root, so
+# root is a public module: it comes through GO_BUILD_PROXY, which in CI on a
+# GitHub-hosted runner is the default public proxy (#293), so no forge
+# credential reaches this build. The public checksum database cannot know the root, so
 # GONOSUMDB skips it for this RUN alone; go.sum still verifies every module.
 WORKDIR /build/backends/armtrustzone
 COPY backends/armtrustzone/go.mod backends/armtrustzone/go.sum ./

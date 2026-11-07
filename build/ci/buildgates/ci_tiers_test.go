@@ -540,7 +540,7 @@ func TestCIGateTiers_RefusesWhatItMustRefuse(t *testing.T) {
 		{"gate drops NIGHTLY", `"$FULL_TIER" "$NIGHTLY"`, `"$FULL_TIER"`},
 		{"workflow CI_FULL_TIER differs", "  CI_FULL_TIER: " + fullTierIf, "  CI_FULL_TIER: ${{ github.event_name == 'push' }}"},
 		{"labeled type added back", "types: [opened, synchronize, reopened]", "types: [opened, synchronize, reopened, labeled]"},
-		{"gate on a self-hosted label", "    runs-on: " + ciGateRunner + "\n", "    runs-on: ci-gate\n"},
+		{"gate on a self-hosted label", "    name: CI Gate\n    runs-on: " + ciGateRunner + "\n", "    name: CI Gate\n    runs-on: ci-gate\n"},
 		{"deps-check back on the full tier", "env.TOOLCHAIN_IMAGE != '' }}\n        env:\n          IN_IMAGE_NETWORK: bridge\n        run: scripts/in-toolchain-image.sh \"$TOOLCHAIN_IMAGE\" make deps-check\n", "env.TOOLCHAIN_IMAGE != '' && env.CI_FULL_TIER == 'true' }}\n        env:\n          IN_IMAGE_NETWORK: bridge\n        run: scripts/in-toolchain-image.sh \"$TOOLCHAIN_IMAGE\" make deps-check\n"},
 		{"gate uses an action", "      - name: Fail closed on any non-success\n", "      - uses: actions/checkout@abc # v7\n      - name: Fail closed on any non-success\n"},
 	} {
