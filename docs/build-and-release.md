@@ -198,9 +198,12 @@ only when the runner's daemon lacks it; each job leases it, and
 `reap-stale-ci-stacks.sh` removes an old unleased one. The root module needs no
 module credential. The toolchain image also downloads each backend module's
 graph (`backends/armtrustzone` requires the private root), so `make
-docker-build` passes `MODULE_ENV_FILE`, when the file exists, to `docker
-build` as the BuildKit secret `gomodauth`; only that download reads it, and
-without it the image build fails naming `MODULE_ENV_FILE`. Nothing prints it. `GO_BUILD_TAGS` must stay empty,
+docker-build` passes `GO_BUILD_PROXY`, when set, to `docker build` as the build
+argument naming the Go module proxy the image build fetches through; unset, the
+Dockerfile's public proxy applies. CI reads it from the repository variable
+`vars.GO_BUILD_PROXY`, a LAN proxy that serves the private root, and runs the
+image jobs on the `bigdisk` runner (#293). `MODULE_ENV_FILE` serves
+`integration-test` only. `GO_BUILD_TAGS` must stay empty,
 because no package is gated by a tag; the Makefile refuses any other value.
 
 The **CI Gate** is the one required check. It runs on the `ci-gate` runner
