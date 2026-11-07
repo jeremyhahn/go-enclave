@@ -824,9 +824,8 @@ jobs:
   publish-images:
     name: Publish CI images
     runs-on: release
-    # CUSTOMIZE (go-enclave): no `release` runner serves this repository
-    # (#277), so the job never runs; restore the template's if: when one does.
-    if: false
+    # go-enclave: the server_url guard skips the job on github.com, where go-enclave lives and no `release` runner serves it (#277).
+    if: ${{ github.server_url != 'https://github.com' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     timeout-minutes: 60       # CUSTOMIZE: ceil(1.5 x a cold toolchain build's p95)
     env:
       CI_IMAGE_NAMESPACE: agent-ci-images   # ci-standard.md §9 (ruling 217(4))
