@@ -145,7 +145,7 @@ func (e *patternFileError) Unwrap() error { return e.err }
 // Blank lines and lines starting with `#` are skipped. Any other malformed
 // line is an error, never a dropped rule.
 func loadSitePatterns(path string) ([]leakPattern, error) {
-	content, err := os.ReadFile(path) //nolint:gosec // the operator names the file
+	content, err := os.ReadFile(path)
 	if err != nil {
 		return nil, &patternFileError{path: path, err: err}
 	}
