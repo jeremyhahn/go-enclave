@@ -1,4 +1,4 @@
-# code-review-template: v5.9.1 -- the code review in Gitea or GitHub CI for a pull request
+# code-review-template: v5.9.2 -- the code review in Gitea or GitHub CI for a pull request
 # that carries `code-review` and `task:ready`, routed by its labels through
 # route-labels (labels.md §2). Codex on the `codex` runner reviews every such
 # PR; `agent:opencode` adds an advisory COMMENT review by the opencode job on
@@ -25,6 +25,11 @@
 #   vars.OLLAMA_URL           repo Actions variable: the Ollama address the
 #                             opencode review uses (required since v5.7;
 #                             unset, the opencode job fails)
+#
+# v5.9.2 (2026-11-07, Company Agent m2066 item 3): the GitHub token check
+# takes `ghs_` then letters, digits, dot, underscore and hyphen, the form
+# GitHub issues installation tokens in now (Infra 19:33Z); v5.9.1 refused
+# it and the first codex job on go-enclave failed at the check.
 #
 # v5.9.1 (2026-11-07, Company Agent m2047 item 6): on GitHub the reviewer is
 # the repo variable CODEX_REVIEWER and nothing else. Unset or empty, the
@@ -442,7 +447,7 @@ jobs:
             tok=${tok%$'\r'}
             [ -n "$tok" ] || die "the reviewer token $TOKEN_FILE is empty (dept-infra#94)"
             if [ "$FORGE" = github ]; then
-              [[ $tok =~ ^ghs_[A-Za-z0-9]+$ ]] ||
+              [[ $tok =~ ^ghs_[A-Za-z0-9._-]+$ ]] ||
                 { unset tok; die "the reviewer token $TOKEN_FILE is not a GitHub App installation token (dept-infra#94)"; }
               printf 'Authorization: Bearer %s\n' "$tok" > "$HDR"
             else
