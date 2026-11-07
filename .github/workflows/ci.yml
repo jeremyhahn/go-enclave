@@ -578,7 +578,7 @@ jobs:
   # so the next run rebuilds the image rather than reuse a cached one with the
   # old package (go-enclave main fd83b79ce, CVE-2026-92392).
   #
-  # No forge credential reaches the image build (#293, DS-7350): the
+  # No forge credential reaches the image build (#293): the
   # self-hosted pool's environment carries GOPROXY (a LAN proxy that serves
   # the private modules) and the job passes it to make docker-build as
   # GO_BUILD_PROXY. No step and no make target prints the job environment

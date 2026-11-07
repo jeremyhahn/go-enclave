@@ -13,7 +13,7 @@ import (
 )
 
 // The toolchain image build fetches backends/armtrustzone's modules, whose
-// private root module comes through a LAN Go module proxy (#293, DS-7350):
+// private root module comes through a LAN Go module proxy (#293):
 // the jobs run on the self-hosted label whose pool environment carries
 // GOPROXY, GOPRIVATE, GONOPROXY and GONOSUMDB, each make docker-build passes
 // the inherited GOPROXY to the build as GO_BUILD_PROXY, no workflow sets
