@@ -69,8 +69,9 @@ const (
 	// by ref, and on main by event and commit, so a main run never cancels
 	// another main run (issue #246) while a PR's newer run cancels the older.
 	refConcurrencyGroup = "${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && format('main-{0}-{1}', github.event_name, github.sha) || github.ref }}"
-	// ciSchedule is the one CI schedule, ci.yml's nightly cron.
-	ciSchedule = "0 4 * * *"
+	// ciSchedule is the one CI schedule, ci.yml's weekly cron: Tuesday night
+	// in the nightly rotation (CA m1919), 04:00 UTC Wednesday.
+	ciSchedule = "0 4 * * 3"
 	// mergeSweepWorkflow is the one other workflow allowed a `schedule:`.
 	mergeSweepWorkflow = "automerge.yml"
 )
