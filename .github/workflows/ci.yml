@@ -402,7 +402,8 @@
 # v1.1 (2026-08-14): gosec findings now also print to the job log (the SARIF
 # upload only exists on github.com, so on Gitea the findings were invisible).
 # Also NEVER add `GOPROXY: direct` / `GOSUMDB: off` to a repo's env block:
-# GOPRIVATE (injected by the runners, dependency-resolution.md §6) already
+# GOPRIVATE (the self-hosted pool's environment sets GOPROXY, GOPRIVATE,
+# GONOPROXY and GONOSUMDB, #293; dependency-resolution.md §6) already
 # exempts first-party modules from proxy and sumdb; the blanket override
 # disables checksum-database verification for every third-party dependency
 # and breaks the build when an upstream re-points a tag (go-tpm-tools v0.4.8,
@@ -577,10 +578,10 @@ jobs:
   # so the next run rebuilds the image rather than reuse a cached one with the
   # old package (go-enclave main fd83b79ce, CVE-2026-92392).
   #
-  # No forge credential reaches the image build (#293, DS-7343): the backend
-  # modules' private root comes through GO_BUILD_PROXY, the repository
-  # variable vars.GO_BUILD_PROXY naming a LAN Go module proxy, passed to make
-  # docker-build. No step and no make target prints the job environment
+  # No forge credential reaches the image build (#293, DS-7350): the
+  # self-hosted pool's environment carries GOPROXY (a LAN proxy that serves
+  # the private modules) and the job passes it to make docker-build as
+  # GO_BUILD_PROXY. No step and no make target prints the job environment
   # (`env`, `printenv`, `set -x`) or a matched line: lint steps and `make
   # check-public-literals` report path and line only (ci-standard.md §5,
   # Company Agent m605 item 8).
@@ -640,10 +641,8 @@ jobs:
       # goes here; the container shares the runner's kernel.
 
       - name: Build the devcontainer images
-        env:
-          GO_BUILD_PROXY: ${{ vars.GO_BUILD_PROXY }}
         run: |
-          make docker-build GO_BUILD_PROXY="$GO_BUILD_PROXY" IT_IMAGE="$IT_IMAGE"
+          make docker-build GO_BUILD_PROXY="${GOPROXY:-}" IT_IMAGE="$IT_IMAGE"
           echo "TOOLCHAIN_IMAGE=$(make -s toolchain-image)" >> "$GITHUB_ENV"
 
       # v1.23: a lease on the integration image (from a Codex review). A
@@ -680,8 +679,6 @@ jobs:
       # lock created more than 600 s ago is removed by its id; a step waits
       # 660 s for the lock and then fails.
       - name: Lease the integration image
-        env:
-          GO_BUILD_PROXY: ${{ vars.GO_BUILD_PROXY }}
         run: |
           lease="${CI_STACK_PREFIX}lease-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
           # v1.25.3: the daemon's image lock, shared with the reaper (v5) and
@@ -722,7 +719,7 @@ jobs:
             image_unlock
             echo "integration image $IT_IMAGE is missing or went before its lease; building it once"
             rc=0
-            make docker-build GO_BUILD_PROXY="$GO_BUILD_PROXY" IT_IMAGE="$IT_IMAGE" || rc=$?
+            make docker-build GO_BUILD_PROXY="${GOPROXY:-}" IT_IMAGE="$IT_IMAGE" || rc=$?
             if [ "$rc" -ne 0 ]; then
               echo "::error::building the integration image $IT_IMAGE failed (exit $rc)"
               exit "$rc"
@@ -925,10 +922,8 @@ jobs:
 
       - name: Build the devcontainer images
         if: ${{ steps.probe.outputs.has_target == 'true' }}
-        env:
-          GO_BUILD_PROXY: ${{ vars.GO_BUILD_PROXY }}
         run: |
-          make docker-build GO_BUILD_PROXY="$GO_BUILD_PROXY" IT_IMAGE="$IT_IMAGE"
+          make docker-build GO_BUILD_PROXY="${GOPROXY:-}" IT_IMAGE="$IT_IMAGE"
           echo "TOOLCHAIN_IMAGE=$(make -s toolchain-image)" >> "$GITHUB_ENV"
 
       # v1.22: bound this repo's cache volumes (as in the image job). It never
@@ -983,10 +978,8 @@ jobs:
         run: echo "IT_IMAGE=$(make -s it-image)" >> "$GITHUB_ENV"
 
       - name: Build the toolchain image
-        env:
-          GO_BUILD_PROXY: ${{ vars.GO_BUILD_PROXY }}
         run: |
-          make docker-build GO_BUILD_PROXY="$GO_BUILD_PROXY" IT_IMAGE="$IT_IMAGE"
+          make docker-build GO_BUILD_PROXY="${GOPROXY:-}" IT_IMAGE="$IT_IMAGE"
           echo "TOOLCHAIN_IMAGE=$(make -s toolchain-image)" >> "$GITHUB_ENV"
 
       - name: make test-fips (toolchain image)
@@ -1055,8 +1048,6 @@ jobs:
       # CUSTOMIZE: go-enclave needs no module credential, so the rebuild
       # writes no credential file (as the FIPS job's build).
       - name: Lease the integration image
-        env:
-          GO_BUILD_PROXY: ${{ vars.GO_BUILD_PROXY }}
         run: |
           lease="${CI_STACK_PREFIX}lease-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
           # v1.25.3: the daemon's image lock, shared with the reaper (v5) and
@@ -1097,7 +1088,7 @@ jobs:
             image_unlock
             echo "integration image $IT_IMAGE is missing or went before its lease; building it once"
             rc=0
-            make docker-build GO_BUILD_PROXY="$GO_BUILD_PROXY" IT_IMAGE="$IT_IMAGE" || rc=$?
+            make docker-build GO_BUILD_PROXY="${GOPROXY:-}" IT_IMAGE="$IT_IMAGE" || rc=$?
             if [ "$rc" -ne 0 ]; then
               echo "::error::building the integration image $IT_IMAGE failed (exit $rc)"
               exit "$rc"
@@ -1208,8 +1199,6 @@ jobs:
       # CUSTOMIZE: go-enclave needs no module credential, so the rebuild
       # writes no credential file (as the FIPS job's build).
       - name: Lease the integration image
-        env:
-          GO_BUILD_PROXY: ${{ vars.GO_BUILD_PROXY }}
         run: |
           lease="${CI_STACK_PREFIX}lease-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
           # v1.25.3: the daemon's image lock, shared with the reaper (v5) and
@@ -1250,7 +1239,7 @@ jobs:
             image_unlock
             echo "integration image $IT_IMAGE is missing or went before its lease; building it once"
             rc=0
-            make docker-build GO_BUILD_PROXY="$GO_BUILD_PROXY" IT_IMAGE="$IT_IMAGE" || rc=$?
+            make docker-build GO_BUILD_PROXY="${GOPROXY:-}" IT_IMAGE="$IT_IMAGE" || rc=$?
             if [ "$rc" -ne 0 ]; then
               echo "::error::building the integration image $IT_IMAGE failed (exit $rc)"
               exit "$rc"

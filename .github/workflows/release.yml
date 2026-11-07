@@ -54,8 +54,10 @@
 #
 # NEVER add `GOPROXY: direct` or `GOSUMDB: off` here either (see ci.yml). The
 # consumer resolves exactly as dependency-resolution §1/§6 says: on our runners
-# act_runner injects GOPRIVATE and a read-token insteadOf rewrite into every
-# job, so this file sets neither.
+# the self-hosted pool's environment carries GOPROXY (a LAN proxy that serves
+# the private modules), GOPRIVATE, GONOPROXY and GONOSUMDB into every job, and
+# the image jobs pass GOPROXY to the build as GO_BUILD_PROXY (#293), so this
+# file sets none of them.
 
 name: Release
 
@@ -147,10 +149,8 @@ jobs:
         run: echo "IT_IMAGE=$(make -s it-image)" >> "$GITHUB_ENV"
 
       - name: Build the devcontainer images
-        env:
-          GO_BUILD_PROXY: ${{ vars.GO_BUILD_PROXY }}
         run: |
-          make docker-build GO_BUILD_PROXY="$GO_BUILD_PROXY" IT_IMAGE="$IT_IMAGE"
+          make docker-build GO_BUILD_PROXY="${GOPROXY:-}" IT_IMAGE="$IT_IMAGE"
           echo "TOOLCHAIN_IMAGE=$(make -s toolchain-image)" >> "$GITHUB_ENV"
 
       - name: Trim the CI caches
@@ -225,8 +225,6 @@ jobs:
       # the lease: bounded, building the image once if it is missing, and
       # exporting the leased id as IT_LEASE_ID).
       - name: Lease the integration image
-        env:
-          GO_BUILD_PROXY: ${{ vars.GO_BUILD_PROXY }}
         run: |
           lease="${CI_STACK_PREFIX}lease-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
           take_lease() {
@@ -239,7 +237,7 @@ jobs:
           if ! take_lease; then
             echo "integration image $IT_IMAGE is missing or went before its lease; building it once"
             rc=0
-            make docker-build GO_BUILD_PROXY="$GO_BUILD_PROXY" IT_IMAGE="$IT_IMAGE" || rc=$?
+            make docker-build GO_BUILD_PROXY="${GOPROXY:-}" IT_IMAGE="$IT_IMAGE" || rc=$?
             if [ "$rc" -ne 0 ]; then
               echo "::error::building the integration image $IT_IMAGE failed (exit $rc)"
               exit "$rc"
@@ -272,7 +270,7 @@ jobs:
   consumer:
     name: Consumer
     needs: [verify]
-    runs-on: ubuntu-latest
+    runs-on: bigdisk   # resolves the private module through the pool's GOPROXY (#293)
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7

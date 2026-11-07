@@ -200,9 +200,10 @@ module credential. The toolchain image also downloads each backend module's
 graph (`backends/armtrustzone` requires the private root), so `make
 docker-build` passes `GO_BUILD_PROXY`, when set, to `docker build` as the build
 argument naming the Go module proxy the image build fetches through; unset, the
-Dockerfile's public proxy applies. CI reads it from the repository variable
-`vars.GO_BUILD_PROXY`, a LAN proxy that serves the private root, and runs the
-image jobs on the `bigdisk` runner (#293). `MODULE_ENV_FILE` serves
+Dockerfile's public proxy applies. In CI the
+self-hosted pool's environment carries `GOPROXY`, a LAN proxy that serves the
+private root, and the image jobs, on the `bigdisk` runner, pass it to the build
+as `GO_BUILD_PROXY="${GOPROXY:-}"` (#293). `MODULE_ENV_FILE` serves
 `integration-test` only. `GO_BUILD_TAGS` must stay empty,
 because no package is gated by a tag; the Makefile refuses any other value.
 
