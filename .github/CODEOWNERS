@@ -1,0 +1,6 @@
+# GitHub CODEOWNERS (m1986), the .gitea/CODEOWNERS rules in GitHub's
+# gitignore-style patterns. Keep the two in step until .gitea/ is retired.
+/.github/ @jeremyhahn
+/Makefile @jeremyhahn
+/scripts/ @jeremyhahn
+/build/ @jeremyhahn
