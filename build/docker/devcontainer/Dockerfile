@@ -208,6 +208,24 @@ RUN set -eux; \
     chmod -R a+rX /gomodcache; \
     find /gomodcache/cache -type d -exec chmod a+w {} +
 
+# The backend modules (Makefile BACKEND_MODULES), the same way: each requires
+# a released root, which the root's own download above does not fetch. The
+# root is a private forge module, so this download needs the forge module
+# variables (GOPRIVATE, GIT_CONFIG_*): they arrive only as the BuildKit secret
+# gomodauth (MODULE_ENV_FILE, handbook dependency-resolution.md §6), are read
+# in a subshell for this RUN alone, and never reach an ENV, an ARG, a layer or
+# the log (no `set -x` here). With them GOPRIVATE sends the root direct, over
+# the git this stage installs; go.sum still verifies every module.
+WORKDIR /build/backends/armtrustzone
+COPY backends/armtrustzone/go.mod backends/armtrustzone/go.sum ./
+RUN --mount=type=secret,id=gomodauth,required=false set -eu; \
+    [ -f /run/secrets/gomodauth ] || { echo "backends/armtrustzone: the private root module needs the forge module variables: build with MODULE_ENV_FILE=<file> (BuildKit secret gomodauth)" >&2; exit 1; }; \
+    ( set -a; . /run/secrets/gomodauth; set +a; \
+      n=0; until GOPROXY="$GO_BUILD_PROXY" go mod download; do n=$((n + 1)); [ "$n" -lt 3 ] || exit 1; sleep $((n * 10)); done; \
+      go mod verify ); \
+    chmod -R a+rX /gomodcache; \
+    find /gomodcache/cache -type d -exec chmod a+w {} +
+
 WORKDIR /src
 RUN rm -rf /build
 USER dev:dev

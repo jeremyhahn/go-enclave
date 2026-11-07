@@ -1,12 +1,14 @@
-# arm-trustzone backend — design proposal
+# arm-trustzone backend — design
 
-> **Status: PROPOSED** · Scope: go-enclave; trusted-firmware (secure world) · Last verified: 2026-10-30
-> The design of the out-of-tree backend that reaches OP-TEE through the [backend seam](architecture.md). Its harness is [backend-conformance](../backend-conformance/engineering.md#the-arm-trustzone-harness); the secure world and the TA are trusted-firmware's at `v0.4.2-alpha`. Three decisions below are open until Software rules (DS-3097).
+> **Status: NORMATIVE** · Scope: go-enclave; trusted-firmware (secure world) · Last verified: 2026-10-31
+> Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it. Slice 2 (the backend) is shipped.
+> The design of the out-of-tree backend that reaches OP-TEE through the [backend seam](architecture.md). Its harness is [backend-conformance](../backend-conformance/engineering.md#the-arm-trustzone-harness); the secure world and the TA are trusted-firmware's at `v0.4.2-alpha`. Decisions 1 and 2 are ruled (A); decision 3 is open (DS-3097).
 
 This is the design of the `arm-trustzone` backend ([SPEC](../SPEC.md), #206).
-It is PROPOSED: three decisions below are open, each with its options, the
-alternatives rejected and a recommendation. Software rules on them (DS-3097)
-before any code slice. Nothing here is decided.
+Ruling 176434 (#254) took recommendation (A) for decisions 1 and 2, and slice
+2 ships them: the nested module `backends/armtrustzone`, pure Go over
+`/dev/tee0` ([user](user.md#arm-trustzone), [engineering](engineering.md#arm-trustzone)).
+Decision 3, where the fixture runs, is still open and is slice 3's.
 
 ## Problem
 
@@ -30,7 +32,7 @@ The row fixes the seam `backendtest` assumes ([SPEC](../SPEC.md)):
 |---|---|---|
 | go-enclave, root module | the backend seam and the detection that finds a backend | [backends/](architecture.md) |
 | go-enclave | `backendtest` and the arm-trustzone harness, including `make integration-test-arm-trustzone` | [The arm-trustzone harness](../backend-conformance/engineering.md#the-arm-trustzone-harness) |
-| go-enclave, a module still to place | the backend itself: the Go side of the TEE Client API, `Connect`, `Random` and the register file | [Open decision 1](#open-decision-1-where-the-backend-lives) |
+| go-enclave, the nested module `backends/armtrustzone` | the backend itself: the Go side of the TEE Client API, `Connect`, `Random` and its conformance test | [Decision 1](#decision-1-where-the-backend-lives-ruled-a) |
 | trusted-firmware, tag `v0.4.2-alpha` (48d7c9f48) | the secure world (TF-A at EL3, OP-TEE OS 4.11.0 at S-EL1), the TA at S-EL0, the fixture `make optee-run` | trusted-firmware row `optee-trustzone`, trusted-firmware#253 |
 
 The root module stays interface-only (#187): a backend depends on go-enclave,
@@ -102,7 +104,7 @@ On the go-enclave side the proposal is:
 This slice keeps no key in the secure world. The bytes leave it as soon as
 they are produced, and the handle in the normal world is their only holder.
 
-## Open decision 1: where the backend lives
+## Decision 1: where the backend lives (ruled: A)
 
 - **(A) A nested module in this repository**, with its own `go.mod` (for
   example `backends/armtrustzone/`) and prefixed tags
@@ -125,7 +127,7 @@ under the release targets (alpha tags only); a root API change must be
 tagged before the nested module can require it; and the buildgates and the
 releasability gate learn a second module.
 
-## Open decision 2: how the backend reaches the TEE
+## Decision 2: how the backend reaches the TEE (ruled: A)
 
 - **(A) Pure Go over the Linux TEE subsystem's ioctl interface** on
   `/dev/tee0` (`include/uapi/linux/tee.h`), through `golang.org/x/sys/unix`.
@@ -178,9 +180,11 @@ rule for builds, and local runs of the target need that image too.
 
 ## Slices
 
-1. This design.
-2. The backend and its register file, against the ruled decisions.
-3. The `TRUSTED_FIRMWARE_TAG=v0.4.2-alpha` pin and the CI job.
+1. This design. Shipped.
+2. The backend and its optee-tagged conformance test, against the ruled
+   decisions. Shipped.
+3. The `TRUSTED_FIRMWARE_TAG=v0.4.2-alpha` pin, the harness's wiring to the
+   conformance test, and the CI job.
 
 ## References
 
@@ -192,5 +196,5 @@ rule for builds, and local runs of the target need that image too.
 - Linux, `include/uapi/linux/tee.h`: the TEE subsystem's ioctl interface, at
   the kernel the fixture pins.
 
-Copying RFC 9562 and the uapi header into [docs/reference/](../reference/README.md),
-with their revisions and implementing symbols, is slice 2's work.
+Both are copied into [docs/reference/](../reference/README.md) with their
+revisions and implementing symbols.

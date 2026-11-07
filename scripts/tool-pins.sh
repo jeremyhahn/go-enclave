@@ -43,3 +43,11 @@ SHELLCHECK_SHA256_LINUX_AMD64=8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b
 SHELLCHECK_SHA256_LINUX_ARM64=12b331c1d2db6b9eb13cfca64306b1b157a86eb69db83023e261eaa7e7c14588
 SHELLCHECK_BIN_SHA256_LINUX_AMD64=4da528ddb3a4d1b7b24a59d4e16eb2f5fd960f4bd9a3708a15baddbdf1d5a55b
 SHELLCHECK_BIN_SHA256_LINUX_ARM64=127f13925eadd52c341bca0ebaf9ab0dbd78c6468f30a8f262a528bf8de47546
+#
+# The OP-TEE fixture (#250): trusted-firmware's `make optee-run` at a release
+# tag, run by scripts/optee-fixture.sh. The tag is pinned with the commit it
+# peels to; a checkout at any other commit is refused, so a moved tag is never
+# followed. Raise the tag and its commit together, by an ordinary PR. The clone
+# URL is the forge's and caller-supplied (TRUSTED_FIRMWARE_URL, Makefile).
+TRUSTED_FIRMWARE_TAG=v0.4.2-alpha
+TRUSTED_FIRMWARE_COMMIT=48d7c9f4817aaef1cbdbc034ffc2d2110cf16687

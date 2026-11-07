@@ -1,6 +1,6 @@
 # Backends — engineering contract
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-14
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-31
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 This contract covers the seam and its wiring into sealing: `WithBackend`,
@@ -260,6 +260,52 @@ imports into its budget and refuses an import it cannot honour.
 A backend author calls `backendtest.TestBackend` from a package test. What it
 checks, what it returns and how its own tests run are in
 [backend-conformance](../backend-conformance/engineering.md).
+
+## arm-trustzone
+
+The nested module `backends/armtrustzone` requires the released root
+(`v0.11.0-alpha`) and `golang.org/x/sys`, with no `replace` or `go.work`; the
+root module never requires it ([design](arm-trustzone-design.md), decision 1).
+
+| Identifier | Contract |
+|---|---|
+| `Name` | `"arm-trustzone"`, the `Backend` and `Connector` name. |
+| `Connect(endpoint string) (*Backend, error)` | Opens the TEE device, checks `TEE_IOC_VERSION` reports a GlobalPlatform TEE, opens a public-login session to TA `23751b49-3a76-4e49-b63c-e5853742fa1f` and probes it; closes everything on failure. Off Linux, `*PlatformError` before any I/O. |
+| `Backend.Rank()`, `Backend.Probe(ctx)` | `Prober`: rank 2, above secretmem; `Probe` invokes GET_INFO (0x1) and accepts only interface version 1 with flags 0. |
+| `Backend.Random(ctx, n) (enclave.Handle, error)` | A `ByteAccess` memory enclave of `n` bytes filled by GET_RANDOM (0x2) in chunks of at most 4096 bytes. `n < 1` is a `*SizeError` before the TA is called. A cancelled `ctx` issues `TEE_IOC_CANCEL` and returns `ctx.Err()`; on any failure the handle is destroyed. |
+| `Backend.Close()` | Closes the session and the device; idempotent; afterwards every call returns `ErrBackendClosed`. |
+| `Connector` | A registrable `Backend` whose `Connect(endpoint) (enclave.Backend, error)` is `Connect`. |
+| `OriginAPI` … `OriginTrustedApp` | The GP return origins a `SessionError` or `CommandError` reports. |
+
+Shared memory follows the [trust boundary](arm-trustzone-design.md#trust-boundary):
+with the driver's `TEE_GEN_CAP_REG_MEM` the handle's own pages are
+registered (`TEE_IOC_SHM_REGISTER`) and the TA writes into them; otherwise
+driver memory (`TEE_IOC_SHM_ALLOC`, `mmap`) is copied from per chunk and
+zeroed after each copy and before `munmap`, on every path. The ioctl structs
+and numbers are the pinned [`tee.h`](../reference/linux-uapi-tee.h); the TA
+UUID's byte order is [RFC 9562](../reference/rfc9562.txt).
+
+| Error | Matches |
+|---|---|
+| `*PlatformError{GOOS}` | `ErrUnsupportedPlatform` |
+| `*DeviceError{Endpoint; Op; Cause}` | `ErrDeviceUnavailable`, and its cause (`fs.ErrNotExist`, `ErrNotGlobalPlatform`, an errno). `Op` is `open`, `version`, `open-session`, `invoke`, `shm-alloc`, `mmap`, `close-session` or `close`. |
+| `*SessionError{Code; Origin}` | `ErrSessionRefused` |
+| `*CommandError{Command; Code; Origin}` | `ErrCommandFailed` |
+| `*InterfaceError{Version; Flags}` | `ErrInterfaceUnsupported` |
+| `*SizeError{N}` | `ErrRandomSize` |
+| `*ShortRandomError{Want; Got}` | `ErrShortRandom` |
+| `*UUIDError{Text}` | `ErrInvalidUUID` |
+| `ErrBackendClosed` | Itself. |
+
+Unit tests cover only pure functions: the struct layouts, offsets and ioctl
+numbers against `tee.h`, the `TEEC_UUID` byte order, the chunk plan, the
+`n < 1` refusal, GET_INFO's acceptance, and `Connect` on a missing device and
+off Linux. No mock or simulator stands in for the TEE (owner queue 41).
+`conformance_optee_test.go` (tag `optee`) registers the backend and runs
+`backendtest.TestBackend` with the probe and an `rng` handle case against
+`GO_ENCLAVE_OPTEE_ENDPOINT`; the harness running it in the OP-TEE guest is
+slice 3. `make lint-go`, `tidy-check`, `govulncheck`, `test` and
+`cross-build` run in the module (`BACKEND_MODULES`); coverage does not.
 
 ## Observability
 

@@ -2,7 +2,7 @@
 # <Dockerfile>.dockerignore in preference to a root .dockerignore).
 #
 # Everything is excluded, then exactly what the stages read is re-admitted:
-# the toolchain's inputs (both modules' go.mod/go.sum and the tool installer
+# the toolchain's inputs (every module's go.mod/go.sum and the tool installer
 # with its pins), and for the integration stage the sources of the
 # root package (its tests too, for the userns service), the non-test sources of
 # backendtest, providertest and internal/, the integration suite and the two scripts it runs. Each stage COPYs its own part by name, so the integration image
@@ -15,6 +15,8 @@
 !go.sum
 !build/ci/buildgates/go.mod
 !build/ci/buildgates/go.sum
+!backends/armtrustzone/go.mod
+!backends/armtrustzone/go.sum
 !scripts/lib.sh
 !scripts/tool.sh
 !scripts/tool-pins.sh

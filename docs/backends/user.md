@@ -1,6 +1,6 @@
 # Backends — user guide
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-14
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-31
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 A backend is what holds an enclave's material. Locked memory, the
@@ -80,6 +80,32 @@ if enclave.As(backend, &t) {
 
 Run the conformance suite from your backend's tests:
 [backend conformance](../backend-conformance/user.md).
+
+## arm-trustzone
+
+`github.com/jeremyhahn/go-enclave/backends/armtrustzone` reaches OP-TEE on
+Arm through the Linux TEE driver (`/dev/tee0`), in pure Go
+([design](arm-trustzone-design.md)). It needs Linux, an OP-TEE kernel driver
+and trusted-firmware's `go-enclave` trusted application; elsewhere `Connect`
+returns `*armtrustzone.PlatformError`. Its handles are byte-access memory
+enclaves filled from the TEE's random number generator:
+
+```go
+b, err := armtrustzone.Connect("/dev/tee0") // opens a session, probes the TA
+if err != nil {
+	return err
+}
+defer b.Close()
+h, err := b.Random(ctx, 32) // 32 bytes from the secure world
+```
+
+To register it, pass `armtrustzone.Connector{}` to `enclave.Register` and
+call its `Connect` after `Lookup`. A failure is the module's typed error:
+`*DeviceError` (the device or an ioctl failed; `Op` says which),
+`*SessionError` (the TA is missing or refused the session), `*InterfaceError`
+(the TA speaks another interface version), `*CommandError` and
+`*ShortRandomError` (the TA failed or returned too few bytes), `*SizeError`
+(`Random` of fewer than 1 byte) and `ErrBackendClosed`.
 
 ## Troubleshooting
 
