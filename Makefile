@@ -235,7 +235,7 @@ lint-actions:
 # follows the `. lib.sh` every script sources. build/ci/*.sh are the workflows'
 # scripts, and CI_BASH_SCRIPTS the ci-template's bash ones, taken unchanged
 # from it; each names its own shell on its first line.
-CI_BASH_SCRIPTS := scripts/apk-index-sum.sh scripts/in-toolchain-image.sh scripts/reap-stale-ci-stacks.sh scripts/trim-ci-caches.sh
+CI_BASH_SCRIPTS := scripts/apk-index-sum.sh scripts/ci-image-cache.sh scripts/in-toolchain-image.sh scripts/reap-stale-ci-stacks.sh scripts/trim-ci-caches.sh
 .PHONY: lint-scripts
 lint-scripts:
 	@sc=$(call tool,shellcheck,SHELLCHECK) && \
