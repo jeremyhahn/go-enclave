@@ -120,13 +120,12 @@ case $1 in
     [ $# -eq 1 ] || die "usage: $0 build"
     docker_ok build
     ref=$(image)
-    # The forge module variables reach the build only as the BuildKit secret
-    # gomodauth (handbook dependency-resolution.md §6): never an argument, a
-    # layer or a line of output. The backend modules' download needs them.
+    # The backend modules' download fetches the public root module through
+    # GO_BUILD_PROXY, unset on CI's GitHub-hosted runners (#293); no forge
+    # credential reaches the build. Unset, the Dockerfile's public default applies.
     set -- -f "$dockerfile" --target toolchain -t "$ref" -t "$repo:latest"
-    if [ -n "${MODULE_ENV_FILE:-}" ] && [ -f "$MODULE_ENV_FILE" ]; then
-      case $MODULE_ENV_FILE in *,*) die "MODULE_ENV_FILE must not contain a comma (a --secret separator)" ;; esac
-      set -- "$@" --secret "id=gomodauth,src=$MODULE_ENV_FILE"
+    if [ -n "${GO_BUILD_PROXY:-}" ]; then
+      set -- "$@" --build-arg "GO_BUILD_PROXY=$GO_BUILD_PROXY"
     fi
     if held "$ref"; then
       docker tag "$ref" "$repo:latest"
