@@ -75,7 +75,7 @@
 # v1.29.3 (Company Agent ruling 255(10)/(11)(c), 2026-10-29): one schedule
 # run per repository, skipped when a main run is in flight. The 04:00Z
 # nightly cron on every repository started six main runs over the throttle
-# and drove ci-node-2 /mnt/disk1 to 93 %. Two changes:
+# and drove a bigdisk runner's cache disk to 93 %. Two changes:
 #   - a schedule run's concurrency group is `schedule-{repository}`, with no
 #     sha, so a repository has one schedule run at a time. cancel-in-progress
 #     stays a literal `true`, so a newer schedule run cancels an older one
@@ -536,9 +536,8 @@
 # the repository never moves a pin back.
 #
 # CUSTOMIZE (go-enclave): CI Gate runs on the `ci-gate` runner label and
-# checks its tiers with build/ci/summary.sh, carried inline, in place of the
-# template's check() function; the script differs because go-enclave has three
-# tiers (pr, full, nightly) and release.yml runs the same file.
+# checks its tiers with the template's check() function, one check line per
+# job in needs, the fips job included (#277).
 
 name: CI
 
@@ -825,7 +824,9 @@ jobs:
   publish-images:
     name: Publish CI images
     runs-on: release
-    if: ${{ github.server_url != 'https://github.com' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    # CUSTOMIZE (go-enclave): no `release` runner serves this repository
+    # (#277), so the job never runs; restore the template's if: when one does.
+    if: false
     timeout-minutes: 60       # CUSTOMIZE: ceil(1.5 x a cold toolchain build's p95)
     env:
       CI_IMAGE_NAMESPACE: agent-ci-images   # ci-standard.md §9 (ruling 217(4))
@@ -915,6 +916,8 @@ jobs:
         if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' }}
         run: scripts/trim-ci-caches.sh "$CI_STACK_PREFIX" "$TOOLCHAIN_IMAGE"
 
+      # CUSTOMIZE (go-enclave): the four lint steps below ran in the image job
+      # through v1.29; v1.30 moves lint here, so they move with it, in their order.
       # make lint: gofmt, vet, golangci-lint, actionlint with shellcheck
       # (devops.md §4). .golangci.yml enables staticcheck, errcheck, unused,
       # ineffassign, misspell and gocritic (devops.md §8). v1.27: a repo's
@@ -931,6 +934,14 @@ jobs:
       - name: Releasability test (docs-only PR)
         if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && env.RELEASABILITY_TEST != '' && needs.changes.outputs.docs_only == 'true' }}
         run: scripts/in-toolchain-image.sh "$TOOLCHAIN_IMAGE" "go test -count=1 -tags '$GO_BUILD_TAGS' $RELEASABILITY_TEST"
+
+      # CUSTOMIZE (go-enclave): go-enclave's other static checks: go.mod
+      # tidiness, the GOEXPERIMENT=runtimesecret build's lint and the
+      # integration suite's lint (with its tag). The repository's own gates
+      # run as `make lint-gates` in the lint-gates job.
+      - name: make tidy-check lint-runtimesecret lint-integration
+        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' }}
+        run: scripts/in-toolchain-image.sh "$TOOLCHAIN_IMAGE" make tidy-check lint-runtimesecret lint-integration
 
       # v1.9.2, now in the image: the declared tag set must select code. Each
       # tag is checked by removal: if dropping it changes no selected file
@@ -1021,7 +1032,7 @@ jobs:
     # on every event only on `run` (not `refused`, not `proven`), and never
     # on a docs-only PR.
     if: ${{ needs.schedule-guard.outputs.verdict == 'run' && needs.changes.outputs.docs_only != 'true' }}
-    timeout-minutes: 90       # CUSTOMIZE: ceil(1.5 x this job's 72-hour p95), ci-standard.md §12
+    timeout-minutes: 32       # CUSTOMIZE: ceil(1.5 x this job's 72-hour p95), ci-standard.md §12 (#277)
     env:
       CI_IMAGE_NAMESPACE: agent-ci-images   # v1.30
       CI_STACK_PREFIX: ${{ github.event.repository.name }}-ci-
@@ -1198,42 +1209,6 @@ jobs:
         if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' }}
         run: scripts/trim-ci-caches.sh "$CI_STACK_PREFIX" "$TOOLCHAIN_IMAGE"
 
-<<<<<<< ours
-      # make lint: gofmt, vet, golangci-lint, actionlint with shellcheck
-      # (devops.md §4). .golangci.yml enables staticcheck, errcheck, unused,
-      # ineffassign, misspell and gocritic (devops.md §8). v1.27: a repo's
-      # `make lint-gates` runs in the lint-gates job beside this one, never
-      # here and never as a prerequisite of lint.
-      - name: make lint
-        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' }}
-        run: scripts/in-toolchain-image.sh "$TOOLCHAIN_IMAGE" "make lint GO_BUILD_TAGS='$GO_BUILD_TAGS'"
-
-      # v1.26.1: a docs-only PR skips make coverage, so it runs the
-      # releasability test alone; any other run gets it from make coverage.
-      - name: Releasability test (docs-only PR)
-        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && env.RELEASABILITY_TEST != '' && needs.changes.outputs.docs_only == 'true' }}
-        run: scripts/in-toolchain-image.sh "$TOOLCHAIN_IMAGE" "go test -count=1 -tags '$GO_BUILD_TAGS' $RELEASABILITY_TEST"
-
-      # CUSTOMIZE: go-enclave's other static checks, which `make ci-lint` ran in
-      # the lint job through v1.18: go.mod tidiness, the GOEXPERIMENT=
-      # runtimesecret build's lint and the integration suite's lint (with its
-      # tag). The repository's own gates (build/ci/buildgates: workflow shape
-      # and pins, releasability, changelog assembly, the scripts) run as
-      # `make lint-gates` in the lint-gates job.
-      - name: make tidy-check lint-runtimesecret lint-integration
-        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' }}
-        run: scripts/in-toolchain-image.sh "$TOOLCHAIN_IMAGE" make tidy-check lint-runtimesecret lint-integration
-
-      # v1.9.2, now in the image: the declared tag set must select code. Each
-      # tag is checked by removal: if dropping it changes no selected file
-      # (tests included), it is misspelled or dead. Compares files, not
-      # packages, and a tag may swap files (a `!foo` stub for a `foo` body).
-      - name: Assert every build tag selects code
-        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && env.GO_BUILD_TAGS != '' && needs.changes.outputs.docs_only != 'true' }}
-        run: scripts/in-toolchain-image.sh "$TOOLCHAIN_IMAGE" "GO_BUILD_TAGS='$GO_BUILD_TAGS' sh scripts/assert-build-tags.sh"
-
-=======
->>>>>>> v130
       # CUSTOMIZE: nested modules (sdk/go, xkey) and variants (FIPS) are built
       # by `make build` itself, never by an extra step here.
       - name: make build
@@ -1326,7 +1301,7 @@ jobs:
     # schedule guard's `run`. v1.30: only on `run` on every event, and on a PR
     # only when a changed file matches LINT_GATES_PATTERN (fix 3).
     if: ${{ !github.event.pull_request.draft && needs.schedule-guard.outputs.verdict == 'run' && needs.changes.outputs.lint_gates != 'false' }}
-    timeout-minutes: 45       # CUSTOMIZE: ceil(1.5 x this job's 72-hour p95), ci-standard.md §12
+    timeout-minutes: 20       # CUSTOMIZE: ceil(1.5 x this job's 72-hour p95), ci-standard.md §12 (#277)
     env:
       CI_STACK_PREFIX: ${{ github.event.repository.name }}-ci-
       # v1.22: the cache volumes' trust class (as in the image job).
@@ -1413,7 +1388,7 @@ jobs:
     # v1.26: never on a draft PR, ci:full or not.
     if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')) && !github.event.pull_request.draft }}
     runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'bigdisk' }}
-    timeout-minutes: 60
+    timeout-minutes: 11       # CUSTOMIZE: ceil(1.5 x this job's 72-hour p95), ci-standard.md §12 (#277)
     env:
       CI_STACK_PREFIX: ${{ github.event.repository.name }}-ci-
     steps:
@@ -1461,7 +1436,7 @@ jobs:
     needs: schedule-guard
     if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')) && !github.event.pull_request.draft && needs.schedule-guard.outputs.verdict == 'run' }}
     runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'bigdisk' }}
-    timeout-minutes: 60       # CUSTOMIZE: ceil(1.5 x this job's 72-hour p95), ci-standard.md §12
+    timeout-minutes: 22       # CUSTOMIZE: ceil(1.5 x this job's 72-hour p95), ci-standard.md §12 (#277)
     env:
       CI_STACK_PREFIX: ${{ github.event.repository.name }}-ci-
       IT_PROJECT: ${{ github.event.repository.name }}-ci-${{ github.run_id }}-${{ github.run_attempt }}
@@ -1628,7 +1603,7 @@ jobs:
     # v1.30: a dispatch off main is refused, so soak runs only on `run`.
     if: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && needs.schedule-guard.outputs.verdict == 'run' }}
     runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'bigdisk' }}
-    timeout-minutes: 90       # CUSTOMIZE: SOAK_MINUTES plus one iteration, at least ceil(1.5 x the 72-hour p95)
+    timeout-minutes: 56       # CUSTOMIZE: SOAK_MINUTES plus one iteration, at least ceil(1.5 x the 72-hour p95) (#277)
     env:
       SOAK_MINUTES: 30        # CUSTOMIZE
       SOAK_TARGET: ci-integration     # CUSTOMIZE: a make target of the integration image
@@ -1854,23 +1829,14 @@ jobs:
   # is worse than no gate. Do not use join(needs.*.result); it evaluates empty
   # on Gitea and reports success while jobs fail.
   # v1.21: on the ci-gate runners (Company Agent m386: only CI Gate runs there;
-  # a 1-CPU gate runner cannot hold a stage). trivy and fips are in nightly.yml
+  # a 1-CPU gate runner cannot hold a stage). trivy is in nightly.yml
   # (v1.9, devops.md §8a: the alpha regime).
   #
-  # CUSTOMIZE: the template's check() logic is build/ci/summary.sh, carried
-  # inline (release.yml runs the same file), tagged pr, full or nightly per
-  # job; FULL_TIER and NIGHTLY are the template's. runs-on is the literal label:
-  # build/ci/buildgates holds the gate to it, and the gate has no checkout and
-  # no action.
+  # CUSTOMIZE (go-enclave): the fips job stays here, tagged full, and has its
+  # check line. build/ci/buildgates holds every job in needs to exactly one
+  # check line and the gate to no checkout and no action.
   ci-gate:
     name: CI Gate
-<<<<<<< ours
-    runs-on: ci-gate
-    if: always()
-    # CUSTOMIZE: the repo's job list. Add every CUSTOMIZE job here AND as a
-    # check line below; remove none of the template's jobs.
-    needs: [changes, image, lint-gates, fips, integration, soak, arch-gates]
-=======
     runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'ci-gate' }}
     # v1.29.3: on a schedule run the schedule guard decides. `busy` skips the
     # gate, so `CI / CI Gate (schedule)` posts `skipped` (Gitea 1.27.1 posts a
@@ -1881,8 +1847,7 @@ jobs:
     # CUSTOMIZE: the repo's job list. Add every CUSTOMIZE job here AND as a
     # check line below; remove none of the template's jobs. v1.30: lint
     # joins; publish-images is the one job outside the gate (see its comment).
-    needs: [changes, schedule-guard, lint, image, lint-gates, integration, soak, arch-gates]
->>>>>>> v130
+    needs: [changes, schedule-guard, lint, image, lint-gates, fips, integration, soak, arch-gates]
     steps:
       - name: Fail closed on any non-success
         env:
@@ -1894,12 +1859,6 @@ jobs:
           NIGHTLY: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
           # v1.26: a draft PR runs no CI, so its gate fails rather than pass on skips.
           DRAFT: ${{ github.event.pull_request.draft == true }}
-<<<<<<< ours
-        # build/ci/summary.sh, verbatim (buildgates holds the copy to the file).
-        # CUSTOMIZE: one check line per job in needs above, after the script.
-        # A job gated to the full tier by its `if:` is marked full, one gated to
-        # schedule and workflow_dispatch is nightly; every other job is pr.
-=======
           # v1.29.3: the schedule guard's verdict on a schedule run.
           SCHEDULE: ${{ github.event_name == 'schedule' }}
           SCHEDULE_GUARD: ${{ needs.schedule-guard.outputs.verdict }}
@@ -1909,61 +1868,11 @@ jobs:
           PROOF: ${{ needs.schedule-guard.outputs.proof }}
           DOCS_ONLY: ${{ needs.changes.outputs.docs_only == 'true' }}
           LINT_GATES_SEL: ${{ needs.changes.outputs.lint_gates != 'false' }}
->>>>>>> v130
         run: |
           if [ "${DRAFT}" = true ]; then
             echo "FAIL draft pull request: no CI runs on a draft. Mark it ready, then push an empty commit to start its run."
             exit 1
           fi
-<<<<<<< ours
-          script=$(mktemp)
-          cat > "$script" <<'SUMMARY'
-          #!/bin/sh
-          # summary.sh — the pass/fail summary a gate job ends with: one line per job,
-          # and a failure unless every job the run selected succeeded.
-          #
-          # Usage: sh build/ci/summary.sh <message> <full> <nightly> <tier>:<job>=<result>...
-          #
-          # <message> is the error printed when any job did not pass. <full> is `true`
-          # when this run selected the full tier and `false` when it did not; <nightly>
-          # is the same for the nightly tier (the schedule and workflow_dispatch). <tier>
-          # is `pr` (the job runs on every event), `full` (only when the full tier is
-          # selected) or `nightly` (only when the nightly tier is). A skipped job fails
-          # the gate like a failed one: a job that never ran proved nothing. The one
-          # exception is a `full` or `nightly` job skipped in a run that did not select
-          # its tier, because that job's `if:` was false by design. Anything else (an
-          # unknown tier, a <full> or <nightly> other than true or false) fails closed.
-          # The results arrive one per argument because Gitea does not implement
-          # join(needs.*.result) (it evaluates empty and reports success while jobs
-          # fail), so a workflow names every job it needs.
-          set -eu
-
-          [ $# -ge 4 ] || { echo "usage: $0 <message> <full> <nightly> <tier>:<job>=<result>..." >&2; exit 2; }
-          message=$1
-          full=$2
-          nightly=$3
-          shift 3
-          case $full in
-            true|false) ;;
-            *) echo "$0: <full> is '$full', want true or false" >&2; exit 2 ;;
-          esac
-          case $nightly in
-            true|false) ;;
-            *) echo "$0: <nightly> is '$nightly', want true or false" >&2; exit 2 ;;
-          esac
-
-          bad=0
-          for pair in "$@"; do
-            tagged=${pair%%=*}
-            result=${pair#*=}
-            tier=${tagged%%:*}
-            name=${tagged#*:}
-            case $tier:$result in
-              pr:success|full:success|nightly:success) printf 'OK   %s\n' "$name" ;;
-              full:skipped|nightly:skipped)
-                if { [ "$tier" = full ] && [ "$full" = false ]; } || { [ "$tier" = nightly ] && [ "$nightly" = false ]; }; then
-                  printf 'OK   %s (%s tier, not selected)\n' "$name" "$tier"
-=======
           BAD=0
           echo "full tier selected: ${FULL_TIER}; nightly selected: ${NIGHTLY}"
           check() { # <job> <result> <pr|code|scoped|full|nightly>
@@ -1980,31 +1889,11 @@ jobs:
                   echo "SKIP $1 (full tier not selected)"
                 elif [ "$3" = nightly ] && [ "${NIGHTLY}" != true ]; then
                   echo "SKIP $1 (nightly and dispatch only)"
->>>>>>> v130
                 else
-                  printf 'SKIP %s (did not run: see its job)\n' "$name"; bad=1
-                fi ;;
-              pr:skipped) printf 'SKIP %s (did not run: see its job)\n' "$name"; bad=1 ;;
-              pr:*|full:*|nightly:*) printf 'FAIL %s (%s)\n' "$name" "$result"; bad=1 ;;
-              *) printf 'FAIL %s (no pr:, full: or nightly: tier tag)\n' "$pair"; bad=1 ;;
+                  echo "FAIL $1 (skipped)"; BAD=1
+                fi;;
+              *) echo "FAIL $1 ($2)"; BAD=1;;
             esac
-<<<<<<< ours
-          done
-
-          if [ "$bad" -ne 0 ]; then
-            echo "::error::$message"
-          fi
-          exit "$bad"
-          SUMMARY
-          sh "$script" "a CI job did not pass" "$FULL_TIER" "$NIGHTLY" \
-            pr:changes="${{ needs.changes.result }}" \
-            pr:image="${{ needs.image.result }}" \
-            pr:lint-gates="${{ needs.lint-gates.result }}" \
-            full:fips="${{ needs.fips.result }}" \
-            full:integration="${{ needs.integration.result }}" \
-            nightly:soak="${{ needs.soak.result }}" \
-            pr:arch-gates="${{ needs.arch-gates.result }}"
-=======
           }
           # v1.29.3: a schedule run reaches this step on any verdict but
           # `busy`. Any verdict but `run` means its bigdisk jobs skipped
@@ -2025,8 +1914,8 @@ jobs:
           check lint        "${{ needs.lint.result }}" pr
           check image       "${{ needs.image.result }}" code
           check lint-gates  "${{ needs.lint-gates.result }}" scoped
+          check fips        "${{ needs.fips.result }}" full
           check integration "${{ needs.integration.result }}" full
           check soak        "${{ needs.soak.result }}" nightly
           check arch-gates  "${{ needs.arch-gates.result }}" pr
           exit $BAD
->>>>>>> v130
