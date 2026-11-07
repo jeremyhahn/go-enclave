@@ -191,8 +191,8 @@
 # in a go-xkms run): the image and integration jobs mask the forge
 # credentials first, and no step or make target prints an env file, the job
 # environment or a matched line; lint steps and `make check-public-literals`
-# report path and line only, and `make stage-gomodauth` runs silent
-# (ci-standard.md §5). Every v1.21 rollout PR adopts v1.21.1 before it merges.
+# report path and line only (ci-standard.md §5). The image build takes no
+# forge credential: its private root module comes through GO_BUILD_PROXY (#293). Every v1.21 rollout PR adopts v1.21.1 before it merges.
 # v1.21 (Company Agent m598 items 1 and 2, 2026-10-18): every stage runs in
 # the project's own devcontainer image (ci-standard.md §2, devcontainer.md §7).
 # Through v1.20 lint, security, build and test installed Go with setup-go on
@@ -206,7 +206,7 @@
 # COVERAGE_THRESHOLD, m601 (c)), security, deps-check (new, ci-standard.md
 # §1) and trivy image on the integration image (it leaves the CUSTOMIZE note).
 # The integration stage stays its own job, `make integration-test` in the
-# integration image. Both run on bigdisk (ubuntu-latest on github.com).
+# integration image. Both run on bigdisk, on github.com too (#293).
 # setup-go, the runner tool installs and the SARIF upload (m601 (d): CI runs
 # on Gitea) are gone, and with them GO_VERSION: the image pins Go. The tag
 # assertion moves to scripts/assert-build-tags.sh (ships beside this file).
@@ -577,20 +577,20 @@ jobs:
   # so the next run rebuilds the image rather than reuse a cached one with the
   # old package (go-enclave main fd83b79ce, CVE-2026-92392).
   #
-  # The forge credentials reach the image build only as the gomodauth BuildKit
-  # secret, from a file outside the context that the job removes.
-  # No step and no make target prints that file, the job environment (`env`,
-  # `printenv`, `set -x`) or a matched line: `make stage-gomodauth` and the
-  # file writes run silent, and lint steps and `make check-public-literals`
-  # report path and line only (ci-standard.md §5, Company Agent m605 item 8).
+  # No forge credential reaches the image build (#293, DS-7343): the backend
+  # modules' private root comes through GO_BUILD_PROXY, the repository
+  # variable vars.GO_BUILD_PROXY naming a LAN Go module proxy, passed to make
+  # docker-build. No step and no make target prints the job environment
+  # (`env`, `printenv`, `set -x`) or a matched line: lint steps and `make
+  # check-public-literals` report path and line only (ci-standard.md §5,
+  # Company Agent m605 item 8).
   #
-  # Runners: the image and integration jobs run on bigdisk (Docker and the disk
-  # for the image builds) and CI Gate on ci-gate; on the github.com mirror all
-  # are ubuntu-latest, which has Docker (devops.md §1: host-specific choices
-  # are guarded on github.server_url).
+  # Runners: every job that builds an image runs on bigdisk (Docker, the disk
+  # for the image builds and the LAN proxy), on the github.com mirror too, and
+  # CI Gate on ci-gate.
   image:
     name: Devcontainer image [lint, build, test, security, deps-check, trivy image]
-    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'bigdisk' }}
+    runs-on: bigdisk
     needs: changes             # v1.24 (CA m749, m751 (a))
     timeout-minutes: 90       # CUSTOMIZE: give the stages honest headroom
     env:
@@ -640,13 +640,10 @@ jobs:
       # goes here; the container shares the runner's kernel.
 
       - name: Build the devcontainer images
+        env:
+          GO_BUILD_PROXY: ${{ vars.GO_BUILD_PROXY }}
         run: |
-          ( umask 077; : > "$RUNNER_TEMP/gomodauth.env"
-            for v in GOPRIVATE GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0; do
-              if [ -n "${!v:-}" ]; then printf '%s=%s\n' "$v" "${!v}" >> "$RUNNER_TEMP/gomodauth.env"; fi
-            done )
-          make docker-build MODULE_ENV_FILE="$RUNNER_TEMP/gomodauth.env" IT_IMAGE="$IT_IMAGE"
-          rm -f "$RUNNER_TEMP/gomodauth.env"
+          make docker-build GO_BUILD_PROXY="$GO_BUILD_PROXY" IT_IMAGE="$IT_IMAGE"
           echo "TOOLCHAIN_IMAGE=$(make -s toolchain-image)" >> "$GITHUB_ENV"
 
       # v1.23: a lease on the integration image (from a Codex review). A
@@ -683,6 +680,8 @@ jobs:
       # lock created more than 600 s ago is removed by its id; a step waits
       # 660 s for the lock and then fails.
       - name: Lease the integration image
+        env:
+          GO_BUILD_PROXY: ${{ vars.GO_BUILD_PROXY }}
         run: |
           lease="${CI_STACK_PREFIX}lease-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
           # v1.25.3: the daemon's image lock, shared with the reaper (v5) and
@@ -722,13 +721,8 @@ jobs:
           if ! take_lease; then
             image_unlock
             echo "integration image $IT_IMAGE is missing or went before its lease; building it once"
-            ( umask 077; : > "$RUNNER_TEMP/gomodauth.env"
-              for v in GOPRIVATE GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0; do
-                if [ -n "${!v:-}" ]; then printf '%s=%s\n' "$v" "${!v}" >> "$RUNNER_TEMP/gomodauth.env"; fi
-              done )
             rc=0
-            make docker-build MODULE_ENV_FILE="$RUNNER_TEMP/gomodauth.env" IT_IMAGE="$IT_IMAGE" || rc=$?
-            rm -f "$RUNNER_TEMP/gomodauth.env"
+            make docker-build GO_BUILD_PROXY="$GO_BUILD_PROXY" IT_IMAGE="$IT_IMAGE" || rc=$?
             if [ "$rc" -ne 0 ]; then
               echo "::error::building the integration image $IT_IMAGE failed (exit $rc)"
               exit "$rc"
@@ -858,7 +852,7 @@ jobs:
       - name: Tear down
         if: always()
         run: |
-          rm -f "$RUNNER_TEMP/gomodauth.env" it-image.tar
+          rm -f it-image.tar
           [ -z "${IT_LEASE:-}" ] || docker rm "$IT_LEASE" >/dev/null || true
 
   # v1.27: a repository's `make lint-gates` (its own gates beside `make lint`:
@@ -878,7 +872,7 @@ jobs:
   # and the job; the gates after it run on the next push.
   lint-gates:
     name: Lint Gates [toolchain image]
-    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'bigdisk' }}
+    runs-on: bigdisk
     if: ${{ !github.event.pull_request.draft }}   # v1.26
     timeout-minutes: 45       # CUSTOMIZE: the repo's lint-gates time, with honest headroom
     env:
@@ -931,13 +925,10 @@ jobs:
 
       - name: Build the devcontainer images
         if: ${{ steps.probe.outputs.has_target == 'true' }}
+        env:
+          GO_BUILD_PROXY: ${{ vars.GO_BUILD_PROXY }}
         run: |
-          ( umask 077; : > "$RUNNER_TEMP/gomodauth.env"
-            for v in GOPRIVATE GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0; do
-              if [ -n "${!v:-}" ]; then printf '%s=%s\n' "$v" "${!v}" >> "$RUNNER_TEMP/gomodauth.env"; fi
-            done )
-          make docker-build MODULE_ENV_FILE="$RUNNER_TEMP/gomodauth.env" IT_IMAGE="$IT_IMAGE"
-          rm -f "$RUNNER_TEMP/gomodauth.env"
+          make docker-build GO_BUILD_PROXY="$GO_BUILD_PROXY" IT_IMAGE="$IT_IMAGE"
           echo "TOOLCHAIN_IMAGE=$(make -s toolchain-image)" >> "$GITHUB_ENV"
 
       # v1.22: bound this repo's cache volumes (as in the image job). It never
@@ -953,10 +944,6 @@ jobs:
           IN_IMAGE_NETWORK: none   # go-enclave's gates run offline (scratch trees, a fake forge and a local module proxy)
         run: scripts/in-toolchain-image.sh "$TOOLCHAIN_IMAGE" "make lint-gates GO_BUILD_TAGS='$GO_BUILD_TAGS'"
 
-      - name: Tear down
-        if: always()
-        run: rm -f "$RUNNER_TEMP/gomodauth.env"
-
   # CUSTOMIZE (FIPS 140-3 strict): build and unit tests under GOFIPS140=latest
   # with GODEBUG=fips140=only (security-review.md §6), in the toolchain image,
   # on the full tier (CI_FULL_TIER's expression). Strict mode, never `on`,
@@ -967,7 +954,7 @@ jobs:
     name: FIPS
     # v1.26: never on a draft PR, ci:full or not.
     if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')) && !github.event.pull_request.draft }}
-    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'bigdisk' }}
+    runs-on: bigdisk
     timeout-minutes: 60
     env:
       CI_STACK_PREFIX: ${{ github.event.repository.name }}-ci-
@@ -996,8 +983,10 @@ jobs:
         run: echo "IT_IMAGE=$(make -s it-image)" >> "$GITHUB_ENV"
 
       - name: Build the toolchain image
+        env:
+          GO_BUILD_PROXY: ${{ vars.GO_BUILD_PROXY }}
         run: |
-          make docker-build IT_IMAGE="$IT_IMAGE"
+          make docker-build GO_BUILD_PROXY="$GO_BUILD_PROXY" IT_IMAGE="$IT_IMAGE"
           echo "TOOLCHAIN_IMAGE=$(make -s toolchain-image)" >> "$GITHUB_ENV"
 
       - name: make test-fips (toolchain image)
@@ -1012,7 +1001,7 @@ jobs:
     name: Integration [integration image]
     # v1.26: never on a draft PR, ci:full or not.
     if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')) && !github.event.pull_request.draft }}
-    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'bigdisk' }}
+    runs-on: bigdisk
     timeout-minutes: 60       # CUSTOMIZE
     env:
       CI_STACK_PREFIX: ${{ github.event.repository.name }}-ci-
@@ -1066,6 +1055,8 @@ jobs:
       # CUSTOMIZE: go-enclave needs no module credential, so the rebuild
       # writes no credential file (as the FIPS job's build).
       - name: Lease the integration image
+        env:
+          GO_BUILD_PROXY: ${{ vars.GO_BUILD_PROXY }}
         run: |
           lease="${CI_STACK_PREFIX}lease-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
           # v1.25.3: the daemon's image lock, shared with the reaper (v5) and
@@ -1106,7 +1097,7 @@ jobs:
             image_unlock
             echo "integration image $IT_IMAGE is missing or went before its lease; building it once"
             rc=0
-            make docker-build IT_IMAGE="$IT_IMAGE" || rc=$?
+            make docker-build GO_BUILD_PROXY="$GO_BUILD_PROXY" IT_IMAGE="$IT_IMAGE" || rc=$?
             if [ "$rc" -ne 0 ]; then
               echo "::error::building the integration image $IT_IMAGE failed (exit $rc)"
               exit "$rc"
@@ -1153,7 +1144,6 @@ jobs:
       - name: Tear down
         if: always()
         run: |
-          rm -f "$RUNNER_TEMP/gomodauth.env"
           IT_IMAGE="$IT_IMAGE" docker compose -f build/docker/devcontainer/compose.yaml -p "$IT_PROJECT" down --volumes || true
           [ -z "${IT_LEASE:-}" ] || docker rm "$IT_LEASE" >/dev/null || true
 
@@ -1166,7 +1156,7 @@ jobs:
   soak:
     name: Soak [integration image]
     if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
-    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'bigdisk' }}
+    runs-on: bigdisk
     timeout-minutes: 90       # CUSTOMIZE: SOAK_MINUTES plus one iteration
     env:
       SOAK_MINUTES: 30        # CUSTOMIZE
@@ -1218,6 +1208,8 @@ jobs:
       # CUSTOMIZE: go-enclave needs no module credential, so the rebuild
       # writes no credential file (as the FIPS job's build).
       - name: Lease the integration image
+        env:
+          GO_BUILD_PROXY: ${{ vars.GO_BUILD_PROXY }}
         run: |
           lease="${CI_STACK_PREFIX}lease-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
           # v1.25.3: the daemon's image lock, shared with the reaper (v5) and
@@ -1258,7 +1250,7 @@ jobs:
             image_unlock
             echo "integration image $IT_IMAGE is missing or went before its lease; building it once"
             rc=0
-            make docker-build IT_IMAGE="$IT_IMAGE" || rc=$?
+            make docker-build GO_BUILD_PROXY="$GO_BUILD_PROXY" IT_IMAGE="$IT_IMAGE" || rc=$?
             if [ "$rc" -ne 0 ]; then
               echo "::error::building the integration image $IT_IMAGE failed (exit $rc)"
               exit "$rc"
@@ -1311,7 +1303,6 @@ jobs:
       - name: Tear down
         if: always()
         run: |
-          rm -f "$RUNNER_TEMP/gomodauth.env"
           if [ -s "$RUNNER_TEMP/soak-project" ]; then
             IT_IMAGE="$IT_IMAGE" docker compose -f build/docker/devcontainer/compose.yaml -p "$(cat "$RUNNER_TEMP/soak-project")" down --volumes || true
           fi

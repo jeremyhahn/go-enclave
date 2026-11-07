@@ -118,7 +118,7 @@ jobs:
   gate:
     name: Gate [toolchain image] [lint, build, security, test]
     needs: [verify]
-    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'bigdisk' }}
+    runs-on: bigdisk
     timeout-minutes: 120
     env:
       CI_STACK_PREFIX: ${{ github.event.repository.name }}-ci-
@@ -147,13 +147,10 @@ jobs:
         run: echo "IT_IMAGE=$(make -s it-image)" >> "$GITHUB_ENV"
 
       - name: Build the devcontainer images
+        env:
+          GO_BUILD_PROXY: ${{ vars.GO_BUILD_PROXY }}
         run: |
-          ( umask 077; : > "$RUNNER_TEMP/gomodauth.env"
-            for v in GOPRIVATE GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0; do
-              if [ -n "${!v:-}" ]; then printf '%s=%s\n' "$v" "${!v}" >> "$RUNNER_TEMP/gomodauth.env"; fi
-            done )
-          make docker-build MODULE_ENV_FILE="$RUNNER_TEMP/gomodauth.env" IT_IMAGE="$IT_IMAGE"
-          rm -f "$RUNNER_TEMP/gomodauth.env"
+          make docker-build GO_BUILD_PROXY="$GO_BUILD_PROXY" IT_IMAGE="$IT_IMAGE"
           echo "TOOLCHAIN_IMAGE=$(make -s toolchain-image)" >> "$GITHUB_ENV"
 
       - name: Trim the CI caches
@@ -178,10 +175,6 @@ jobs:
         if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' }}
         run: scripts/in-toolchain-image.sh "$TOOLCHAIN_IMAGE" make ci-test test-fips
 
-      - name: Tear down
-        if: always()
-        run: rm -f "$RUNNER_TEMP/gomodauth.env"
-
   # The integration suite (#91), both FIPS configurations, in the hardened
   # integration image on the TAGGED commit, as ci.yml's Integration job runs
   # it, so a tag is held to at least the main gate: the user-namespace test,
@@ -197,7 +190,7 @@ jobs:
   integration:
     name: Integration [integration image]
     needs: [verify, gate]
-    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'bigdisk' }}
+    runs-on: bigdisk
     timeout-minutes: 60
     env:
       CI_STACK_PREFIX: ${{ github.event.repository.name }}-ci-
@@ -232,6 +225,8 @@ jobs:
       # the lease: bounded, building the image once if it is missing, and
       # exporting the leased id as IT_LEASE_ID).
       - name: Lease the integration image
+        env:
+          GO_BUILD_PROXY: ${{ vars.GO_BUILD_PROXY }}
         run: |
           lease="${CI_STACK_PREFIX}lease-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
           take_lease() {
@@ -244,7 +239,7 @@ jobs:
           if ! take_lease; then
             echo "integration image $IT_IMAGE is missing or went before its lease; building it once"
             rc=0
-            make docker-build IT_IMAGE="$IT_IMAGE" || rc=$?
+            make docker-build GO_BUILD_PROXY="$GO_BUILD_PROXY" IT_IMAGE="$IT_IMAGE" || rc=$?
             if [ "$rc" -ne 0 ]; then
               echo "::error::building the integration image $IT_IMAGE failed (exit $rc)"
               exit "$rc"

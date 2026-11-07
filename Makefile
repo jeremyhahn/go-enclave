@@ -114,7 +114,8 @@ $(call raw_bind,$(EXTERNAL_VARS))
 
 # CI VARIABLES (handbook devcontainer.md §6): ci.yml passes them, so they are
 # data from a workflow and raw-bound like EXTERNAL_VARS.
-## MODULE_ENV_FILE=<file>: docker-build, integration-test: the forge module variables; docker-build passes the file, when it exists, as the BuildKit secret gomodauth (the backend modules' private root); never read here or printed
+## MODULE_ENV_FILE=<file>: integration-test: the forge module variables; never read here or printed
+## GO_BUILD_PROXY=<url>: docker-build: the Go module proxy the image build fetches through, passed as --build-arg when set (CI: a LAN proxy that serves the private root, #293); default the Dockerfile's public proxy
 ## IT_IMAGE=<tag>: docker-build, ci-integration: the integration image's tag (default `make -s it-image`)
 ## APK_INDEX_SUM=<sum>: docker-build, it-image: the Alpine package index checksum (scripts/apk-index-sum.sh); it-image hashes it, docker-build passes it as --build-arg
 ## IT_PROJECT=<name>: integration-test: accepted; each suite names its own compose project (go-enclave-it-*, go-enclave-userns-*)
@@ -124,7 +125,7 @@ $(call raw_bind,$(EXTERNAL_VARS))
 ifneq ($(strip $(value GO_BUILD_TAGS)),)
 $(error GO_BUILD_TAGS must be empty: no go-enclave package is gated by a build tag)
 endif
-CI_VARS := MODULE_ENV_FILE IT_IMAGE IT_PROJECT GO_BUILD_TAGS
+CI_VARS := MODULE_ENV_FILE GO_BUILD_PROXY IT_IMAGE IT_PROJECT GO_BUILD_TAGS
 $(call raw_bind,$(CI_VARS))
 
 # Every GOOS/GOARCH a consumer may build for; 32-bit targets catch uintptr
