@@ -9,6 +9,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"regexp/syntax"
 	"sort"
 	"strings"
 	"testing"
@@ -220,27 +221,59 @@ func TestReleasability_TrackedTreeIsPubliclyReleasable(t *testing.T) {
 // contains the literal it tests for and does not trip the gate it defines.
 func plant(parts ...string) string { return strings.Join(parts, "") }
 
+// sitePatterns is a site pattern file in the RELEASABILITY_PATTERNS format,
+// written with generic stand-ins: the tests exercise the loader and the rules
+// it yields without this file naming any real site.
+const sitePatterns = "# site rules for the tests: generic stand-ins only\n" +
+	"\n" +
+	"lab-host\t(?i)\\b(?:buildhost|edgeswitch)-\\d{2}\\b\n" +
+	"lab-host\t(?i)\\bgpuhost\\b\n" +
+	"lab-host\t(?i)\\bsite\\.internal\\b\n" +
+	"owner-path\t/home/owner\\b\n"
+
+// writePatterns writes content to a pattern file in a temporary directory and
+// returns its path.
+func writePatterns(t *testing.T, content string) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "patterns")
+	if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// siteRules is the built-in rule set plus the rules sitePatterns adds, loaded
+// the way the tracked-tree test loads the file RELEASABILITY_PATTERNS names.
+func siteRules(t *testing.T) []leakPattern {
+	t.Helper()
+	rules, err := contentRules(writePatterns(t, sitePatterns))
+	if err != nil {
+		t.Fatalf("load the test site patterns: %v", err)
+	}
+	return rules
+}
+
 func TestReleasability_PlantedValuesAreCaught(t *testing.T) {
+	rules := siteRules(t)
 	cases := []struct {
 		name  string
 		line  string
 		class leakClass
 		match string
 	}{
-		{"forge address in a link", "[v0.1.0]: http://" + plant("192.168", ".101.91") + ":3001/x/y", classLabAddress, plant("192.168", ".101.91")},
-		{"management subnet", "ipmi at " + plant("192.168", ".50.102"), classLabAddress, plant("192.168", ".50.102")},
-		{"cluster subnet", plant("192.168", ".200.20"), classLabAddress, plant("192.168", ".200.20")},
-		{"measurement host", "// Measured on " + plant("vstation", "-04") + " at load ~26", classLabHost, plant("vstation", "-04")},
-		{"runner host, shouted", "RUNNER=" + plant("DELLEMC", "-01"), classLabHost, plant("DELLEMC", "-01")},
-		{"core switch", plant("coreswt", "-01") + " Eth1/35", classLabHost, plant("coreswt", "-01")},
-		{"gpu host", "ssh " + plant("god", "like"), classLabHost, plant("god", "like")},
-		{"private zone", "mgmt." + plant("jeremyhahn", ".internal"), classLabHost, plant("jeremyhahn", ".internal")},
-		{"owner home", "cd " + plant("/home/", "jhahn") + "/sources/x", classOwnerPath, plant("/home/", "jhahn")},
-		{"nfs mount", plant("/mnt/", "vstation") + "01/src", classOwnerPath, plant("/mnt/", "vstation")},
+		{"forge address in a link", "[v0.1.0]: http://" + plant("192.168", ".1.91") + ":3001/x/y", classLabAddress, plant("192.168", ".1.91")},
+		{"management subnet", "ipmi at " + plant("192.168", ".0.102"), classLabAddress, plant("192.168", ".0.102")},
+		{"cluster subnet", plant("192.168", ".1.20"), classLabAddress, plant("192.168", ".1.20")},
+		{"measurement host", "// Measured on buildhost-04 at load ~26", classLabHost, "buildhost-04"},
+		{"runner host, shouted", "RUNNER=BUILDHOST-01", classLabHost, "BUILDHOST-01"},
+		{"edge switch", "edgeswitch-01 Eth1/35", classLabHost, "edgeswitch-01"},
+		{"gpu host", "ssh gpuhost", classLabHost, "gpuhost"},
+		{"private zone", "mgmt.site.internal", classLabHost, "site.internal"},
+		{"owner home", "cd /home/owner/sources/x", classOwnerPath, "/home/owner"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := scanContent("f.md", []byte("prose\n"+tc.line+"\nmore prose\n"))
+			got := scanContent("f.md", []byte("prose\n"+tc.line+"\nmore prose\n"), rules)
 			if len(got) != 1 {
 				t.Fatalf("want exactly one finding in %q, got %d: %v", tc.line, len(got), got)
 			}
@@ -255,24 +288,140 @@ func TestReleasability_PlantedValuesAreCaught(t *testing.T) {
 // TestReleasability_DocumentationValuesPass pins that the documentation values
 // the gate recommends do not fire.
 func TestReleasability_DocumentationValuesPass(t *testing.T) {
+	rules := siteRules(t)
 	clean := []string{
 		"server at 192.0.2.10, fallback 198.51.100.7 and 203.0.113.254",
 		"quicbaas.example.com:8443 and gpu-host.internal",
 		"a factory runner at load average ~26",
 		"version 192.168 of nothing", // not an address
 		"/home/agent/go/bin and /var/lib/enclave",
-		"vstation without a number is a word, not a host",
+		"buildhost without a number is a word, not a host",
 		"see CLAUDE.md in the handbook", // a mention is not a tracked file
 	}
 	for _, line := range clean {
-		if got := scanContent("f.md", []byte(line)); len(got) != 0 {
+		if got := scanContent("f.md", []byte(line), rules); len(got) != 0 {
 			t.Errorf("false positive on %q: %v", line, got)
 		}
 	}
 }
 
+// A valid site pattern file adds its rules to the built-ins, each with its
+// class's guidance; without it, the built-ins do not see a site host.
+func TestReleasability_SitePatternsAddRules(t *testing.T) {
+	site, err := loadSitePatterns(writePatterns(t, sitePatterns))
+	if err != nil {
+		t.Fatalf("loadSitePatterns: %v", err)
+	}
+	wantClasses := []leakClass{classLabHost, classLabHost, classLabHost, classOwnerPath}
+	if len(site) != len(wantClasses) {
+		t.Fatalf("got %d rule(s), want %d: %v", len(site), len(wantClasses), site)
+	}
+	for i, r := range site {
+		if r.class != wantClasses[i] || r.guidance == "" || r.expr == nil {
+			t.Errorf("rule %d = %+v, want class %s with guidance", i, r, wantClasses[i])
+		}
+	}
+	line := []byte("ssh gpuhost")
+	if got := scanContent("f", line, leakPatterns); len(got) != 0 {
+		t.Errorf("built-in rules alone matched a site host: %v", got)
+	}
+	if got := scanContent("f", line, siteRules(t)); len(got) != 1 {
+		t.Errorf("built-ins plus site rules: got %d finding(s), want 1: %v", len(got), got)
+	}
+}
+
+func TestReleasability_SitePatternsSkipBlankLinesAndComments(t *testing.T) {
+	cases := []struct {
+		name    string
+		content string
+		want    int
+	}{
+		{"blank, comment and indented comment", "\n# a comment\n   \n  # indented\nlab-host\t\\bgpuhost\\b\n\n", 1},
+		{"only comments", "# nothing here\n\n", 0},
+		{"a hash inside a rule is part of it", "lab-host\t\\bgpuhost#\\d\n", 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := loadSitePatterns(writePatterns(t, tc.content))
+			if err != nil {
+				t.Fatalf("loadSitePatterns: %v", err)
+			}
+			if len(got) != tc.want {
+				t.Errorf("got %d rule(s), want %d: %v", len(got), tc.want, got)
+			}
+		})
+	}
+}
+
+// A malformed rule is an error naming the file and the line, never a rule
+// silently dropped: a dropped rule is a site value the gate stops seeing.
+func TestReleasability_SitePatternErrorsNameFileAndLine(t *testing.T) {
+	cases := []struct {
+		name    string
+		content string
+		line    int
+		cause   error // nil: the cause is a regexp syntax error
+	}{
+		{"unknown class", "# rules\nlab-printer\t\\bx\\b\n", 2, errUnknownClass},
+		{"internal-file is not a content class", "internal-file\tx\n", 1, errUnknownClass},
+		{"missing tab and regex", "lab-host\n", 1, errMissingField},
+		{"empty regex", "\nlab-host\t  \n", 2, errMissingField},
+		{"empty class", "\t\\bx\\b\n", 1, errMissingField},
+		{"invalid regex", "lab-host\t\\bok\\b\nowner-path\t(unclosed\n", 2, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := writePatterns(t, tc.content)
+			got, err := loadSitePatterns(p)
+			var pe *patternFileError
+			if !errors.As(err, &pe) {
+				t.Fatalf("loadSitePatterns = %v, %v; want a *patternFileError", got, err)
+			}
+			if pe.path != p || pe.line != tc.line {
+				t.Errorf("error at %s:%d, want %s:%d", pe.path, pe.line, p, tc.line)
+			}
+			if tc.cause != nil && !errors.Is(err, tc.cause) {
+				t.Errorf("cause = %v, want %v", pe.err, tc.cause)
+			}
+			var se *syntax.Error
+			if tc.cause == nil && !errors.As(err, &se) {
+				t.Errorf("cause = %v, want a *syntax.Error", pe.err)
+			}
+		})
+	}
+	t.Run("missing file", func(t *testing.T) {
+		p := filepath.Join(t.TempDir(), "absent")
+		_, err := loadSitePatterns(p)
+		var pe *patternFileError
+		if !errors.As(err, &pe) || pe.path != p || !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("loadSitePatterns on a missing file = %v; want a *patternFileError wrapping os.ErrNotExist", err)
+		}
+	})
+}
+
+// An unset or empty RELEASABILITY_PATTERNS means the built-in rules only; set,
+// it adds the file's rules.
+func TestReleasability_UnsetPatternsVariableMeansBuiltinsOnly(t *testing.T) {
+	t.Setenv(patternsEnv, "")
+	rules, err := contentRules(os.Getenv(patternsEnv))
+	if err != nil {
+		t.Fatalf("contentRules with %s unset: %v", patternsEnv, err)
+	}
+	if len(rules) != len(leakPatterns) {
+		t.Errorf("%s unset: got %d rule(s), want the %d built-in(s)", patternsEnv, len(rules), len(leakPatterns))
+	}
+	t.Setenv(patternsEnv, writePatterns(t, sitePatterns))
+	rules, err = contentRules(os.Getenv(patternsEnv))
+	if err != nil {
+		t.Fatalf("contentRules with %s set: %v", patternsEnv, err)
+	}
+	if len(rules) != len(leakPatterns)+4 {
+		t.Errorf("%s set: got %d rule(s), want %d", patternsEnv, len(rules), len(leakPatterns)+4)
+	}
+}
+
 func TestReleasability_WaiverNeedsAReasonAndAdjacency(t *testing.T) {
-	addr := plant("192.168", ".101.7")
+	addr := plant("192.168", ".1.7")
 	cases := []struct {
 		name    string
 		content string
@@ -288,7 +437,7 @@ func TestReleasability_WaiverNeedsAReasonAndAdjacency(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := scanContent("f", []byte(tc.content)); len(got) != tc.want {
+			if got := scanContent("f", []byte(tc.content), leakPatterns); len(got) != tc.want {
 				t.Errorf("got %d finding(s), want %d: %v", len(got), tc.want, got)
 			}
 		})
@@ -338,13 +487,14 @@ func TestReleasability_AgentInstructionsAreStrippedAtPublish(t *testing.T) {
 	}
 }
 
-// End to end, against a real index: the planted address in a tracked file
-// fails the gate, the same address in an untracked file does not, a tracked
+// End to end, against a real index: the planted address in a tracked file,
+// and a site host the site pattern file names, fail the gate, the same address in an untracked file does not, a tracked
 // file deleted from the working tree is skipped rather than erroring, and a
 // tracked CLAUDE.md, stripped at publish, is neither refused nor scanned.
 func TestReleasability_PlantedTreeFailsTheGate(t *testing.T) {
 	root := t.TempDir()
-	addr := plant("192.168", ".101.50")
+	rules := siteRules(t)
+	addr := plant("192.168", ".0.50")
 	write := func(name, content string) {
 		t.Helper()
 		p := filepath.Join(root, filepath.FromSlash(name))
@@ -367,6 +517,7 @@ func TestReleasability_PlantedTreeFailsTheGate(t *testing.T) {
 	write("README.md", "clean\n")
 	write("docs/deploy.md", "clone from http://"+addr+":3001/x\n")
 	write("CLAUDE.md", "notes on "+addr+"\n")
+	write("docs/runner.md", "ssh gpuhost, then cd /home/owner/src\n")
 	write("local.mk", "X=1\n")
 	write("gone.md", "tracked, then deleted from the working tree\n")
 	write("bin.dat", "\x00"+addr)
@@ -380,10 +531,10 @@ func TestReleasability_PlantedTreeFailsTheGate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{"CLAUDE.md", "README.md", "bin.dat", "docs/deploy.md", "gone.md", "local.mk"}; strings.Join(files, ",") != strings.Join(want, ",") {
+	if want := []string{"CLAUDE.md", "README.md", "bin.dat", "docs/deploy.md", "docs/runner.md", "gone.md", "local.mk"}; strings.Join(files, ",") != strings.Join(want, ",") {
 		t.Fatalf("tracked files = %v, want %v", files, want)
 	}
-	findings, err := scanTree(root, files)
+	findings, err := scanTree(root, files, rules)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -393,6 +544,8 @@ func TestReleasability_PlantedTreeFailsTheGate(t *testing.T) {
 	}
 	want := []string{
 		"docs/deploy.md:1:" + string(classLabAddress) + ":" + addr,
+		"docs/runner.md:1:" + string(classLabHost) + ":gpuhost",
+		"docs/runner.md:1:" + string(classOwnerPath) + ":/home/owner",
 		"local.mk:0:" + string(classInternalFile) + ":local.mk",
 	}
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
