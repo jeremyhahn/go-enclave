@@ -517,7 +517,7 @@ func TestCIGateTiers_RefusesWhatItMustRefuse(t *testing.T) {
 		{"image job names the image before reading the apk index", "          sum=$(scripts/apk-index-sum.sh)\n", "          sum=none\n"},
 		{"lint-gates waits on the changes job", "    name: Lint Gates [toolchain image]\n", "    name: Lint Gates [toolchain image]\n    needs: changes\n"},
 		{"lint-gates skipped on a docs-only PR", "      - name: make lint-gates\n        if: ${{ !cancelled() &&", "      - name: make lint-gates\n        if: ${{ needs.changes.outputs.docs_only != 'true' && !cancelled() &&"}, //nolint:misspell // the Actions cancelled() function
-		{"lint-gates job without its draft if", "    name: Lint Gates [toolchain image]\n    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'bigdisk' }}\n    if: " + draftIf + "   # v1.26\n", "    name: Lint Gates [toolchain image]\n    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'bigdisk' }}\n"},
+		{"lint-gates job without its draft if", "    name: Lint Gates [toolchain image]\n    runs-on: bigdisk\n    if: " + draftIf + "   # v1.26\n", "    name: Lint Gates [toolchain image]\n    runs-on: bigdisk\n"},
 		{"the image job runs a lint-gates gate too", "\"$TOOLCHAIN_IMAGE\" make tidy-check lint-runtimesecret lint-integration\n", "\"$TOOLCHAIN_IMAGE\" make tidy-check lint-runtimesecret lint-integration check-scripts\n"},
 		{"changes job without its draft if", "    if: " + draftIf + "\n    steps:\n", "    steps:\n"},
 		{"arch-gates job without its draft if", archIf, "    runs-on: ubuntu-latest\n"},
