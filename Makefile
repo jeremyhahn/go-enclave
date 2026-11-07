@@ -521,6 +521,15 @@ $(call raw_bind,CMD)
 docker-build:
 	@GO_ENCLAVE_IT_IMAGE="$$IT_IMAGE" sh scripts/devcontainer.sh build
 
+## docker-build-toolchain: Build the toolchain stage alone, go-enclave-toolchain:<content tag> and :latest, skipped when the tag is held (ci-template v1.30)
+.PHONY: docker-build-toolchain
+docker-build-toolchain:
+	@ref=$$(sh scripts/devcontainer.sh tag) && repo=$${ref%%:*} && \
+	set -- -f build/docker/devcontainer/Dockerfile --target toolchain -t "$$ref" -t "$$repo:latest" && \
+	if [ -n "$${MODULE_ENV_FILE:-}" ] && [ -f "$$MODULE_ENV_FILE" ]; then set -- "$$@" --secret "id=gomodauth,src=$$MODULE_ENV_FILE"; fi && \
+	if docker image inspect "$$ref" >/dev/null 2>&1; then docker tag "$$ref" "$$repo:latest" && echo "$$ref is already held; tagged $$repo:latest"; \
+	elif ! DOCKER_BUILDKIT=1 docker build "$$@" .; then docker image inspect "$$ref" >/dev/null 2>&1 || { echo "building $$ref failed" >&2; exit 1; }; docker tag "$$ref" "$$repo:latest"; fi
+
 ## it-image: Print the integration image's content-addressed tag, go-enclave-ci-it:<hash> of the build context (ci.yml's IT_IMAGE)
 .PHONY: it-image
 it-image:
@@ -596,6 +605,11 @@ lint-gates: check-buildgates check-releasability check-changelog-assembly check-
 # is one `make` line and the two workflows cannot drift apart. Each target runs
 # once per invocation, however many others depend on it: lint-go carries vet,
 # staticcheck and gosec for lint and security alike.
+
+## lint-sweeps: nightly.yml's lint-sweeps job (ci-template v1.30); go-enclave has no sweep slower than its lint job, so it has nothing to run
+.PHONY: lint-sweeps
+lint-sweeps:
+	@echo "OK: no lint sweep; every lint runs in ci.yml's lint job"
 
 ## ci-lint: every static check: tidy, lint (staticcheck included), the integration suite's lint, the build gates, releasability, changelog assembly, the scripts
 .PHONY: ci-lint
