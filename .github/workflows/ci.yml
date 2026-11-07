@@ -461,7 +461,7 @@ on:
   # v1.23: main's full tier nightly as well as after every merge. Scheduled
   # runs are on the default branch. CUSTOMIZE: the hour, off nightly.yml's.
   schedule:
-    - cron: '0 4 * * *'
+    - cron: '0 4 * * 3'
 
 # v1.26.2: on main the group is the workflow, the event and the commit sha,
 # so each main run is its own group and a merge never cancels the main run in

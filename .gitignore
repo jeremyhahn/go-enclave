@@ -38,14 +38,11 @@ trivy-results.sarif
 *.swp
 *.swo
 
-# AI assistant / local tooling — never commit
-.serena/*
-# ...except the shared Serena project file (#140); caches and memories stay local
-!.serena/project.yml
+# Agent and tool state: never commit. The releasability gate
+# (build/ci/buildgates/releasability_test.go) refuses it if it is tracked.
+.serena/
+.claude/
+scheduled_tasks.lock
+lane-records/
+*.log
 local.mk
-
-# Agent instruction files (CLAUDE.md, AGENTS.md, .claude/) are tracked: the
-# publish step strips them from the public tree (scaffold §7), and the
-# releasability gate (build/ci/buildgates/releasability_test.go) reports them
-# as strip-at-publish. Only the per-machine settings stay out of the index.
-.claude/settings.local.json
