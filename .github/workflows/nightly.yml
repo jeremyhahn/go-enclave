@@ -1,6 +1,3 @@
-<<<<<<< ours
-# Nightly jobs: the long-horizon checks, kept off the push path.
-=======
 # nightly-template: v1.9 — the known-red and long-horizon jobs, off the push path.
 # v1.9 (2026-10-31, Company Agent m1804, ci-template v1.30 fix 2): a
 # `lint-sweeps` job runs the repository's `make -k lint-sweeps` in its
@@ -45,7 +42,6 @@
 # copied to the repo root with it — trivy treats a missing ignore file as a
 # FATAL flag error and never scans (measured go-enclave 2026-08-26, 10 HIGH
 # CVEs hidden behind the FATAL; go-enclave PR #5).
->>>>>>> v130
 #
 # Jobs that verify a slow-moving property, or that were known-red with tracked
 # issues, do NOT run per push — a known-red job burning 60-90 runner-minutes
@@ -88,29 +84,6 @@ jobs:
   # `curl …/contrib/install.sh from main | sh` — an unreviewed script from a
   # moving branch, executed as the build user — and the trivy-action steps
   # that ran on github.com, a third-party action the CLI makes unnecessary.
-  trivy:
-    name: Trivy
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    permissions:
-      contents: read
-      security-events: write  # the Trivy SARIF upload on github.com; unused on Gitea
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
-        with:
-          go-version-file: go.mod
-
-<<<<<<< ours
-      # Misconfiguration scanning, ADVISORY: findings surface daily without a
-      # new finding class blocking anything (owner direction: enable it).
-      # Promote it to a gate once its baseline is clean.
-      - name: Trivy misconfiguration scan (advisory)
-        run: make trivy-misconfig
-=======
   # v1.9: the repository's lint sweeps (whole-tree, slow lint passes beside
   # `make lint`), off every push and PR path (ci-standard.md §12).
   lint-sweeps:
@@ -181,27 +154,24 @@ jobs:
   trivy:
     name: Trivy
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      security-events: write  # the Trivy SARIF upload on github.com; unused on Gitea
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
-      # ONE declaration of the trivy version, shared by both paths below and by
-      # the Makefile, so the scanner in CI and the scanner on a developer's
-      # machine are the same build. Bump .trivy-version, nothing else.
-      - name: Resolve pinned trivy version
-        id: trivy_version
-        # Read as ONE bare token and FAIL if the file is malformed, matching the
-        # Makefile's parser and install-trivy.sh. The old `tr -d ' \t\n\r'`
-        # scrubbed all whitespace, so `0.74 .0` normalised to `0.74.0` and fed
-        # the trivy-action `version:` inputs a version nobody pinned — CI would
-        # not catch what `make install-tools` now refuses (go-blockstore #22).
-        run: |
-          version=$(awk '{for(i=1;i<=NF;i++){n++;v=$i}} END{if(n==1)print v}' .trivy-version)
-          if [ -z "$version" ]; then
-            echo "::error::.trivy-version is malformed (empty, whitespace, or multiple tokens); refusing to resolve a scrubbed version"
-            exit 1
-          fi
-          echo "version=$version" >> "$GITHUB_OUTPUT"
->>>>>>> v130
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+
+      # Misconfiguration scanning, ADVISORY: findings surface daily without a
+      # new finding class blocking anything (owner direction: enable it).
+      # Promote it to a gate once its baseline is clean.
+      - name: Trivy misconfiguration scan (advisory)
+        run: make trivy-misconfig
 
       # Code scanning on github.com only: Gitea has no code-scanning API.
       - name: Trivy SARIF (github.com)
