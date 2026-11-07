@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -12,15 +13,20 @@ import (
 )
 
 // The toolchain image build fetches backends/armtrustzone's modules, whose
-// private root module comes through a LAN Go module proxy (#293, DS-7343):
-// the workflows pass the repository variable GO_BUILD_PROXY to make
-// docker-build, the jobs run on the self-hosted label that reaches the proxy,
-// and no forge credential reaches the build as the gomodauth secret.
+// private root module comes through a LAN Go module proxy (#293, DS-7350):
+// the jobs run on the self-hosted label whose pool environment carries
+// GOPROXY, GOPRIVATE, GONOPROXY and GONOSUMDB, each make docker-build passes
+// the inherited GOPROXY to the build as GO_BUILD_PROXY, no workflow sets
+// those variables or rewrites module URLs, and no forge credential reaches
+// the build as the gomodauth secret.
 const (
 	imageBuildRunner   = "bigdisk"
-	imageBuildProxyEnv = "${{ vars.GO_BUILD_PROXY }}"
-	imageBuildMakeCall = `make docker-build GO_BUILD_PROXY="$GO_BUILD_PROXY"`
+	imageBuildMakeCall = `make docker-build GO_BUILD_PROXY="${GOPROXY:-}"`
 )
+
+// goEnvSet matches a workflow line that sets one of the module variables the
+// pool environment owns, as an env: key or a shell assignment or export.
+var goEnvSet = regexp.MustCompile(`^\s*(?:-\s*)?(?:GOPROXY|GOPRIVATE|GONOPROXY|GONOSUMDB)\s*:|(?:^|[\s;&|(])(?:GOPROXY|GOPRIVATE|GONOPROXY|GONOSUMDB)=`)
 
 var imageBuildWorkflows = []string{".github/workflows/ci.yml", ".github/workflows/release.yml"}
 
@@ -40,6 +46,20 @@ func imageBuildProxyViolations(src []byte) ([]string, error) {
 	var bad []string
 	if strings.Contains(string(src), "gomodauth") {
 		bad = append(bad, "names gomodauth; the image build takes GO_BUILD_PROXY, not the forge credentials")
+	}
+	if strings.Contains(string(src), "vars.GO_BUILD_PROXY") {
+		bad = append(bad, "names vars.GO_BUILD_PROXY; the proxy comes from the pool's GOPROXY, not a repository variable")
+	}
+	for i, line := range strings.Split(string(src), "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "#") {
+			continue
+		}
+		if goEnvSet.MatchString(line) {
+			bad = append(bad, fmt.Sprintf("line %d: %q sets a module variable the pool environment owns", i+1, strings.TrimSpace(line)))
+		}
+		if strings.Contains(line, "insteadOf") {
+			bad = append(bad, fmt.Sprintf("line %d: %q rewrites module URLs; the pool's proxy serves the private modules", i+1, strings.TrimSpace(line)))
+		}
 	}
 	var wf proxyWorkflow
 	if err := yaml.Unmarshal(src, &wf); err != nil {
@@ -63,9 +83,6 @@ func imageBuildProxyViolations(src []byte) ([]string, error) {
 			builds++
 			if job.RunsOn != imageBuildRunner {
 				bad = append(bad, fmt.Sprintf("job %s: builds the image on runs-on %v, want %s", name, job.RunsOn, imageBuildRunner))
-			}
-			if got := fmt.Sprint(st.Env["GO_BUILD_PROXY"]); got != imageBuildProxyEnv {
-				bad = append(bad, fmt.Sprintf("job %s: the make docker-build step's env GO_BUILD_PROXY is %q, want %q", name, got, imageBuildProxyEnv))
 			}
 			for _, line := range strings.Split(st.Run, "\n") {
 				if strings.Contains(line, "make docker-build") && !strings.Contains(line, imageBuildMakeCall) {
@@ -107,8 +124,13 @@ func TestImageBuildUsesTheModuleProxy_RefusesWhatItMustRefuse(t *testing.T) {
 		wf := string(src)
 		for _, tc := range []struct{ name, old, new string }{
 			{"gomodauth staged again", "      - name: ", "      - name: gomodauth\n        run: \"true\"\n      - name: "},
-			{"proxy from a secret", "GO_BUILD_PROXY: " + imageBuildProxyEnv, "GO_BUILD_PROXY: ${{ secrets.GO_BUILD_PROXY }}"},
-			{"proxy env dropped", "GO_BUILD_PROXY: " + imageBuildProxyEnv, "GO_BUILD_PROXY_X: " + imageBuildProxyEnv},
+			{"proxy from the repository variable", imageBuildMakeCall, `make docker-build GO_BUILD_PROXY="${{ vars.GO_BUILD_PROXY }}"`},
+			{"proxy from a secret", imageBuildMakeCall, `make docker-build GO_BUILD_PROXY="${{ secrets.GO_BUILD_PROXY }}"`},
+			{"GOPROXY set as an env key", "      - name: ", "      - name: x\n        env:\n          GOPROXY: direct\n        run: \"true\"\n      - name: "},
+			{"GOPRIVATE set as an env key", "      - name: ", "      - name: x\n        env:\n          GOPRIVATE: example.com/*\n        run: \"true\"\n      - name: "},
+			{"GONOPROXY set in the shell", "      - name: ", "      - name: x\n        run: GONOPROXY=none go mod download\n      - name: "},
+			{"GONOSUMDB exported", "      - name: ", "      - name: x\n        run: export GONOSUMDB=example.com/*\n      - name: "},
+			{"url insteadOf rewrite", "      - name: ", "      - name: x\n        run: git config --global url.https://example.com/.insteadOf https://github.com/\n      - name: "},
 			{"make call drops the proxy", imageBuildMakeCall, "make docker-build"},
 			{"image job on a hosted runner", "runs-on: " + imageBuildRunner + "\n", "runs-on: ubuntu-latest\n"},
 			{"image job back on the server_url choice", "runs-on: " + imageBuildRunner + "\n", "runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'bigdisk' }}\n"},
