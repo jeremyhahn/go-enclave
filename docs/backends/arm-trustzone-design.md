@@ -117,12 +117,19 @@ param wiring of SEAL and UNSEAL, the short-buffer retry, tampered blobs and
 cancels. It runs each of these with registered memory and with driver shared
 memory, and fails if any shared memory or session outlives the call. On the
 fixture, GET_INFO cannot decide whether the TA has SEAL: trusted-firmware's TA
-reports interface version 1 and flags 0 with SEAL and without it. The test
-skips only when SEAL answers `TEE_ERROR_NOT_SUPPORTED`, or answers
-`TEE_ERROR_BAD_PARAMETERS` and a command no TA defines gets the same answer.
-`GO_ENCLAVE_OPTEE_SEAL=required`, passed through
-`integration-test-arm-trustzone`, turns that skip into a failure; CI leaves it
-unset.
+reports interface version 1 and flags 0 with SEAL and without it, and no
+error code proves SEAL absent, since a TA with SEAL can answer
+`TEE_ERROR_BAD_PARAMETERS` to a broken SEAL call and to an unknown command
+alike. The fixture therefore declares it: `GO_ENCLAVE_OPTEE_SEAL` left empty,
+`scripts/optee-fixture.sh` passes `absent:<TRUSTED_FIRMWARE_TAG>`, and the test
+skips on SEAL's `TEE_ERROR_BAD_PARAMETERS` or `TEE_ERROR_NOT_SUPPORTED` only
+when that release is `opteeSealAbsentRelease`
+(`backends/armtrustzone/sealdecision_linux_test.go`), the pinned release known
+to lack SEAL; a new pin without SEAL raises both. With the knob empty in the
+test, or `required`, any SEAL error fails it; a SEAL that works runs the
+suite under every value. `GO_ENCLAVE_OPTEE_SEAL=required`, passed through
+`integration-test-arm-trustzone`, turns the fixture's skip into a failure; CI
+leaves it unset. The fake TEE runs this decision (`TestSealDecision`).
 
 ## Data flow
 
