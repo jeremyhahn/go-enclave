@@ -147,7 +147,7 @@ PKGDIR_memscan      := ./internal/memscan
 # requiring a released root (#206), so the root never depends on them. lint-go,
 # tidy-check, govulncheck, test and cross-build run in each, as for
 # build/ci/buildgates; coverage does not (their device paths need the device).
-BACKEND_MODULES := backends/armtrustzone
+BACKEND_MODULES := backends/armtrustzone backends/tpm
 
 # FEATURE MAPPING (local-software-factory §7). A feature is a directory
 # docs/<feature>/, mapped in scripts/features.map to its package, its
