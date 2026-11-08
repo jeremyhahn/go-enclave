@@ -36,6 +36,9 @@ const (
 	cleanupTimeout   = 5 * time.Second
 )
 
+// opOpen is the DeviceError operation for opening the device.
+const opOpen = "open"
+
 var (
 	_ enclave.KeyProtector   = (*KeyProtector)(nil)
 	_ enclave.HealthReporter = (*KeyProtector)(nil)
@@ -569,14 +572,14 @@ func (t *streamTransport) reopen(ctx context.Context) error {
 		return nil
 	}
 	if t.dial == nil {
-		return &DeviceError{Path: t.path, Op: "open", Err: errOutOfStep}
+		return &DeviceError{Path: t.path, Op: opOpen, Err: errOutOfStep}
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	_ = t.rw.Close()
 	rw, err := t.dial(ctx)
 	if err != nil {
-		return &DeviceError{Path: t.path, Op: "open", Err: err}
+		return &DeviceError{Path: t.path, Op: opOpen, Err: err}
 	}
 	t.rw = rw
 	t.outOfStep.Store(false)

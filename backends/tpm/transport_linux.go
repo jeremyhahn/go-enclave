@@ -21,7 +21,7 @@ func openDevice(path string, alloc allocator) (device, error) {
 	dial := func(ctx context.Context) (io.ReadWriteCloser, error) { return dialDevice(ctx, path) }
 	rw, err := dial(context.Background())
 	if err != nil {
-		return nil, &DeviceError{Path: path, Op: "open", Err: err}
+		return nil, &DeviceError{Path: path, Op: opOpen, Err: err}
 	}
 	t, err := newStreamTransport(rw, path, alloc)
 	if err != nil {

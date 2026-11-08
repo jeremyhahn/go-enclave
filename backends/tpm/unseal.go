@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math"
 
 	"github.com/google/go-tpm/tpm2"
 
@@ -44,8 +45,12 @@ func (d *tpmDevice) create(ctx context.Context, parent object, s session, data [
 	}
 	defer d.t.alloc.free(params)
 	defer enclave.Wipe(params)
-	binary.BigEndian.PutUint16(params, uint16(sensitive))
-	binary.BigEndian.PutUint16(params[4:], uint16(len(data)))
+	if err := putSize16(params, sensitive); err != nil {
+		return nil, nil, err
+	}
+	if err := putSize16(params[4:], len(data)); err != nil {
+		return nil, nil, err
+	}
 	copy(params[6:], data)
 	copy(params[2+sensitive:], inPublic)
 	if err := s.auth.NewNonceCaller(); err != nil {
@@ -120,7 +125,11 @@ func (d *tpmDevice) execute(ctx context.Context, cc tpm2.TPMCC, h object, s sess
 	binary.BigEndian.PutUint32(cmd[2:], uint32(size))
 	binary.BigEndian.PutUint32(cmd[6:], uint32(cc))
 	binary.BigEndian.PutUint32(cmd[10:], uint32(h.handle))
-	binary.BigEndian.PutUint32(cmd[14:], uint32(len(area)))
+	areaSize := len(area)
+	if areaSize > maxResponseBytes {
+		return nil, fmt.Errorf("a %d-byte authorization area exceeds the %d-byte limit", areaSize, maxResponseBytes)
+	}
+	binary.BigEndian.PutUint32(cmd[14:], uint32(areaSize))
 	copy(cmd[18:], area)
 	copy(cmd[18+len(area):], params)
 	rsp, err := d.t.send(ctx, cmd) // send wipes cmd.
@@ -147,6 +156,15 @@ func (d *tpmDevice) execute(ctx context.Context, cc tpm2.TPMCC, h object, s sess
 		return nil, err
 	}
 	return parms, nil
+}
+
+// putSize16 writes n as a TPM2B size at the front of b.
+func putSize16(b []byte, n int) error {
+	if n < 0 || n > math.MaxUint16 {
+		return fmt.Errorf("a %d-byte TPM2B exceeds the %d-byte limit", n, math.MaxUint16)
+	}
+	binary.BigEndian.PutUint16(b, uint16(n))
+	return nil
 }
 
 // cut2B splits a TPM2B's contents off the front of b.
