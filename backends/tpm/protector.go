@@ -57,6 +57,11 @@ type KeyProtector struct {
 	dev    device
 	alloc  allocator
 	closed bool // guarded by sem
+	// closing is closed by the first Close before it waits for sem, so a
+	// call waiting for sem, or one that takes it after, returns ErrClosed
+	// without reaching the device.
+	closing   chan struct{}
+	closeOnce sync.Once
 	// reclaimDue marks handles an interrupted call may have left in a TPM
 	// without a resource manager; baseline lists the handles that call
 	// found. Both are guarded by sem.
@@ -112,6 +117,7 @@ func Open(path string, opts ...Option) (*KeyProtector, error) {
 func newKeyProtector(dev device, alloc allocator, cfg config) *KeyProtector {
 	return &KeyProtector{
 		sem:       make(chan struct{}, 1),
+		closing:   make(chan struct{}),
 		dev:       dev,
 		alloc:     alloc,
 		attempts:  cfg.attempts,
@@ -222,9 +228,13 @@ func (p *KeyProtector) Health() error { return nil }
 // 5 seconds more. Without a resource manager, Close then finishes, within
 // 5 seconds, the reclaim of handles an interrupted call left and the flush
 // of handles the TPM refused to flush, and returns its failure joined with
-// the close's. A call after Close returns [ErrClosed]; a second Close
-// returns nil.
+// the close's. A call waiting for the provider when Close starts, and a
+// call after Close, returns [ErrClosed] without reaching the device; a
+// second Close returns nil.
 func (p *KeyProtector) Close() error {
+	// Refuse the calls queued behind the one in progress first: the one
+	// interrupt below frees sem for Close only if none of them can take it.
+	p.closeOnce.Do(func() { close(p.closing) })
 	wait := time.NewTimer(p.closeWait)
 	defer wait.Stop()
 	select {
@@ -256,18 +266,23 @@ func (p *KeyProtector) closeLeft() error {
 }
 
 // acquire takes the semaphore, or returns ctx.Err() without touching the
-// device if the context ends first. It reopens a device an interrupted call
-// left out of step, finishes a reclaim a call left due, and flushes the
-// handles a refused flush left, within cleanupTimeout.
+// device if the context ends first, or ErrClosed once Close has begun. It
+// reopens a device an interrupted call left out of step, finishes a reclaim a
+// call left due, and flushes the handles a refused flush left, within
+// cleanupTimeout.
 func (p *KeyProtector) acquire(ctx context.Context) error {
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
+	case <-p.closing:
+		return ErrClosed
 	case p.sem <- struct{}{}:
 	}
-	if p.closed {
+	select {
+	case <-p.closing:
 		p.release()
 		return ErrClosed
+	default:
 	}
 	if err := ctx.Err(); err != nil {
 		p.release()
