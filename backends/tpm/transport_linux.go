@@ -3,10 +3,12 @@
 package tpm
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -18,13 +20,14 @@ import (
 func openDevice(path string, alloc allocator) (device, error) {
 	var rw io.ReadWriteCloser
 	var err error
+	var d net.Dialer
 	switch {
 	case strings.HasPrefix(path, "unix:"):
-		rw, err = net.Dial("unix", strings.TrimPrefix(path, "unix:"))
+		rw, err = d.DialContext(context.Background(), "unix", strings.TrimPrefix(path, "unix:"))
 	case strings.HasPrefix(path, "tcp:"):
-		rw, err = net.Dial("tcp", strings.TrimPrefix(path, "tcp:"))
+		rw, err = d.DialContext(context.Background(), "tcp", strings.TrimPrefix(path, "tcp:"))
 	default:
-		rw, err = os.OpenFile(path, os.O_RDWR, 0)
+		rw, err = openCharDevice(path)
 	}
 	if err != nil {
 		return nil, &DeviceError{Path: path, Op: "open", Err: err}
@@ -35,6 +38,29 @@ func openDevice(path string, alloc allocator) (device, error) {
 		return nil, err
 	}
 	return &tpmDevice{t: t}, nil
+}
+
+// openCharDevice opens path read-write only if it is absolute and names a
+// character device, so that a TPM path never reaches a regular file.
+func openCharDevice(path string) (*os.File, error) {
+	clean := filepath.Clean(path)
+	if !filepath.IsAbs(clean) {
+		return nil, errors.New("the device path is not absolute")
+	}
+	f, err := os.OpenFile(clean, os.O_RDWR, 0)
+	if err != nil {
+		return nil, err
+	}
+	info, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	if info.Mode()&os.ModeCharDevice == 0 {
+		_ = f.Close()
+		return nil, errors.New("the path is not a character device")
+	}
+	return f, nil
 }
 
 // lockedAllocator maps each transient on its own anonymous pages, locked
