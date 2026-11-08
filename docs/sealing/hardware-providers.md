@@ -48,7 +48,8 @@ when it is made, and releases it in `Close`. The resource manager gives the
 provider its own transient handle space and flushes whatever the provider
 left loaded when the file closes. One mutex per provider serializes the
 provider's command sequences on that file (see [Concurrency](#concurrency)).
-A call after `Close` returns the provider's own `ErrClosed`.
+A call waiting for the provider when `Close` starts, and a call after
+`Close`, returns the provider's own `ErrClosed` without reaching the device.
 
 ### Parent
 
@@ -256,7 +257,11 @@ A call holds the provider's mutex for its whole command sequence
 (create parent, session, create or load and unseal, flushes), because the
 sequence's transient handles are only meaningful together. The mutex is a
 one-slot semaphore, so a waiting call also selects on `ctx.Done()` and
-returns `ctx.Err()` without touching the device.
+returns `ctx.Err()` without touching the device. `Close` marks the provider
+closing before it waits for the mutex, so a call waiting when `Close`
+starts, or one that takes the mutex after, returns `ErrClosed` without
+reaching the device, and `Close` takes the mutex after at most the one call
+it interrupts.
 
 Every exchange with the device takes the call's context. The command
 sequence runs on the calling goroutine, and the provider checks the context
