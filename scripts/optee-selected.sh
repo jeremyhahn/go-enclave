@@ -22,6 +22,8 @@
 #                                      image (devcontainer.sh inputs)
 #   build/docker/devcontainer/         the images' Dockerfile and compose file
 #   scripts/optee-selected.sh          this selector
+#   .github/workflows/ci.yml           the job's command, environment and
+#                                      fixture wiring
 # and, in the pins diff, a changed TRUSTED_FIRMWARE_* or OPTEE_FIXTURE_IMAGE
 # line: the release the fixture boots and the image it runs in.
 set -eu
@@ -31,7 +33,7 @@ set -eu
 [ $# -eq 1 ] || die "usage: $0 <pins-diff> < changed-paths"
 [ -f "$1" ] || die "pins diff $1 is missing"
 
-paths='^(backends/armtrustzone/|build/docker/devcontainer/|Makefile$|test/integration/enclave/main_optee_test\.go$|scripts/(optee-fixture|optee-selected|in-toolchain-image|devcontainer|lib|tool|install-tools)\.sh$)'
+paths='^(backends/armtrustzone/|build/docker/devcontainer/|Makefile$|\.github/workflows/ci\.yml$|test/integration/enclave/main_optee_test\.go$|scripts/(optee-fixture|optee-selected|in-toolchain-image|devcontainer|lib|tool|install-tools)\.sh$)'
 pins='^[-+](TRUSTED_FIRMWARE_[A-Z_]*|OPTEE_FIXTURE_IMAGE)='
 
 if grep -qE "$paths" || grep -qE "$pins" "$1"; then

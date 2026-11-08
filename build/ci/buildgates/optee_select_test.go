@@ -57,6 +57,8 @@ func TestScriptsOPTEESelect_SelectsWhatTheHarnessRuns(t *testing.T) {
 		{"the fixture script", []string{"scripts/optee-fixture.sh"}, "", "true"},
 		{"the root harness", []string{"test/integration/enclave/main_optee_test.go"}, "", "true"},
 		{"the selector itself", []string{"scripts/optee-selected.sh"}, "", "true"},
+		{"a workflow-only change", []string{".github/workflows/ci.yml"}, "", "true"},
+		{"another workflow", []string{".github/workflows/code-review.yml"}, "", "false"},
 		{"one selected path among others", []string{"README.md", "Makefile", "docs/x.md"}, "", "true"},
 		{"a docs-only change", []string{"docs/README.md", "changelog.d/1-x.md"}, "", "false"},
 		{"a Makefile elsewhere", []string{"docs/Makefile"}, "", "false"},
