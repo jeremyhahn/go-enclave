@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/google/go-tpm/tpm2"
+
 	enclave "github.com/jeremyhahn/go-enclave"
 	"github.com/jeremyhahn/go-enclave/providertest"
 )

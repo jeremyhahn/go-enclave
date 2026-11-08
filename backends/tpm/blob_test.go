@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/google/go-tpm/tpm2"
+
 	enclave "github.com/jeremyhahn/go-enclave"
 )
 
