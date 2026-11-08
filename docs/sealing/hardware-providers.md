@@ -291,7 +291,8 @@ copied.
 exchange the same way and waits for it to return: at once on a socket or a
 pollable device, and on a device file without deadlines within the kernel's
 TPM command timeout. The interrupted call's reclaim then takes at most 5
-seconds more.
+seconds more, and without a resource manager the reclaim `Close` finishes
+before it closes the stream at most 5 seconds after that.
 
 Calls on different providers over the same TPM are serialized by the TPM
 itself; the resource manager keeps their handles apart.
@@ -313,15 +314,18 @@ The reclaim depends on the transport:
   runs one command at a time, so the second list follows the interrupted
   command. A reclaim the TPM refuses, or that runs past the 5-second bound,
   stays due: the next call finishes it before it sends a command, and fails
-  if it cannot.
+  if it cannot. With no next call, `Close` finishes it within 5 seconds
+  before it closes the stream, which it closes whatever the reclaim returns,
+  and returns the reclaim's failure.
 
 On every transport, a `TPM2_FlushContext` the TPM answers with an error
 (`TPM_RC_RETRY` after every retry, or any other response code) leaves its
 handle loaded on a stream still in step. The call returns its error and the
 provider keeps the handle: the next call flushes it before it sends a
 command, and fails while the TPM still lists it; one the TPM no longer lists
-is gone. Without a resource manager, `Close` tries the flush once more, since
-closing the stream does not drop the handle; behind one, a reopen or `Close`
+is gone. Without a resource manager, `Close` flushes it within the same
+5 seconds as the reclaim, since closing the stream does not drop the handle,
+and returns a failure; behind one, a reopen or `Close`
 drops it. The provider keeps only handles it made.
 
 The interrupted call returns an error matching `ctx.Err()` either way.
