@@ -269,10 +269,9 @@ When the context has ended:
    each handle the call holds (object, session, parent), under a context of
    its own bounded at 5 seconds;
 2. if the context ended during an exchange, the stream is out of step (the
-   interrupted command's response may still arrive), so the flushes fail at
-   once and the handles are abandoned. The next call closes the stream and
-   opens a fresh one, and the kernel's resource manager flushes every
-   handle the closed one held;
+   interrupted command's response may still arrive, and the command may
+   still create a handle), so the provider reclaims instead of flushing,
+   within the same 5-second bound (see Transports below);
 3. the provider wipes every transient that holds key material: `Protect`'s
    copy of `key`, `Unprotect`'s unsealed transient, and the parameter,
    command and response buffers it marshals `TPM2_Create` and
@@ -291,10 +290,32 @@ copied.
 `Close` waits up to 2 seconds for the call in progress, then interrupts its
 exchange the same way and waits for it to return: at once on a socket or a
 pollable device, and on a device file without deadlines within the kernel's
-TPM command timeout.
+TPM command timeout. The interrupted call's reclaim then takes at most 5
+seconds more.
 
 Calls on different providers over the same TPM are serialized by the TPM
 itself; the resource manager keeps their handles apart.
+
+#### Transports
+
+The reclaim depends on the transport:
+
+- **`/dev/tpmrm0`**, or a link to it: the kernel's resource manager flushes
+  every handle a closed stream held. After an interrupt the provider closes
+  the stream and opens a fresh one, and lists no handles.
+- **`/dev/tpm0` and a simulator socket** (`unix:` or `tcp:`): nothing
+  flushes a closed stream's handles, and an interrupted command may still
+  create one in the TPM. The provider must be the TPM's only user. Before
+  its first command, a call lists the TPM's transient objects and loaded
+  sessions with `TPM2_GetCapability` (`TPM_CAP_HANDLES`). After an interrupt
+  the provider reopens the stream, lists them again, and flushes each handle
+  the first list lacks; it never flushes a handle that list holds. The TPM
+  runs one command at a time, so the second list follows the interrupted
+  command. A reclaim the TPM refuses, or that runs past the 5-second bound,
+  stays due: the next call finishes it before it sends a command, and fails
+  if it cannot.
+
+The interrupted call returns an error matching `ctx.Err()` either way.
 
 ### Test plan
 

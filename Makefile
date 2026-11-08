@@ -146,7 +146,9 @@ PKGDIR_memscan      := ./internal/memscan
 # BACKEND MODULES: hardware backends, each its own module at backends/<name>
 # requiring a released root (#206), so the root never depends on them. lint-go,
 # tidy-check, govulncheck, test and cross-build run in each, as for
-# build/ci/buildgates; coverage does not (their device paths need the device).
+# build/ci/buildgates. coverage runs their unit tests too, with -race, after
+# the root packages; the floor measures the root packages only (their device
+# paths need the device).
 BACKEND_MODULES := backends/armtrustzone backends/tpm
 
 # FEATURE MAPPING (local-software-factory §7). A feature is a directory
@@ -354,9 +356,9 @@ $(COVERAGE_TARGETS): coverage-%: coverage-profile-%
 $(BENCH_TARGETS): bench-%:
 	"$$GOCMD" test -run '^$$' -bench . -benchmem $(PKGDIR_$*)
 
-## coverage: unit tests with coverage; FAILS below COVERAGE_THRESHOLD, in total AND per package
+## coverage: unit tests with coverage; FAILS below COVERAGE_THRESHOLD, in total AND per package; then test-backends
 .PHONY: coverage
-coverage: $(COVERAGE_TARGETS)
+coverage: $(COVERAGE_TARGETS) test-backends
 
 .PHONY: coverage-threshold
 coverage-threshold:

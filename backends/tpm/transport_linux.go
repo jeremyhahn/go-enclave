@@ -29,7 +29,20 @@ func openDevice(path string, alloc allocator) (device, error) {
 		return nil, err
 	}
 	t.dial = dial
-	return &tpmDevice{t: t}, nil
+	return &tpmDevice{t: t, rm: resourceManaged(path)}, nil
+}
+
+// resourceManaged reports whether path names a kernel resource manager
+// device, such as /dev/tpmrm0, directly or through a link. A simulator
+// socket and /dev/tpm0 have none.
+func resourceManaged(path string) bool {
+	if strings.HasPrefix(path, "unix:") || strings.HasPrefix(path, "tcp:") {
+		return false
+	}
+	if real, err := filepath.EvalSymlinks(path); err == nil {
+		path = real
+	}
+	return strings.HasPrefix(filepath.Base(path), "tpmrm")
 }
 
 func dialDevice(ctx context.Context, path string) (io.ReadWriteCloser, error) {
