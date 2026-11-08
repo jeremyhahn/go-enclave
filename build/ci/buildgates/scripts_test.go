@@ -326,6 +326,14 @@ type fakeForge struct {
 	defaultState string
 }
 
+// setDefaultState sets defaultState under the lock ServeHTTP reads it under:
+// a test changes it after the forge has already served requests.
+func (f *fakeForge) setDefaultState(state string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.defaultState = state
+}
+
 func newFakeForge() *fakeForge {
 	return &fakeForge{tagSHA: map[string]string{}, releases: map[string]*fakeRelease{}}
 }
@@ -1812,9 +1820,9 @@ func TestScriptsRelease_RefusesWhatItMustNotPublish(t *testing.T) {
 		{"dev has no main", "candidate", "v1.5.0-rc.1", func(r *releaseRepo) {
 			r.git(r.bare, "update-ref", "-d", "refs/heads/main")
 		}, "could not fetch main from dev"},
-		{"CI red on main", "candidate", "v1.5.0-rc.1", func(r *releaseRepo) { r.forge.defaultState = "failure" }, "CI is not green"},
-		{"CI pending on main", "candidate", "v1.5.0-rc.1", func(r *releaseRepo) { r.forge.defaultState = "pending" }, "CI is not green"},
-		{"forge has no status", "candidate", "v1.5.0-rc.1", func(r *releaseRepo) { r.forge.defaultState = "" }, "could not read the forge's commit status"},
+		{"CI red on main", "candidate", "v1.5.0-rc.1", func(r *releaseRepo) { r.forge.setDefaultState("failure") }, "CI is not green"},
+		{"CI pending on main", "candidate", "v1.5.0-rc.1", func(r *releaseRepo) { r.forge.setDefaultState("pending") }, "CI is not green"},
+		{"forge has no status", "candidate", "v1.5.0-rc.1", func(r *releaseRepo) { r.forge.setDefaultState("") }, "could not read the forge's commit status"},
 		{"forge unreachable", "candidate", "v1.5.0-rc.1", func(r *releaseRepo) { r.env["FORGE_API_URL"] = "http://127.0.0.1:1/api/v1" }, "could not read the forge's commit status"},
 		{"forge rejects the token", "candidate", "v1.5.0-rc.1", func(r *releaseRepo) { r.env["FORGE_TOKEN"] = "wrong" }, "could not read the forge's commit status"},
 		{"no forge URL", "candidate", "v1.5.0-rc.1", func(r *releaseRepo) { r.env["FORGE_API_URL"] = "" }, "FORGE_API_URL is unset"},
