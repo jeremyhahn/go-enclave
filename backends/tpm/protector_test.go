@@ -45,6 +45,9 @@ type fakeDevice struct {
 	onLose  func()
 	stale   bool
 	capErrs []error // returned by the next handle listings, in turn
+	// capHang makes each handle listing wait for its context to end.
+	capHang bool
+	closes  int
 }
 
 // staleError is a command sent on a stream the fake left out of step.
@@ -183,11 +186,17 @@ func (d *fakeDevice) flush(_ context.Context, h tpm2.TPMHandle) error {
 }
 
 // handles lists the loaded handles, as TPM2_GetCapability would.
-func (d *fakeDevice) handles(context.Context) (hs []tpm2.TPMHandle, err error) {
+func (d *fakeDevice) handles(ctx context.Context) (hs []tpm2.TPMHandle, err error) {
 	defer d.lose(&err)
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.log = append(d.log, "TPM2_GetCapability")
+	if d.capHang {
+		d.mu.Unlock()
+		<-ctx.Done()
+		d.mu.Lock()
+		return nil, ctx.Err()
+	}
 	if d.stale {
 		return nil, staleError()
 	}
@@ -224,7 +233,12 @@ func (d *fakeDevice) reopen(context.Context) error {
 	return nil
 }
 
-func (d *fakeDevice) close() error { return nil }
+func (d *fakeDevice) close() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.closes++
+	return nil
+}
 
 func (d *fakeDevice) commands() []string {
 	d.mu.Lock()
@@ -559,6 +573,116 @@ func TestProtector_ReclaimAfterLostResponse(t *testing.T) {
 		sent := d.commands()[start:]
 		if len(sent) < 2 || sent[0] != "TPM2_GetCapability" || !strings.HasPrefix(sent[1], "TPM2_FlushContext") {
 			t.Fatalf("the next call did not reclaim first; sent %v", sent)
+		}
+	})
+
+	// deferReclaim runs unmanaged/reclaim_deferred up to the refused
+	// reclaim, beside a foreign handle the baseline lists: the TPM then
+	// holds the lost parent and the foreign handle.
+	foreign := tpm2.TPMHandle(0x80ff0000)
+	deferReclaim := func(t *testing.T) (*KeyProtector, *fakeDevice) {
+		t.Helper()
+		p, d, a := newTestProtector()
+		d.unmanaged = true
+		d.loaded[foreign] = "foreign"
+		key := []byte(strings.Repeat("k", 32))
+		if _, err := p.Protect(context.Background(), key); err != nil {
+			t.Fatalf("Protect: %v", err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		d.loseAt = len(d.commands()) + 2 // TPM2_CreatePrimary
+		d.onLose = func() {
+			cancel()
+			d.mu.Lock()
+			d.capErrs = []error{tpm2.TPMRCFailure}
+			d.mu.Unlock()
+		}
+		if _, err := p.Protect(ctx, key); !errors.Is(err, context.Canceled) {
+			t.Fatalf("got %v, want context.Canceled", err)
+		}
+		a.check(t)
+		if len(d.loaded) != 2 {
+			t.Fatalf("loaded %v, want the lost parent and the foreign handle", d.loaded)
+		}
+		return p, d
+	}
+
+	// Closing a stream without a resource manager does not flush what it
+	// holds: Close finishes the reclaim a call left due.
+	t.Run("unmanaged/close_finishes_reclaim", func(t *testing.T) {
+		p, d := deferReclaim(t)
+		start := len(d.commands())
+		if err := p.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+		if _, ok := d.loaded[foreign]; !ok || len(d.loaded) != 1 {
+			t.Fatalf("loaded %v after Close, want only the foreign handle", d.loaded)
+		}
+		sent := d.commands()[start:]
+		if len(sent) != 2 || sent[0] != "TPM2_GetCapability" || !strings.HasPrefix(sent[1], "TPM2_FlushContext") {
+			t.Fatalf("Close did not reclaim; sent %v", sent)
+		}
+		if d.closes != 1 {
+			t.Fatalf("closed the stream %d times, want 1", d.closes)
+		}
+	})
+
+	t.Run("unmanaged/close_reports_refused_reclaim", func(t *testing.T) {
+		p, d := deferReclaim(t)
+		d.mu.Lock()
+		d.capErrs = []error{tpm2.TPMRCFailure}
+		d.mu.Unlock()
+		if err := p.Close(); !errors.Is(err, tpm2.TPMRCFailure) {
+			t.Fatalf("Close: got %v, want TPM_RC_FAILURE", err)
+		}
+		if d.closes != 1 {
+			t.Fatalf("closed the stream %d times, want 1", d.closes)
+		}
+		if err := p.Close(); err != nil {
+			t.Fatalf("second Close: %v", err)
+		}
+		if d.closes != 1 {
+			t.Fatalf("closed the stream %d times after a second Close, want 1", d.closes)
+		}
+	})
+
+	t.Run("unmanaged/close_bounds_reclaim", func(t *testing.T) {
+		p, d := deferReclaim(t)
+		d.mu.Lock()
+		d.capHang = true
+		d.mu.Unlock()
+		began := time.Now()
+		err := p.Close()
+		if took := time.Since(began); took < cleanupTimeout || took > cleanupTimeout+2*time.Second {
+			t.Fatalf("Close took %v, want about %v", took, cleanupTimeout)
+		}
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Close: got %v, want context.DeadlineExceeded", err)
+		}
+		if d.closes != 1 {
+			t.Fatalf("closed the stream %d times, want 1", d.closes)
+		}
+	})
+
+	// The resource manager flushes a closed stream's handles: Close sends
+	// nothing first.
+	t.Run("managed/close_sends_nothing", func(t *testing.T) {
+		p, d, _ := newTestProtector()
+		d.errs[cmdFlushContext] = []error{tpm2.TPMRCFailure}
+		_, _ = p.Protect(context.Background(), []byte(strings.Repeat("k", 32)))
+		if len(d.loaded) == 0 {
+			t.Fatal("the refused flush left no handle")
+		}
+		start := len(d.commands())
+		if err := p.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+		if sent := d.commands()[start:]; len(sent) != 0 {
+			t.Fatalf("Close sent %v on a managed device", sent)
+		}
+		if d.closes != 1 {
+			t.Fatalf("closed the stream %d times, want 1", d.closes)
 		}
 	})
 }
