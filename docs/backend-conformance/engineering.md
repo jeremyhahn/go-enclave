@@ -298,11 +298,17 @@ binary.
   for a fresh backend per check. The connected backend claims
   `CapabilityProbe`, behind the TA's version command (0x1). Its one handle case,
   `rng`, is `Random(ctx, 32)`: a `CapabilityBytes` handle filled by the TA's
-  rng command (0x2). Commands 0x3 and 0x4 are held until a SPEC row names them.
+  rng command (0x2). Commands 0x3 and 0x4 (SEAL and UNSEAL) are named by the
+  `keyprotector-providers` SPEC row: `TestKeyProtectorConformance_OnOPTEE`
+  runs the provider suite (`providertest.TestProvider`, `ModePerOperation`)
+  against `(*Backend).KeyProtector()` on the same fixture. It skips, naming
+  trusted-firmware's SEAL as not yet in the pinned TA, only when SEAL answers
+  `TEE_ERROR_NOT_SUPPORTED` or `TEE_ERROR_BAD_PARAMETERS`.
 - **Fails, never skips.** An empty `GO_ENCLAVE_OPTEE_ENDPOINT` is a
   `*backendtest.EndpointError` (`ErrNoEndpoint`). A failed registration or
   lookup, or a backend without `Connect`, fails the test. A skipped run would
-  look like a pass.
+  look like a pass. The `KeyProtector` test's one skip, above, is for a TA
+  without SEAL; every other failure of it fails.
 
 ## Observability
 

@@ -55,16 +55,59 @@ As trusted-firmware's tag fixes it in `optee/ta/include/tfw_ta.h`:
 | UUID | `23751b49-3a76-4e49-b63c-e5853742fa1f` (RFC 9562, version 4) | – |
 | `TFW_TA_CMD_GET_INFO` | `0x00000001` | param 0 `VALUE_OUTPUT`: `a` the interface version, `b` the flags |
 | `TFW_TA_CMD_GET_RANDOM` | `0x00000002` | param 0 `MEMREF_OUTPUT`: 1 to 4096 bytes |
+| `TFW_TA_CMD_SEAL` | `0x00000003` | param 0 `MEMREF_INPUT`: plaintext; param 1 `MEMREF_INPUT`: associated data, may be empty; param 2 `MEMREF_OUTPUT`: the sealed blob |
+| `TFW_TA_CMD_UNSEAL` | `0x00000004` | param 0 `MEMREF_INPUT`: the sealed blob; param 1 `MEMREF_INPUT`: associated data; param 2 `MEMREF_OUTPUT`: the plaintext |
 | `TFW_TA_INTERFACE_VERSION` | `1` | – |
 | `TFW_TA_INFO_FLAGS` | `0` | – |
 | `TFW_TA_RANDOM_MIN` / `_MAX` | `1` / `4096` | – |
 
-Commands `0x3` (SEAL) and `0x4` (UNSEAL) are held (trusted-firmware#250);
-this backend does not call them.
+SEAL and UNSEAL return `TEE_ERROR_SHORT_BUFFER` (`0xFFFF0010`) with the size
+they needed in param 2's size; UNSEAL returns `TEE_ERROR_MAC_INVALID`
+(`0xFFFF3071`) for a tampered blob. The backend calls them through its
+[`KeyProtector`](#keyprotector); the TA side is trusted-firmware's, and a
+pinned TA that predates it answers SEAL with `TEE_ERROR_NOT_SUPPORTED` or
+`TEE_ERROR_BAD_PARAMETERS`.
 
 A `Random(ctx, n)` with `n` above 4096 is served in chunks of at most 4096
 bytes, each written straight into the handle; `n` of 0 is refused before the
 TA is called.
+
+## KeyProtector
+
+`(*Backend).KeyProtector()` returns an `enclave.KeyProtector` and
+`enclave.HealthReporter` for `ModePerOperation`: `Protect` runs SEAL on the
+key and `Unprotect` runs UNSEAL on the blob. The key the blob is sealed under
+lives in the TA; the blob is a generic provider blob, opaque to go-enclave.
+
+- **Associated data.** Both commands carry the fixed ASCII label
+  `go-enclave v1 TrustZone KeyProtector`, so a blob the TA sealed for another
+  client never opens as a go-enclave key.
+- **SEAL's output.** The output buffer starts at `len(key) + 64` bytes. On
+  `TEE_ERROR_SHORT_BUFFER` it is retried once, at the size the TA reported,
+  and refused above 4096 bytes. Any other failure, or a reported size of zero
+  or above the buffer, is a `CommandError` (`ErrCommandFailed`).
+- **UNSEAL's output.** When the driver registers the key's pages, the TA
+  writes into the caller's `key` directly; otherwise the plaintext lands in
+  driver shared memory, is copied into `key`, and the shared memory is wiped.
+- **Error mapping.** On UNSEAL, `TEE_ERROR_MAC_INVALID`,
+  `TEE_ERROR_BAD_FORMAT` (`0xFFFF0005`), `TEE_ERROR_SHORT_BUFFER` and a
+  plaintext of a length other than `len(key)` all match
+  `enclave.ErrSealedAuthentication`, as do an empty blob, a blob above 4096
+  bytes and an empty `key`, which are refused before the TA is called. Any
+  other result, `TEE_ERROR_BAD_PARAMETERS` among them, is a `CommandError`;
+  driver failures are a `DeviceError`, and a closed backend is
+  `ErrBackendClosed`. `key` is zeroed on every failure.
+
+It meets the [provider contract](../sealing/engineering.md#provider-contract):
+UNSEAL authenticates every blob (§1); `Unprotect` writes exactly `len(key)`
+bytes into the caller's `key` (§2); `Protect` keeps no key, and its copy in
+driver shared memory is wiped (§3); the blob is copied, never kept or changed
+(§4); an ended context is refused before the TA is called, and one ending
+during the call cancels it (§5); infrastructure failures are the backend's own
+errors (§6); concurrent calls are serialized by the session lock (§7); and
+`Health` returns nil without blocking (§8).
+`TestKeyProtectorConformance_OnOPTEE` runs `providertest.TestProvider`
+against it on the fixture.
 
 ## Data flow
 
@@ -171,8 +214,8 @@ rule for builds, and local runs of the target need that image too.
 
 ## What this does not do
 
-- SEAL and UNSEAL (held, trusted-firmware#250), or any key kept in the secure
-  world.
+- A `RootUnsealer`: the `KeyProtector` serves `ModePerOperation` only, and no
+  key is kept in the secure world for go-enclave beyond the TA's sealing key.
 - Attestation.
 - `Confiner`.
 - Any hardware other than QEMU `virt`. Owner queue 41 allows no simulators or

@@ -165,7 +165,10 @@ sealer over a `SoftwareProvider` therefore carries no provider blob.
 [Provider contract](#provider-contract) §4 ("Blob is opaque") still holds for
 every other provider. Contract v1 fixes only the envelope and the
 SoftwareProvider blob. A provider such as the OP-TEE TA implements
-SEAL/UNSEAL (0x3/0x4) against this section; those commands stay held (#250).
+SEAL/UNSEAL (0x3/0x4) against this section; go-enclave's side is the
+arm-trustzone backend's `KeyProtector`
+([design](../backends/arm-trustzone-design.md#keyprotector)), and the TA
+side is pending in trusted-firmware.
 
 ### Versioning
 
