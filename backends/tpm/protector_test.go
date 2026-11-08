@@ -360,25 +360,99 @@ func TestProtector_CancelMidCommand(t *testing.T) {
 }
 
 func TestProtector_FlushFailsAfterUnseal(t *testing.T) {
-	p, d, a := newTestProtector()
-	blob, err := p.Protect(context.Background(), canary(32)[:16])
-	if err != nil {
-		t.Fatalf("Protect: %v", err)
+	retries := make([]error, defaultAttempts)
+	for i := range retries {
+		retries[i] = tpm2.TPMRCRetry
 	}
-	start := len(d.commands())
-	d.errs[cmdFlushContext] = []error{tpm2.TPMRCFailure}
-	key := canary(16)
-	err = p.Unprotect(context.Background(), blob, key)
-	if !errors.Is(err, ErrCommandFailed) || errors.Is(err, enclave.ErrSealedAuthentication) {
-		t.Fatalf("got %v, want the provider's ErrCommandFailed", err)
+	// The first flush, of the unsealed object, fails with a TPM error,
+	// once or after every retry; the stream stays in step.
+	failures := map[string][]error{"failure": {tpm2.TPMRCFailure}, "retry_exhausted": retries}
+	setup := func(t *testing.T, unmanaged bool, errs []error) (*KeyProtector, *fakeDevice, map[tpm2.TPMHandle]string, tpm2.TPMHandle) {
+		t.Helper()
+		p, d, a := newTestProtector()
+		d.unmanaged = unmanaged
+		blob, err := p.Protect(context.Background(), canary(32)[:16])
+		if err != nil {
+			t.Fatalf("Protect: %v", err)
+		}
+		want := map[tpm2.TPMHandle]string{}
+		var foreign tpm2.TPMHandle
+		if unmanaged {
+			foreign = d.handle("foreign")
+			want[foreign] = "foreign"
+		}
+		start := len(d.commands())
+		d.errs[cmdFlushContext] = errs
+		key := canary(16)
+		err = p.Unprotect(context.Background(), blob, key)
+		if !errors.Is(err, ErrCommandFailed) || errors.Is(err, enclave.ErrSealedAuthentication) {
+			t.Fatalf("got %v, want the provider's ErrCommandFailed", err)
+		}
+		a.check(t)
+		if !bytes.Equal(key, canary(16)) {
+			t.Fatal("Unprotect wrote key although a flush failed")
+		}
+		wantSent := 7 + len(errs) - 1 // each retry resends the flush
+		if unmanaged {
+			wantSent++ // TPM2_GetCapability first
+		}
+		if sent := d.commands()[start:]; len(sent) != wantSent {
+			t.Fatalf("sent %v, want every flush despite the failure", sent)
+		}
+		if len(d.loaded) != len(want)+1 {
+			t.Fatalf("loaded %v, want the handle whose flush failed", d.loaded)
+		}
+		return p, d, want, foreign
 	}
-	a.check(t)
-	if !bytes.Equal(key, canary(16)) {
-		t.Fatal("Unprotect wrote key although a flush failed")
+	for _, unmanaged := range []bool{false, true} {
+		for name, errs := range failures {
+			t.Run(fmt.Sprintf("unmanaged=%v/%s/next_call", unmanaged, name), func(t *testing.T) {
+				p, d, want, foreign := setup(t, unmanaged, errs)
+				start := len(d.commands())
+				if _, err := p.Protect(context.Background(), canary(32)); err != nil {
+					t.Fatalf("Protect after the failed flush: %v", err)
+				}
+				sent := d.commands()[start:]
+				if len(sent) == 0 || !strings.HasPrefix(sent[0], "TPM2_FlushContext") {
+					t.Fatalf("the next call did not flush the left handle first; sent %v", sent)
+				}
+				if !maps.Equal(d.loaded, want) {
+					t.Fatalf("after the next call, loaded %v, want %v; sent %v", d.loaded, want, sent)
+				}
+				if unmanaged && slices.Contains(d.commands(), fmt.Sprintf("TPM2_FlushContext %#x", uint32(foreign))) {
+					t.Fatalf("flushed a handle the provider did not make; sent %v", sent)
+				}
+			})
+		}
 	}
-	if sent := d.commands()[start:]; len(sent) != 7 {
-		t.Fatalf("sent %v, want every flush despite the failure", sent)
-	}
+	t.Run("unmanaged/close", func(t *testing.T) {
+		p, d, want, _ := setup(t, true, failures["failure"])
+		if err := p.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+		if !maps.Equal(d.loaded, want) {
+			t.Fatalf("after Close, loaded %v, want %v", d.loaded, want)
+		}
+	})
+	t.Run("unmanaged/still_loaded", func(t *testing.T) {
+		// A left handle the TPM will not flush stays: the next call fails
+		// before it sends its own commands, and the one after reclaims it.
+		p, d, want, _ := setup(t, true, failures["failure"])
+		d.errs[cmdFlushContext] = []error{tpm2.TPMRCFailure}
+		start := len(d.commands())
+		if _, err := p.Protect(context.Background(), canary(32)); !errors.Is(err, ErrCommandFailed) {
+			t.Fatalf("got %v, want ErrCommandFailed while the left handle is loaded", err)
+		}
+		if sent := d.commands()[start:]; slices.ContainsFunc(sent, func(c string) bool { return !strings.HasPrefix(c, "TPM2_FlushContext") && c != "TPM2_GetCapability" }) {
+			t.Fatalf("sent %v before the left handle was reclaimed", sent)
+		}
+		if _, err := p.Protect(context.Background(), canary(32)); err != nil {
+			t.Fatalf("Protect after the reclaim: %v", err)
+		}
+		if !maps.Equal(d.loaded, want) {
+			t.Fatalf("loaded %v, want %v", d.loaded, want)
+		}
+	})
 }
 
 // TestProtector_ReclaimAfterLostResponse loses the response of each command
