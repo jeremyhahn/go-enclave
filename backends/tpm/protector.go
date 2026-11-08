@@ -219,8 +219,11 @@ func (p *KeyProtector) Health() error { return nil }
 // [DeviceError] as soon as its exchange with a simulator socket or a
 // pollable device ends; on a device without deadlines, it ends when the
 // kernel's TPM command timeout does, and its recovery then takes at most
-// 5 seconds more. A call after Close returns
-// [ErrClosed]; a second Close returns nil.
+// 5 seconds more. Without a resource manager, Close then finishes, within
+// 5 seconds, the reclaim of handles an interrupted call left and the flush
+// of handles the TPM refused to flush, and returns its failure joined with
+// the close's. A call after Close returns [ErrClosed]; a second Close
+// returns nil.
 func (p *KeyProtector) Close() error {
 	wait := time.NewTimer(p.closeWait)
 	defer wait.Stop()
@@ -238,27 +241,18 @@ func (p *KeyProtector) Close() error {
 	return errors.Join(p.closeLeft(), p.dev.close())
 }
 
-// closeLeft tries once to flush the handles a refused flush left, where
-// closing the stream does not drop them: without a resource manager, on a
-// stream in step.
+// closeLeft finishes, within cleanupTimeout, the reclaim a call left due and
+// the flush of the handles a refused flush left, where closing the stream
+// does not drop them: without a resource manager. It reopens a stream left
+// out of step first, and flushes no handle the reclaim's baseline lists.
 func (p *KeyProtector) closeLeft() error {
-	left := p.left
-	p.left = nil
-	if len(left) == 0 || p.dev.managed() || p.dev.outOfStep() {
+	defer func() { p.left, p.reclaimDue, p.baseline = nil, false, nil }()
+	if p.dev.managed() || (!p.reclaimDue && len(p.left) == 0) {
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
 	defer cancel()
-	var first error
-	for _, h := range left {
-		if err := mapResult(cmdFlushContext, p.dev.flush(ctx, h)); err != nil && first == nil {
-			first = err
-		}
-		if p.dev.outOfStep() {
-			break
-		}
-	}
-	return first
+	return p.settle(ctx)
 }
 
 // acquire takes the semaphore, or returns ctx.Err() without touching the
