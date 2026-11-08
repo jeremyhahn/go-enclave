@@ -51,6 +51,8 @@ inputs() {
     build/ci/buildgates/go.sum \
     backends/armtrustzone/go.mod \
     backends/armtrustzone/go.sum \
+    backends/tpm/go.mod \
+    backends/tpm/go.sum \
     scripts/lib.sh \
     scripts/tool.sh \
     scripts/tool-pins.sh \

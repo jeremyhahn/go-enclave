@@ -160,7 +160,13 @@ Install once in `main`, before anything seals (the first `NewSealed` otherwise
 installs the software default and locks the configuration):
 
 ```go
-p := newTPMProvider() // an enclave.KeyProtector
+import "github.com/jeremyhahn/go-enclave/backends/tpm"
+
+p, err := tpm.Open("") // /dev/tpmrm0; an enclave.KeyProtector
+if err != nil {
+	log.Fatal(err) // tpm.ErrDeviceUnavailable, tpm.ErrUnsupportedPlatform off Linux
+}
+defer p.Close() // after the last seal and open
 s, err := enclave.NewSealer(enclave.WithKeyProtector(p)) // ModePerOperation
 if err != nil {
 	log.Fatal(err) // ErrInvalidProvider: p is nil
@@ -178,6 +184,20 @@ Implement `HealthReporter` (`Health() error`) on a `KeyProtector` when its key
 is not in this process's memory (return `nil`) or when it can tell that a sweep
 destroyed it (return `ErrSealerWiped`). `Health` must not block. To write a
 provider, see [provider-conformance](../provider-conformance/user.md).
+
+The TPM provider is its own module (`go get
+github.com/jeremyhahn/go-enclave/backends/tpm`), Linux only. It seals each key
+under a parent derived from the owner hierarchy and keeps nothing in the TPM;
+clearing the TPM makes every earlier blob fail with `ErrSealedAuthentication`.
+
+**Troubleshooting `/dev/tpmrm0`.** `tpm.Open` returning `ErrDeviceUnavailable`
+with "permission denied" means the process may not open the resource manager.
+On most distributions the device belongs to the `tss` group with mode 0660:
+add the service's user to that group (or grant it through a udev rule), and
+use `/dev/tpmrm0`, not `/dev/tpm0`, which allows one user at a time. "No such
+file" means the kernel has no TPM driver loaded or the machine has no TPM 2.0.
+A hardware TPM is a manual check; the `swtpm`-tagged test runs the provider
+against a software TPM named by `GO_ENCLAVE_SWTPM`.
 
 ## After a shutdown sweep
 
