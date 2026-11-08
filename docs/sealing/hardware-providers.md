@@ -239,7 +239,7 @@ How the TPM provider meets each item of the
 | --- | --- |
 | 1. Authenticated | The private area's integrity HMAC under the label-bound parent's seed; the template check, the blob framing and the length check refuse the rest, all as `ErrSealedAuthentication` ([Error mapping](#error-mapping)). |
 | 2. Recover into the caller's buffer | Unseal lands in a locked transient, checked against `len(key)`, then copied into `key`. |
-| 3. Retain nothing | The provider marshals `TPM2_Create` and `TPM2_Unseal` itself, so the key is in clear only in locked buffers it owns (`Protect`'s transient, the parameter and command buffers, the transport's response buffer), each wiped before the call returns, on every path, cancellation included; the TPM keeps no object after the flush ([Open questions](#open-questions) 4). |
+| 3. Retain nothing | The provider marshals `TPM2_Create` and `TPM2_Unseal` itself, so the key is in clear only in locked buffers it owns (`Protect`'s transient, the parameter and command buffers, the transport's response buffer), each wiped before the call returns, on every path, cancellation included. On Linux each buffer has its own anonymous pages, locked and excluded from core dumps and forked children (`MADV_DONTDUMP`, `MADV_DONTFORK`); an allocation whose lock or exclusion the kernel refuses fails with `ErrLockedMemory` wrapping the refusal, and the call fails before it sends its own commands; the TPM keeps no object after the flush ([Open questions](#open-questions) 4). |
 | 4. Blob is opaque | Non-empty by construction; the provider parses a copy-free view of the blob and never writes it or keeps it. |
 | 5. Honor the context | Refused at entry before device work and while waiting for the mutex; a context ending mid-command interrupts the exchange on a simulator socket or a pollable device (on a device without deadlines, the command in flight completes first), and the call returns `ctx.Err()` after the flushes or the abandonment of its handles, and the wipes, with `key` unwritten: `Unprotect` writes `key` only as its last step, after cleanup succeeded ([Unprotect](#unprotect), [Concurrency](#concurrency)). |
 | 6. Infrastructure failures | Every result outside the authentication rows of [Error mapping](#error-mapping) is the provider's own error. |
@@ -314,6 +314,15 @@ The reclaim depends on the transport:
   command. A reclaim the TPM refuses, or that runs past the 5-second bound,
   stays due: the next call finishes it before it sends a command, and fails
   if it cannot.
+
+On every transport, a `TPM2_FlushContext` the TPM answers with an error
+(`TPM_RC_RETRY` after every retry, or any other response code) leaves its
+handle loaded on a stream still in step. The call returns its error and the
+provider keeps the handle: the next call flushes it before it sends a
+command, and fails while the TPM still lists it; one the TPM no longer lists
+is gone. Without a resource manager, `Close` tries the flush once more, since
+closing the stream does not drop the handle; behind one, a reopen or `Close`
+drops it. The provider keeps only handles it made.
 
 The interrupted call returns an error matching `ctx.Err()` either way.
 
