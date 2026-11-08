@@ -170,6 +170,10 @@ if err := enclave.SetSealer(s); err != nil {
 }
 ```
 
+The arm-trustzone backend module ships one: `b.KeyProtector()` seals with
+OP-TEE's trusted application in place of `newTPMProvider()` above (see
+[arm-trustzone](../backends/user.md#seal-keys-with-the-ta)).
+
 `WithKeyProtector` selects `ModePerOperation`; `WithRootUnsealer` selects
 `ModeRootKey`. The option is typed by the interface its mode needs, so a
 provider that cannot serve the mode does not compile.
