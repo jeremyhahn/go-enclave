@@ -398,22 +398,6 @@ func (d *tpmDevice) startSession(parent object, encryptIn bool) (session, error)
 	return session{handle: s.Handle(), auth: s}, nil
 }
 
-func (d *tpmDevice) create(parent object, s session, data []byte) (public, private []byte, err error) {
-	defer d.t.wipe()
-	sensitive := &tpm2.TPM2BSensitiveData{Buffer: data}
-	rsp, err := tpm2.Create{
-		ParentHandle: tpm2.AuthHandle{Handle: parent.handle, Name: parent.name, Auth: s.auth},
-		InSensitive: tpm2.TPM2BSensitiveCreate{Sensitive: &tpm2.TPMSSensitiveCreate{
-			Data: tpm2.NewTPMUSensitiveCreate(sensitive),
-		}},
-		InPublic: tpm2.New2B(sealedTemplate(nil)),
-	}.Execute(d.t)
-	if err != nil {
-		return nil, nil, err
-	}
-	return append([]byte(nil), rsp.OutPublic.Bytes()...), append([]byte(nil), rsp.OutPrivate.Buffer...), nil
-}
-
 func (d *tpmDevice) load(parent object, public, private []byte) (object, error) {
 	defer d.t.wipe()
 	rsp, err := tpm2.Load{
@@ -425,22 +409,6 @@ func (d *tpmDevice) load(parent object, public, private []byte) (object, error) 
 		return object{}, err
 	}
 	return object{handle: rsp.ObjectHandle, name: rsp.Name}, nil
-}
-
-func (d *tpmDevice) unseal(obj object, s session, dst []byte) (int, error) {
-	defer d.t.wipe()
-	rsp, err := tpm2.Unseal{
-		ItemHandle: tpm2.AuthHandle{Handle: obj.handle, Name: obj.name, Auth: s.auth},
-	}.Execute(d.t)
-	if err != nil {
-		return 0, err
-	}
-	out := rsp.OutData.Buffer
-	defer enclave.Wipe(out)
-	if len(out) <= len(dst) {
-		copy(dst, out)
-	}
-	return len(out), nil
 }
 
 func (d *tpmDevice) flush(h tpm2.TPMHandle) error {
