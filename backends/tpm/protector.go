@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -61,9 +62,13 @@ type KeyProtector struct {
 	// found. Both are guarded by sem.
 	reclaimDue bool
 	baseline   []tpm2.TPMHandle
-	attempts   int
-	backoff    time.Duration
-	closeWait  time.Duration
+	// left lists handles the provider made whose flush the TPM refused on
+	// a stream still in step; the next call flushes them first. Guarded by
+	// sem.
+	left      []tpm2.TPMHandle
+	attempts  int
+	backoff   time.Duration
+	closeWait time.Duration
 }
 
 // Option configures [Open].
@@ -230,13 +235,36 @@ func (p *KeyProtector) Close() error {
 		return nil
 	}
 	p.closed = true
-	return p.dev.close()
+	return errors.Join(p.closeLeft(), p.dev.close())
+}
+
+// closeLeft tries once to flush the handles a refused flush left, where
+// closing the stream does not drop them: without a resource manager, on a
+// stream in step.
+func (p *KeyProtector) closeLeft() error {
+	left := p.left
+	p.left = nil
+	if len(left) == 0 || p.dev.managed() || p.dev.outOfStep() {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
+	defer cancel()
+	var first error
+	for _, h := range left {
+		if err := mapResult(cmdFlushContext, p.dev.flush(ctx, h)); err != nil && first == nil {
+			first = err
+		}
+		if p.dev.outOfStep() {
+			break
+		}
+	}
+	return first
 }
 
 // acquire takes the semaphore, or returns ctx.Err() without touching the
 // device if the context ends first. It reopens a device an interrupted call
-// left out of step, and finishes a reclaim a call left due, within
-// cleanupTimeout.
+// left out of step, finishes a reclaim a call left due, and flushes the
+// handles a refused flush left, within cleanupTimeout.
 func (p *KeyProtector) acquire(ctx context.Context) error {
 	select {
 	case <-ctx.Done():
@@ -252,7 +280,7 @@ func (p *KeyProtector) acquire(ctx context.Context) error {
 		return err
 	}
 	rctx, cancel := context.WithTimeout(ctx, cleanupTimeout)
-	err := p.reclaim(rctx)
+	err := p.settle(rctx)
 	cancel()
 	if err != nil {
 		p.release()
@@ -373,20 +401,67 @@ func (c *call) cleanup() error {
 	held := c.held
 	c.held = nil
 	var first error
+	var kept []tpm2.TPMHandle
 	for i := len(held) - 1; i >= 0 && !c.p.dev.outOfStep(); i-- {
 		h := held[i]
 		err := c.p.retry(ctx, func() error { return c.p.dev.flush(ctx, h) })
-		if err := mapResult(cmdFlushContext, err); err != nil && first == nil {
-			first = err
+		if err := mapResult(cmdFlushContext, err); err != nil {
+			kept = append(kept, h)
+			if first == nil {
+				first = err
+			}
 		}
 	}
 	if !c.p.dev.outOfStep() {
+		// The TPM answered and kept these handles: the next call flushes
+		// them before its own commands.
+		c.p.left = append(c.p.left, kept...)
 		return first
 	}
+	// A reopen behind a resource manager drops the handles this call kept;
+	// without one, the reclaim finds them, since c.before predates them.
 	if c.listed {
 		c.p.reclaimDue, c.p.baseline = true, c.before
 	}
-	return c.p.reclaim(ctx)
+	return c.p.settle(ctx)
+}
+
+// settle reopens a device left out of step, finishes a reclaim a call left
+// due, and flushes the handles a refused flush left. The caller holds the
+// semaphore and bounds ctx.
+func (p *KeyProtector) settle(ctx context.Context) error {
+	if p.dev.managed() && p.dev.outOfStep() {
+		// The resource manager drops the old stream's handles with it.
+		p.left = nil
+	}
+	if err := p.reclaim(ctx); err != nil {
+		return err
+	}
+	return p.flushLeft(ctx)
+}
+
+// flushLeft flushes the handles a refused flush left. A handle whose flush
+// fails again stays while the TPM still lists it, and the call fails; one the
+// TPM no longer lists is gone.
+func (p *KeyProtector) flushLeft(ctx context.Context) error {
+	for len(p.left) > 0 {
+		h := p.left[0]
+		if err := p.retry(ctx, func() error { return p.dev.flush(ctx, h) }); err != nil {
+			if p.dev.outOfStep() {
+				return mapResult(cmdFlushContext, err)
+			}
+			hs, lerr := p.list(ctx)
+			if lerr != nil {
+				return lerr
+			}
+			if slices.Contains(hs, h) {
+				return mapResult(cmdFlushContext, err)
+			}
+		}
+		p.left = p.left[1:]
+	}
+	p.left = nil
+	return nil
 }
 
 // object is a loaded TPM object: its handle, name and public area.
