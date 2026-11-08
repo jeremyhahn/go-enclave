@@ -554,10 +554,12 @@ jobs:
           fi
           echo "docs only: $docs_only"
           echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
-      # CUSTOMIZE: true when the arm-trustzone backend, its OP-TEE harness or
-      # fixture script, or a pin they read changes (a pin is matched by its
-      # line in the diff of scripts/tool-pins.sh), and on every schedule and
-      # workflow_dispatch. A diff that cannot be taken selects the job.
+      # CUSTOMIZE: scripts/optee-selected.sh decides from the changed paths and
+      # the diff of scripts/tool-pins.sh (it lists what it selects on: the
+      # backend, its harness and fixture script, the Makefile, the scripts and
+      # image the recipe calls, and the pins it reads). Every schedule and
+      # workflow_dispatch selects the job, and so does a diff that cannot be
+      # taken or a selector that fails.
       - name: Does the change reach the OP-TEE harness?
         id: optee
         env:
@@ -569,14 +571,14 @@ jobs:
           if [ "$EVENT" = pull_request ] || [ "$EVENT" = push ]; then
             range="$BASE...$HEAD"
             [ "$EVENT" = pull_request ] || range="$BASE..$HEAD"
-            if files=$(git diff --name-only --no-renames "$range") &&
-              pins=$(git diff --no-renames "$range" -- scripts/tool-pins.sh); then
-              optee=false
-              if printf '%s\n' "$files" | grep -qE '^(backends/armtrustzone/|scripts/optee-fixture\.sh$|test/integration/enclave/main_optee_test\.go$)' ||
-                printf '%s\n' "$pins" | grep -qE '^[-+](TRUSTED_FIRMWARE_[A-Z_]*|OPTEE_FIXTURE_IMAGE)='; then
-                optee=true
-              fi
+            files=$(mktemp)
+            pins=$(mktemp)
+            if git diff --name-only --no-renames "$range" > "$files" &&
+              git diff --no-renames "$range" -- scripts/tool-pins.sh > "$pins" &&
+              selected=$(sh scripts/optee-selected.sh "$pins" < "$files"); then
+              optee=$selected
             fi
+            rm -f "$files" "$pins"
           fi
           echo "optee: $optee"
           echo "optee=$optee" >> "$GITHUB_OUTPUT"
