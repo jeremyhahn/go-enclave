@@ -8,6 +8,7 @@ import (
 	"net"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -177,4 +178,82 @@ func TestKeyProtector_CloseInterruptsStuckCall(t *testing.T) {
 	}
 	s.close()
 	settles(t, base)
+}
+
+// TestKeyProtector_CloseRefusesQueuedCall holds Close to its bound when a
+// second call waits behind one stuck in the TPM: the waiting call returns
+// ErrClosed without reaching the device, so it cannot take the provider
+// after Close has spent its one interrupt.
+func TestKeyProtector_CloseRefusesQueuedCall(t *testing.T) {
+	base := runtime.NumGoroutine()
+	s := newSilentTPM(t)
+	p := newSilentProtector(t, s)
+
+	stuck := make(chan error, 1)
+	go func() {
+		_, err := p.Protect(context.Background(), make([]byte, 32))
+		stuck <- err
+	}()
+	<-s.got
+	queued := make(chan error, 1)
+	go func() {
+		_, err := p.Protect(context.Background(), make([]byte, 32))
+		queued <- err
+	}()
+	waitQueued(t)
+
+	bound := defaultCloseWait + 2*cleanupTimeout + time.Second
+	if err := within(t, bound, "Close with a call stuck in the TPM and one queued", p.Close); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	select {
+	case err := <-queued:
+		if !errors.Is(err, ErrClosed) {
+			t.Fatalf("queued Protect: %v, want %v", err, ErrClosed)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("the queued Protect did not return after Close")
+	}
+	select {
+	case err := <-stuck:
+		var de *DeviceError
+		if !errors.As(err, &de) {
+			t.Fatalf("stuck Protect: %v, want a DeviceError", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("the stuck Protect did not return after Close")
+	}
+	select {
+	case <-s.got:
+		t.Fatal("the TPM received a command after the stuck one")
+	default:
+	}
+	if _, err := p.Protect(context.Background(), make([]byte, 32)); !errors.Is(err, ErrClosed) {
+		t.Fatalf("Protect after Close: %v, want %v", err, ErrClosed)
+	}
+	if err := p.Close(); err != nil {
+		t.Fatalf("second Close: %v", err)
+	}
+	s.close()
+	settles(t, base)
+}
+
+// waitQueued returns once a goroutine is blocked in acquire, waiting for
+// the provider.
+func waitQueued(t *testing.T) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	buf := make([]byte, 1<<20)
+	for time.Now().Before(deadline) {
+		n := runtime.Stack(buf, true)
+		for _, g := range strings.Split(string(buf[:n]), "\n\n") {
+			header, _, _ := strings.Cut(g, "\n")
+			blocked := strings.Contains(header, "[select") || strings.Contains(header, "[chan send")
+			if blocked && strings.Contains(g, "(*KeyProtector).acquire(") {
+				return
+			}
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("no call queued for the provider")
 }
