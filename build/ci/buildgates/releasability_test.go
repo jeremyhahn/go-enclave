@@ -222,9 +222,10 @@ type leakFinding struct {
 	guidance string
 }
 
-// String renders a finding in the file:line: form editors can jump to.
+// String renders a finding in the file:line: form editors can jump to. The
+// matched text is never rendered, so a secret class cannot leak into a log.
 func (f leakFinding) String() string {
-	return fmt.Sprintf("%s:%d: [%s] %q -- %s", f.path, f.line, f.class, f.match, f.guidance)
+	return fmt.Sprintf("%s:%d: [%s] -- %s", f.path, f.line, f.class, f.guidance)
 }
 
 // binarySniff is how much of a file is examined for a NUL byte before deciding
