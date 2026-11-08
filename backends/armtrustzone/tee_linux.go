@@ -24,6 +24,7 @@ const (
 const (
 	teeParamAttrTypeNone         = 0
 	teeParamAttrTypeValueOutput  = 2
+	teeParamAttrTypeMemrefInput  = 5
 	teeParamAttrTypeMemrefOutput = 6
 )
 
