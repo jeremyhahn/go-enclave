@@ -233,13 +233,13 @@ config is refused.
 
 ### The arm-trustzone harness
 
-`make integration-test-arm-trustzone` runs the arm-trustzone conformance test,
-`TestBackendConformance_OnOPTEE` in
+`make integration-test-arm-trustzone` runs the arm-trustzone conformance tests,
+`TestBackendConformance_OnOPTEE` and `TestKeyProtectorConformance_OnOPTEE` in
 `backends/armtrustzone/conformance_optee_test.go`, against the backend on
 OP-TEE ([#250](../../../../issues/250), [#206](../../../../issues/206)). The
 backend and its design are in
-[arm-trustzone-design.md](../backends/arm-trustzone-design.md). The test is
-built only with the `optee` tag, so no other run compiles it,
+[arm-trustzone-design.md](../backends/arm-trustzone-design.md). The tests are
+built only with the `optee` tag, so no other run compiles them,
 `make integration-test-backend-conformance` included. The target compiles
 `backends/armtrustzone` with `go test -c -tags=optee` as a static linux/arm64
 test binary (`CGO_ENABLED=0`) in the toolchain image (`scripts/devcontainer.sh
@@ -248,7 +248,7 @@ run`, as `make docker-run` does) into the checkout's ignored
 it into a fresh share directory and runs the pinned checkout's
 `make optee-run OPTEE_SHARE=<dir> OPTEE_GUEST_CMD=<binary>` on the host, the
 only step that runs there. The guest runs `TestBackendConformance_OnOPTEE`
-with `GO_ENCLAVE_OPTEE_ENDPOINT` set (default `/dev/tee0`, the guest's TEE
+and `TestKeyProtectorConformance_OnOPTEE` with `GO_ENCLAVE_OPTEE_ENDPOINT` set (default `/dev/tee0`, the guest's TEE
 device), and `optee-run`'s status, the binary's, is the target's. It refuses
 while `TRUSTED_FIRMWARE_TAG` is empty, and the script refuses a missing
 binary.

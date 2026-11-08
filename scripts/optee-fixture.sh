@@ -92,5 +92,5 @@ out=${ARM_TRUSTZONE_BIN:-}
 cp "$out" "$share/$bin"
 rc=0
 tfmake optee-run OPTEE_SHARE="$share" \
-  OPTEE_GUEST_CMD="GO_ENCLAVE_OPTEE_ENDPOINT=$endpoint ./$bin -test.v -test.run=^TestBackendConformance_OnOPTEE" || rc=$?
+  OPTEE_GUEST_CMD="GO_ENCLAVE_OPTEE_ENDPOINT=$endpoint ./$bin -test.v -test.run='^(TestBackendConformance|TestKeyProtectorConformance)_OnOPTEE'" || rc=$?
 exit "$rc"

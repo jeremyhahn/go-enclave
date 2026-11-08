@@ -475,9 +475,9 @@ optee-fixture-check:
 # The toolchain image builds backends/armtrustzone (its own module) with
 # go test -c -tags=optee as a CGO-free linux/arm64 test binary;
 # scripts/optee-fixture.sh shares it with the guest and runs
-# TestBackendConformance_OnOPTEE there under make optee-run, whose status is
-# the target's. The test registers the backend in-process; a missing endpoint
-# fails the run, never skips it. The root's optee-tagged harness
+# TestBackendConformance_OnOPTEE and TestKeyProtectorConformance_OnOPTEE there
+# under make optee-run, whose status is the target's. The tests connect
+# in-process; a missing endpoint fails the run, never skips it. The root's optee-tagged harness
 # (test/integration/enclave) is not run: the root go.mod never requires the
 # nested module, so nothing registers the backend there.
 ARM_TRUSTZONE_MODULE := backends/armtrustzone
