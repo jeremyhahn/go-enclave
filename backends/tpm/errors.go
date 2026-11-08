@@ -94,6 +94,10 @@ func (e *KeySizeError) Error() string {
 // Is reports whether target is [ErrKeySize].
 func (e *KeySizeError) Is(target error) bool { return target == ErrKeySize }
 
+// ErrLockedMemory reports that the provider could not map or lock memory for
+// a key transient. The error joins it with the system call's error.
+var ErrLockedMemory = errors.New("tpm: no locked memory for a key transient")
+
 // ErrClosed reports a call on a provider after Close.
 var ErrClosed = errors.New("tpm: the provider is closed")
 
