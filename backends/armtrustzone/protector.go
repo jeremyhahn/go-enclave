@@ -14,6 +14,7 @@ const (
 	taCmdSeal   = 0x00000003 // TFW_TA_CMD_SEAL
 	taCmdUnseal = 0x00000004 // TFW_TA_CMD_UNSEAL
 
+	teecErrorBadFormat   = 0xffff0005 // TEE_ERROR_BAD_FORMAT
 	teecErrorShortBuffer = 0xffff0010 // TEE_ERROR_SHORT_BUFFER
 	teecErrorMACInvalid  = 0xffff3071 // TEE_ERROR_MAC_INVALID
 )
@@ -118,9 +119,11 @@ func sealNext(err error, size int, got uint64, retried bool) (int, error) {
 }
 
 // unsealResult maps an UNSEAL call that was to write want bytes and
-// reported got: TEE_ERROR_MAC_INVALID, TEE_ERROR_SHORT_BUFFER and a length
-// other than want are [enclave.ErrSealedAuthentication]; any other error is
-// returned as it is.
+// reported got: TEE_ERROR_MAC_INVALID (a tampered blob), TEE_ERROR_BAD_FORMAT
+// (a truncated or forged one), TEE_ERROR_SHORT_BUFFER and a length other than
+// want are [enclave.ErrSealedAuthentication]; any other error, such as
+// TEE_ERROR_BAD_PARAMETERS for parameters this client got wrong, is returned
+// as it is.
 func unsealResult(err error, got uint64, want int) error {
 	if err == nil {
 		if got != uint64(want) { //nolint:gosec // want is a buffer length, never negative
@@ -129,7 +132,7 @@ func unsealResult(err error, got uint64, want int) error {
 		return nil
 	}
 	var ce *CommandError
-	if errors.As(err, &ce) && (ce.Code == teecErrorMACInvalid || ce.Code == teecErrorShortBuffer) {
+	if errors.As(err, &ce) && (ce.Code == teecErrorMACInvalid || ce.Code == teecErrorBadFormat || ce.Code == teecErrorShortBuffer) {
 		return enclave.ErrSealedAuthentication
 	}
 	return err

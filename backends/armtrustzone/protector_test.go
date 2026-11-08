@@ -112,7 +112,7 @@ func TestUnsealResult(t *testing.T) {
 		{"longer plaintext", nil, 33, 32, enclave.ErrSealedAuthentication},
 		{"mac invalid", &CommandError{Command: taCmdUnseal, Code: teecErrorMACInvalid}, 32, 32, enclave.ErrSealedAuthentication},
 		{"short buffer", &CommandError{Command: taCmdUnseal, Code: teecErrorShortBuffer}, 64, 32, enclave.ErrSealedAuthentication},
-		{"bad format", &CommandError{Command: taCmdUnseal, Code: 0xffff0005}, 32, 32, enclave.ErrSealedAuthentication}, // TEE_ERROR_BAD_FORMAT: a truncated or forged blob
+		{"bad format", &CommandError{Command: taCmdUnseal, Code: teecErrorBadFormat}, 32, 32, enclave.ErrSealedAuthentication},
 		{"other command error", &CommandError{Command: taCmdUnseal, Code: 0xffff0006}, 32, 32, ErrCommandFailed},
 		{"device error", devErr, 32, 32, devErr},
 		{"backend closed", ErrBackendClosed, 0, 32, ErrBackendClosed},
