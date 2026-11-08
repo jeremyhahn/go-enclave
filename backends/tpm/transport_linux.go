@@ -79,8 +79,11 @@ func openCharDevice(path string) (*os.File, error) {
 	return f, nil
 }
 
+// madvise is unix.Madvise; a test refuses an advice through it.
+var madvise = unix.Madvise
+
 // lockedAllocator maps each transient on its own anonymous pages, locked
-// in RAM and excluded from core dumps.
+// in RAM and excluded from core dumps and forked children.
 type lockedAllocator struct {
 	mu   sync.Mutex
 	maps map[*byte][]byte
@@ -99,7 +102,15 @@ func (a *lockedAllocator) alloc(n int) ([]byte, error) {
 		_ = unix.Munmap(m)
 		return nil, errors.Join(ErrLockedMemory, err)
 	}
-	_ = unix.Madvise(m, unix.MADV_DONTDUMP)
+	// A refused exclusion is a denial: a transient a core dump or a forked
+	// child could copy is not handed out.
+	for _, advice := range []int{unix.MADV_DONTDUMP, unix.MADV_DONTFORK} {
+		if err := madvise(m, advice); err != nil {
+			_ = unix.Munlock(m)
+			_ = unix.Munmap(m)
+			return nil, errors.Join(ErrLockedMemory, err)
+		}
+	}
 	a.mu.Lock()
 	a.maps[&m[0]] = m
 	a.mu.Unlock()
