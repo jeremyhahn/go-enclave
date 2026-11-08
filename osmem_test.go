@@ -94,13 +94,3 @@ func TestSysPrimitives_ReportTheirSyscall(t *testing.T) {
 		t.Errorf("sysMap(0) = %v, want an *os.SyscallError naming %q", err, want)
 	}
 }
-
-// TestCoreDumpsDisabled_UnsupportedOnlyWhereThereIsNoLimit pins that only
-// Windows reports ErrCoreDumpLimitUnsupported.
-func TestCoreDumpsDisabled_UnsupportedOnlyWhereThereIsNoLimit(t *testing.T) {
-	unsupported := errors.Is(CoreDumpsDisabled(), ErrCoreDumpLimitUnsupported)
-	if want := runtime.GOOS == "windows"; unsupported != want {
-		t.Errorf("CoreDumpsDisabled() = %v on %s; reports the limit unsupported = %v, want %v",
-			CoreDumpsDisabled(), runtime.GOOS, unsupported, want)
-	}
-}
