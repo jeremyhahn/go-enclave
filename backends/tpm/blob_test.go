@@ -22,6 +22,10 @@ const sealedPublicBytes = 46
 // nameAlg digest + seedValue 2+32 + data 2+32).
 const sealedPrivateBytes = 158
 
+// largestPrivateBytes is the private area of the largest key Protect seals:
+// the 32-byte key's area with the data grown to maxKeyBytes.
+const largestPrivateBytes = sealedPrivateBytes - 32 + maxKeyBytes
+
 func testPublic(t *testing.T, mutate func(*tpm2.TPMTPublic)) []byte {
 	t.Helper()
 	pub := sealedTemplate(bytes.Repeat([]byte{0xa5}, 32))
@@ -100,12 +104,25 @@ func TestBlob_Refused(t *testing.T) {
 		}(),
 		"public_does_not_unmarshal": encodeBlob([]byte{0x00, 0x08, 0x00}, []byte{1}),
 		"public_has_trailing_bytes": encodeBlob(append(testPublic(t, nil), 0), []byte{1}),
+		"private_over_bound":        encodeBlob(testPublic(t, nil), bytes.Repeat([]byte{0x5a}, largestPrivateBytes+1)),
 	}
 	for name, blob := range cases {
 		t.Run(name, func(t *testing.T) {
 			_, _, err := parseBlob(blob)
 			requireAuth(t, err)
 		})
+	}
+}
+
+// TestBlob_PrivateAtBound parses a private area as large as Protect makes.
+func TestBlob_PrivateAtBound(t *testing.T) {
+	private := bytes.Repeat([]byte{0x5a}, largestPrivateBytes)
+	_, got, err := parseBlob(encodeBlob(testPublic(t, nil), private))
+	if err != nil {
+		t.Fatalf("parseBlob: %v", err)
+	}
+	if !bytes.Equal(got, private) {
+		t.Fatal("parseBlob returned another private area")
 	}
 }
 
