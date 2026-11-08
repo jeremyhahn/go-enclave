@@ -4,11 +4,13 @@ package armtrustzone
 
 import (
 	"context"
+	"errors"
 	"os"
 	"testing"
 
 	enclave "github.com/jeremyhahn/go-enclave"
 	"github.com/jeremyhahn/go-enclave/backendtest"
+	"github.com/jeremyhahn/go-enclave/providertest"
 )
 
 // opteeEndpointVar names the TEE device, as the arm-trustzone harness sets
@@ -57,5 +59,57 @@ func TestBackendConformance_OnOPTEE(t *testing.T) {
 	}
 	if err := backendtest.TestBackend(context.Background(), cfg); err != nil {
 		t.Fatalf("the arm-trustzone backend fails conformance: %v", err)
+	}
+}
+
+// TestKeyProtectorConformance_OnOPTEE runs the provider suite against the
+// backend's KeyProtector, on the same fixture. A trusted application that
+// answers SEAL with TEE_ERROR_NOT_SUPPORTED or TEE_ERROR_BAD_PARAMETERS
+// predates trusted-firmware's SEAL, and the test is skipped; any other
+// failure fails it.
+func TestKeyProtectorConformance_OnOPTEE(t *testing.T) {
+	const (
+		teecErrorBadParameters = 0xffff0006 // TEE_ERROR_BAD_PARAMETERS
+		teecErrorNotSupported  = 0xffff000a // TEE_ERROR_NOT_SUPPORTED
+	)
+	endpoint := os.Getenv(opteeEndpointVar)
+	if endpoint == "" {
+		t.Fatalf("the arm-trustzone KeyProtector conformance test cannot run: %v", &backendtest.EndpointError{Variable: opteeEndpointVar})
+	}
+	newProtector := func() (*KeyProtector, error) {
+		b, err := Connect(endpoint)
+		if err != nil {
+			return nil, err
+		}
+		t.Cleanup(func() { _ = b.Close() })
+		return b.KeyProtector(), nil
+	}
+
+	p, err := newProtector()
+	if err != nil {
+		t.Fatalf("Connect(%q): %v", endpoint, err)
+	}
+	_, err = p.Protect(context.Background(), make([]byte, 32))
+	var ce *CommandError
+	if errors.As(err, &ce) && ce.Command == taCmdSeal && (ce.Code == teecErrorNotSupported || ce.Code == teecErrorBadParameters) {
+		t.Skipf("trusted-firmware's SEAL is not yet in the pinned trusted application: %v", err)
+	}
+	if err != nil {
+		t.Fatalf("Protect: %v", err)
+	}
+
+	cfg := providertest.Config{
+		New: func() (any, error) {
+			p, err := newProtector()
+			if err != nil {
+				return nil, err
+			}
+			return p, nil
+		},
+		Modes: []enclave.Mode{enclave.ModePerOperation},
+		Logf:  t.Logf,
+	}
+	if err := providertest.TestProvider(context.Background(), cfg); err != nil {
+		t.Fatalf("the arm-trustzone KeyProtector fails conformance: %v", err)
 	}
 }
