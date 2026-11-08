@@ -122,11 +122,11 @@ func (d *tpmDevice) listType(ctx context.Context, ht tpm2.TPMHT) ([]tpm2.TPMHand
 	defer d.t.wipe()
 	var hs []tpm2.TPMHandle
 	next := uint32(ht) << 24
-	for len(hs) < maxListedHandles {
+	for left := uint32(maxListedHandles); left > 0; {
 		rsp, err := tpm2.GetCapability{
 			Capability:    tpm2.TPMCapHandles,
 			Property:      next,
-			PropertyCount: uint32(maxListedHandles - len(hs)),
+			PropertyCount: left,
 		}.Execute(d.t.bind(ctx))
 		if err != nil {
 			return nil, err
@@ -137,8 +137,9 @@ func (d *tpmDevice) listType(ctx context.Context, ht tpm2.TPMHT) ([]tpm2.TPMHand
 		}
 		n := len(hs)
 		for _, h := range got.Handle {
-			if uint32(h)>>24 == uint32(ht) {
+			if uint32(h)>>24 == uint32(ht) && left > 0 {
 				hs = append(hs, h)
+				left--
 			}
 		}
 		if !rsp.MoreData || len(hs) == n {
