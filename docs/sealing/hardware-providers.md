@@ -95,8 +95,10 @@ primary is derived without a prime search.
    `inSensitive.data` = the transient. `sensitiveDataOrigin`, `sign` and
    `decrypt` stay clear: the TPM refuses a sealed data object whose
    `sensitiveDataOrigin` is set while the caller supplies the data.
-5. Flush the session and the parent, wipe the transient, and return the
-   blob.
+5. Flush the session and the parent on every path, and wipe the transient.
+   Return the blob only as the last step: a context that ended or a flush
+   that failed returns `ctx.Err()` or the provider's own error, and the blob
+   is discarded.
 
 The salted session is what keeps the key off the bus in clear. An unsalted,
 unbound session over empty authorization values derives its session key
@@ -161,15 +163,28 @@ the authority this provider grants, as access to the process is for
 3. Create the parent and start a session salted to it, with response
    parameter encryption (`encrypt` session attribute).
 4. `TPM2_Load` the public and private areas under the parent, then
-   `TPM2_Unseal` the loaded object under the session.
-5. Receive the data into a locked transient. If its length is not
-   `len(key)`, wipe it and return an error matching
-   `enclave.ErrSealedAuthentication`; otherwise copy it into `key` and wipe
-   the transient.
-6. Flush the object, the session and the parent on every path.
+   `TPM2_Unseal` the loaded object under the session. The unsealed data is
+   received into a locked transient and stays there; `key` is not touched.
+5. Flush the object, the session and the parent. Every handle the call
+   holds is flushed on every path, after a failure or a cancellation too,
+   and each flush's result is kept.
+6. Decide the result, in this order: a context that has ended returns an
+   error matching `ctx.Err()`; a failed flush returns the provider's own
+   error; an unsealed length other than `len(key)` returns an error matching
+   `enclave.ErrSealedAuthentication`. On any of these, wipe the transient
+   and return.
+7. Copy the transient into `key`, wipe the transient, and return nil.
 
-`key` is written only in step 5, after every check, so a refused call
-writes no key material. The blob is read, never kept or modified.
+`key` is written only in step 7, the last step, after cleanup succeeded and
+every check passed, so every refused call (authentication, a failed flush,
+a cancellation at any point) leaves `key` untouched. The transient is wiped
+on every path. The blob is read, never kept or modified.
+
+A flush that fails after a successful unseal refuses the call. The seam
+gives an error one meaning, no key material written (contract item 5), so
+the call cannot both report the failure and deliver the key; and returning
+nil would hide a handle the provider believes it left loaded. The refusal
+costs nothing: the blob is unchanged and a later call can open it.
 
 ### Error mapping
 
@@ -209,7 +224,7 @@ How the TPM provider meets each item of the
 | 2. Recover into the caller's buffer | Unseal lands in a locked transient, checked against `len(key)`, then copied into `key`. |
 | 3. Retain nothing | Every key copy the provider can reach (`Protect`'s locked transient, its transport buffers) is wiped before the call returns, on every path, cancellation included; the TPM keeps no object after the flush. |
 | 4. Blob is opaque | Non-empty by construction; the provider parses a copy-free view of the blob and never writes it or keeps it. |
-| 5. Honor the context | Refused at entry before device work and while waiting for the mutex; a context ending mid-command stops the sequence at the next command boundary, and the call returns `ctx.Err()` within one command's duration, after the flushes and the wipes, with `key` unwritten ([Concurrency](#concurrency)). |
+| 5. Honor the context | Refused at entry before device work and while waiting for the mutex; a context ending mid-command stops the sequence at the next command boundary, and the call returns `ctx.Err()` within one command's duration, after the flushes and the wipes, with `key` unwritten: `Unprotect` writes `key` only as its last step, after cleanup succeeded ([Unprotect](#unprotect), [Concurrency](#concurrency)). |
 | 6. Infrastructure failures | Every result outside the authentication rows of [Error mapping](#error-mapping) is the provider's own error. |
 | 7. Concurrent calls | Safe: the mutex serializes the command sequences, and each call owns its transients and handles. |
 | 8. `Health` does not block | `Health` returns nil unconditionally: the key lives in the TPM. |
@@ -241,9 +256,12 @@ sends. When the context has ended:
    `ctx.Err()`.
 
 No goroutine outlives the call, and no copy of the key that the provider can
-reach survives its return. A cancelled `Unprotect` never writes `key`, even
-when `TPM2_Unseal` completed before the provider saw the context end: the
-unsealed transient is wiped, not copied. Copies the provider cannot reach
+reach survives its return. A context that ends during a flush does not stop
+the remaining flushes, and the call still returns `ctx.Err()`. A cancelled
+`Unprotect` never writes `key`, even when `TPM2_Unseal` completed or the
+context ended only during the flushes: the context is checked after cleanup
+and before the copy (step 6 of [Unprotect](#unprotect)), and the unsealed
+transient is wiped, not copied. Copies the provider cannot reach
 are listed under [Open questions](#open-questions).
 
 Calls on different providers over the same TPM are serialized by the TPM
@@ -267,6 +285,11 @@ itself; the resource manager keeps their handles apart.
   `TPM2_FlushContext` of the held handles reaches the transport after the
   blocked one, that the error matches `ctx.Err()`, and that a cancelled
   `Unprotect` leaves `key` holding the canary bytes the test filled it with.
+  The blocked command includes each `TPM2_FlushContext` after a successful
+  `TPM2_Unseal`: a cancel during a flush still sends the remaining flushes,
+  returns `ctx.Err()` and leaves `key` unchanged. A fake flush that fails
+  after a successful unseal, with the context live, returns the provider's
+  own error and also leaves `key` unchanged.
 - **Conformance against a software TPM:** `providertest.TestProvider` with
   `Modes` = `ModePerOperation`, against `swtpm` in a CI fixture job under a
   build tag of its own, as the OP-TEE job runs the arm-trustzone suite. The
