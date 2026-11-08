@@ -207,9 +207,9 @@ How the TPM provider meets each item of the
 | --- | --- |
 | 1. Authenticated | The private area's integrity HMAC under the label-bound parent's seed; the template check, the blob framing and the length check refuse the rest, all as `ErrSealedAuthentication` ([Error mapping](#error-mapping)). |
 | 2. Recover into the caller's buffer | Unseal lands in a locked transient, checked against `len(key)`, then copied into `key`. |
-| 3. Retain nothing | `Protect`'s copy of `key` is a locked transient wiped on every path; the TPM keeps no object after the flush. |
+| 3. Retain nothing | Every key copy the provider can reach (`Protect`'s locked transient, its transport buffers) is wiped before the call returns, on every path, cancellation included; the TPM keeps no object after the flush. |
 | 4. Blob is opaque | Non-empty by construction; the provider parses a copy-free view of the blob and never writes it or keeps it. |
-| 5. Honor the context | Checked at entry before device work, while waiting for the mutex, and between commands; see [Concurrency](#concurrency) for a context that ends mid-command. |
+| 5. Honor the context | Refused at entry before device work and while waiting for the mutex; a context ending mid-command stops the sequence at the next command boundary, and the call returns `ctx.Err()` within one command's duration, after the flushes and the wipes, with `key` unwritten ([Concurrency](#concurrency)). |
 | 6. Infrastructure failures | Every result outside the authentication rows of [Error mapping](#error-mapping) is the provider's own error. |
 | 7. Concurrent calls | Safe: the mutex serializes the command sequences, and each call owns its transients and handles. |
 | 8. `Health` does not block | `Health` returns nil unconditionally: the key lives in the TPM. |
@@ -223,15 +223,28 @@ one-slot semaphore, so a waiting call also selects on `ctx.Done()` and
 returns `ctx.Err()` without touching the device.
 
 The kernel cannot cancel a TPM command once it is sent, and a
-`TPM2_CreatePrimary` may take a large part of a second on a discrete TPM. So
-that a context ending mid-command still returns promptly, the command
-sequence runs on a worker goroutine, and the caller waits on the worker's
-result or `ctx.Done()`, whichever comes first. If the context wins, the
-caller returns `ctx.Err()` at once; the worker finishes the command in
-flight, flushes its handles, wipes its transients and releases the mutex.
-Exactly one side owns a transient at any time: the caller copies into `key`
-only after it has taken the worker's result, so an abandoned call writes no
-key material.
+`TPM2_CreatePrimary` may take a large part of a second on a discrete TPM.
+This is the case the seam's "as far as the underlying API allows" covers: a
+context that ends mid-command makes the call return within one TPM
+command's duration, not at once. The command sequence runs on the calling
+goroutine, and the provider checks the context before every command it
+sends. When the context has ended:
+
+1. the command in flight, if any, runs to completion;
+2. no further command of the sequence is sent: only `TPM2_FlushContext` for
+   each handle the call holds (object, session, parent);
+3. the provider wipes every transient that holds key material: `Protect`'s
+   copy of `key`, `Unprotect`'s unsealed transient, the `TPM2B_SENSITIVE_DATA`
+   go-tpm returns, and every marshalled command or response buffer the
+   provider owns (its transport's send and receive buffers);
+4. only then does the call release the mutex and return an error matching
+   `ctx.Err()`.
+
+No goroutine outlives the call, and no copy of the key that the provider can
+reach survives its return. A cancelled `Unprotect` never writes `key`, even
+when `TPM2_Unseal` completed before the provider saw the context end: the
+unsealed transient is wiped, not copied. Copies the provider cannot reach
+are listed under [Open questions](#open-questions).
 
 Calls on different providers over the same TPM are serialized by the TPM
 itself; the resource manager keeps their handles apart.
@@ -243,6 +256,17 @@ itself; the resource manager keeps their handles apart.
   the end; each template field changed), and the result-code mapping (each
   row of the [error mapping](#error-mapping), including a format-one code on
   a handle or session number, which must not count as a parameter).
+- **Mid-command cancellation, unit test, every platform:** `providertest`
+  refuses only a context already ended at entry, so the provider's own test
+  measures the rest. A fake go-tpm transport blocks inside a chosen command
+  until the test releases it; the test cancels the context while it blocks,
+  then releases it. For `Protect` and `Unprotect`, and for each command of
+  their sequences in turn, the test checks that the call does not return
+  before every key-bearing transient is wiped (the fake observes the wipe
+  through the provider's transient allocator), that no command but the
+  `TPM2_FlushContext` of the held handles reaches the transport after the
+  blocked one, that the error matches `ctx.Err()`, and that a cancelled
+  `Unprotect` leaves `key` holding the canary bytes the test filled it with.
 - **Conformance against a software TPM:** `providertest.TestProvider` with
   `Modes` = `ModePerOperation`, against `swtpm` in a CI fixture job under a
   build tag of its own, as the OP-TEE job runs the arm-trustzone suite. The
@@ -326,11 +350,19 @@ gains no dependency. Nothing here is decided beyond the shape; the
    (flushed in `Close`) changes no TPM state either and removes one
    `TPM2_CreatePrimary` per call; whether a resource-manager restart or a
    context swap makes that fragile is for the code slice to measure.
-4. **Residue in go-tpm's buffers.** go-tpm marshals the command and decrypts
-   the response in buffers it owns. Whether the key survives in one after
-   the call is for the residue sweep of `providertest` to measure; if it
-   does, the code slice wipes it through go-tpm's API or, failing that,
-   records `SkipResidueSweep` with that reason and reports it.
+4. **Residual copy in go-tpm's buffers.** go-tpm marshals `TPM2_Create`'s
+   `inSensitive` in clear before it applies parameter encryption, and
+   decrypts `TPM2_Unseal`'s response before it unmarshals it, in heap buffers
+   it allocates and does not hand back. The provider can wipe the slices
+   go-tpm returns and the buffers its own transport owns, which carry only
+   ciphertext; it cannot wipe go-tpm's internal buffers. Unless go-tpm
+   exposes or wipes them, a copy of the key may stay in this process's heap
+   after the call returns, on success and on cancellation alike, until the
+   garbage collector reuses the memory. This is a residual copy, not a
+   met contract item. The code slice measures it with `providertest`'s
+   residue sweep; if a copy survives, the slice either wipes it through
+   go-tpm's API (or a change upstream) or records `SkipResidueSweep` with
+   this reason and reports it to the owner.
 5. **Departure: the label binds through the parent.** The row offered the
    sealed object's `authPolicy` or its own unique or name derivation. A
    sealed data object's `unique` is computed by the TPM from its sensitive
