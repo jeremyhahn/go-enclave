@@ -121,7 +121,9 @@ integer is big-endian, as the TPM marshals it:
 
 The length prefixes are the TPM2B size fields themselves, so the blob is the
 version byte followed by the two structures exactly as the TPM marshals them.
-Nothing may follow the private area. For an n-byte DEK under the SHA-256,
+Nothing may follow the private area. A private area over 254 bytes, the
+size for a `maxKeyBytes` (128-byte) DEK, is refused as a sealed-authentication
+failure before any command reaches the TPM. For an n-byte DEK under the SHA-256,
 AES-128 parent the blob is 177 + n bytes, 209 for a 32-byte DEK, and the
 swtpm test pins it:
 
@@ -197,7 +199,9 @@ every check passed, so every refused call (authentication, a failed flush,
 a cancellation at any point) leaves `key` untouched. The transient is wiped
 on every path. The blob is read, never kept or modified.
 
-A flush that fails after a successful unseal refuses the call. The seam
+A flush that fails after a successful unseal refuses the call, even when a
+lost transport's reopen and reclaim then succeed: the call returns the
+flush's failure joined with the reclaim's result. The seam
 gives an error one meaning, no key material written (contract item 5), so
 the call cannot both report the failure and deliver the key; and returning
 nil would hide a handle the provider believes it left loaded. The refusal

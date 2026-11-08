@@ -388,7 +388,8 @@ func (c *call) parentAndSession(template tpm2.TPMTPublic, in bool) (object, sess
 // left the device out of step, it reclaims instead: reopening a device
 // behind the kernel's resource manager flushes what the old stream held,
 // and on a device without one the reclaim flushes each handle begin did not
-// find. Both run within cleanupTimeout.
+// find. Both run within cleanupTimeout, and a flush error stands whatever
+// the reclaim returns.
 func (c *call) cleanup() error {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(c.ctx), cleanupTimeout)
 	defer cancel()
@@ -417,7 +418,8 @@ func (c *call) cleanup() error {
 	if c.listed {
 		c.p.reclaimDue, c.p.baseline = true, c.before
 	}
-	return c.p.settle(ctx)
+	// A recovery that succeeds does not excuse the flush that failed.
+	return errors.Join(first, c.p.settle(ctx))
 }
 
 // settle reopens a device left out of step, finishes a reclaim a call left

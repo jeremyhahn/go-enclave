@@ -49,17 +49,30 @@ func TestLockedAllocator_FailsClosedWhenAnExclusionIsRefused(t *testing.T) {
 		{"MADV_DONTFORK", unix.MADV_DONTFORK},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			orig := madvise
-			t.Cleanup(func() { madvise = orig })
-			var mapped uintptr
+			origAdvise, origUnmap := madvise, munmap
+			t.Cleanup(func() { madvise, munmap = origAdvise, origUnmap })
+			var mapped, unmapped []uintptr
+			var mappedLen, unmappedLen []int
+			var unmapErr error
 			refused := false
 			madvise = func(b []byte, advice int) error {
-				mapped = addrOf(b)
+				mapped = append(mapped, addrOf(b))
+				mappedLen = append(mappedLen, len(b))
 				if advice == tc.advice {
 					refused = true
 					return unix.EPERM
 				}
-				return orig(b, advice)
+				return origAdvise(b, advice)
+			}
+			// The unmap is checked by what alloc hands to munmap and what
+			// munmap returns, not by looking the address up afterwards: once
+			// unmapped, any other mapping can take it.
+			munmap = func(b []byte) error {
+				unmapped = append(unmapped, addrOf(b))
+				unmappedLen = append(unmappedLen, len(b))
+				err := origUnmap(b)
+				unmapErr = errors.Join(unmapErr, err)
+				return err
 			}
 			a := newAllocator().(*lockedAllocator)
 			b, err := a.alloc(32)
@@ -69,8 +82,21 @@ func TestLockedAllocator_FailsClosedWhenAnExclusionIsRefused(t *testing.T) {
 			if !refused {
 				t.Fatalf("alloc did not ask for %s", tc.name)
 			}
-			if _, ok := vmFlags(t, mapped); ok {
-				t.Fatal("the refused transient is still mapped")
+			if len(unmapped) != 1 {
+				t.Fatalf("alloc unmapped %d times; want once", len(unmapped))
+			}
+			if unmapped[0] != mapped[0] || unmappedLen[0] != mappedLen[0] {
+				t.Fatalf("alloc unmapped %d bytes at %#x; it mapped %d bytes at %#x",
+					unmappedLen[0], unmapped[0], mappedLen[0], mapped[0])
+			}
+			for i := range mapped {
+				if mapped[i] != mapped[0] || mappedLen[i] != mappedLen[0] {
+					t.Fatalf("alloc advised %d bytes at %#x; it mapped %d bytes at %#x",
+						mappedLen[i], mapped[i], mappedLen[0], mapped[0])
+				}
+			}
+			if unmapErr != nil {
+				t.Fatalf("the refused transient was not unmapped: %v", unmapErr)
 			}
 			if len(a.maps) != 0 {
 				t.Fatalf("the allocator kept %d refused mappings", len(a.maps))

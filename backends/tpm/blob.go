@@ -14,6 +14,13 @@ const tpmBlobVersion = 1
 // maxKeyBytes is MAX_SYM_DATA, the bound of a TPM2B_SENSITIVE_DATA.
 const maxKeyBytes = 128
 
+// maxPrivateBytes bounds the TPM2B_PRIVATE buffer of a sealed object under
+// the SHA-256, AES-128 parent: the integrity HMAC (2+32), the outer wrap's
+// IV (2+16), the TPM2B_SENSITIVE size field (2), and a TPMT_SENSITIVE of
+// sensitiveType (2), an authValue padded to the digest (2+32), the
+// seedValue (2+32) and at most maxKeyBytes of data (2+128): 254 bytes.
+const maxPrivateBytes = 2 + 32 + 2 + 16 + 2 + 2 + 2 + 32 + 2 + 32 + 2 + maxKeyBytes
+
 // label is bound into the parent's unique field, so only go-enclave's parent
 // loads a blob this provider sealed.
 const label = "go-enclave v1 TPM KeyProtector"
@@ -90,7 +97,8 @@ func encodeBlob(public, private []byte) []byte {
 
 // parseBlob splits a blob into its public and private areas without the
 // device, and refuses, with an error matching ErrSealedAuthentication, any
-// blob whose framing or public area is not one Protect produced. The results
+// blob whose framing, public area or private area's size is not one Protect
+// produced. The results
 // alias blob; nothing is copied or written.
 func parseBlob(blob []byte) (public, private []byte, err error) {
 	if len(blob) < 1 || blob[0] != tpmBlobVersion {
@@ -107,6 +115,9 @@ func parseBlob(blob []byte) (public, private []byte, err error) {
 	}
 	if len(rest) != 0 {
 		return nil, nil, &authError{reason: "bytes follow the private area"}
+	}
+	if len(private) > maxPrivateBytes {
+		return nil, nil, &authError{reason: "the private area is larger than Protect makes"}
 	}
 	if err := checkPublic(public); err != nil {
 		return nil, nil, err

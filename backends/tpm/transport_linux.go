@@ -82,6 +82,9 @@ func openCharDevice(path string) (*os.File, error) {
 // madvise is unix.Madvise; a test refuses an advice through it.
 var madvise = unix.Madvise
 
+// munmap is unix.Munmap; a test records the mapping a refused alloc unmaps.
+var munmap = unix.Munmap
+
 // lockedAllocator maps each transient on its own anonymous pages, locked
 // in RAM and excluded from core dumps and forked children.
 type lockedAllocator struct {
@@ -107,7 +110,7 @@ func (a *lockedAllocator) alloc(n int) ([]byte, error) {
 	for _, advice := range []int{unix.MADV_DONTDUMP, unix.MADV_DONTFORK} {
 		if err := madvise(m, advice); err != nil {
 			_ = unix.Munlock(m)
-			_ = unix.Munmap(m)
+			_ = munmap(m)
 			return nil, errors.Join(ErrLockedMemory, err)
 		}
 	}

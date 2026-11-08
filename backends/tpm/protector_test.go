@@ -41,8 +41,11 @@ type fakeDevice struct {
 	// loseAt is the 1-based command number whose response an interrupt
 	// loses: the command runs, then the stream is out of step until
 	// reopen and the command returns context.Canceled. onLose runs then.
-	loseAt  int
-	onLose  func()
+	loseAt int
+	onLose func()
+	// loseErr, if set, is what the lost command returns in place of
+	// context.Canceled: a transport failure with the context still live.
+	loseErr error
 	stale   bool
 	capErrs []error // returned by the next handle listings, in turn
 	// capHang makes each handle listing wait for its context to end.
@@ -60,13 +63,16 @@ func (d *fakeDevice) lose(err *error) {
 	if lost {
 		d.stale, d.loseAt = true, 0
 	}
-	onLose := d.onLose
+	onLose, loseErr := d.onLose, d.loseErr
 	d.mu.Unlock()
 	if lost {
 		if onLose != nil {
 			onLose()
 		}
 		*err = context.Canceled
+		if loseErr != nil {
+			*err = loseErr
+		}
 	}
 }
 
@@ -172,7 +178,8 @@ func (d *fakeDevice) unseal(_ context.Context, obj object, _ session, dst []byte
 	return len(data), nil
 }
 
-func (d *fakeDevice) flush(_ context.Context, h tpm2.TPMHandle) error {
+func (d *fakeDevice) flush(_ context.Context, h tpm2.TPMHandle) (err error) {
+	defer d.lose(&err)
 	if err := d.enter(cmdFlushContext, fmt.Sprintf("%#x", uint32(h))); err != nil {
 		return err
 	}
@@ -469,6 +476,51 @@ func TestProtector_FlushFailsAfterUnseal(t *testing.T) {
 	})
 }
 
+// TestProtector_FlushLostAfterUnseal loses the transport during the first
+// flush after a successful Unseal, with the context live: the reopen and
+// the reclaim succeed, and the call still refuses with the flush's failure.
+func TestProtector_FlushLostAfterUnseal(t *testing.T) {
+	for _, unmanaged := range []bool{false, true} {
+		t.Run(fmt.Sprintf("unmanaged=%v", unmanaged), func(t *testing.T) {
+			p, d, a := newTestProtector()
+			d.unmanaged = unmanaged
+			blob, err := p.Protect(context.Background(), canary(32)[:16])
+			if err != nil {
+				t.Fatalf("Protect: %v", err)
+			}
+			want := map[tpm2.TPMHandle]string{}
+			if unmanaged {
+				want[d.handle("foreign")] = "foreign"
+			}
+			start := len(d.commands())
+			flushAt := start + 5 // TPM2_CreatePrimary, StartAuthSession, Load, Unseal, then the flush
+			if unmanaged {
+				flushAt++ // TPM2_GetCapability first
+			}
+			lost := errors.New("connection lost")
+			d.loseAt, d.loseErr = flushAt, &DeviceError{Path: "fake", Op: "read", Err: lost}
+			key := canary(16)
+			err = p.Unprotect(context.Background(), blob, key)
+			if sent := d.commands(); len(sent) < flushAt || !strings.HasPrefix(sent[flushAt-1], "TPM2_FlushContext") {
+				t.Fatalf("sent %v, want the transport lost on the first flush", sent[start:])
+			}
+			if !errors.Is(err, lost) || errors.Is(err, enclave.ErrSealedAuthentication) {
+				t.Fatalf("got %v, want the lost flush's failure", err)
+			}
+			a.check(t)
+			if !bytes.Equal(key, canary(16)) {
+				t.Fatal("Unprotect wrote key although a flush failed")
+			}
+			if d.outOfStep() {
+				t.Fatal("the call left the stream out of step")
+			}
+			if !maps.Equal(d.loaded, want) {
+				t.Fatalf("loaded %v, want %v: the reclaim missed a handle", d.loaded, want)
+			}
+		})
+	}
+}
+
 // TestProtector_ReclaimAfterLostResponse loses the response of each command
 // of each sequence in turn, as an interrupt does on a stream: the command
 // ran, and a handle it made is unknown to the provider. Before the next call,
@@ -695,6 +747,12 @@ func TestProtector_RefusesBeforeDeviceWork(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Protect: %v", err)
 	}
+	public, _, err := parseBlob(blob)
+	if err != nil {
+		t.Fatalf("parseBlob: %v", err)
+	}
+	// Framed correctly, but one byte past the largest private area.
+	over := encodeBlob(public, bytes.Repeat([]byte{0x5a}, largestPrivateBytes+1))
 	start := len(d.commands())
 	cases := map[string]struct {
 		run    func() error
@@ -714,6 +772,9 @@ func TestProtector_RefusesBeforeDeviceWork(t *testing.T) {
 		}, enclave.ErrSealedAuthentication},
 		"unprotect_bad_framing": {func() error {
 			return p.Unprotect(context.Background(), blob[:len(blob)-1], canary(32))
+		}, enclave.ErrSealedAuthentication},
+		"unprotect_private_over_bound": {func() error {
+			return p.Unprotect(context.Background(), over, canary(32))
 		}, enclave.ErrSealedAuthentication},
 	}
 	for name, c := range cases {
