@@ -24,6 +24,7 @@ commit=${TRUSTED_FIRMWARE_COMMIT:-}
 cache=${TRUSTED_FIRMWARE_CACHE:-}
 [ -n "$cache" ] || cache=${HOME:?HOME is unset}/.cache/go-enclave/trusted-firmware
 endpoint=${GO_ENCLAVE_OPTEE_ENDPOINT-}
+seal=${GO_ENCLAVE_OPTEE_SEAL-}
 
 [ "$#" -eq 1 ] || die "usage: $prog check|harness"
 case $1 in
@@ -71,6 +72,12 @@ fi
 case $endpoint in
   *[!A-Za-z0-9/._-]*) die "GO_ENCLAVE_OPTEE_ENDPOINT '$endpoint' is not a device path" ;;
 esac
+# An empty knob lets the KeyProtector test skip a TA without SEAL;
+# "required" makes it fail.
+case $seal in
+  '' | required) ;;
+  *) die "GO_ENCLAVE_OPTEE_SEAL '$seal' is not empty or 'required'" ;;
+esac
 share=$(mktemp -d "${TMPDIR:-/tmp}/go-enclave-optee.XXXXXX")
 trap 'rm -rf "$share"' EXIT
 case $share in
@@ -92,5 +99,5 @@ out=${ARM_TRUSTZONE_BIN:-}
 cp "$out" "$share/$bin"
 rc=0
 tfmake optee-run OPTEE_SHARE="$share" \
-  OPTEE_GUEST_CMD="GO_ENCLAVE_OPTEE_ENDPOINT=$endpoint ./$bin -test.v -test.run='^(TestBackendConformance|TestKeyProtectorConformance)_OnOPTEE'" || rc=$?
+  OPTEE_GUEST_CMD="GO_ENCLAVE_OPTEE_ENDPOINT=$endpoint GO_ENCLAVE_OPTEE_SEAL=$seal ./$bin -test.v -test.run='^(TestBackendConformance|TestKeyProtectorConformance)_OnOPTEE'" || rc=$?
 exit "$rc"

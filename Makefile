@@ -455,6 +455,7 @@ integration-test-userns:
 ## TRUSTED_FIRMWARE_COMMIT=<sha>: optee-fixture-check, integration-test-arm-trustzone: the commit the tag peels to (pinned); a checkout at any other commit is refused
 ## TRUSTED_FIRMWARE_CACHE=<dir>: optee-fixture-check, integration-test-arm-trustzone: where the checkout lives, one directory per tag (default ~/.cache/go-enclave/trusted-firmware)
 ## GO_ENCLAVE_OPTEE_ENDPOINT=<endpoint>: integration-test-arm-trustzone: the TEE client device in the fixture's guest (default /dev/tee0)
+## GO_ENCLAVE_OPTEE_SEAL=required: integration-test-arm-trustzone: fail, rather than skip, the KeyProtector test when the trusted application has no SEAL (default empty)
 ## TRUSTED_FIRMWARE_URL=<url>: optee-fixture-check, integration-test-arm-trustzone: the forge's trusted-firmware clone URL; empty refuses (the pinned commit, not the URL, is what is trusted)
 # The tag and commit come from scripts/tool-pins.sh; a command-line value
 # overrides them and is raw-bound like the other caller-supplied values. No
@@ -462,7 +463,8 @@ integration-test-userns:
 TRUSTED_FIRMWARE_URL      ?=
 TRUSTED_FIRMWARE_CACHE    ?=
 GO_ENCLAVE_OPTEE_ENDPOINT ?= /dev/tee0
-$(call raw_bind,TRUSTED_FIRMWARE_URL TRUSTED_FIRMWARE_TAG TRUSTED_FIRMWARE_COMMIT TRUSTED_FIRMWARE_CACHE GO_ENCLAVE_OPTEE_ENDPOINT)
+GO_ENCLAVE_OPTEE_SEAL     ?=
+$(call raw_bind,TRUSTED_FIRMWARE_URL TRUSTED_FIRMWARE_TAG TRUSTED_FIRMWARE_COMMIT TRUSTED_FIRMWARE_CACHE GO_ENCLAVE_OPTEE_ENDPOINT GO_ENCLAVE_OPTEE_SEAL)
 
 ## optee-fixture-check: boot the pinned trusted-firmware OP-TEE fixture and run its xtest and TA check (no go-enclave code; host packages, several GB)
 # scripts/optee-fixture.sh clones the tag outside the tree, refuses a checkout

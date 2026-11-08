@@ -20,10 +20,10 @@ const fakeEndpoint = "/dev/fake-tee0"
 // Result codes the fake trusted application answers with, beside the ones
 // the package declares.
 const (
-	fakeErrGeneric       = 0xffff0000 // TEE_ERROR_GENERIC
-	fakeErrBadParameters = 0xffff0006 // TEE_ERROR_BAD_PARAMETERS
-	fakeErrNotSupported  = 0xffff000a // TEE_ERROR_NOT_SUPPORTED
-	fakeErrItemNotFound  = 0xffff0008 // TEE_ERROR_ITEM_NOT_FOUND
+	fakeErrGeneric       uint32 = 0xffff0000 // TEE_ERROR_GENERIC
+	fakeErrBadParameters uint32 = 0xffff0006 // TEE_ERROR_BAD_PARAMETERS
+	fakeErrNotSupported  uint32 = 0xffff000a // TEE_ERROR_NOT_SUPPORTED
+	fakeErrItemNotFound  uint32 = 0xffff0008 // TEE_ERROR_ITEM_NOT_FOUND
 )
 
 // fakeTEE is a teeDriver that stands in for the Linux TEE driver and, behind

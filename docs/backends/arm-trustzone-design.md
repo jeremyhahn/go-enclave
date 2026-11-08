@@ -65,8 +65,8 @@ SEAL and UNSEAL return `TEE_ERROR_SHORT_BUFFER` (`0xFFFF0010`) with the size
 they needed in param 2's size; UNSEAL returns `TEE_ERROR_MAC_INVALID`
 (`0xFFFF3071`) for a tampered blob. The backend calls them through its
 [`KeyProtector`](#keyprotector); the TA side is trusted-firmware's, and a
-pinned TA that predates it answers SEAL with `TEE_ERROR_NOT_SUPPORTED` or
-`TEE_ERROR_BAD_PARAMETERS`.
+pinned TA that predates it answers SEAL as it answers any command it does not
+define.
 
 A `Random(ctx, n)` with `n` above 4096 is served in chunks of at most 4096
 bytes, each written straight into the handle; `n` of 0 is refused before the
@@ -108,6 +108,21 @@ errors (§6); concurrent calls are serialized by the session lock (§7); and
 `Health` returns nil without blocking (§8).
 `TestKeyProtectorConformance_OnOPTEE` runs `providertest.TestProvider`
 against it on the fixture.
+
+The sealing transport is also tested without the fixture. The client reaches
+the kernel through a small driver seam (open, ioctl, shared-memory register,
+mmap, munmap, close), and an ordinary `go test` replaces it with a fake TEE
+driver whose TA seals with AES-GCM. The fake runs the provider suite, the
+param wiring of SEAL and UNSEAL, the short-buffer retry, tampered blobs and
+cancels. It runs each of these with registered memory and with driver shared
+memory, and fails if any shared memory or session outlives the call. On the
+fixture, GET_INFO cannot decide whether the TA has SEAL: trusted-firmware's TA
+reports interface version 1 and flags 0 with SEAL and without it. The test
+skips only when SEAL answers `TEE_ERROR_NOT_SUPPORTED`, or answers
+`TEE_ERROR_BAD_PARAMETERS` and a command no TA defines gets the same answer.
+`GO_ENCLAVE_OPTEE_SEAL=required`, passed through
+`integration-test-arm-trustzone`, turns that skip into a failure; CI leaves it
+unset.
 
 ## Data flow
 
