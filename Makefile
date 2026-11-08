@@ -489,6 +489,23 @@ integration-test-arm-trustzone: docker-build
 	@sh scripts/devcontainer.sh run 'mkdir -p $(dir $(ARM_TRUSTZONE_BIN)) && cd $(ARM_TRUSTZONE_MODULE) && GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go test -c -tags=optee -o "$$OLDPWD/$(ARM_TRUSTZONE_BIN)" .'
 	@ARM_TRUSTZONE_BIN=$(ARM_TRUSTZONE_BIN) OPTEE_TEST_BIN=$(notdir $(ARM_TRUSTZONE_BIN)) sh scripts/optee-fixture.sh harness
 
+## SWTPM_PORT=<port>: integration-test-tpm: the swtpm command port on 127.0.0.1 (default 2321)
+## SWTPM_CTRL_PORT=<port>: integration-test-tpm: the swtpm control port on 127.0.0.1 (default 2322)
+SWTPM_PORT      ?= 2321
+SWTPM_CTRL_PORT ?= 2322
+$(call raw_bind,SWTPM_PORT SWTPM_CTRL_PORT)
+
+## integration-test-tpm: providertest against the TPM provider on a throwaway swtpm: backends/tpm's swtpm-tagged conformance and blob-length tests, under -race, on the host (swtpm and swtpm-tools installed)
+# scripts/swtpm-fixture.sh starts swtpm on loopback TCP with its state in a
+# temporary directory, runs the tests with the host's Go against
+# GO_ENCLAVE_SWTPM=tcp:127.0.0.1:$(SWTPM_PORT), and stops swtpm and removes
+# its state on every exit. Not in the toolchain image: its container has no
+# network that reaches the host's loopback, and the image carries no swtpm.
+# Without swtpm on PATH the target fails, never skips.
+.PHONY: integration-test-tpm
+integration-test-tpm:
+	@sh scripts/swtpm-fixture.sh
+
 ## integration-test-fips: every integration suite under FIPS 140-3 strict mode, in the devcontainer
 .PHONY: integration-test-fips
 integration-test-fips: $(IT_FIPS_TARGETS)
