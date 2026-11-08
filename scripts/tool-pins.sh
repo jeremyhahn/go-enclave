@@ -50,7 +50,7 @@ SHELLCHECK_BIN_SHA256_LINUX_ARM64=127f13925eadd52c341bca0ebaf9ab0dbd78c6468f30a8
 # followed. Raise the tag and its commit together, by an ordinary PR. The clone
 # URL is the forge's and caller-supplied (TRUSTED_FIRMWARE_URL, Makefile).
 TRUSTED_FIRMWARE_TAG=v0.4.2-alpha
-TRUSTED_FIRMWARE_COMMIT=48d7c9f4817aaef1cbdbc034ffc2d2110cf16687
+TRUSTED_FIRMWARE_COMMIT=e0ae83d062b45dccc0e4cf08c87bf6def80a946c
 # The OP-TEE QEMU fixture image the CI optee job runs the arm-trustzone harness
 # in (ruling 274(9)): an agent-ci-image Infra builds, publishes and keeps,
 # holding the stack prebuilt at TRUSTED_FIRMWARE_COMMIT. Pinned by digest

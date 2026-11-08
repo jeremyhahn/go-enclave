@@ -34,7 +34,7 @@ The row fixes the seam `backendtest` assumes ([SPEC](../SPEC.md)):
 | go-enclave, root module | the backend seam and the detection that finds a backend | [backends/](architecture.md) |
 | go-enclave | `backendtest` and the arm-trustzone harness, including `make integration-test-arm-trustzone` | [The arm-trustzone harness](../backend-conformance/engineering.md#the-arm-trustzone-harness) |
 | go-enclave, the nested module `backends/armtrustzone` | the backend itself: the Go side of the TEE Client API, `Connect`, `Random` and its conformance test | [Decision 1](#decision-1-where-the-backend-lives-ruled-a) |
-| trusted-firmware, tag `v0.4.2-alpha` (48d7c9f48) | the secure world (TF-A at EL3, OP-TEE OS 4.11.0 at S-EL1), the TA at S-EL0, the fixture `make optee-run` | trusted-firmware row `optee-trustzone`, trusted-firmware#253 |
+| trusted-firmware, tag `v0.4.2-alpha` (e0ae83d06) | the secure world (TF-A at EL3, OP-TEE OS 4.11.0 at S-EL1), the TA at S-EL0, the fixture `make optee-run` | trusted-firmware row `optee-trustzone`, trusted-firmware#253 |
 
 The root module stays interface-only (#187): a backend depends on go-enclave,
 never the reverse, and the root module keeps its one dependency,

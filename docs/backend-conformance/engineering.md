@@ -261,7 +261,7 @@ binary.
   cannot register anything in the test binary's registry.
 - **Pin.** `scripts/tool-pins.sh` pins `TRUSTED_FIRMWARE_TAG=v0.4.2-alpha`
   and `TRUSTED_FIRMWARE_COMMIT`, the commit the annotated tag peels to
-  (`48d7c9f4817a…`). The clone URL is the forge's, so the caller supplies it
+  (`e0ae83d062b4…`). The clone URL is the forge's, so the caller supplies it
   as `TRUSTED_FIRMWARE_URL` (empty refuses); the commit, not the URL, is what
   is trusted. The script clones the tag into `TRUSTED_FIRMWARE_CACHE/<tag>` (default
   `~/.cache/go-enclave/trusted-firmware`, outside the tree, one directory per
