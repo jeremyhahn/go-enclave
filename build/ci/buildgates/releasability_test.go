@@ -363,6 +363,25 @@ func TestReleasability_PlantedValuesAreCaught(t *testing.T) {
 
 // TestReleasability_DocumentationValuesPass pins that the documentation values
 // the gate recommends do not fire.
+func TestLeakFindingStringOmitsMatch(t *testing.T) {
+	const secret = "fake-secret-7f3a9c1e"
+	f := leakFinding{
+		path:     "dir/f.md",
+		line:     7,
+		class:    classInternalFile,
+		match:    secret,
+		guidance: "remove it",
+	}
+	want := fmt.Sprintf("dir/f.md:7: [%s] -- remove it", classInternalFile)
+	got := f.String()
+	if got != want {
+		t.Errorf("String() = %q, want %q", got, want)
+	}
+	if strings.Contains(got, secret) {
+		t.Errorf("String() renders the matched text: %q", got)
+	}
+}
+
 func TestReleasability_DocumentationValuesPass(t *testing.T) {
 	rules := siteRules(t)
 	clean := []string{
