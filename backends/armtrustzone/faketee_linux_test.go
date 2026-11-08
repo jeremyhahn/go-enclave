@@ -5,6 +5,7 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
+	"crypto/sha256"
 	"fmt"
 	"sync"
 	"testing"
@@ -41,8 +42,8 @@ type fakeTEE struct {
 	aead   cipher.AEAD
 
 	mu         sync.Mutex
-	devs       map[int]bool    // open device fds
-	sessions   map[uint32]int  // session → its device fd
+	devs       map[int]bool   // open device fds
+	sessions   map[uint32]int // session → its device fd
 	shms       map[int32]*fakeShm
 	nextFD     int
 	nextID     int32
@@ -77,12 +78,14 @@ type fakeInvoke struct {
 }
 
 // fakeParam is one parameter as the TA saw it. For a memref, window is its
-// bytes in shared memory and in, for an input, a copy of them on entry.
+// bytes in shared memory and in, for an input, their SHA-256 on entry: a
+// digest, so the record holds no copy of a key for providertest's residue
+// sweep to find.
 type fakeParam struct {
 	attr       uint64
 	id         int32
 	off, size  uint64
-	in         []byte
+	in         [sha256.Size]byte
 	window     []byte
 	registered bool
 }
@@ -368,7 +371,7 @@ func (f *fakeTEE) invoke(fd int, b *teeInvokeBuf) (<-chan struct{}, error) {
 		mems[i] = w
 		rec.params[i] = fakeParam{attr: p.Attr, id: id, off: p.A, size: p.B, window: w, registered: s.registered}
 		if p.Attr == teeParamAttrTypeMemrefInput {
-			rec.params[i].in = bytes.Clone(w)
+			rec.params[i].in = sha256.Sum256(w)
 		}
 	}
 	f.invokes = append(f.invokes, rec)

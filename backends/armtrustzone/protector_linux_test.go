@@ -3,6 +3,7 @@ package armtrustzone
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"testing"
@@ -64,6 +65,9 @@ func testKey(n int) []byte {
 	return key
 }
 
+// holds reports whether the input memref p carried b.
+func holds(p fakeParam, b []byte) bool { return p.in == sha256.Sum256(b) }
+
 func wantMemref(t *testing.T, name string, got fakeParam, attr uint64, off, size int) {
 	t.Helper()
 	if got.attr != attr || got.off != uint64(off) || got.size != uint64(size) {
@@ -115,8 +119,8 @@ func TestSealTransportWiring(t *testing.T) {
 		if s[1].id != s[0].id || s[2].id != s[0].id {
 			t.Errorf("SEAL's memrefs name shared memory %d, %d and %d; want one", s[0].id, s[1].id, s[2].id)
 		}
-		if !bytes.Equal(s[0].in, key) || !bytes.Equal(s[1].in, ad) {
-			t.Errorf("SEAL's inputs are %x and %q; want the key and the label", s[0].in, s[1].in)
+		if !holds(s[0], key) || !holds(s[1], ad) {
+			t.Error("SEAL's inputs are not the key and the label")
 		}
 
 		dst := make([]byte, len(key))
@@ -130,8 +134,8 @@ func TestSealTransportWiring(t *testing.T) {
 		u := unseals[0].params
 		wantMemref(t, "UNSEAL param 0", u[0], teeParamAttrTypeMemrefInput, 0, len(blob))
 		wantMemref(t, "UNSEAL param 1", u[1], teeParamAttrTypeMemrefInput, len(blob), len(ad))
-		if !bytes.Equal(u[0].in, blob) || !bytes.Equal(u[1].in, ad) {
-			t.Errorf("UNSEAL's inputs are %x and %q; want the blob and the label", u[0].in, u[1].in)
+		if !holds(u[0], blob) || !holds(u[1], ad) {
+			t.Error("UNSEAL's inputs are not the blob and the label")
 		}
 		if u[1].id != u[0].id {
 			t.Errorf("UNSEAL's inputs name shared memory %d and %d; want one", u[0].id, u[1].id)
@@ -272,7 +276,7 @@ func TestSealShortBufferRetry(t *testing.T) {
 	}
 	wantMemref(t, "the first SEAL's output", seals[0].params[2], teeParamAttrTypeMemrefOutput, outOff, len(key)+sealOverhead)
 	wantMemref(t, "the retried SEAL's output", seals[1].params[2], teeParamAttrTypeMemrefOutput, outOff, asked)
-	if !bytes.Equal(seals[1].params[0].in, key) || !bytes.Equal(seals[1].params[1].in, ad) {
+	if !holds(seals[1].params[0], key) || !holds(seals[1].params[1], ad) {
 		t.Error("the retried SEAL did not carry the key and the label")
 	}
 	dst := make([]byte, len(key))
