@@ -72,12 +72,16 @@ fi
 case $endpoint in
   *[!A-Za-z0-9/._-]*) die "GO_ENCLAVE_OPTEE_ENDPOINT '$endpoint' is not a device path" ;;
 esac
-# An empty knob lets the KeyProtector test skip a TA without SEAL;
-# "required" makes it fail.
+# The pinned trusted-firmware release's TA has no SEAL: an empty knob
+# declares so, as absent:<tag>, which lets the KeyProtector test skip on a
+# missing SEAL only while <tag> is the release the test knows lacks it.
+# "required" makes a missing SEAL fail.
 case $seal in
-  '' | required) ;;
+  '') seal="absent:$tag" ;;
+  required) ;;
   *) die "GO_ENCLAVE_OPTEE_SEAL '$seal' is not empty or 'required'" ;;
 esac
+echo "GO_ENCLAVE_OPTEE_SEAL=$seal"
 share=$(mktemp -d "${TMPDIR:-/tmp}/go-enclave-optee.XXXXXX")
 trap 'rm -rf "$share"' EXIT
 case $share in

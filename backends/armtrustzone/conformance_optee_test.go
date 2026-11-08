@@ -62,10 +62,10 @@ func TestBackendConformance_OnOPTEE(t *testing.T) {
 }
 
 // TestKeyProtectorConformance_OnOPTEE runs the provider suite against the
-// backend's KeyProtector, on the same fixture. A trusted application that
-// has no SEAL (see sealDecision) predates trusted-firmware's SEAL, and the
-// test is skipped, or fails when GO_ENCLAVE_OPTEE_SEAL is "required"; any
-// other failure fails it.
+// backend's KeyProtector, on the same fixture. A SEAL error skips the test
+// only when the fixture declares, in GO_ENCLAVE_OPTEE_SEAL, that its pinned
+// trusted-firmware release has no SEAL (see sealDecision); any other failure
+// fails it.
 func TestKeyProtectorConformance_OnOPTEE(t *testing.T) {
 	endpoint := os.Getenv(opteeEndpointVar)
 	if endpoint == "" {
@@ -95,7 +95,7 @@ func TestKeyProtectorConformance_OnOPTEE(t *testing.T) {
 	}
 	t.Logf("GET_INFO: interface version %d, flags %#x; neither says whether SEAL is present", version, flags)
 	_, err = p.Protect(ctx, make([]byte, 32))
-	switch verdict, why := sealDecision(ctx, p.b.c, knob, err); verdict {
+	switch verdict, why := sealDecision(knob, err); verdict {
 	case sealSkip:
 		t.Skip(why)
 	case sealFail:
