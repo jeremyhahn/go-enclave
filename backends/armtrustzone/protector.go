@@ -113,7 +113,7 @@ func sealNext(err error, size int, got uint64, retried bool) (int, error) {
 	var ce *CommandError
 	if errors.As(err, &ce) && ce.Code == teecErrorShortBuffer && !retried &&
 		got > uint64(size) && got <= sealMaxBlob { //nolint:gosec // size is a buffer length, never negative
-		return int(got), nil //nolint:gosec // got is at most sealMaxBlob
+		return int(got), nil
 	}
 	return 0, err
 }

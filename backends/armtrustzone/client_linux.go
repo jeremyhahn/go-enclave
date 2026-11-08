@@ -258,7 +258,7 @@ func (c *client) unseal(ctx context.Context, blob, ad, dst []byte) error {
 		}
 		err := c.invoke(ctx, taCmdUnseal, &params)
 		got = params[2].B
-		if err == nil && !direct && got == uint64(len(dst)) { //nolint:gosec // len(dst) is never negative
+		if err == nil && !direct && got == uint64(len(dst)) {
 			copy(dst, shm[outOff:])
 		}
 		return err
