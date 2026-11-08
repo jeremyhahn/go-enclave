@@ -6,6 +6,6 @@ module github.com/jeremyhahn/go-enclave/backends/armtrustzone
 go 1.27.3
 
 require (
-	github.com/jeremyhahn/go-enclave v0.11.0-alpha
+	github.com/jeremyhahn/go-enclave v0.11.1-alpha
 	golang.org/x/sys v0.49.0
 )

@@ -264,7 +264,7 @@ checks, what it returns and how its own tests run are in
 ## arm-trustzone
 
 The nested module `backends/armtrustzone` requires the released root
-(`v0.11.0-alpha`) and `golang.org/x/sys`, with no `replace` or `go.work`; the
+(`v0.11.1-alpha`) and `golang.org/x/sys`, with no `replace` or `go.work`; the
 root module never requires it ([design](arm-trustzone-design.md), decision 1).
 
 | Identifier | Contract |
