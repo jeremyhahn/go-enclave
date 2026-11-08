@@ -1,4 +1,4 @@
-github.com/jeremyhahn/go-enclave v0.11.0-alpha h1:+GKdyD+J+HBMLHta8Eef/s/ZZOKh+UYZmTL+Qg5wapA=
-github.com/jeremyhahn/go-enclave v0.11.0-alpha/go.mod h1:VtR8yhyPZPlHwYLx/ge2w07WwmlrLe8AUDDv3XemlKI=
+github.com/jeremyhahn/go-enclave v0.11.1-alpha h1:aNy/4La944+KwTfZELIa8bHKDxpbcAE2ZXDKqfeVUvY=
+github.com/jeremyhahn/go-enclave v0.11.1-alpha/go.mod h1:VtR8yhyPZPlHwYLx/ge2w07WwmlrLe8AUDDv3XemlKI=
 golang.org/x/sys v0.49.0 h1:XbzkgYJHdqh/8m2Uu0W/dQv8nktxx4BFHp1M0gROTXA=
 golang.org/x/sys v0.49.0/go.mod h1:hNLxWAXmnKAxqDtdwIYC4bM9oQPEecfsnNMuSxOs3og=
