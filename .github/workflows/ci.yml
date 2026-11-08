@@ -1441,6 +1441,14 @@ jobs:
             case $val in *://*:*@*) t=${val#*://}; t=${t%%@*}; echo "::add-mask::${t#*:}" ;; esac
           done
 
+      # A GitHub-hosted runner has about 14 GB free; the image build needs more,
+      # and the fixture image comes on top of it.
+      - name: Free disk for the image build
+        if: steps.select.outputs.run == 'true'
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
       # Fails closed: until Infra publishes the image, the pin is empty and
       # this job fails here, never skips.
       - name: Require the fixture image pin
