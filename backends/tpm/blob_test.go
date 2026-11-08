@@ -11,7 +11,7 @@ import (
 	enclave "github.com/jeremyhahn/go-enclave"
 )
 
-// sealedPublicBytes is the marshalled TPMT_PUBLIC the TPM returns for a
+// sealedPublicBytes is the marshaled TPMT_PUBLIC the TPM returns for a
 // sealed object: 46 bytes, with a 32-byte unique.
 const sealedPublicBytes = 46
 

@@ -259,12 +259,12 @@ func TestProtector_CancelMidCommand(t *testing.T) {
 				}
 				a.check(t)
 				if !bytes.Equal(key, canary(32)) {
-					t.Fatal("a cancelled Unprotect wrote key")
+					t.Fatal("a canceled Unprotect wrote key")
 				}
 				after := d.commands()[start+i:]
 				for _, c := range after {
 					if !strings.HasPrefix(c, "TPM2_FlushContext") {
-						t.Fatalf("%s reached the device after the cancelled command; sent %v", c, after)
+						t.Fatalf("%s reached the device after the canceled command; sent %v", c, after)
 					}
 				}
 				if len(d.loaded) != 0 {
