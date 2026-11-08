@@ -152,6 +152,10 @@ points carry the [backend seam](../backends/architecture.md) into sealing:
   enclave that is destroyed once the import returns, so plaintext still never
   lands on the heap.
 
+The TPM and secure-element `KeyProtector` providers, which keep the protect
+key in a device and live in nested modules of their own, are designed in
+[Hardware KeyProtector providers](hardware-providers.md).
+
 ## Data flow
 
 Where each byte goes, in the default `ModeRootKey`:
