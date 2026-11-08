@@ -146,8 +146,10 @@ PKGDIR_memscan      := ./internal/memscan
 # BACKEND MODULES: hardware backends, each its own module at backends/<name>
 # requiring a released root (#206), so the root never depends on them. lint-go,
 # tidy-check, govulncheck, test and cross-build run in each, as for
-# build/ci/buildgates; coverage does not (their device paths need the device).
-BACKEND_MODULES := backends/armtrustzone
+# build/ci/buildgates. coverage runs their unit tests too, with -race, after
+# the root packages; the floor measures the root packages only (their device
+# paths need the device).
+BACKEND_MODULES := backends/armtrustzone backends/tpm
 
 # FEATURE MAPPING (local-software-factory §7). A feature is a directory
 # docs/<feature>/, mapped in scripts/features.map to its package, its
@@ -354,9 +356,9 @@ $(COVERAGE_TARGETS): coverage-%: coverage-profile-%
 $(BENCH_TARGETS): bench-%:
 	"$$GOCMD" test -run '^$$' -bench . -benchmem $(PKGDIR_$*)
 
-## coverage: unit tests with coverage; FAILS below COVERAGE_THRESHOLD, in total AND per package
+## coverage: unit tests with coverage; FAILS below COVERAGE_THRESHOLD, in total AND per package; then test-backends
 .PHONY: coverage
-coverage: $(COVERAGE_TARGETS)
+coverage: $(COVERAGE_TARGETS) test-backends
 
 .PHONY: coverage-threshold
 coverage-threshold:
@@ -490,6 +492,23 @@ integration-test-arm-trustzone: docker-build
 	@[ -n "$$TRUSTED_FIRMWARE_TAG" ] || { echo "integration-test-arm-trustzone: TRUSTED_FIRMWARE_TAG is empty; set it to the trusted-firmware release whose make optee-run is the fixture (scripts/tool-pins.sh pins it)" >&2; exit 2; }
 	@sh scripts/devcontainer.sh run 'mkdir -p $(dir $(ARM_TRUSTZONE_BIN)) && cd $(ARM_TRUSTZONE_MODULE) && GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go test -c -tags=optee -o "$$OLDPWD/$(ARM_TRUSTZONE_BIN)" .'
 	@ARM_TRUSTZONE_BIN=$(ARM_TRUSTZONE_BIN) OPTEE_TEST_BIN=$(notdir $(ARM_TRUSTZONE_BIN)) sh scripts/optee-fixture.sh harness
+
+## SWTPM_PORT=<port>: integration-test-tpm: the swtpm command port on 127.0.0.1 (default 2321)
+## SWTPM_CTRL_PORT=<port>: integration-test-tpm: the swtpm control port on 127.0.0.1 (default 2322)
+SWTPM_PORT      ?= 2321
+SWTPM_CTRL_PORT ?= 2322
+$(call raw_bind,SWTPM_PORT SWTPM_CTRL_PORT)
+
+## integration-test-tpm: providertest against the TPM provider on a throwaway swtpm: backends/tpm's swtpm-tagged conformance and blob-length tests, under -race, on the host (swtpm and swtpm-tools installed)
+# scripts/swtpm-fixture.sh starts swtpm on loopback TCP with its state in a
+# temporary directory, runs the tests with the host's Go against
+# GO_ENCLAVE_SWTPM=tcp:127.0.0.1:$(SWTPM_PORT), and stops swtpm and removes
+# its state on every exit. Not in the toolchain image: its container has no
+# network that reaches the host's loopback, and the image carries no swtpm.
+# Without swtpm on PATH the target fails, never skips.
+.PHONY: integration-test-tpm
+integration-test-tpm:
+	@sh scripts/swtpm-fixture.sh
 
 ## integration-test-fips: every integration suite under FIPS 140-3 strict mode, in the devcontainer
 .PHONY: integration-test-fips

@@ -580,6 +580,13 @@ process-lifetime `Sealer` (an AST guard test keeps it that way).
   failure is an `*OpenError` carrying it.
 - Provider behavior is checked by [provider-conformance](../provider-conformance/engineering.md),
   which `SoftwareProvider` passes in this repository's own tests.
+- The TPM provider (`backends/tpm`) runs the same conformance suite, with its
+  residue sweep, and checks its sealed blob's length against a software TPM:
+  with `swtpm` and `swtpm-tools` installed, `make integration-test-tpm` starts
+  a throwaway swtpm on 127.0.0.1 (`SWTPM_PORT`, default 2321, and
+  `SWTPM_CTRL_PORT`, default 2322), runs the module's swtpm-tagged tests under
+  `-race` against it, and stops it on exit. Without `swtpm` on `PATH` the
+  target fails; it does not skip. CI runs it on the full tier.
 - `make test-fips` runs the suite in FIPS strict mode (`GOFIPS140=latest`; see [FIPS 140-3](#fips-140-3)).
 
 ## Observability

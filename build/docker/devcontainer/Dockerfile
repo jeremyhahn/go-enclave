@@ -221,6 +221,15 @@ RUN set -eu; \
     GONOSUMDB=github.com/jeremyhahn/go-enclave go mod verify; \
     chmod -R a+rX /gomodcache; \
     find /gomodcache/cache -type d -exec chmod a+w {} +
+# The TPM backend downloads all: go mod tidy there loads go-tpm's simulator
+# test dependency, which the bare download leaves out of the cache.
+WORKDIR /build/backends/tpm
+COPY backends/tpm/go.mod backends/tpm/go.sum ./
+RUN set -eu; \
+    n=0; until GOPROXY="$GO_BUILD_PROXY" GONOSUMDB=github.com/jeremyhahn/go-enclave go mod download all; do n=$((n + 1)); [ "$n" -lt 3 ] || exit 1; sleep $((n * 10)); done; \
+    GONOSUMDB=github.com/jeremyhahn/go-enclave go mod verify; \
+    chmod -R a+rX /gomodcache; \
+    find /gomodcache/cache -type d -exec chmod a+w {} +
 
 WORKDIR /src
 RUN rm -rf /build
