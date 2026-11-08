@@ -107,6 +107,29 @@ call its `Connect` after `Lookup`. A failure is the module's typed error:
 `*ShortRandomError` (the TA failed or returned too few bytes), `*SizeError`
 (`Random` of fewer than 1 byte) and `ErrBackendClosed`.
 
+### Seal keys with the TA
+
+`(*Backend).KeyProtector()` is an `enclave.KeyProtector` whose key never
+leaves the trusted application: `Protect` seals with the TA's SEAL command and
+`Unprotect` opens with UNSEAL. Give it to a sealer:
+
+```go
+b, err := armtrustzone.Connect("/dev/tee0")
+if err != nil {
+	return err
+}
+defer b.Close() // the sealer's calls fail with ErrBackendClosed after this
+s, err := enclave.NewSealer(enclave.WithKeyProtector(b.KeyProtector())) // ModePerOperation
+if err != nil {
+	return err
+}
+```
+
+A blob opens only on the device and TA that sealed it. The trusted-firmware
+release this module pins does not have SEAL and UNSEAL yet; against it,
+`Connect` and `Random` work but the first seal fails with a `*CommandError`
+for command `0x3`.
+
 ## Troubleshooting
 
 | Error | Cause and fix |
@@ -115,6 +138,8 @@ call its `Connect` after `Lookup`. A failure is the module's typed error:
 | `*BackendExistsError` | The name is taken. Register each backend once, in `main`; `"locked-memory"` is always taken. |
 | `*BackendNotRegisteredError` | `Lookup` of a name nobody registered: the configuration names a backend `main` did not register. |
 | `*CapabilityError` | The handle or backend lacks what the operation needs, such as byte access to a secure element's key. Choose a backend that provides it; nothing falls back silently. |
+| `*armtrustzone.CommandError` with `Command` `0x3` (code `0xffff000a` or `0xffff0006`) from a seal | The trusted application has no SEAL command. Install a trusted-firmware `go-enclave` TA that has SEAL and UNSEAL. |
+| `enclave.ErrSealedAuthentication` from an open through the arm-trustzone `KeyProtector` | The blob was sealed by another device or TA, or was altered. It cannot be opened here; re-seal from source on this device. |
 
 ## Upgrading
 

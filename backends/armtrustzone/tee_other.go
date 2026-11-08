@@ -23,4 +23,12 @@ func (*client) fillRandom(context.Context, []byte, []chunk) error {
 	return &PlatformError{GOOS: runtime.GOOS}
 }
 
+func (*client) seal(context.Context, []byte, []byte) ([]byte, error) {
+	return nil, &PlatformError{GOOS: runtime.GOOS}
+}
+
+func (*client) unseal(context.Context, []byte, []byte, []byte) error {
+	return &PlatformError{GOOS: runtime.GOOS}
+}
+
 func (*client) close() error { return &PlatformError{GOOS: runtime.GOOS} }

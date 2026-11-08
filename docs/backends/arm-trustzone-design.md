@@ -55,16 +55,81 @@ As trusted-firmware's tag fixes it in `optee/ta/include/tfw_ta.h`:
 | UUID | `23751b49-3a76-4e49-b63c-e5853742fa1f` (RFC 9562, version 4) | – |
 | `TFW_TA_CMD_GET_INFO` | `0x00000001` | param 0 `VALUE_OUTPUT`: `a` the interface version, `b` the flags |
 | `TFW_TA_CMD_GET_RANDOM` | `0x00000002` | param 0 `MEMREF_OUTPUT`: 1 to 4096 bytes |
+| `TFW_TA_CMD_SEAL` | `0x00000003` | param 0 `MEMREF_INPUT`: plaintext; param 1 `MEMREF_INPUT`: associated data, may be empty; param 2 `MEMREF_OUTPUT`: the sealed blob |
+| `TFW_TA_CMD_UNSEAL` | `0x00000004` | param 0 `MEMREF_INPUT`: the sealed blob; param 1 `MEMREF_INPUT`: associated data; param 2 `MEMREF_OUTPUT`: the plaintext |
 | `TFW_TA_INTERFACE_VERSION` | `1` | – |
 | `TFW_TA_INFO_FLAGS` | `0` | – |
 | `TFW_TA_RANDOM_MIN` / `_MAX` | `1` / `4096` | – |
 
-Commands `0x3` (SEAL) and `0x4` (UNSEAL) are held (trusted-firmware#250);
-this backend does not call them.
+SEAL and UNSEAL return `TEE_ERROR_SHORT_BUFFER` (`0xFFFF0010`) with the size
+they needed in param 2's size; UNSEAL returns `TEE_ERROR_MAC_INVALID`
+(`0xFFFF3071`) for a tampered blob. The backend calls them through its
+[`KeyProtector`](#keyprotector); the TA side is trusted-firmware's, and a
+pinned TA that predates it answers SEAL as it answers any command it does not
+define.
 
 A `Random(ctx, n)` with `n` above 4096 is served in chunks of at most 4096
 bytes, each written straight into the handle; `n` of 0 is refused before the
 TA is called.
+
+## KeyProtector
+
+`(*Backend).KeyProtector()` returns an `enclave.KeyProtector` and
+`enclave.HealthReporter` for `ModePerOperation`: `Protect` runs SEAL on the
+key and `Unprotect` runs UNSEAL on the blob. The key the blob is sealed under
+lives in the TA; the blob is a generic provider blob, opaque to go-enclave.
+
+- **Associated data.** Both commands carry the fixed ASCII label
+  `go-enclave v1 TrustZone KeyProtector`, so a blob the TA sealed for another
+  client never opens as a go-enclave key.
+- **SEAL's output.** The output buffer starts at `len(key) + 64` bytes. On
+  `TEE_ERROR_SHORT_BUFFER` it is retried once, at the size the TA reported,
+  and refused above 4096 bytes. Any other failure, or a reported size of zero
+  or above the buffer, is a `CommandError` (`ErrCommandFailed`).
+- **UNSEAL's output.** When the driver registers the key's pages, the TA
+  writes into the caller's `key` directly; otherwise the plaintext lands in
+  driver shared memory, is copied into `key`, and the shared memory is wiped.
+- **Error mapping.** On UNSEAL, `TEE_ERROR_MAC_INVALID`,
+  `TEE_ERROR_BAD_FORMAT` (`0xFFFF0005`), `TEE_ERROR_SHORT_BUFFER` and a
+  plaintext of a length other than `len(key)` all match
+  `enclave.ErrSealedAuthentication`, as do an empty blob, a blob above 4096
+  bytes and an empty `key`, which are refused before the TA is called. Any
+  other result, `TEE_ERROR_BAD_PARAMETERS` among them, is a `CommandError`;
+  driver failures are a `DeviceError`, and a closed backend is
+  `ErrBackendClosed`. `key` is zeroed on every failure.
+
+It meets the [provider contract](../sealing/engineering.md#provider-contract):
+UNSEAL authenticates every blob (§1); `Unprotect` writes exactly `len(key)`
+bytes into the caller's `key` (§2); `Protect` keeps no key, and its copy in
+driver shared memory is wiped (§3); the blob is copied, never kept or changed
+(§4); an ended context is refused before the TA is called, and one ending
+during the call cancels it (§5); infrastructure failures are the backend's own
+errors (§6); concurrent calls are serialized by the session lock (§7); and
+`Health` returns nil without blocking (§8).
+`TestKeyProtectorConformance_OnOPTEE` runs `providertest.TestProvider`
+against it on the fixture.
+
+The sealing transport is also tested without the fixture. The client reaches
+the kernel through a small driver seam (open, ioctl, shared-memory register,
+mmap, munmap, close), and an ordinary `go test` replaces it with a fake TEE
+driver whose TA seals with AES-GCM. The fake runs the provider suite, the
+param wiring of SEAL and UNSEAL, the short-buffer retry, tampered blobs and
+cancels. It runs each of these with registered memory and with driver shared
+memory, and fails if any shared memory or session outlives the call. On the
+fixture, GET_INFO cannot decide whether the TA has SEAL: trusted-firmware's TA
+reports interface version 1 and flags 0 with SEAL and without it, and no
+error code proves SEAL absent, since a TA with SEAL can answer
+`TEE_ERROR_BAD_PARAMETERS` to a broken SEAL call and to an unknown command
+alike. The fixture therefore declares it: `GO_ENCLAVE_OPTEE_SEAL` left empty,
+`scripts/optee-fixture.sh` passes `absent:<TRUSTED_FIRMWARE_TAG>`, and the test
+skips on SEAL's `TEE_ERROR_BAD_PARAMETERS` or `TEE_ERROR_NOT_SUPPORTED` only
+when that release is `opteeSealAbsentRelease`
+(`backends/armtrustzone/sealdecision_linux_test.go`), the pinned release known
+to lack SEAL; a new pin without SEAL raises both. With the knob empty in the
+test, or `required`, any SEAL error fails it; a SEAL that works runs the
+suite under every value. `GO_ENCLAVE_OPTEE_SEAL=required`, passed through
+`integration-test-arm-trustzone`, turns the fixture's skip into a failure; CI
+leaves it unset. The fake TEE runs this decision (`TestSealDecision`).
 
 ## Data flow
 
@@ -171,8 +236,8 @@ rule for builds, and local runs of the target need that image too.
 
 ## What this does not do
 
-- SEAL and UNSEAL (held, trusted-firmware#250), or any key kept in the secure
-  world.
+- A `RootUnsealer`: the `KeyProtector` serves `ModePerOperation` only, and no
+  key is kept in the secure world for go-enclave beyond the TA's sealing key.
 - Attestation.
 - `Confiner`.
 - Any hardware other than QEMU `virt`. Owner queue 41 allows no simulators or
