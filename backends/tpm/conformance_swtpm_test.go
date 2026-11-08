@@ -18,8 +18,8 @@ import (
 const swtpmVar = "GO_ENCLAVE_SWTPM"
 
 // sealedBlobBytes is the exact blob length for a 32-byte key: the version
-// byte, the 46-byte public area and the 108-byte private area, each behind
-// its 2-byte size field.
+// byte, the 46-byte public area and the 158-byte private area, each behind
+// its 2-byte size field: 209 bytes.
 const sealedBlobBytes = 1 + 2 + sealedPublicBytes + 2 + sealedPrivateBytes
 
 func openSWTPM(t *testing.T) *KeyProtector {

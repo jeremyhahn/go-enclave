@@ -121,8 +121,25 @@ integer is big-endian, as the TPM marshals it:
 
 The length prefixes are the TPM2B size fields themselves, so the blob is the
 version byte followed by the two structures exactly as the TPM marshals them.
-Nothing may follow the private area. For a 32-byte DEK the blob is about 160
-bytes; the code slice pins the exact length in a test.
+Nothing may follow the private area. For an n-byte DEK under the SHA-256,
+AES-128 parent the blob is 177 + n bytes, 209 for a 32-byte DEK, and the
+swtpm test pins it:
+
+| Field | Bytes |
+| --- | --- |
+| version | 1 |
+| `TPM2B_PUBLIC` size field | 2 |
+| `TPMT_PUBLIC`: type 2, nameAlg 2, objectAttributes 4, `authPolicy` 2+0, scheme 2, `unique` 2+32 | 46 |
+| `TPM2B_PRIVATE` size field | 2 |
+| integrity HMAC, a `TPM2B_DIGEST` of the parent's nameAlg | 2+32 |
+| outer wrap IV, a `TPM2B_IV` of the AES block | 2+16 |
+| `TPM2B_SENSITIVE` size field | 2 |
+| `TPMT_SENSITIVE`: sensitiveType 2, `authValue` 2+32, `seedValue` 2+32, `sensitive` 2+n | 72 + n |
+
+The private area is the reference TPM's (and libtpms'): its outer wrap
+carries the CFB IV in clear, and it pads an empty `authValue` with zeros to
+the nameAlg's digest size before it encrypts the sensitive area, so the
+area's size does not tell the authValue's.
 
 ### Associated data
 

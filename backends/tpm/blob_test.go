@@ -16,9 +16,11 @@ import (
 const sealedPublicBytes = 46
 
 // sealedPrivateBytes is the TPM2B_PRIVATE buffer of a 32-byte key under a
-// SHA-256, AES-128 parent: the integrity digest (2+32) and the encrypted
-// TPM2B_SENSITIVE (2 + type 2 + authValue 2 + seedValue 2+32 + data 2+32).
-const sealedPrivateBytes = 108
+// SHA-256, AES-128 parent, as the reference TPM (and libtpms) marshals it:
+// the integrity digest (2+32), the outer wrap's CFB IV (2+16), and the
+// encrypted TPM2B_SENSITIVE (2 + type 2 + authValue 2+32, padded to the
+// nameAlg digest + seedValue 2+32 + data 2+32).
+const sealedPrivateBytes = 158
 
 func testPublic(t *testing.T, mutate func(*tpm2.TPMTPublic)) []byte {
 	t.Helper()
