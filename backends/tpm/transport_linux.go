@@ -18,17 +18,8 @@ import (
 // openDevice opens the TPM device file, or a simulator's command socket
 // named "unix:<path>" or "tcp:<host:port>".
 func openDevice(path string, alloc allocator) (device, error) {
-	var rw io.ReadWriteCloser
-	var err error
-	var d net.Dialer
-	switch {
-	case strings.HasPrefix(path, "unix:"):
-		rw, err = d.DialContext(context.Background(), "unix", strings.TrimPrefix(path, "unix:"))
-	case strings.HasPrefix(path, "tcp:"):
-		rw, err = d.DialContext(context.Background(), "tcp", strings.TrimPrefix(path, "tcp:"))
-	default:
-		rw, err = openCharDevice(path)
-	}
+	dial := func(ctx context.Context) (io.ReadWriteCloser, error) { return dialDevice(ctx, path) }
+	rw, err := dial(context.Background())
 	if err != nil {
 		return nil, &DeviceError{Path: path, Op: "open", Err: err}
 	}
@@ -37,7 +28,19 @@ func openDevice(path string, alloc allocator) (device, error) {
 		_ = rw.Close()
 		return nil, err
 	}
+	t.dial = dial
 	return &tpmDevice{t: t}, nil
+}
+
+func dialDevice(ctx context.Context, path string) (io.ReadWriteCloser, error) {
+	var d net.Dialer
+	switch {
+	case strings.HasPrefix(path, "unix:"):
+		return d.DialContext(ctx, "unix", strings.TrimPrefix(path, "unix:"))
+	case strings.HasPrefix(path, "tcp:"):
+		return d.DialContext(ctx, "tcp", strings.TrimPrefix(path, "tcp:"))
+	}
+	return openCharDevice(path)
 }
 
 // openCharDevice opens path read-write only if it is absolute and names a

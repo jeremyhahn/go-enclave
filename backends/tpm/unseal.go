@@ -1,6 +1,7 @@
 package tpm
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -28,7 +29,7 @@ const (
 // errMalformedResponse is a response whose sizes do not add up.
 var errMalformedResponse = errors.New("the TPM response is malformed")
 
-func (d *tpmDevice) create(parent object, s session, data []byte) (public, private []byte, err error) {
+func (d *tpmDevice) create(ctx context.Context, parent object, s session, data []byte) (public, private []byte, err error) {
 	defer d.t.wipe()
 	if len(data) > maxKeyBytes {
 		return nil, nil, fmt.Errorf("a %d-byte key exceeds the %d-byte limit", len(data), maxKeyBytes)
@@ -53,7 +54,7 @@ func (d *tpmDevice) create(parent object, s session, data []byte) (public, priva
 	if err := s.auth.Encrypt(params[2 : 2+sensitive]); err != nil {
 		return nil, nil, err
 	}
-	rsp, err := d.execute(tpm2.TPMCCCreate, parent, s, params)
+	rsp, err := d.execute(ctx, tpm2.TPMCCCreate, parent, s, params)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -70,12 +71,12 @@ func (d *tpmDevice) create(parent object, s session, data []byte) (public, priva
 	return append([]byte(nil), public...), append([]byte(nil), private...), nil
 }
 
-func (d *tpmDevice) unseal(obj object, s session, dst []byte) (int, error) {
+func (d *tpmDevice) unseal(ctx context.Context, obj object, s session, dst []byte) (int, error) {
 	defer d.t.wipe()
 	if err := s.auth.NewNonceCaller(); err != nil {
 		return 0, err
 	}
-	rsp, err := d.execute(tpm2.TPMCCUnseal, obj, s, nil)
+	rsp, err := d.execute(ctx, tpm2.TPMCCUnseal, obj, s, nil)
 	if err != nil {
 		return 0, err
 	}
@@ -99,7 +100,7 @@ func (d *tpmDevice) unseal(obj object, s session, dst []byte) (int, error) {
 // which the caller has refreshed, and returns the response's
 // parameter area once s has validated it. The response aliases the
 // transport's buffer.
-func (d *tpmDevice) execute(cc tpm2.TPMCC, h object, s session, params []byte) ([]byte, error) {
+func (d *tpmDevice) execute(ctx context.Context, cc tpm2.TPMCC, h object, s session, params []byte) ([]byte, error) {
 	names := []tpm2.TPM2BName{h.name}
 	auth, err := s.auth.Authorize(cc, params, nil, names, 0)
 	if err != nil {
@@ -122,7 +123,7 @@ func (d *tpmDevice) execute(cc tpm2.TPMCC, h object, s session, params []byte) (
 	binary.BigEndian.PutUint32(cmd[14:], uint32(len(area)))
 	copy(cmd[18:], area)
 	copy(cmd[18+len(area):], params)
-	rsp, err := d.t.Send(cmd) // Send wipes cmd.
+	rsp, err := d.t.send(ctx, cmd) // send wipes cmd.
 	if err != nil {
 		return nil, err
 	}

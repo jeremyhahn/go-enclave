@@ -5,6 +5,7 @@ package tpm
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto"
 	"crypto/aes"
 	"crypto/cipher"
@@ -211,7 +212,7 @@ func newFakeTPMDevice(t *testing.T, encryptIn bool) (*fakeTPM, *tpmDevice, sessi
 	if encryptIn {
 		dir = tpm2.EncryptIn
 	}
-	s, _, err := tpm2.HMACSession(tr, tpm2.TPMAlgSHA256, 16, tpm2.AESEncryption(128, dir))
+	s, _, err := tpm2.HMACSession(tr.bind(context.Background()), tpm2.TPMAlgSHA256, 16, tpm2.AESEncryption(128, dir))
 	if err != nil {
 		t.Fatalf("starting the session on the fake: %v", err)
 	}
@@ -293,7 +294,7 @@ func TestTPMDevice_UnsealLeavesNoCopy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	n, err := d.unseal(object{handle: 0x80000001, name: f.name}, s, dst)
+	n, err := d.unseal(context.Background(), object{handle: 0x80000001, name: f.name}, s, dst)
 	if err != nil || f.err != nil {
 		t.Fatalf("unseal: %v; the fake saw: %v", err, f.err)
 	}
@@ -314,7 +315,7 @@ func TestTPMDevice_CreateLeavesNoCopy(t *testing.T) {
 		t.Fatal(err)
 	}
 	copy(data, f.secret)
-	public, private, err := d.create(object{handle: 0x80000000, name: f.name}, s, data)
+	public, private, err := d.create(context.Background(), object{handle: 0x80000000, name: f.name}, s, data)
 	if err != nil || f.err != nil {
 		t.Fatalf("create: %v; the fake saw: %v", err, f.err)
 	}

@@ -67,7 +67,7 @@ func (d *fakeDevice) handle(v string) tpm2.TPMHandle {
 	return d.next
 }
 
-func (d *fakeDevice) createPrimary(template tpm2.TPMTPublic) (object, error) {
+func (d *fakeDevice) createPrimary(_ context.Context, template tpm2.TPMTPublic) (object, error) {
 	if err := d.enter(cmdCreatePrimary, ""); err != nil {
 		return object{}, err
 	}
@@ -77,7 +77,7 @@ func (d *fakeDevice) createPrimary(template tpm2.TPMTPublic) (object, error) {
 	return object{handle: d.handle(id), name: tpm2.TPM2BName{Buffer: []byte(id)}}, nil
 }
 
-func (d *fakeDevice) startSession(object, bool) (session, error) {
+func (d *fakeDevice) startSession(context.Context, object, bool) (session, error) {
 	if err := d.enter(cmdStartAuthSession, ""); err != nil {
 		return session{}, err
 	}
@@ -86,7 +86,7 @@ func (d *fakeDevice) startSession(object, bool) (session, error) {
 	return session{handle: d.handle("session")}, nil
 }
 
-func (d *fakeDevice) create(parent object, _ session, data []byte) (public, private []byte, err error) {
+func (d *fakeDevice) create(_ context.Context, parent object, _ session, data []byte) (public, private []byte, err error) {
 	if err := d.enter(cmdCreate, ""); err != nil {
 		return nil, nil, err
 	}
@@ -101,7 +101,7 @@ func (d *fakeDevice) create(parent object, _ session, data []byte) (public, priv
 	return public, private, nil
 }
 
-func (d *fakeDevice) load(parent object, public, private []byte) (object, error) {
+func (d *fakeDevice) load(_ context.Context, parent object, public, private []byte) (object, error) {
 	if err := d.enter(cmdLoad, ""); err != nil {
 		return object{}, err
 	}
@@ -114,7 +114,7 @@ func (d *fakeDevice) load(parent object, public, private []byte) (object, error)
 	return object{handle: d.handle(data)}, nil
 }
 
-func (d *fakeDevice) unseal(obj object, _ session, dst []byte) (int, error) {
+func (d *fakeDevice) unseal(_ context.Context, obj object, _ session, dst []byte) (int, error) {
 	if err := d.enter(cmdUnseal, ""); err != nil {
 		return 0, err
 	}
@@ -127,7 +127,7 @@ func (d *fakeDevice) unseal(obj object, _ session, dst []byte) (int, error) {
 	return len(data), nil
 }
 
-func (d *fakeDevice) flush(h tpm2.TPMHandle) error {
+func (d *fakeDevice) flush(_ context.Context, h tpm2.TPMHandle) error {
 	if err := d.enter(cmdFlushContext, fmt.Sprintf("%#x", uint32(h))); err != nil {
 		return err
 	}
@@ -139,6 +139,10 @@ func (d *fakeDevice) flush(h tpm2.TPMHandle) error {
 	delete(d.loaded, h)
 	return nil
 }
+
+func (d *fakeDevice) interrupt() {}
+
+func (d *fakeDevice) reopen(context.Context) error { return nil }
 
 func (d *fakeDevice) close() error { return nil }
 
@@ -437,7 +441,7 @@ func TestStreamTransport(t *testing.T) {
 				t.Fatalf("newStreamTransport: %v", err)
 			}
 			cmd := []byte{0x80, 0x01, 0, 0, 0, 10, 0, 0, 1, 0x7f}
-			got, err := tr.Send(cmd)
+			got, err := tr.send(context.Background(), cmd)
 			if err != nil || !bytes.Equal(got, resp) {
 				t.Fatalf("Send = %x, %v; want %x", got, err, resp)
 			}
@@ -460,7 +464,7 @@ func TestStreamTransport(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			tr, _ := newStreamTransport(&chunkedRW{resp: resp, chunk: 64}, "test", newFakeAllocator())
-			if _, err := tr.Send([]byte{0}); !errors.Is(err, ErrDeviceUnavailable) {
+			if _, err := tr.send(context.Background(), []byte{0}); !errors.Is(err, ErrDeviceUnavailable) {
 				t.Fatalf("got %v, want ErrDeviceUnavailable", err)
 			}
 		})
