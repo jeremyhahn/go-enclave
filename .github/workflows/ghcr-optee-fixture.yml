@@ -33,8 +33,8 @@ on:
           - placeholder
           - fixture
 
+# The workflow token reads only; the one job that pushes grants packages: write.
 permissions:
-  packages: write
   contents: read
 
 concurrency:
@@ -58,6 +58,9 @@ jobs:
     name: Publish (${{ inputs.mode }})
     runs-on: [self-hosted, linux, x64, fixture-push]
     timeout-minutes: 120
+    permissions:
+      contents: read
+      packages: write
     steps:
       - name: Install crane
         run: |
