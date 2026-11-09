@@ -1,7 +1,7 @@
 # arm-trustzone backend — design
 
 > **Status: NORMATIVE** · Scope: go-enclave; trusted-firmware (secure world) · Last verified: 2026-10-31
-> Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it. Slice 2 (the backend) is shipped.
+> Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it. Slices 2 (the backend) and 3 (the harness and the CI job) are shipped.
 > The design of the out-of-tree backend that reaches OP-TEE through the [backend seam](architecture.md). Its harness is [backend-conformance](../backend-conformance/engineering.md#the-arm-trustzone-harness); the secure world and the TA are trusted-firmware's at `v0.4.2-alpha`. All three decisions are ruled: 1 and 2 (A), 3 (B).
 
 This is the design of the `arm-trustzone` backend ([SPEC](../SPEC.md), #206).
@@ -9,7 +9,7 @@ Ruling 176434 (#254) took recommendation (A) for decisions 1 and 2, and slice
 2 ships them: the nested module `backends/armtrustzone`, pure Go over
 `/dev/tee0` ([user](user.md#arm-trustzone), [engineering](engineering.md#arm-trustzone)).
 Ruling 274(9) took (B) for decision 3, where the fixture runs. Slice 3 ships
-with the CI job, which waits on Infra's fixture image.
+the CI job, which pulls the fixture image by its pinned ghcr digest.
 
 ## Problem
 
@@ -258,7 +258,7 @@ rule for builds, and local runs of the target need that image too.
    decisions. Shipped.
 3. The `TRUSTED_FIRMWARE_TAG=v0.4.2-alpha` pin, the harness's wiring to the
    conformance test, and the CI job. Shipped by the `optee` CI job and the
-   `OPTEE_FIXTURE_IMAGE` pin; the job waits on Infra's fixture image.
+   `OPTEE_FIXTURE_IMAGE` pin; the job pulls the image by its pinned digest.
 
 ## References
 

@@ -1543,14 +1543,13 @@ jobs:
           fi
           echo "Docker's data root $root has $free GB free (need $NEED_GB GB)"
 
-      # Fails closed: until Infra publishes the image, the pin is empty and
-      # this job fails here, never skips.
+      # Fails closed: if the pin is ever emptied, this job fails here, never skips.
       - name: Require the fixture image pin
         if: steps.select.outputs.run == 'true'
         run: |
           OPTEE_FIXTURE_IMAGE=$(make -s optee-fixture-image)
           if [ -z "$OPTEE_FIXTURE_IMAGE" ]; then
-            echo "::error::OPTEE_FIXTURE_IMAGE is empty in scripts/tool-pins.sh: the OP-TEE fixture image is not published yet (ruling 274(9): Infra publishes it, by digest), so the arm-trustzone harness cannot run"
+            echo "::error::OPTEE_FIXTURE_IMAGE is empty in scripts/tool-pins.sh: pin the OP-TEE fixture image by its ghcr digest (re-run ghcr-optee-fixture.yml), so the arm-trustzone harness can run"
             exit 1
           fi
           echo "OPTEE_FIXTURE_IMAGE=$OPTEE_FIXTURE_IMAGE" >> "$GITHUB_ENV"
