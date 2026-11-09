@@ -52,10 +52,12 @@ SHELLCHECK_BIN_SHA256_LINUX_ARM64=127f13925eadd52c341bca0ebaf9ab0dbd78c6468f30a8
 TRUSTED_FIRMWARE_TAG=v0.4.2-alpha
 TRUSTED_FIRMWARE_COMMIT=e0ae83d062b45dccc0e4cf08c87bf6def80a946c
 # The OP-TEE QEMU fixture image the CI optee job runs the arm-trustzone harness
-# in (ruling 274(9)): an agent-ci-image Infra builds, publishes and keeps,
-# holding the stack prebuilt at TRUSTED_FIRMWARE_COMMIT. Pinned by digest
-# (<registry>/<name>@sha256:<64 hex>); raise it with the trusted-firmware pins.
-# Infra published it 2026-11-01 (tag v0.4.2-alpha-optee-4.11.0, #254 comment 184877); the optee job fails if it is emptied.
+# in (ruling 274(9)), holding the stack prebuilt at TRUSTED_FIRMWARE_COMMIT.
+# Published to ghcr by the repository's ghcr-optee-fixture.yml workflow (tag
+# v0.4.2-alpha-optee-4.11.0, config sha256:38725a25…6bdb). The package is
+# public, so the GitHub-hosted job pulls it by manifest digest with no login.
+# Pinned as ghcr.io/<owner>/<name>@sha256:<64 hex>; raise it with the
+# trusted-firmware pins by re-running that workflow. The optee job fails if it
+# is emptied.
 # The contract: docs/backend-conformance/engineering.md#fixture-image-contract.
-# lab-string-ok: the optee job pulls this image from the lab registry by digest (ruling 274(9)); ci.yml has no registry-host source
-OPTEE_FIXTURE_IMAGE=git.example.internal/agent-ci-images/go-enclave-optee-fixture@sha256:7c618b5fb7d0bcdbd0f63b15878e3653c0f46ea0d880a9c1f20fb11c7e2edbd6
+OPTEE_FIXTURE_IMAGE=ghcr.io/jeremyhahn/go-enclave-optee-fixture@sha256:107175c7463eddbe14bd9feca741e9ba6b29a18d5412cd04e92bdbf7a7d6a012

@@ -324,8 +324,13 @@ binary.
 
 ### Fixture image contract
 
-`OPTEE_FIXTURE_IMAGE` is an agent-ci-image Infra builds, publishes and keeps
-(ruling 274(9)), pinned by digest. The optee job runs it with `docker run`,
+`OPTEE_FIXTURE_IMAGE` is the OP-TEE fixture image (ruling 274(9)), published
+to `ghcr.io/jeremyhahn/go-enclave-optee-fixture` by the repository's
+`ghcr-optee-fixture.yml` workflow and pinned in `scripts/tool-pins.sh` by its
+manifest digest (`ghcr.io/<owner>/<name>@sha256:<64 hex>`). The package is
+public, so the GitHub-hosted optee job pulls it with no login or secret. The
+image is raised with the trusted-firmware pins by re-running that workflow and
+pinning the digest it prints. The optee job runs it with `docker run`,
 the repository mounted read-only at `/src` as the working directory, and
 `sh scripts/optee-fixture.sh harness` as the command, as the image's default
 user. The image holds:
