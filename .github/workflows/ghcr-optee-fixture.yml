@@ -15,7 +15,8 @@
 # archive, mounted read-only at /fixture. The runner has no Docker daemon, so
 # the push uses crane (go-containerregistry), which reads the archive directly.
 # The image config blob is pushed unchanged, so its digest is the local image
-# ID; the job checks that before it prints the manifest digest.
+# ID. The job checks the archive's config blob against CONFIG_DIGEST before
+# anything is pushed, and the pushed manifest's config digest after.
 #
 # GITHUB_TOKEN carries packages: write and contents: read and nothing else; it
 # goes to crane on stdin and the credential file lives in RUNNER_TEMP, which
@@ -71,12 +72,21 @@ jobs:
           tar -xzf crane.tgz crane
           ./crane version
 
+      # Before any push: the archive holds one image, and its config blob (read
+      # byte for byte from the member manifest.json names) hashes to
+      # CONFIG_DIGEST, so a wrong archive is never published.
       - name: Check the archive
         if: inputs.mode == 'fixture'
         run: |
           set -euo pipefail
           test -r "$ARCHIVE"
           ls -l "$ARCHIVE"
+          manifest=$(tar -xOf "$ARCHIVE" manifest.json)
+          test "$(jq length <<<"$manifest")" = 1
+          member=$(jq -r '.[0].Config' <<<"$manifest")
+          config=sha256:$(tar -xOf "$ARCHIVE" "$member" | sha256sum | cut -d' ' -f1)
+          echo "archive config: $config"
+          test "$config" = "$CONFIG_DIGEST"
 
       - name: Log in
         env:
@@ -118,10 +128,10 @@ jobs:
         run: |
           set -euo pipefail
           digest=$("$RUNNER_TEMP/crane" digest "$IMAGE:$TAG")
-          config=$("$RUNNER_TEMP/crane" config "$IMAGE@$digest" | sha256sum | cut -d' ' -f1)
+          config=$("$RUNNER_TEMP/crane" manifest "$IMAGE@$digest" | jq -r '.config.digest')
           echo "manifest: $IMAGE@$digest"
-          echo "config:   sha256:$config"
-          test "sha256:$config" = "$CONFIG_DIGEST"
+          echo "config:   $config"
+          test "$config" = "$CONFIG_DIGEST"
           echo "### $IMAGE@$digest" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Log out
