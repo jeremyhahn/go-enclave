@@ -330,16 +330,19 @@ to `ghcr.io/jeremyhahn/go-enclave-optee-fixture` by the repository's
 manifest digest (`ghcr.io/<owner>/<name>@sha256:<64 hex>`). The package is
 public, so the GitHub-hosted optee job pulls it with no login or secret. The
 image is raised with the trusted-firmware pins by re-running that workflow and
-pinning the digest it prints. The optee job runs it with `docker run`,
-the repository mounted read-only at `/src` as the working directory, and
-`sh scripts/optee-fixture.sh harness` as the command, as the image's default
-user. The image holds:
+pinning the digest it prints. The optee job creates the container with
+`docker create`, `/src` as the working directory, the recipe's environment and
+`sh scripts/optee-fixture.sh harness` as the command, copies the checkout into
+`/src` with `docker cp`, owned by UID and GID 1000, and runs it with
+`docker start -a`. So `/src` is a writable copy, not a mount, and the image's
+default user must be UID 1000 (GID 1000), the owner of that copy and of the
+prebuilt checkout. The image holds:
 
 - **The checkout.** trusted-firmware cloned at `TRUSTED_FIRMWARE_TAG`, its
   `HEAD` at `TRUSTED_FIRMWARE_COMMIT` (both pinned in `scripts/tool-pins.sh`),
   at `/opt/go-enclave/trusted-firmware/<tag>` (the job's
   `TRUSTED_FIRMWARE_CACHE`, `OPTEE_FIXTURE_CACHE` in the Makefile), with a
-  `.git` directory, no modified tracked files, and owned by the image's user,
+  `.git` directory, no modified tracked files, and owned by UID and GID 1000,
   so `git rev-parse` and `git status` run there.
 - **The built stack.** QEMU (`qemu-system-aarch64`, virt machine), TF-A,
   OP-TEE OS 4.11.0 and the Linux guest, built by that checkout into its
