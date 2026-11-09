@@ -346,6 +346,11 @@ user. The image holds:
 A new trusted-firmware pin needs a new image: the image and the
 `TRUSTED_FIRMWARE_*` pins move in one PR.
 
+The image unpacks to 27.4 GB, more than a GitHub-hosted runner has free, so
+the optee job frees disk, moves Docker's data root to the runner's `/mnt`
+filesystem, and fails before the first pull when that root has less than the
+job's `NEED_GB` free.
+
 ## Observability
 
 `Config.Logf` receives a note for each measurement the config allowed to be

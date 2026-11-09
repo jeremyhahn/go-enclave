@@ -1441,13 +1441,43 @@ jobs:
             case $val in *://*:*@*) t=${val#*://}; t=${t%%@*}; echo "::add-mask::${t#*:}" ;; esac
           done
 
-      # A GitHub-hosted runner has about 14 GB free; the image build needs more,
-      # and the fixture image comes on top of it.
+      # A GitHub-hosted runner has about 14 GB free on /, and the fixture
+      # image alone unpacks to 27.4 GB. Remove toolchains this job never uses
+      # from / (about 25 GB) and move Docker's data root to the runner's
+      # larger /mnt filesystem, on the classic image store so every layer
+      # lands under the data root. The next step checks the room.
       - name: Free disk for the image build
         if: steps.select.outputs.run == 'true'
         run: |
+          df -h / /mnt "$(docker info --format '{{.DockerRootDir}}')"
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
-          df -h /
+          sudo systemctl stop docker docker.socket
+          sudo mkdir -p /etc/docker /mnt/docker
+          conf=$(sudo cat /etc/docker/daemon.json 2>/dev/null || true)
+          [ -n "$conf" ] || conf='{}'
+          printf '%s\n' "$conf" |
+            jq '. + {"data-root": "/mnt/docker", "features": ((.features // {}) + {"containerd-snapshotter": false})}' |
+            sudo tee /etc/docker/daemon.json >/dev/null
+          sudo systemctl start docker
+          df -h / "$(docker info --format '{{.DockerRootDir}}')"
+
+      # Fails closed: NEED_GB is the 27.4 GB fixture image (28), its
+      # compressed layers, which a pull holds while it unpacks them (10), the
+      # toolchain image the test binary compiles in (5), and the harness
+      # container's copy of the checkout (2).
+      - name: Check the room on Docker's data root
+        if: steps.select.outputs.run == 'true'
+        env:
+          NEED_GB: 45
+        run: |
+          root=$(docker info --format '{{.DockerRootDir}}')
+          df -h / "$root"
+          free=$(df --output=avail -BG "$root" | tail -n 1 | tr -dc 0-9)
+          if [ "${free:-0}" -lt "$NEED_GB" ]; then
+            echo "::error::Docker's data root $root has ${free:-0} GB free; the OP-TEE job needs $NEED_GB GB (the 27.4 GB fixture image, its compressed layers during the pull, and the toolchain image)"
+            exit 1
+          fi
+          echo "Docker's data root $root has $free GB free (need $NEED_GB GB)"
 
       # Fails closed: until Infra publishes the image, the pin is empty and
       # this job fails here, never skips.
