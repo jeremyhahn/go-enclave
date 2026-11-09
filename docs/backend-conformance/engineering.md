@@ -296,8 +296,8 @@ binary.
   `OPTEE_FIXTURE_PREBUILT=1`, which uses the image's checkout and refuses to
   clone, so the job never builds the stack (about 155 min cold). The commit
   check applies to that checkout as to a clone. `OPTEE_FIXTURE_IMAGE` in
-  `scripts/tool-pins.sh` is empty until Infra publishes the image, and the
-  job fails while it is empty, never skips.
+  `scripts/tool-pins.sh` pins the image by its ghcr manifest digest, and the
+  job fails if the pin is emptied, never skips.
 - **Registration.** The registry is per process. The test registers the
   backend in its own binary with `enclave.Register(Connector{})` and finds it
   with `enclave.Lookup`. The root's optee-tagged harness,

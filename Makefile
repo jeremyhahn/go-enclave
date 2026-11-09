@@ -474,7 +474,7 @@ $(call raw_bind,TRUSTED_FIRMWARE_URL TRUSTED_FIRMWARE_TAG TRUSTED_FIRMWARE_COMMI
 # OPTEE_FIXTURE_CACHE/<tag> (the contract's path).
 OPTEE_FIXTURE_CACHE := /opt/go-enclave/trusted-firmware
 
-## optee-fixture-image: print the pinned OP-TEE fixture image (OPTEE_FIXTURE_IMAGE; empty until Infra publishes it)
+## optee-fixture-image: print the pinned OP-TEE fixture image (OPTEE_FIXTURE_IMAGE, pinned by digest)
 .PHONY: optee-fixture-image
 optee-fixture-image:
 	@echo "$$OPTEE_FIXTURE_IMAGE"
