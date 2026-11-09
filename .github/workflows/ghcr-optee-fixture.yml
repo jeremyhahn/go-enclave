@@ -1,0 +1,130 @@
+# One-off publish of the OP-TEE test fixture image (owner ruling on item 226,
+# option (d)): no personal access token, ever. The job runs only when it is
+# dispatched by hand, never on push, pull request or schedule, and it is not
+# part of CI Gate.
+#
+# It runs twice, once per mode (Company Agent m2309):
+#   placeholder  pushes a one-layer image (a single text file) under the same
+#                package name, tag `placeholder`. A first publish is private;
+#                the owner then sets the package public, so the real image is
+#                never private.
+#   fixture      pushes the real image, after the package is public.
+#
+# The image was built from trusted-firmware v0.4.2-alpha (e0ae83d0) with
+# OP-TEE 4.11.0 and is handed to the self-hosted runner as a `docker save`
+# archive, mounted read-only at /fixture. The runner has no Docker daemon, so
+# the push uses crane (go-containerregistry), which reads the archive directly.
+# The image config blob is pushed unchanged, so its digest is the local image
+# ID; the job checks that before it prints the manifest digest.
+#
+# GITHUB_TOKEN carries packages: write and contents: read and nothing else; it
+# goes to crane on stdin and the credential file lives in RUNNER_TEMP, which
+# goes away with the runner.
+name: Publish OP-TEE fixture
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: placeholder (first, while the package is private) or fixture (after it is public)
+        required: true
+        type: choice
+        options:
+          - placeholder
+          - fixture
+
+permissions:
+  packages: write
+  contents: read
+
+concurrency:
+  group: ghcr-optee-fixture
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/jeremyhahn/go-enclave-optee-fixture
+  TAG: v0.4.2-alpha-optee-4.11.0
+  PLACEHOLDER_TAG: placeholder
+  ARCHIVE: /fixture/fixture.tar
+  # The local image ID of the archived image (its config blob digest).
+  CONFIG_DIGEST: sha256:38725a255a253b62a0e0a8996bf6593c65569e178c2444f0bce0acec6dfc6bdb
+  CRANE_VERSION: v0.20.2
+  # sha256 of go-containerregistry_Linux_x86_64.tar.gz for CRANE_VERSION, from
+  # the release's checksums.txt; the reviewer checks it against the release.
+  CRANE_SHA256: c14340087103ba9dadf61d45acd20675490fd0ccbd56ac7901fc1b502137f44b
+
+jobs:
+  publish:
+    name: Publish (${{ inputs.mode }})
+    runs-on: [self-hosted, linux, x64, fixture-push]
+    timeout-minutes: 120
+    steps:
+      - name: Install crane
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          curl -fsSL -o crane.tgz "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz"
+          echo "${CRANE_SHA256}  crane.tgz" | sha256sum -c -
+          tar -xzf crane.tgz crane
+          ./crane version
+
+      - name: Check the archive
+        if: inputs.mode == 'fixture'
+        run: |
+          set -euo pipefail
+          test -r "$ARCHIVE"
+          ls -l "$ARCHIVE"
+
+      - name: Log in
+        env:
+          DOCKER_CONFIG: ${{ runner.temp }}/docker-config
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$DOCKER_CONFIG"
+          printf '%s' "$GH_TOKEN" | "$RUNNER_TEMP/crane" auth login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+
+      - name: Push the placeholder
+        if: inputs.mode == 'placeholder'
+        env:
+          DOCKER_CONFIG: ${{ runner.temp }}/docker-config
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          mkdir -p placeholder
+          printf 'Placeholder for %s:%s; the fixture image follows once the package is public.\n' "$IMAGE" "$TAG" > placeholder/README
+          tar -C placeholder -cf placeholder.tar README
+          ./crane append -f placeholder.tar -t "$IMAGE:$PLACEHOLDER_TAG"
+          ./crane mutate "$IMAGE:$PLACEHOLDER_TAG" \
+            --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
+            --label "org.opencontainers.image.description=Placeholder; the OP-TEE test fixture follows."
+          echo "### $IMAGE@$(./crane digest "$IMAGE:$PLACEHOLDER_TAG") (placeholder)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Push the fixture
+        if: inputs.mode == 'fixture'
+        env:
+          DOCKER_CONFIG: ${{ runner.temp }}/docker-config
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/crane" push "$ARCHIVE" "$IMAGE:$TAG" | tee "$RUNNER_TEMP/pushed.txt"
+
+      - name: Print the digest
+        if: inputs.mode == 'fixture'
+        env:
+          DOCKER_CONFIG: ${{ runner.temp }}/docker-config
+        run: |
+          set -euo pipefail
+          digest=$("$RUNNER_TEMP/crane" digest "$IMAGE:$TAG")
+          config=$("$RUNNER_TEMP/crane" config "$IMAGE@$digest" | sha256sum | cut -d' ' -f1)
+          echo "manifest: $IMAGE@$digest"
+          echo "config:   sha256:$config"
+          test "sha256:$config" = "$CONFIG_DIGEST"
+          echo "### $IMAGE@$digest" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Log out
+        if: always()
+        env:
+          DOCKER_CONFIG: ${{ runner.temp }}/docker-config
+        run: |
+          [ ! -x "$RUNNER_TEMP/crane" ] || "$RUNNER_TEMP/crane" auth logout ghcr.io || true
+          rm -rf "$DOCKER_CONFIG"

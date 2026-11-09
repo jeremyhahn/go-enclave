@@ -67,3 +67,4 @@ self-hosted-runner:
     - qwen
     - dells
     - release
+    - fixture-push
