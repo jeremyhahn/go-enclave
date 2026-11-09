@@ -506,7 +506,7 @@ func TestCIGateTiers_RefusesWhatItMustRefuse(t *testing.T) {
 		{"check names another job", `pr:arch-gates="${{ needs.arch-gates`, `pr:arch-gates="${{ needs.image`},
 		{"job missing from the gate", "            pr:image=\"${{ needs.image.result }}\" \\\n", ""},
 		{"job checked twice", "            pr:image=\"${{ needs.image.result }}\" \\\n", "            pr:image=\"${{ needs.image.result }}\" \\\n            pr:image=\"${{ needs.image.result }}\" \\\n"},
-		{"gate misses a need", "needs: [changes, image, lint-gates, fips, integration, soak, tpm-swtpm, arch-gates]", "needs: [changes, image, lint-gates, fips, integration, tpm-swtpm, arch-gates]"},
+		{"gate misses a need", "needs: [changes, image, lint-gates, fips, integration, soak, tpm-swtpm, optee, arch-gates]", "needs: [changes, image, lint-gates, fips, integration, tpm-swtpm, optee, arch-gates]"},
 		{"gate misses lint-gates", "needs: [changes, image, lint-gates, fips,", "needs: [changes, image, fips,"},
 		{"lint-gates missing from the gate checks", "            pr:lint-gates=\"${{ needs.lint-gates.result }}\" \\\n", ""},
 		{"lint-gates tagged full", "pr:lint-gates=", "full:lint-gates="},

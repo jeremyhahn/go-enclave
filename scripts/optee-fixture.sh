@@ -6,7 +6,8 @@
 # The body of `make optee-fixture-check` (check) and of
 # `make integration-test-arm-trustzone` (harness). Both clone trusted-firmware
 # at TRUSTED_FIRMWARE_TAG into TRUSTED_FIRMWARE_CACHE/<tag>, outside the tree,
-# and refuse unless the checkout's HEAD is TRUSTED_FIRMWARE_COMMIT: a moved tag
+# or use the checkout already there (in the CI optee job, the fixture image's
+# prebuilt stack: OPTEE_FIXTURE_PREBUILT=1 refuses to clone), and refuse unless the checkout's HEAD is TRUSTED_FIRMWARE_COMMIT: a moved tag
 # is refused, never followed. check runs the checkout's
 # `make integration-test-optee` (xtest and the TA's version and rng commands;
 # no go-enclave code). harness takes backends/armtrustzone's optee-tagged
@@ -24,6 +25,7 @@ commit=${TRUSTED_FIRMWARE_COMMIT:-}
 cache=${TRUSTED_FIRMWARE_CACHE:-}
 [ -n "$cache" ] || cache=${HOME:?HOME is unset}/.cache/go-enclave/trusted-firmware
 endpoint=${GO_ENCLAVE_OPTEE_ENDPOINT-}
+prebuilt=${OPTEE_FIXTURE_PREBUILT:-}
 seal=${GO_ENCLAVE_OPTEE_SEAL-}
 
 [ "$#" -eq 1 ] || die "usage: $prog check|harness"
@@ -31,7 +33,6 @@ case $1 in
   check | harness) mode=$1 ;;
   *) die "unknown mode '$1': want check or harness" ;;
 esac
-[ -n "$url" ] || die "TRUSTED_FIRMWARE_URL is empty; set it to the forge's trusted-firmware clone URL"
 [ -n "$tag" ] || die "TRUSTED_FIRMWARE_TAG is empty; scripts/tool-pins.sh pins the trusted-firmware release whose make optee-run is the fixture"
 case $tag in
   .* | *[!A-Za-z0-9._-]*) die "TRUSTED_FIRMWARE_TAG '$tag' is not a release tag name" ;;
@@ -42,9 +43,15 @@ case $commit in
 esac
 [ "${#commit}" -eq 40 ] || die "TRUSTED_FIRMWARE_COMMIT '$commit' is not a full 40-digit commit id"
 
-# One directory per tag; a clone lands in place only when it is complete.
+# One directory per tag; a clone lands in place only when it is complete. A
+# checkout already there (the fixture image's prebuilt stack) is used, never
+# re-cloned; in the fixture image (OPTEE_FIXTURE_PREBUILT=1) a missing one is
+# refused, so the job never builds the stack. Either way the commit check
+# below decides.
 dir=$cache/$tag
 if [ ! -e "$dir/.git" ]; then
+  [ "$prebuilt" != 1 ] || die "the fixture image holds no trusted-firmware checkout at $dir; see docs/backend-conformance/engineering.md#fixture-image-contract"
+  [ -n "$url" ] || die "TRUSTED_FIRMWARE_URL is empty; set it to the forge's trusted-firmware clone URL"
   mkdir -p "$cache"
   tmp=$(mktemp -d "$cache/.clone.XXXXXX")
   if ! git clone --quiet --depth 1 --branch "$tag" -c advice.detachedHead=false -- "$url" "$tmp/tf"; then

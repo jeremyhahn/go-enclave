@@ -434,6 +434,16 @@
 # checks its tiers with build/ci/summary.sh, carried inline, in place of the
 # template's check() function; the script differs because go-enclave has three
 # tiers (pr, full, nightly) and release.yml runs the same file.
+# CUSTOMIZE (go-enclave, ruling 274(9), #206 comment 179925): the optee job
+# runs make integration-test-arm-trustzone with the harness in the OP-TEE
+# fixture image (OPTEE_FIXTURE_IMAGE, scripts/tool-pins.sh) on a GitHub-hosted
+# runner (ubuntu-latest), timeout 180, with no module credential (every module
+# is public). CI Gate tags it `full` and it carries the full tier's
+# `if:` with no path condition, so it never skips on a full-tier run. Its
+# path gate is its first step, which reads the changes job's `optee` output
+# (true on every schedule and workflow_dispatch): when no OP-TEE path
+# changed, every later step is skipped and the job succeeds without running
+# the harness. When selected, an empty pin fails the job, never skips it.
 
 name: CI
 
@@ -518,11 +528,15 @@ jobs:
       # CUSTOMIZE: true when a pull request changes the TPM provider, its
       # swtpm fixture or this workflow; the tpm-swtpm job's steps read it.
       tpm: ${{ steps.diff.outputs.tpm }}
+      # CUSTOMIZE: the optee job's path gate (step optee below).
+      optee: ${{ steps.optee.outputs.optee }}
     # v1.26: a draft PR runs no CI; the image job needs this one and skips with it.
     if: ${{ !github.event.pull_request.draft }}
     steps:
+      # CUSTOMIZE: the optee step diffs every pull request and push, so the
+      # checkout runs for them too (the template's: a PR off the full tier).
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        if: ${{ github.event_name == 'pull_request' }}
+        if: ${{ github.event_name == 'pull_request' || github.event_name == 'push' }}
         with:
           fetch-depth: 0
       - name: Is every changed file docs or markdown?
@@ -554,6 +568,35 @@ jobs:
           echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
           echo "tpm paths: $tpm"
           echo "tpm=$tpm" >> "$GITHUB_OUTPUT"
+
+      # CUSTOMIZE: scripts/optee-selected.sh decides from the changed paths and
+      # the diff of scripts/tool-pins.sh (it lists what it selects on: the
+      # backend, its harness and fixture script, the Makefile, the scripts and
+      # image the recipe calls, and the pins it reads). Every schedule and
+      # workflow_dispatch selects the job, and so does a diff that cannot be
+      # taken or a selector that fails.
+      - name: Does the change reach the OP-TEE harness?
+        id: optee
+        env:
+          BASE: ${{ github.event_name == 'push' && github.event.before || github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event_name == 'push' && github.sha || github.event.pull_request.head.sha }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          optee=true
+          if [ "$EVENT" = pull_request ] || [ "$EVENT" = push ]; then
+            range="$BASE...$HEAD"
+            [ "$EVENT" = pull_request ] || range="$BASE..$HEAD"
+            files=$(mktemp)
+            pins=$(mktemp)
+            if git diff --name-only --no-renames "$range" > "$files" &&
+              git diff --no-renames "$range" -- scripts/tool-pins.sh > "$pins" &&
+              selected=$(sh scripts/optee-selected.sh "$pins" < "$files"); then
+              optee=$selected
+            fi
+            rm -f "$files" "$pins"
+          fi
+          echo "optee: $optee"
+          echo "optee=$optee" >> "$GITHUB_OUTPUT"
 
   # v1.21: every stage runs in the project's own devcontainer image and no
   # other (ci-standard.md §2, devcontainer.md §7). One image job (Company Agent
@@ -607,6 +650,11 @@ jobs:
     runs-on: ubuntu-latest
     needs: changes             # v1.24 (CA m749, m751 (a))
     timeout-minutes: 90       # CUSTOMIZE: give the stages honest headroom
+    # CUSTOMIZE (v1.29.2): `built` is set by the build step, for a path-gated
+    # job's `if:` (header note). The optee job gates in a step instead, since
+    # CI Gate requires the full tier's own `if:` of it.
+    outputs:
+      built: ${{ steps.build.outputs.built }}
     env:
       CI_STACK_PREFIX: ${{ github.event.repository.name }}-ci-
       # v1.22: the cache volumes' trust class. Only a push to main writes the
@@ -660,9 +708,11 @@ jobs:
       # goes here; the container shares the runner's kernel.
 
       - name: Build the devcontainer images
+        id: build
         run: |
           make docker-build GO_BUILD_PROXY="${GOPROXY:-}" IT_IMAGE="$IT_IMAGE"
           echo "TOOLCHAIN_IMAGE=$(make -s toolchain-image)" >> "$GITHUB_ENV"
+          echo "built=true" >> "$GITHUB_OUTPUT"
 
       # v1.23: a lease on the integration image (from a Codex review). A
       # reused image can be older than REAP_IMAGE_MIN_AGE, so its age alone
@@ -1407,6 +1457,108 @@ jobs:
         if: ${{ env.TPM_SELECTED == 'true' }}
         run: make integration-test-tpm
 
+  # CUSTOMIZE (ruling 274(9), #206 comment 179925): the arm-trustzone harness
+  # on the OP-TEE QEMU fixture. make integration-test-arm-trustzone compiles
+  # the linux/arm64 test binary in the toolchain image and runs
+  # scripts/optee-fixture.sh harness in OPTEE_FIXTURE_IMAGE, the agent-ci-image
+  # Infra builds and keeps, whose prebuilt stack it boots: this job never
+  # builds the stack (about 155 min cold). What the image holds is the
+  # fixture image contract in docs/backend-conformance/engineering.md
+  # (#fixture-image-contract). Full tier, with the tier `if:` CI Gate requires
+  # of a full job and no path condition there: the first step reads the
+  # changes job's `optee` output, and when no OP-TEE path changed every later
+  # step is skipped, so the job succeeds without running the harness.
+  optee:
+    name: OP-TEE [arm-trustzone harness, fixture image]
+    needs: [changes, image]
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')) && !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      # The path gate: selected only when the changes job's `optee` output
+      # is true. Every later step tests the `run` output this step sets.
+      - name: Select the OP-TEE harness
+        id: select
+        env:
+          OPTEE: ${{ needs.changes.outputs.optee }}
+        run: |
+          if [ "$OPTEE" = true ]; then
+            echo "optee selected: OP-TEE paths changed"
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "optee not selected: no OP-TEE paths changed"
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        if: steps.select.outputs.run == 'true'
+
+      # v1.21.1: mask the forge credentials before any other step (as in the
+      # integration job).
+      - name: Mask the forge credentials
+        if: steps.select.outputs.run == 'true'
+        run: |
+          for v in GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0; do
+            val=${!v:-}
+            [ -n "$val" ] || continue
+            echo "::add-mask::$val"
+            case $val in *://*:*@*) t=${val#*://}; t=${t%%@*}; echo "::add-mask::${t#*:}" ;; esac
+          done
+
+      # A GitHub-hosted runner has about 14 GB free on /, and the fixture
+      # image alone unpacks to 27.4 GB. Remove toolchains this job never uses
+      # from / (about 25 GB) and move Docker's data root to the runner's
+      # larger /mnt filesystem, on the classic image store so every layer
+      # lands under the data root. The next step checks the room.
+      - name: Free disk for the image build
+        if: steps.select.outputs.run == 'true'
+        run: |
+          df -h / /mnt "$(docker info --format '{{.DockerRootDir}}')"
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo systemctl stop docker docker.socket
+          sudo mkdir -p /etc/docker /mnt/docker
+          conf=$(sudo cat /etc/docker/daemon.json 2>/dev/null || true)
+          [ -n "$conf" ] || conf='{}'
+          printf '%s\n' "$conf" |
+            jq '. + {"data-root": "/mnt/docker", "features": ((.features // {}) + {"containerd-snapshotter": false})}' |
+            sudo tee /etc/docker/daemon.json >/dev/null
+          sudo systemctl start docker
+          df -h / "$(docker info --format '{{.DockerRootDir}}')"
+
+      # Fails closed: NEED_GB is the 27.4 GB fixture image (28), its
+      # compressed layers, which a pull holds while it unpacks them (10), the
+      # toolchain image the test binary compiles in (5), and the harness
+      # container's copy of the checkout (2).
+      - name: Check the room on Docker's data root
+        if: steps.select.outputs.run == 'true'
+        env:
+          NEED_GB: 45
+        run: |
+          root=$(docker info --format '{{.DockerRootDir}}')
+          df -h / "$root"
+          free=$(df --output=avail -BG "$root" | tail -n 1 | tr -dc 0-9)
+          if [ "${free:-0}" -lt "$NEED_GB" ]; then
+            echo "::error::Docker's data root $root has ${free:-0} GB free; the OP-TEE job needs $NEED_GB GB (the 27.4 GB fixture image, its compressed layers during the pull, and the toolchain image)"
+            exit 1
+          fi
+          echo "Docker's data root $root has $free GB free (need $NEED_GB GB)"
+
+      # Fails closed: until Infra publishes the image, the pin is empty and
+      # this job fails here, never skips.
+      - name: Require the fixture image pin
+        if: steps.select.outputs.run == 'true'
+        run: |
+          OPTEE_FIXTURE_IMAGE=$(make -s optee-fixture-image)
+          if [ -z "$OPTEE_FIXTURE_IMAGE" ]; then
+            echo "::error::OPTEE_FIXTURE_IMAGE is empty in scripts/tool-pins.sh: the OP-TEE fixture image is not published yet (ruling 274(9): Infra publishes it, by digest), so the arm-trustzone harness cannot run"
+            exit 1
+          fi
+          echo "OPTEE_FIXTURE_IMAGE=$OPTEE_FIXTURE_IMAGE" >> "$GITHUB_ENV"
+
+      - name: make integration-test-arm-trustzone (fixture image)
+        if: steps.select.outputs.run == 'true'
+        run: make integration-test-arm-trustzone OPTEE_FIXTURE_IMAGE="$OPTEE_FIXTURE_IMAGE"
+
   # Architecture gate (v1.20, Company Agent m270 item 9; go-xkms arch-gates).
   # go-objstore owns every blob backend (docs/00), and a repo reaches it only
   # through the packages that are its storage seam. Test files are exempt, and
@@ -1457,7 +1609,7 @@ jobs:
     if: always()
     # CUSTOMIZE: the repo's job list. Add every CUSTOMIZE job here AND as a
     # check line below; remove none of the template's jobs.
-    needs: [changes, image, lint-gates, fips, integration, soak, tpm-swtpm, arch-gates]
+    needs: [changes, image, lint-gates, fips, integration, soak, tpm-swtpm, optee, arch-gates]
     steps:
       - name: Fail closed on any non-success
         env:
@@ -1547,4 +1699,5 @@ jobs:
             full:integration="${{ needs.integration.result }}" \
             nightly:soak="${{ needs.soak.result }}" \
             full:tpm-swtpm="${{ needs.tpm-swtpm.result }}" \
+            full:optee="${{ needs.optee.result }}" \
             pr:arch-gates="${{ needs.arch-gates.result }}"
