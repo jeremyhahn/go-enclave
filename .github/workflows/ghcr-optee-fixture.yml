@@ -48,10 +48,10 @@ env:
   ARCHIVE: /fixture/fixture.tar
   # The local image ID of the archived image (its config blob digest).
   CONFIG_DIGEST: sha256:38725a255a253b62a0e0a8996bf6593c65569e178c2444f0bce0acec6dfc6bdb
-  CRANE_VERSION: v0.20.2
+  CRANE_VERSION: v0.22.1
   # sha256 of go-containerregistry_Linux_x86_64.tar.gz for CRANE_VERSION, from
   # the release's checksums.txt; the reviewer checks it against the release.
-  CRANE_SHA256: c14340087103ba9dadf61d45acd20675490fd0ccbd56ac7901fc1b502137f44b
+  CRANE_SHA256: 0ab7a1d6932a213aed964ce97666c3077fe691c8606413674a8b3e0b9ec4cda0
 
 jobs:
   publish:
