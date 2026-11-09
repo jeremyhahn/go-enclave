@@ -114,17 +114,41 @@ func TestScriptsDevcontainer_ToolchainTagCoversEveryInput(t *testing.T) {
 		}
 		want = append(want, s.copies...)
 	}
+	got := toolchainTagInputs(t, root)
+	sort.Strings(got)
+	sort.Strings(want)
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("the toolchain tag's inputs are not the toolchain's COPY sources.\n tag hashes: %v\n COPY reads: %v", got, want)
+	}
+}
+
+// toolchainTagInputs lists the files scripts/devcontainer.sh hashes into the
+// toolchain tag.
+func toolchainTagInputs(t *testing.T, root string) []string {
+	t.Helper()
 	cmd := exec.Command("sh", "scripts/devcontainer.sh", "inputs")
 	cmd.Dir = root
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("devcontainer.sh inputs: %v\n%s", err, out)
 	}
-	got := strings.Fields(string(out))
-	sort.Strings(got)
-	sort.Strings(want)
-	if strings.Join(got, "\n") != strings.Join(want, "\n") {
-		t.Fatalf("the toolchain tag's inputs are not the toolchain's COPY sources.\n tag hashes: %v\n COPY reads: %v", got, want)
+	return strings.Fields(string(out))
+}
+
+// TestScriptsDevcontainer_AllowlistAdmitsEveryToolchainInput pins the build
+// context against the tag: every file the toolchain tag hashes, other than the
+// Dockerfile and its allowlist (which BuildKit reads outside the context), is
+// a COPY source, so the allowlist must admit it or the build fails with
+// "not found".
+func TestScriptsDevcontainer_AllowlistAdmitsEveryToolchainInput(t *testing.T) {
+	for _, name := range toolchainTagInputs(t, repoRoot(t)) {
+		if name == devcontainerDockerfile || name == devcontainerDockerfile+".dockerignore" {
+			continue
+		}
+		if !dockerignoreAdmits(t, name) {
+			t.Errorf("%s.dockerignore excludes %s: the toolchain tag hashes it, so the toolchain stage COPYs it, and the build cannot find it",
+				devcontainerDockerfile, name)
+		}
 	}
 }
 
@@ -280,15 +304,20 @@ func TestScriptsDevcontainer_ITTagIsContentAddressed(t *testing.T) {
 	}
 }
 
-// dockerignoreAdmits evaluates the devcontainer allowlist for one file at the
-// root of the build context: the last pattern that matches decides, and a
-// leading ! admits. Root-level names are all the userns gate needs.
+// dockerignoreAdmits evaluates the devcontainer allowlist for one slash-separated
+// path in the build context: the last pattern that matches decides, and a
+// leading ! admits. A pattern matches the path or any of its parent
+// directories (so `*` excludes everything below the root, as BuildKit does),
+// segment by segment with path.Match, where a `**` segment matches zero or
+// more segments. That covers every pattern the file uses: literal paths, `*`,
+// `*.go`, `dir/*.go` and `dir/**/*.go`.
 func dockerignoreAdmits(t *testing.T, name string) bool {
 	t.Helper()
 	b, err := os.ReadFile(filepath.Join(repoRoot(t), filepath.FromSlash(devcontainerDockerfile+".dockerignore")))
 	if err != nil {
 		t.Fatalf("read the Dockerfile's dockerignore: %v", err)
 	}
+	segs := strings.Split(name, "/")
 	admitted := true // no pattern matches: the file is in the context
 	for _, line := range strings.Split(string(b), "\n") {
 		line = strings.TrimSpace(line)
@@ -296,14 +325,43 @@ func dockerignoreAdmits(t *testing.T, name string) bool {
 			continue
 		}
 		negated := strings.HasPrefix(line, "!")
-		pattern := strings.TrimPrefix(line, "!")
-		if ok, err := path.Match(pattern, name); err != nil {
-			t.Fatalf("dockerignore pattern %q: %v", line, err)
-		} else if ok {
-			admitted = negated
+		pattern := strings.Split(strings.TrimPrefix(line, "!"), "/")
+		for n := 1; n <= len(segs); n++ {
+			ok, err := matchSegments(pattern, segs[:n])
+			if err != nil {
+				t.Fatalf("dockerignore pattern %q: %v", line, err)
+			}
+			if ok {
+				admitted = negated
+				break
+			}
 		}
 	}
 	return admitted
+}
+
+// matchSegments matches a split dockerignore pattern against a split path:
+// path.Match per segment, and a `**` segment matches zero or more segments.
+func matchSegments(pattern, segs []string) (bool, error) {
+	if len(pattern) == 0 {
+		return len(segs) == 0, nil
+	}
+	if pattern[0] == "**" {
+		for i := 0; i <= len(segs); i++ {
+			if ok, err := matchSegments(pattern[1:], segs[i:]); err != nil || ok {
+				return ok, err
+			}
+		}
+		return false, nil
+	}
+	if len(segs) == 0 {
+		return false, nil
+	}
+	ok, err := path.Match(pattern[0], segs[0])
+	if err != nil || !ok {
+		return false, err
+	}
+	return matchSegments(pattern[1:], segs[1:])
 }
 
 // TestScriptsDevcontainer_UsernsImageCarriesTheRootTests pins the cause of a

@@ -165,7 +165,10 @@ sealer over a `SoftwareProvider` therefore carries no provider blob.
 [Provider contract](#provider-contract) §4 ("Blob is opaque") still holds for
 every other provider. Contract v1 fixes only the envelope and the
 SoftwareProvider blob. A provider such as the OP-TEE TA implements
-SEAL/UNSEAL (0x3/0x4) against this section; those commands stay held (#250).
+SEAL/UNSEAL (0x3/0x4) against this section; go-enclave's side is the
+arm-trustzone backend's `KeyProtector`
+([design](../backends/arm-trustzone-design.md#keyprotector)), and the TA
+side is pending in trusted-firmware.
 
 ### Versioning
 
@@ -577,6 +580,13 @@ process-lifetime `Sealer` (an AST guard test keeps it that way).
   failure is an `*OpenError` carrying it.
 - Provider behavior is checked by [provider-conformance](../provider-conformance/engineering.md),
   which `SoftwareProvider` passes in this repository's own tests.
+- The TPM provider (`backends/tpm`) runs the same conformance suite, with its
+  residue sweep, and checks its sealed blob's length against a software TPM:
+  with `swtpm` and `swtpm-tools` installed, `make integration-test-tpm` starts
+  a throwaway swtpm on 127.0.0.1 (`SWTPM_PORT`, default 2321, and
+  `SWTPM_CTRL_PORT`, default 2322), runs the module's swtpm-tagged tests under
+  `-race` against it, and stops it on exit. Without `swtpm` on `PATH` the
+  target fails; it does not skip. CI runs it on the full tier.
 - `make test-fips` runs the suite in FIPS strict mode (`GOFIPS140=latest`; see [FIPS 140-3](#fips-140-3)).
 
 ## Observability

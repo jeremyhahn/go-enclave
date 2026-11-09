@@ -525,6 +525,9 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       docs_only: ${{ steps.diff.outputs.docs_only }}
+      # CUSTOMIZE: true when a pull request changes the TPM provider, its
+      # swtpm fixture or this workflow; the tpm-swtpm job's steps read it.
+      tpm: ${{ steps.diff.outputs.tpm }}
       # CUSTOMIZE: the optee job's path gate (step optee below).
       optee: ${{ steps.optee.outputs.optee }}
     # v1.26: a draft PR runs no CI; the image job needs this one and skips with it.
@@ -542,18 +545,30 @@ jobs:
           BASE: ${{ github.event.pull_request.base.sha }}
           HEAD: ${{ github.event.pull_request.head.sha }}
           EVENT: ${{ github.event_name }}
+          TPM_PATTERN: '^(backends/tpm/|scripts/swtpm-fixture\.sh$|\.github/workflows/ci\.yml$)'
         run: |
           docs_only=false
-          if [ "$EVENT" = pull_request ] && [ "$CI_FULL_TIER" != true ]; then
-            if files=$(git diff --name-only --no-renames "$BASE...$HEAD") && [ -n "$files" ]; then
-              if ! printf '%s\n' "$files" | grep -qvE "$DOCS_ONLY_PATTERN"; then
-                docs_only=true
+          tpm=false
+          if [ "$EVENT" = pull_request ]; then
+            if files=$(git diff --name-only --no-renames "$BASE...$HEAD"); then
+              if [ -n "$files" ]; then
+                if [ "$CI_FULL_TIER" != true ] && ! printf '%s\n' "$files" | grep -qvE "$DOCS_ONLY_PATTERN"; then
+                  docs_only=true
+                fi
+                if printf '%s\n' "$files" | grep -qE "$TPM_PATTERN"; then
+                  tpm=true
+                fi
+                printf '%s\n' "$files"
               fi
-              printf '%s\n' "$files"
+            else
+              tpm=true   # an unknown diff runs the TPM suite rather than skip it
             fi
           fi
           echo "docs only: $docs_only"
           echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
+          echo "tpm paths: $tpm"
+          echo "tpm=$tpm" >> "$GITHUB_OUTPUT"
+
       # CUSTOMIZE: scripts/optee-selected.sh decides from the changed paths and
       # the diff of scripts/tool-pins.sh (it lists what it selects on: the
       # backend, its harness and fixture script, the Makefile, the scripts and
@@ -1393,6 +1408,55 @@ jobs:
   #   needs: [changes, image]
   #   if: ${{ !cancelled() && needs.image.outputs.built == 'true' && !github.event.pull_request.draft && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.event_name == 'push' || (github.event_name == 'pull_request' && needs.changes.outputs.optee == 'true')) }}
 
+  # CUSTOMIZE (TPM provider conformance, #264): backends/tpm's swtpm-tagged
+  # tests (providertest conformance with its residue sweep, and the sealed
+  # blob's length) against a throwaway swtpm, through `make
+  # integration-test-tpm`. It is full tier, and its job-level `if:` is the
+  # full tier's (the tier check pins it), so the path gate is per step: a
+  # pull request runs the suite only when the changes job's `tpm` output is
+  # true, and every other full-tier event always runs it. The suite runs on
+  # the runner host with swtpm from the runner's apt and Go from setup-go, not
+  # in the toolchain image: that container's network is none (or bridge),
+  # which cannot reach swtpm on the host's loopback, and the image carries no
+  # swtpm. A skipped suite step leaves the job green with the reason printed.
+  tpm-swtpm:
+    name: TPM swtpm Conformance
+    # v1.26: never on a draft PR, ci:full or not.
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')) && !github.event.pull_request.draft }}
+    needs: changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      TPM_SELECTED: ${{ github.event_name != 'pull_request' || needs.changes.outputs.tpm == 'true' }}
+    steps:
+      - name: Are the TPM paths selected?
+        run: |
+          if [ "$TPM_SELECTED" = true ]; then
+            echo "TPM suite selected: running make integration-test-tpm"
+          else
+            echo "TPM suite not selected: this pull request changes no file under backends/tpm/, scripts/swtpm-fixture.sh or .github/workflows/ci.yml"
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        if: ${{ env.TPM_SELECTED == 'true' }}
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        if: ${{ env.TPM_SELECTED == 'true' }}
+        with:
+          go-version-file: backends/tpm/go.mod
+          cache-dependency-path: backends/tpm/go.sum
+
+      - name: Install swtpm
+        if: ${{ env.TPM_SELECTED == 'true' }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends swtpm swtpm-tools
+          swtpm --version
+
+      - name: make integration-test-tpm
+        if: ${{ env.TPM_SELECTED == 'true' }}
+        run: make integration-test-tpm
+
   # CUSTOMIZE (ruling 274(9), #206 comment 179925): the arm-trustzone harness
   # on the OP-TEE QEMU fixture. make integration-test-arm-trustzone compiles
   # the linux/arm64 test binary in the toolchain image and runs
@@ -1545,7 +1609,7 @@ jobs:
     if: always()
     # CUSTOMIZE: the repo's job list. Add every CUSTOMIZE job here AND as a
     # check line below; remove none of the template's jobs.
-    needs: [changes, image, lint-gates, fips, integration, soak, optee, arch-gates]
+    needs: [changes, image, lint-gates, fips, integration, soak, tpm-swtpm, optee, arch-gates]
     steps:
       - name: Fail closed on any non-success
         env:
@@ -1634,5 +1698,6 @@ jobs:
             full:fips="${{ needs.fips.result }}" \
             full:integration="${{ needs.integration.result }}" \
             nightly:soak="${{ needs.soak.result }}" \
+            full:tpm-swtpm="${{ needs.tpm-swtpm.result }}" \
             full:optee="${{ needs.optee.result }}" \
             pr:arch-gates="${{ needs.arch-gates.result }}"

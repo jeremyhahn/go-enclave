@@ -233,13 +233,13 @@ config is refused.
 
 ### The arm-trustzone harness
 
-`make integration-test-arm-trustzone` runs the arm-trustzone conformance test,
-`TestBackendConformance_OnOPTEE` in
+`make integration-test-arm-trustzone` runs the arm-trustzone conformance tests,
+`TestBackendConformance_OnOPTEE` and `TestKeyProtectorConformance_OnOPTEE` in
 `backends/armtrustzone/conformance_optee_test.go`, against the backend on
 OP-TEE ([#250](../../../../issues/250), [#206](../../../../issues/206)). The
 backend and its design are in
-[arm-trustzone-design.md](../backends/arm-trustzone-design.md). The test is
-built only with the `optee` tag, so no other run compiles it,
+[arm-trustzone-design.md](../backends/arm-trustzone-design.md). The tests are
+built only with the `optee` tag, so no other run compiles them,
 `make integration-test-backend-conformance` included. The target compiles
 `backends/armtrustzone` with `go test -c -tags=optee` as a static linux/arm64
 test binary (`CGO_ENABLED=0`) in the toolchain image (`scripts/devcontainer.sh
@@ -248,7 +248,7 @@ run`, as `make docker-run` does) into the checkout's ignored
 it into a fresh share directory and runs the pinned checkout's
 `make optee-run OPTEE_SHARE=<dir> OPTEE_GUEST_CMD=<binary>` on the host, the
 only step that runs there. The guest runs `TestBackendConformance_OnOPTEE`
-with `GO_ENCLAVE_OPTEE_ENDPOINT` set (default `/dev/tee0`, the guest's TEE
+and `TestKeyProtectorConformance_OnOPTEE` with `GO_ENCLAVE_OPTEE_ENDPOINT` set (default `/dev/tee0`, the guest's TEE
 device), and `optee-run`'s status, the binary's, is the target's. It refuses
 while `TRUSTED_FIRMWARE_TAG` is empty, and the script refuses a missing
 binary.
@@ -310,11 +310,17 @@ binary.
   for a fresh backend per check. The connected backend claims
   `CapabilityProbe`, behind the TA's version command (0x1). Its one handle case,
   `rng`, is `Random(ctx, 32)`: a `CapabilityBytes` handle filled by the TA's
-  rng command (0x2). Commands 0x3 and 0x4 are held until a SPEC row names them.
+  rng command (0x2). Commands 0x3 and 0x4 (SEAL and UNSEAL) are named by the
+  `keyprotector-providers` SPEC row: `TestKeyProtectorConformance_OnOPTEE`
+  runs the provider suite (`providertest.TestProvider`, `ModePerOperation`)
+  against `(*Backend).KeyProtector()` on the same fixture. It skips, naming
+  trusted-firmware's SEAL as not yet in the pinned TA, only when SEAL answers
+  `TEE_ERROR_NOT_SUPPORTED` or `TEE_ERROR_BAD_PARAMETERS`.
 - **Fails, never skips.** An empty `GO_ENCLAVE_OPTEE_ENDPOINT` is a
   `*backendtest.EndpointError` (`ErrNoEndpoint`). A failed registration or
   lookup, or a backend without `Connect`, fails the test. A skipped run would
-  look like a pass.
+  look like a pass. The `KeyProtector` test's one skip, above, is for a TA
+  without SEAL; every other failure of it fails.
 
 ### Fixture image contract
 
