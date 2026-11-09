@@ -38,7 +38,9 @@
 # writable layer or its 3 GB /tmp: GOCACHE at /cache/gobuild and
 # GOLANGCI_LINT_CACHE at /cache/golangci for every stage, and, for a bridge
 # stage, GOMODCACHE at /cache/gomod (a no-network stage keeps the image's own
-# read-only module cache, so it still proves the image works offline). The
+# read-only module cache, so it still proves the image works offline). A
+# bridge stage also gets a writable GOPATH on /tmp, because go writes the
+# checksum database note there. The
 # volumes are <CI_STACK_PREFIX>cache-<class>-{gobuild,golangci,gomod}, one set
 # per repo, trust class and daemon host, kept across jobs. CI_CACHE_CLASS
 # (default pr) is `main` only for a push to main, so a pull request never
@@ -178,7 +180,11 @@ fi
 if [ "$network" = bridge ]; then
   # The baked module cache is read-only to the run's user and holds only the
   # root module's build list; the nested modules deps-check walks fetch more.
-  args+=(--env "GOPROXY=https://proxy.golang.org,direct" --env "GOMODCACHE=$modcache")
+  # go keeps the checksum database note under $GOPATH/pkg/sumdb, and the
+  # image's /go is read-only too: a per-run GOPATH on the tmpfs, never a
+  # shared volume. GOMODCACHE is set, so it does not follow GOPATH.
+  args+=(--env "GOPROXY=https://proxy.golang.org,direct" --env "GOMODCACHE=$modcache"
+    --env GOPATH=/tmp/gopath)
   for v in GOPRIVATE GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0; do
     if [ -n "${!v:-}" ]; then args+=(--env "$v"); fi
   done
