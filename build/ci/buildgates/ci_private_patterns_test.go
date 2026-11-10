@@ -24,6 +24,8 @@ const (
 	privatePatternSecret = "${{ secrets.RELEASABILITY_PATTERNS }}"
 	privatePatternSearch = `git grep -n -I -i -F -f "$pf" -- .`
 	privatePatternCut    = "cut -d: -f1,2"
+	// privatePatternIf runs the step after a failed lint step too.
+	privatePatternIf = "${{ !cancelled() }}" //nolint:misspell // the Actions cancelled() function
 )
 
 type privatePatternWorkflow struct {
@@ -61,8 +63,8 @@ func privatePatternGateViolations(src []byte) ([]string, error) {
 			if name != lintJob {
 				bad = append(bad, fmt.Sprintf("job %s: runs %q; want it in the %s job only", name, privatePatternStep, lintJob))
 			}
-			if st.If != "${{ !cancelled() }}" {
-				bad = append(bad, fmt.Sprintf("step if is %q; want it to run whenever the job is not cancelled", st.If))
+			if st.If != privatePatternIf {
+				bad = append(bad, fmt.Sprintf("step if is %q; want it to run whenever the job is not canceled", st.If))
 			}
 			if st.Env["RELEASABILITY_PATTERNS"] != privatePatternSecret {
 				bad = append(bad, fmt.Sprintf("RELEASABILITY_PATTERNS is %q, want %s", st.Env["RELEASABILITY_PATTERNS"], privatePatternSecret))
@@ -133,7 +135,7 @@ func TestLintJobRunsThePrivatePatternGate_RefusesWhatItMustRefuse(t *testing.T) 
 	for _, tc := range []struct{ name, old, new string }{
 		{"header back at v1.30", ciTemplateHeader, "# ci-template: v1.30 (customized)"},
 		{"step renamed away", "- name: " + privatePatternStep, "- name: Releasability"},
-		{"step skipped after a failure", "- name: " + privatePatternStep + "\n        if: ${{ !cancelled() }}", "- name: " + privatePatternStep + "\n        if: ${{ success() }}"},
+		{"step skipped after a failure", "- name: " + privatePatternStep + "\n        if: " + privatePatternIf, "- name: " + privatePatternStep + "\n        if: ${{ success() }}"},
 		{"patterns from a variable", privatePatternSecret, "${{ vars.RELEASABILITY_PATTERNS }}"},
 		{"matched text printed", " | " + privatePatternCut, ""},
 		{"search without fixed strings", privatePatternSearch, `git grep -n -f "$pf" -- .`},
