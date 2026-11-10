@@ -1,4 +1,18 @@
-# ci-template: v1.30 (customized)
+# ci-template: v1.31 (customized)
+# v1.31: the internal-name gate reads its patterns from outside the
+# repository. A public repository never lists internal names, hosts or
+# addresses, not even as patterns to refuse. The lint job's
+# `Releasability (private patterns)` step takes the pattern file from the
+# Actions secret RELEASABILITY_PATTERNS (one fixed string per line) and fails
+# on any match in the tracked tree, printing path and line only, never the
+# value. RELEASABILITY_TEST keeps the repository's own test, which checks
+# generic shapes only.
+# CUSTOMIZE (go-enclave, #277): v1.30 and v1.31 are adopted with go-enclave's
+# runners and image build unchanged. Every job runs on ubuntu-latest; no job
+# takes the template's self-hosted labels. Each image build passes the
+# inherited GOPROXY as GO_BUILD_PROXY and stages no forge credential, so the
+# module-cache probe of v1.29.4 and v1.29.5 below is not carried.
+# publish-images keeps the template's condition and skips on github.com.
 # v1.30 (Company Agent m1804, 2026-10-31): the five fixes of the 72-hour CI
 # evaluation (ci-standard.md §12). go-qrdb #1328, three comment lines, cost
 # about 1100 runner-minutes over three runs, and every push to main reran the
@@ -969,6 +983,38 @@ jobs:
       - name: make lint
         if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' }}
         run: scripts/in-toolchain-image.sh "$TOOLCHAIN_IMAGE" "make lint GO_BUILD_TAGS='$GO_BUILD_TAGS'"
+
+      # v1.31: the internal-name gate. Its patterns are internal values, so
+      # they never live in this repository: the Actions secret
+      # RELEASABILITY_PATTERNS carries the private pattern file (one fixed
+      # string per line, `#` comments). The step prints path and line of a
+      # match, never the value. A run without the secret (a fork PR) skips
+      # with a notice; a push to main without it fails.
+      - name: Releasability (private patterns)
+        if: ${{ !cancelled() }}
+        env:
+          RELEASABILITY_PATTERNS: ${{ secrets.RELEASABILITY_PATTERNS }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ -z "$RELEASABILITY_PATTERNS" ]; then
+            if [ "$EVENT" = push ]; then
+              echo "::error::RELEASABILITY_PATTERNS is not set; the gate needs the private pattern file"
+              exit 1
+            fi
+            echo "::notice::RELEASABILITY_PATTERNS is not available to this run; pushes to main run the gate"
+            exit 0
+          fi
+          pf=$(mktemp)
+          chmod 600 "$pf"
+          trap 'rm -f "$pf"' EXIT
+          printf '%s\n' "$RELEASABILITY_PATTERNS" | sed -e '/^[[:space:]]*$/d' -e '/^#/d' > "$pf"
+          hits=$( (git grep -n -I -i -F -f "$pf" -- . || true) | cut -d: -f1,2)
+          if [ -n "$hits" ]; then
+            echo "::error::internal names in the tracked tree (path:line; the values are not shown):"
+            printf '%s\n' "$hits"
+            exit 1
+          fi
+          echo "releasability: $(wc -l < "$pf") private patterns, 0 matches"
 
       # v1.26.1 (Company Agent m1128 (9)): a docs-only PR skips make coverage, so
       # it runs the releasability test alone; any other run gets it from make
