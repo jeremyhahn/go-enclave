@@ -656,11 +656,6 @@ lint-gates: check-buildgates check-releasability check-changelog-assembly check-
 # once per invocation, however many others depend on it: lint-go carries vet,
 # staticcheck and gosec for lint and security alike.
 
-## lint-sweeps: nightly.yml's lint-sweeps job (ci-template v1.30); go-enclave has no sweep slower than its lint job, so it has nothing to run
-.PHONY: lint-sweeps
-lint-sweeps:
-	@echo "OK: no lint sweep; every lint runs in ci.yml's lint job"
-
 ## ci-lint: every static check: tidy, lint (staticcheck included), the integration suite's lint, the build gates, releasability, changelog assembly, the scripts
 .PHONY: ci-lint
 ci-lint: tidy-check lint lint-runtimesecret lint-integration check-buildgates check-releasability check-changelog-assembly check-scripts
