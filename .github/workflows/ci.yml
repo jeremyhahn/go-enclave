@@ -739,26 +739,27 @@ jobs:
           echo "optee: $optee"
           echo "optee=$optee" >> "$GITHUB_OUTPUT"
 
-  # v1.29.3 (Company Agent ruling 255(10)/(11)(c)): one nightly per
-  # repository, and none while main is busy. On a schedule run only, this job
-  # asks the API whether this workflow has a push run on main in progress or
-  # waiting, and sets `verdict`: `run` (none, or not a schedule run), `busy`
-  # (one is) or `unreadable` (no count came back). On a schedule run every
-  # bigdisk job runs only on `run`; CI Gate skips on `busy` and fails on
-  # `unreadable`. The job runs on every event, not on schedule alone, so no
-  # bigdisk job's `needs` meets a skipped job off schedule; off schedule it
-  # makes no call. It checks nothing out, so no repository code runs beside
-  # the tokens.
-  # v1.30 (fixes 2, 3 and 5): two more verdicts. `refused`: a
-  # workflow_dispatch off main (no full tier on a PR branch, ever) or a pull
-  # request from a checkpoint branch (lane-ckpt/*); every job but the gate
-  # skips and CI Gate fails. `proven`: on a push to main, the newest of this
-  # workflow's last 20 successful runs whose head commit has this commit's tree
-  # and whose Integration job succeeded (a ci:full PR run, a dispatch on main,
-  # an earlier main run); the guard records its id as `proof`, every bigdisk
-  # job skips and CI Gate reads the skips as passed. A proof it cannot read
-  # leaves `run`: the full tier runs. A schedule run never gets `proven`,
-  # because its security stages read fresh vulnerability databases.
+  # v1.29.3: one schedule run per repository, and none while main is busy.
+  # On a schedule run only, and never on github.com, this job asks the API
+  # whether this workflow has a push run on main in progress or waiting, and
+  # sets `verdict`: `run` (none, or not a schedule run), `busy` (one is) or
+  # `unreadable` (no count came back). Every job that needs the guard runs
+  # only on `run`; CI Gate skips on `busy` and fails on `unreadable`. The job
+  # runs on every event, not on schedule alone, so no job's `needs` meets a
+  # skipped job off schedule; off schedule it makes no call. It checks
+  # nothing out, so no repository code runs beside the tokens.
+  # v1.30: two more verdicts. `refused`: a workflow_dispatch off main (no
+  # full tier on a PR branch, ever) or a pull request from a checkpoint
+  # branch; every job but the gate skips and CI Gate fails. `proven`: on a
+  # push to main off github.com, the newest of this workflow's last 20
+  # successful runs whose head commit has this commit's tree and whose
+  # Integration job succeeded; the guard records its id as `proof`, the
+  # guarded jobs skip and CI Gate reads the skips as passed. A proof it
+  # cannot read leaves `run`: the full tier runs. A schedule run never gets
+  # `proven`, because its security stages read fresh vulnerability databases.
+  # CUSTOMIZE (go-enclave, #277): on github.com, where go-enclave runs, the
+  # guard makes no API call, so it only refuses; `busy`, `unreadable` and
+  # `proven` cannot occur here.
   schedule-guard:
     name: Schedule guard
     runs-on: ubuntu-latest
@@ -854,7 +855,7 @@ jobs:
           elif [ "$EVENT" != schedule ]; then
             echo "not a schedule run: no check"
           elif [ "$SERVER" = https://github.com ]; then
-            echo "the github.com mirror has no bigdisk runner: no check"
+            echo "on github.com the guard makes no API call: no check"
           elif [ -n "$JOB_TOKEN" ] && runs "$JOB_TOKEN"; then
             echo "read with the job token"
           elif job="${CODE:-no job token}"; [ -n "$BOT" ] && runs "$BOT"; then
@@ -862,18 +863,18 @@ jobs:
           else
             bot="not set"; [ -z "$BOT" ] || bot="$CODE"
             verdict=unreadable
-            echo "::error::the Actions API gave no count (job token: $job; AGENT_TOKEN: $bot), so every bigdisk job skips and CI Gate fails"
+            echo "::error::the Actions API gave no count (job token: $job; AGENT_TOKEN: $bot), so every guarded job skips and CI Gate fails"
           fi
           if [ "$verdict" = run ] && [ "$N" -gt 0 ]; then
             verdict=busy
-            echo "::notice::$N push run(s) of this workflow on main in flight: this schedule run skips its bigdisk jobs, and CI Gate posts skipped"
+            echo "::notice::$N push run(s) of this workflow on main in flight: this schedule run skips its guarded jobs, and CI Gate posts skipped"
           fi
           # v1.30 (fix 2): the tree proof, on a push to main on the forge only.
           if [ "$verdict" = run ] && [ "$EVENT" = push ] && [ "$REF" = refs/heads/main ] && [ "$SERVER" != https://github.com ]; then
             if { [ -n "$JOB_TOKEN" ] && proof "$JOB_TOKEN"; } || { [ -n "$BOT" ] && proof "$BOT"; }; then
               if [ -n "$PROOF" ]; then
                 verdict=proven
-                echo "::notice::this tree already has a green full tier in run $PROOF: the bigdisk jobs skip, and CI Gate passes on it"
+                echo "::notice::this tree already has a green full tier in run $PROOF: the guarded jobs skip, and CI Gate passes on it"
               fi
             else
               echo "::warning::the tree proof could not be read: the full tier runs"
@@ -902,7 +903,7 @@ jobs:
     if: ${{ github.server_url != 'https://github.com' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     timeout-minutes: 60       # CUSTOMIZE: ceil(1.5 x a cold toolchain build's p95)
     env:
-      CI_IMAGE_NAMESPACE: agent-ci-images   # ci-standard.md §9 (ruling 217(4))
+      CI_IMAGE_NAMESPACE: agent-ci-images   # the template's default namespace; unused on github.com
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
@@ -2112,7 +2113,7 @@ jobs:
             echo "FAIL schedule-guard (refused: a workflow_dispatch off main or a PR from lane-ckpt/*; see its log)"; BAD=1
           fi
           if [ "${SCHEDULE}" = true ] && [ "${SCHEDULE_GUARD}" != run ]; then
-            echo "FAIL schedule-guard (verdict '${SCHEDULE_GUARD:-none}': the bigdisk jobs skipped because the guard could not read the API; see its log)"; BAD=1
+            echo "FAIL schedule-guard (verdict '${SCHEDULE_GUARD:-none}': the guarded jobs skipped because the guard could not read the API; see its log)"; BAD=1
           fi
           # CUSTOMIZE: one line per job in needs above. A job gated to the
           # full tier by its `if:` is marked full, one gated to schedule and
