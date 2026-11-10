@@ -1,4 +1,14 @@
-# Nightly jobs: the long-horizon checks, kept off the push path.
+# nightly-template: v1.9 (customized)
+# The long-horizon checks, kept off the push path.
+# v1.9: a `lint-sweeps` job runs the repository's `make -k lint-sweeps` in its
+# toolchain image, nightly and on dispatch only, when the Makefile (or a
+# tracked *.mk) defines the target; without one it prints OK and passes. A
+# repository's lint sweeps never run in ci.yml. The job needs the scripts
+# ci.yml ships (in-toolchain-image.sh, ci-image-cache.sh, trim-ci-caches.sh).
+# CUSTOMIZE (go-enclave, #277): the job runs on ubuntu-latest like every job
+# (#293), frees disk before it builds the toolchain image, and builds it with
+# GO_BUILD_PROXY and no forge credential, as ci.yml's jobs do. The trivy job
+# and the schedule are go-enclave's own.
 #
 # Jobs that verify a slow-moving property, or that were known-red with tracked
 # issues, do NOT run per push — a known-red job burning 60-90 runner-minutes
@@ -41,6 +51,67 @@ jobs:
   # `curl …/contrib/install.sh from main | sh` — an unreviewed script from a
   # moving branch, executed as the build user — and the trivy-action steps
   # that ran on github.com, a third-party action the CLI makes unnecessary.
+  # v1.9: the repository's lint sweeps (whole-tree, slow lint passes beside
+  # `make lint`), off every push and PR path (ci-standard.md §12).
+  lint-sweeps:
+    name: Lint sweeps [toolchain image]
+    runs-on: ubuntu-latest    # CUSTOMIZE: every job takes the hosted runner (#293)
+    timeout-minutes: 131      # CUSTOMIZE: ceil(1.5 x this job's 72-hour p95); the template's value until this job has one
+    env:
+      CI_STACK_PREFIX: ${{ github.event.repository.name }}-ci-
+      CI_CACHE_CLASS: main
+      CI_IMAGE_NAMESPACE: agent-ci-images
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Mask the forge credentials
+        run: |
+          for v in GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0; do
+            val=${!v:-}
+            [ -n "$val" ] || continue
+            echo "::add-mask::$val"
+            case $val in *://*:*@*) t=${val#*://}; t=${t%%@*}; echo "::add-mask::${t#*:}" ;; esac
+          done
+
+      - name: Does the Makefile define lint-sweeps?
+        id: probe
+        run: |
+          mapfile -t mk < <(git ls-files -- Makefile '*.mk')
+          if [ "${#mk[@]}" -gt 0 ] && grep -qE '^lint-sweeps[[:space:]]*:([^=]|$)' "${mk[@]}"; then
+            echo "has_target=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "OK: no lint-sweeps target in the Makefile; nothing to run"
+            echo "has_target=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # A GitHub-hosted runner has about 14 GB free; the image build needs more.
+      - name: Free disk for the image build
+        if: ${{ steps.probe.outputs.has_target == 'true' }}
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Pull the toolchain image from the registry cache
+        if: ${{ steps.probe.outputs.has_target == 'true' }}
+        run: scripts/ci-image-cache.sh pull || true
+
+      - name: Build the toolchain image
+        if: ${{ steps.probe.outputs.has_target == 'true' }}
+        run: |
+          make docker-build-toolchain GO_BUILD_PROXY="${GOPROXY:-}"
+          echo "TOOLCHAIN_IMAGE=$(make -s toolchain-image)" >> "$GITHUB_ENV"
+
+      - name: Trim the CI caches
+        if: ${{ !cancelled() && steps.probe.outputs.has_target == 'true' && env.TOOLCHAIN_IMAGE != '' }}
+        run: scripts/trim-ci-caches.sh "$CI_STACK_PREFIX" "$TOOLCHAIN_IMAGE"
+
+      # -k: a sweep reports every finding in one run; it gates no merge.
+      - name: make lint-sweeps
+        if: ${{ !cancelled() && steps.probe.outputs.has_target == 'true' && env.TOOLCHAIN_IMAGE != '' }}
+        env:
+          IN_IMAGE_NETWORK: none   # CUSTOMIZE: bridge when a sweep needs the module proxy
+        run: scripts/in-toolchain-image.sh "$TOOLCHAIN_IMAGE" "make -k lint-sweeps"
+
   trivy:
     name: Trivy
     runs-on: ubuntu-latest

@@ -238,7 +238,7 @@ lint-actions:
 # follows the `. lib.sh` every script sources. build/ci/*.sh are the workflows'
 # scripts, and CI_BASH_SCRIPTS the ci-template's bash ones, taken unchanged
 # from it; each names its own shell on its first line.
-CI_BASH_SCRIPTS := scripts/apk-index-sum.sh scripts/in-toolchain-image.sh scripts/reap-stale-ci-stacks.sh scripts/trim-ci-caches.sh
+CI_BASH_SCRIPTS := scripts/apk-index-sum.sh scripts/ci-image-cache.sh scripts/in-toolchain-image.sh scripts/reap-stale-ci-stacks.sh scripts/trim-ci-caches.sh
 .PHONY: lint-scripts
 lint-scripts:
 	@sc=$(call tool,shellcheck,SHELLCHECK) && \
@@ -570,6 +570,15 @@ $(call raw_bind,CMD)
 .PHONY: docker-build
 docker-build:
 	@GO_ENCLAVE_IT_IMAGE="$$IT_IMAGE" sh scripts/devcontainer.sh build
+
+## docker-build-toolchain: Build the toolchain stage alone, go-enclave-toolchain:<content tag> and :latest, skipped when the tag is held (ci-template v1.30)
+.PHONY: docker-build-toolchain
+docker-build-toolchain:
+	@ref=$$(sh scripts/devcontainer.sh tag) && repo=$${ref%%:*} && \
+	set -- -f build/docker/devcontainer/Dockerfile --target toolchain -t "$$ref" -t "$$repo:latest" && \
+	if [ -n "$${GO_BUILD_PROXY:-}" ]; then set -- "$$@" --build-arg "GO_BUILD_PROXY=$$GO_BUILD_PROXY"; fi && \
+	if docker image inspect "$$ref" >/dev/null 2>&1; then docker tag "$$ref" "$$repo:latest" && echo "$$ref is already held; tagged $$repo:latest"; \
+	elif ! DOCKER_BUILDKIT=1 docker build "$$@" .; then docker image inspect "$$ref" >/dev/null 2>&1 || { echo "building $$ref failed" >&2; exit 1; }; docker tag "$$ref" "$$repo:latest"; fi
 
 ## it-image: Print the integration image's content-addressed tag, go-enclave-ci-it:<hash> of the build context (ci.yml's IT_IMAGE)
 .PHONY: it-image

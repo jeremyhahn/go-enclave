@@ -145,14 +145,16 @@ Which integration test covers which feature: [COVERAGE.md](../test/integration/C
 
 ## CI
 
-`ci.yml` follows the ci-template v1.29.2 shape. Every stage runs in the
-devcontainer image that `make docker-build` builds from the commit under test.
+`ci.yml` follows the ci-template v1.31 shape. Every stage runs in the
+devcontainer's toolchain image, built from the commit under test: `make
+docker-build` builds it with the integration image, and the Lint and Lint
+Gates jobs build it alone with `make docker-build-toolchain`.
 No job installs Go or a tool on the runner. `scripts/in-toolchain-image.sh`
 copies the checkout into a toolchain container, because a bind mount would
-resolve on the daemon's host. Each job that uses Docker runs
-`scripts/reap-stale-ci-stacks.sh` first, which removes what a dead runner left
-behind. The image and integration jobs mask the forge credentials before any
-other step. No step prints an env file or the job environment. The stages
+resolve on the daemon's host. The image, Lint Gates, FIPS, integration and
+soak jobs run `scripts/reap-stale-ci-stacks.sh` first, which removes what a
+dead runner left behind. Those jobs and the Lint job mask the forge
+credentials before any other step. No step prints an env file or the job environment. The stages
 keep the Go build, golangci-lint and module caches in named volumes on the
 runner's Docker host, `go-enclave-ci-cache-<pr|main>-{gobuild,golangci,gomod}`,
 and only a push to `main` writes the `main` set. After the image build,
@@ -161,23 +163,28 @@ repository's volumes on that host exceed `CI_CACHE_MAX_GIB` (32).
 
 | Job | Tier | Runs |
 |---|---|---|
-| Devcontainer image | PR | One job on `ubuntu-latest`. Each stage is a step in the toolchain image: `make lint`; the static checks `make ci-lint` adds beside the Lint Gates job's (`tidy-check lint-runtimesecret lint-integration`); `make build`; `make cross-build`; `make coverage`; `make test-runtimesecret`; `make deps-check`, a lint-class gate on every event; then, on the full tier only, `make security` and `trivy image` on the integration image. A failed step does not stop the later ones. `security`, `deps-check` and `trivy image` get a network for the vulnerability databases and the module proxy. `deps-check` reports, and does not fail on, a module behind a latest release published under 7 days ago without a `// held: <reason>` comment |
-| Lint Gates | PR | `make -k lint-gates` in the toolchain image on `ubuntu-latest`, in parallel with the image job's `make lint`, so Lint's wall time is the longer of the two. It builds the toolchain image only when the Makefile defines the target, with no network |
+| Lint | PR | One job on `ubuntu-latest`, beside the image job. It takes the toolchain image from the registry cache or builds it alone (`make docker-build-toolchain`), and each stage is a step in it: `make lint`; the `Releasability (private patterns)` search ([below](#releasability)); the static checks `make ci-lint` adds beside the Lint Gates job's (`tidy-check lint-runtimesecret lint-integration`); `make gosec`, off the full tier and not on a docs-only pull request, with no network; `make deps-check`, a lint-class gate on every event, with a network for the module proxy. A failed step does not stop the later ones. `deps-check` reports, and does not fail on, a module behind a latest release published under 7 days ago without a `// held: <reason>` comment |
+| Devcontainer image | PR | One job on `ubuntu-latest`. It builds the images (`make docker-build`), and each stage is a step in the toolchain image: `make build`; `make cross-build`; `make coverage`; `make test-runtimesecret`; then, on the full tier only, `make security` (gosec included) and `trivy image` on the integration image. A failed step does not stop the later ones. `security` and `trivy image` get a network for the vulnerability databases and the module proxy. The job skips on a docs-only pull request |
+| Lint Gates | PR | `make lint-gates` in the toolchain image on `ubuntu-latest`, beside the Lint job, so lint's wall time is the longer of the two. No `-k`: the first failing gate ends the step. It builds the toolchain image alone, and only when the Makefile defines the target; the gates get no network. On a pull request off the full tier it runs only when a changed file matches `LINT_GATES_PATTERN`. Here the pattern is `.`, which every path matches, so it runs on every pull request. A pattern that cannot be searched skips nothing |
 | Architecture Gates | PR | No go-objstore import (the template's storage-seam check), on the runner's shell |
 | FIPS | full | `make test-fips` in the toolchain image |
 | Integration | full | `make ci-integration` on `ubuntu-latest`: the user-namespace, default and FIPS strict suites, on one scanned integration image |
 | Soak | nightly | `make ci-integration` looped on `ubuntu-latest` for 30 minutes, each iteration its own compose project |
 
 The **PR tier** runs on every event. The **full tier** runs on every event
-but a pull request (a push to `main`, the nightly schedule, `workflow_dispatch`)
-and on a pull request labelled `ci:full`. The **nightly tier** runs on the
-schedule (04:00 UTC) and on `workflow_dispatch`. Label a PR `ci:full` when it
-changes the API or fixes the integration suite. The label takes effect on the
-PR's next push or update-branch, or via `workflow_dispatch`, because a label
-change starts no run (`pull_request` lists only `opened`, `synchronize` and
-`reopened`). A pull request whose every changed file is markdown or under
-`docs/` runs only the lint steps of the PR tier, the Lint Gates job included;
-on the full tier the build and test steps always run.
+but a pull request (a push to `main`, the nightly schedule, `workflow_dispatch`
+on `main`) and on a pull request labelled `ci:full`. The **nightly tier** runs
+on the schedule (04:00 UTC) and on `workflow_dispatch` on `main`. Label a PR
+`ci:full` when it changes the API or fixes the integration suite. The label
+takes effect on the PR's next push or update-branch, because a label change
+starts no run (`pull_request` lists only `opened`, `synchronize` and
+`reopened`). A manual `workflow_dispatch` runs only on `main`: on any other
+ref the schedule guard refuses the run, no job that checks out the branch
+starts and CI Gate fails, so a dispatch cannot put a pull request on the full
+tier. A pull request whose every changed file is markdown or under
+`docs/` (a docs-only pull request) runs the Lint job without `make gosec`, and
+the Lint Gates job; the Devcontainer image job skips, and CI Gate accepts that
+skip. On the full tier the build and test steps always run.
 
 A draft pull request (a `WIP:` title) runs no CI: every job but CI Gate skips,
 and CI Gate fails on a draft, so no skipped gate reads as passed. Marking the
@@ -207,16 +214,22 @@ Dockerfile's default public proxy, which serves the public root module (#293). `
 `integration-test` only. `GO_BUILD_TAGS` must stay empty,
 because no package is gated by a tag; the Makefile refuses any other value.
 
-The **CI Gate** is the one required check. It runs on the `ci-gate` runner
-label and carries `build/ci/summary.sh <message> <full> <nightly> <tier>:<job>=<result>…` inline:
-a full- or nightly-tier job skipped because its tier was not selected passes;
-any other skip, failure or cancellation fails the gate.
+The **CI Gate** is the one required check. It runs on `ubuntu-latest` with no
+checkout and no action: one shell step calls an inline
+`check <job> <result> <pr|code|scoped|full|nightly>` once for each job it
+needs. A skipped job passes only for the reason its class names: a `full` job
+when the full tier is not selected; the `nightly` job (Soak) off the schedule
+and dispatch; the `code` job (Devcontainer image) on a docs-only pull request;
+the `scoped` job (Lint Gates) when no changed file matches
+`LINT_GATES_PATTERN`. A skipped `pr` job (Lint and Architecture Gates among
+them) fails the gate, as does any other skip, failure or cancellation, a draft
+pull request, and a run the schedule guard refused.
 
 | Workflow | Trigger | Runs |
 |---|---|---|
-| `ci.yml` | push to `main`, pull request to `main`, nightly schedule, dispatch | The three tiers and the CI Gate; the one CI schedule |
+| `ci.yml` | push to `main`, pull request to `main`, nightly schedule, dispatch on `main` | The three tiers and the CI Gate; the one CI schedule |
 | `release.yml` | a `v*` tag | The [release flow](#release-flow) |
-| `nightly.yml` | dispatch only | `trivy-misconfig`, `trivy-sarif` |
+| `nightly.yml` | dispatch only | Lint sweeps: `make -k lint-sweeps` in the toolchain image when the Makefile defines the target; this repository defines none, so the job prints `OK` and passes. Trivy: `trivy-misconfig`, `trivy-sarif` |
 
 `TOOL_INSTALL=1`, the default, installs a missing pin into `bin/tools/`.
 `TOOL_INSTALL=0` installs nothing and fails closed. `ci.yml` sets neither,
@@ -253,6 +266,35 @@ not a waiver, and there is no file-level allow list. The agent
 instruction files (`CLAUDE.md`, `AGENTS.md`, `.claude/`,
 `.serena/project.yml`) are reported, not refused: they are stripped from the
 tree at publish.
+
+The CI `lint` job also has a `Releasability (private patterns)` step, on every
+event the job runs on. It searches the tracked tree for the patterns in the
+Actions secret `RELEASABILITY_PATTERNS`, which a maintainer sets in the
+repository's settings. The secret holds the patterns themselves, one fixed
+string per line, for example `example-private-host`. The step runs
+`git grep -I -i -F`: a pattern matches anywhere in a line, without regard to
+case and not as a regular expression, and binary files are skipped. Blank
+lines and lines that start with `#` are dropped; every other line is taken
+whole, spaces included.
+
+| The run | The step |
+|---|---|
+| The secret is absent or empty, on a push to `main` | Fails |
+| The secret is absent or empty, on any other event (a pull request from a fork gets no secret) | Prints a notice and passes without a search |
+| The secret holds only blank lines and `#` lines | Fails, on every event |
+| A pattern matches | Fails and prints `path:line` of each match, never the value |
+| The search cannot run (`git grep` exits above 1) | Fails |
+| No pattern matches | Passes and prints the pattern count |
+
+`make check-releasability` reads the same name differently. There the
+environment variable `RELEASABILITY_PATTERNS` is the path of a site pattern
+file, not the patterns: one `<class><TAB><regex>` rule per line, the class one
+of `lab-address`, `lab-host` or `owner-path` and the rest a Go regular
+expression, with blank lines and `#` lines skipped and any other malformed line
+an error. Unset or empty, only the built-in rules run. No workflow passes the
+secret to `make check-releasability`, so in CI that gate runs its built-in
+rules. Do not reuse one for the other: a line of the secret has no class and
+is not read as a regular expression.
 
 ## Scripts
 
