@@ -1463,8 +1463,11 @@ jobs:
   # the job names it like the others and removes nothing.
   fips:
     name: FIPS
+    needs: schedule-guard
     # v1.26: never on a draft PR, ci:full or not.
-    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')) && !github.event.pull_request.draft }}
+    # CUSTOMIZE (go-enclave, #277): and only on the guard's run verdict, so
+    # a refused workflow_dispatch does not check out and run its branch.
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')) && !github.event.pull_request.draft && needs.schedule-guard.outputs.verdict == 'run' }}
     runs-on: ubuntu-latest
     timeout-minutes: 11       # CUSTOMIZE: ceil(1.5 x this job's 72-hour p95), ci-standard.md §12 (#277)
     env:
@@ -1878,9 +1881,10 @@ jobs:
   # swtpm. A skipped suite step leaves the job green with the reason printed.
   tpm-swtpm:
     name: TPM swtpm Conformance
-    # v1.26: never on a draft PR, ci:full or not.
-    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')) && !github.event.pull_request.draft }}
-    needs: changes
+    # v1.26: never on a draft PR, ci:full or not. #277: and only on the
+    # guard's run verdict.
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')) && !github.event.pull_request.draft && needs.schedule-guard.outputs.verdict == 'run' }}
+    needs: [changes, schedule-guard]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -1927,8 +1931,9 @@ jobs:
   # step is skipped, so the job succeeds without running the harness.
   optee:
     name: OP-TEE [arm-trustzone harness, fixture image]
-    needs: [changes, image]
-    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')) && !github.event.pull_request.draft }}
+    # #277: the guard is named here too, not only reached through the image job.
+    needs: [changes, image, schedule-guard]
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')) && !github.event.pull_request.draft && needs.schedule-guard.outputs.verdict == 'run' }}
     runs-on: ubuntu-latest
     timeout-minutes: 180
     steps:
@@ -2026,8 +2031,9 @@ jobs:
   # v1.23: a lint-class check, so it stays on the PR tier.
   arch-gates:
     name: Architecture Gates
+    needs: schedule-guard
     runs-on: ubuntu-latest
-    if: ${{ !github.event.pull_request.draft }}   # v1.26
+    if: ${{ !github.event.pull_request.draft && needs.schedule-guard.outputs.verdict == 'run' }}   # v1.26
     timeout-minutes: 5        # v1.30
     env:
       OBJSTORE_SEAMS: ''      # CUSTOMIZE
