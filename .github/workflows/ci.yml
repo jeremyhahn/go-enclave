@@ -991,6 +991,9 @@ jobs:
       # string per line, `#` comments). The step prints path and line of a
       # match, never the value. A run without the secret (a fork PR) skips
       # with a notice; a push to main without it fails.
+      # CUSTOMIZE (go-enclave, #277): the step reads git grep's own status.
+      # 0 is a match and 1 is none; any other status (a search that could
+      # not run) fails the step, and so does a secret that holds no pattern.
       - name: Releasability (private patterns)
         if: ${{ !cancelled() }}
         env:
@@ -1009,8 +1012,18 @@ jobs:
           chmod 600 "$pf"
           trap 'rm -f "$pf"' EXIT
           printf '%s\n' "$RELEASABILITY_PATTERNS" | sed -e '/^[[:space:]]*$/d' -e '/^#/d' > "$pf"
-          hits=$( (git grep -n -I -i -F -f "$pf" -- . || true) | cut -d: -f1,2)
-          if [ -n "$hits" ]; then
+          if [ ! -s "$pf" ]; then
+            echo "::error::RELEASABILITY_PATTERNS holds no pattern; the gate has nothing to search for"
+            exit 1
+          fi
+          # go-enclave: fail on a search error (git grep status above 1), not only on a match.
+          rc=0
+          hits=$(git grep -n -I -i -F -f "$pf" -- . | cut -d: -f1,2; exit "${PIPESTATUS[0]}") || rc=$?
+          if [ "$rc" -gt 1 ]; then
+            echo "::error::the private-pattern search failed; nothing shows the tree is clean (git grep status $rc)"
+            exit 1
+          fi
+          if [ "$rc" -eq 0 ] || [ -n "$hits" ]; then
             echo "::error::internal names in the tracked tree (path:line; the values are not shown):"
             printf '%s\n' "$hits"
             exit 1
