@@ -328,7 +328,9 @@ func TestLintJobRunsThePrivatePatternGate_RefusesWhatItMustRefuse(t *testing.T) 
 		{"a failed search counted as no match", searchStatus, " || true)"},
 		{"the search's status lost in the pipe", searchStatus, ")"},
 		{"the search's status never read", ") || rc=$?", ") || :"},
-		{"a search error passes", `if [ "$rc" -gt 1 ]; then`, `if [ "$rc" -gt 2 ]; then`},
+		// The line is taken with the one above it: the changed-files step
+		// reads a grep status the same way, earlier in the workflow.
+		{"a search error passes", ") || rc=$?\n          if [ \"$rc\" -gt 1 ]; then", ") || rc=$?\n          if [ \"$rc\" -gt 2 ]; then"},
 		{"a search error is a warning", "(git grep status $rc)\"\n            exit 1", "(git grep status $rc)\""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

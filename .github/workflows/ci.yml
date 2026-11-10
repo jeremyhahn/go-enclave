@@ -684,18 +684,40 @@ jobs:
         run: |
           # v1.30: lint_gates is false only on a PR whose changed files all
           # miss LINT_GATES_PATTERN; any doubt runs the job.
+          # CUSTOMIZE (go-enclave, #277): each search answers from grep's own
+          # status. `found VAR` asks whether a changed file matches the
+          # pattern VAR names, and `found VAR -v` whether one misses it. 0 is
+          # yes and 1 is no. Any other status (a pattern that is no regular
+          # expression) and an empty pattern are a search that did not run:
+          # it answers yes with a warning, so docs_only stays false,
+          # lint_gates stays true and tpm is true. A broken pattern skips no
+          # job. grep reads the list from a here-string, so no pipe closes on
+          # a writer when grep -q stops at the first line.
+          found() {
+            local rc=0
+            if [ -z "${!1}" ]; then
+              echo "::warning::$1 is empty: no search of the changed files ran, and no job is skipped on it"
+              return 0
+            fi
+            grep -qE "${@:2}" -e "${!1}" <<< "$files" || rc=$?
+            if [ "$rc" -gt 1 ]; then
+              echo "::warning::$1: the search of the changed files failed (grep status $rc); no job is skipped on it"
+              return 0
+            fi
+            return "$rc"
+          }
           docs_only=false lint_gates=true
           tpm=false
           if [ "$EVENT" = pull_request ]; then
             if files=$(git diff --name-only --no-renames "$BASE...$HEAD"); then
               if [ -n "$files" ]; then
-                if [ "$CI_FULL_TIER" != true ] && ! printf '%s\n' "$files" | grep -qvE "$DOCS_ONLY_PATTERN"; then
+                if [ "$CI_FULL_TIER" != true ] && ! found DOCS_ONLY_PATTERN -v; then
                   docs_only=true
                 fi
-                if [ "$CI_FULL_TIER" != true ] && ! printf '%s\n' "$files" | grep -qE "$LINT_GATES_PATTERN"; then
+                if [ "$CI_FULL_TIER" != true ] && ! found LINT_GATES_PATTERN; then
                   lint_gates=false
                 fi
-                if printf '%s\n' "$files" | grep -qE "$TPM_PATTERN"; then
+                if found TPM_PATTERN; then
                   tpm=true
                 fi
                 printf '%s\n' "$files"
