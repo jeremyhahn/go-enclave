@@ -121,9 +121,9 @@ var ciJobTimeouts = map[string]int{
 }
 
 // lintSteps are go-enclave's four lint steps, which v1.30 moved from the
-// image job into the lint job (#277): they run there, in this order, and in
-// no other job.
-var lintSteps = []string{"make lint GO_BUILD_TAGS", "$RELEASABILITY_TEST", "make tidy-check lint-runtimesecret lint-integration", "scripts/assert-build-tags.sh"}
+// image job into the lint job (#277), and v1.31's private-pattern search
+// after make lint: they run there, in this order, and in no other job.
+var lintSteps = []string{"make lint GO_BUILD_TAGS", privatePatternSearch, "$RELEASABILITY_TEST", "make tidy-check lint-runtimesecret lint-integration", "scripts/assert-build-tags.sh"}
 
 // lintGatesTargets are the make targets `make lint-gates` runs (Makefile): no
 // job but lint-gates runs one, so each gate runs once per PR.
