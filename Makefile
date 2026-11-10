@@ -576,7 +576,7 @@ docker-build:
 docker-build-toolchain:
 	@ref=$$(sh scripts/devcontainer.sh tag) && repo=$${ref%%:*} && \
 	set -- -f build/docker/devcontainer/Dockerfile --target toolchain -t "$$ref" -t "$$repo:latest" && \
-	if [ -n "$${MODULE_ENV_FILE:-}" ] && [ -f "$$MODULE_ENV_FILE" ]; then set -- "$$@" --secret "id=gomodauth,src=$$MODULE_ENV_FILE"; fi && \
+	if [ -n "$${GO_BUILD_PROXY:-}" ]; then set -- "$$@" --build-arg "GO_BUILD_PROXY=$$GO_BUILD_PROXY"; fi && \
 	if docker image inspect "$$ref" >/dev/null 2>&1; then docker tag "$$ref" "$$repo:latest" && echo "$$ref is already held; tagged $$repo:latest"; \
 	elif ! DOCKER_BUILDKIT=1 docker build "$$@" .; then docker image inspect "$$ref" >/dev/null 2>&1 || { echo "building $$ref failed" >&2; exit 1; }; docker tag "$$ref" "$$repo:latest"; fi
 
