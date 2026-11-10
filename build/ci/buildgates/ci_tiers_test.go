@@ -57,8 +57,12 @@ const (
 	// which every PR-tier job carries or inherits through `needs:`.
 	draftIf = "${{ !github.event.pull_request.draft }}"
 	// fullTierJobIf is the `if:` a full-tier job carries (v1.26): the full
-	// tier, and never on a draft, ci:full or not.
-	fullTierJobIf = "${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')) && !github.event.pull_request.draft }}"
+	// tier, never on a draft, ci:full or not, and only on the schedule
+	// guard's run verdict (#277).
+	fullTierJobIf = "${{ (" + termFull + ") && " + termDraft + " && " + termRun + " }}"
+	// guardedPRJobIf is the `if:` of a PR-tier job that reads nothing from
+	// the changes job: never on a draft, and only on the guard's run verdict.
+	guardedPRJobIf = "${{ " + termDraft + " && " + termRun + " }}"
 	// gateDraftEnv is the gate's DRAFT value, and gateDraftCheck the guard
 	// that fails the gate on a draft before it reads any result.
 	gateDraftEnv   = "${{ github.event.pull_request.draft == true }}"
@@ -69,6 +73,8 @@ const (
 	lintJob = "lint"
 	// scheduleGuardJob is the v1.29.3 job whose verdict gates the bigdisk jobs.
 	scheduleGuardJob = "schedule-guard"
+	// changesJob lists the changed files for the jobs with a path scope.
+	changesJob = "changes"
 	// publishJob is the one job outside the gate (v1.30); its if holds
 	// publishGuard, so it never runs on github.com, where go-enclave lives and
 	// no `release` runner serves it (#277).
@@ -465,6 +471,24 @@ func ciTierViolations(src []byte) ([]string, error) {
 			}
 		}
 	}
+
+	// #277: the guard refuses a workflow_dispatch off main, and a refused run
+	// starts no job that checks out and runs the branch. So every gated job
+	// but the changes job and the guard itself needs the guard and requires
+	// its run verdict, in its own `needs:` and `if:`: a job skipped only
+	// through another job's skip would run again once that job's `if:` moved.
+	for _, name := range gated {
+		if name == changesJob || name == scheduleGuardJob {
+			continue
+		}
+		job := wf.Jobs[name]
+		if !slices.Contains(job.Needs, scheduleGuardJob) {
+			bad = append(bad, fmt.Sprintf("job %s: needs %v, want %s in it: a refused run must not start the job", name, job.Needs, scheduleGuardJob))
+		}
+		if !slices.Contains(ifTerms(job.If), termRun) {
+			bad = append(bad, fmt.Sprintf("job %s: if (%v) lacks the top-level term %q: a refused run must not start the job", name, job.If, termRun))
+		}
+	}
 	return bad, nil
 }
 
@@ -660,7 +684,8 @@ func TestCIGateTiers_RefusesWhatItMustRefuse(t *testing.T) {
 	}
 	ci := string(src)
 	const fullIf = "    if: " + fullTierJobIf + "\n"
-	const archIf = "    runs-on: ubuntu-latest\n    if: " + draftIf + "   # v1.26\n"
+	const archIf = "    runs-on: ubuntu-latest\n    if: " + guardedPRJobIf + "   # v1.26\n"
+	const archNeeds = "    name: Architecture Gates\n    needs: schedule-guard\n"
 	const nightlyIf = "    if: ${{ (" + termNightly + ") && " + termRun + " }}\n"
 	const scopedIf = " && " + termScoped + " }}\n"
 	for _, tc := range []struct{ name, old, new string }{
@@ -687,7 +712,14 @@ func TestCIGateTiers_RefusesWhatItMustRefuse(t *testing.T) {
 		{"changes job without its draft if", "    if: " + draftIf + "\n    timeout-minutes: 5", "    timeout-minutes: 5"},
 		{"arch-gates job without its draft if", archIf, "    runs-on: ubuntu-latest\n"},
 		{"arch-gates job on a draft's looser if", archIf, "    runs-on: ubuntu-latest\n    if: always()\n"},
-		{"full job runs on a draft", "    if: " + fullTierJobIf + "\n", "    if: ${{ " + termFull + " }}\n"},
+		{"full job runs on a draft", fullIf, "    if: ${{ (" + termFull + ") && " + termRun + " }}\n"},
+		{"full job runs a refused dispatch", fullIf, "    if: ${{ (" + termFull + ") && " + termDraft + " }}\n"},
+		{"full job's run verdict ored away", fullIf, "    if: ${{ ((" + termFull + ") && " + termDraft + ") || " + termRun + " }}\n"},
+		{"fips without the guard in needs", "    name: FIPS\n    needs: schedule-guard\n", "    name: FIPS\n"},
+		{"swtpm without the guard in needs", fullIf + "    needs: [changes, schedule-guard]\n", fullIf + "    needs: changes\n"},
+		{"optee guarded through the image job only", "    needs: [changes, image, schedule-guard]\n", "    needs: [changes, image]\n"},
+		{"arch-gates without the guard in needs", archNeeds, "    name: Architecture Gates\n"},
+		{"arch-gates runs a refused dispatch", archIf, "    runs-on: ubuntu-latest\n    if: " + draftIf + "   # v1.26\n"},
 		{"gate does not fail on a draft", gateDraftCheck, `[ "${DRAFT}" = never ]`},
 		{"gate DRAFT flag differs", "          DRAFT: " + gateDraftEnv, "          DRAFT: ${{ github.event.pull_request.draft == false }}"},
 		{"gate draft check does not exit", "            exit 1\n          fi\n          BAD=0", "            :\n          fi\n          BAD=0"},
@@ -699,8 +731,8 @@ func TestCIGateTiers_RefusesWhatItMustRefuse(t *testing.T) {
 		{"full job with a looser if", fullIf, "    if: github.event_name == 'push' || github.event_name == 'pull_request'\n"},
 		{"nightly job without its if", nightlyIf, ""},
 		{"nightly job on the full tier's if", nightlyIf, fullIf},
-		{"pr job needs a full job", "    name: Architecture Gates\n", "    name: Architecture Gates\n    needs: [fips]\n"},
-		{"pr job needs a nightly job", "    name: Architecture Gates\n", "    name: Architecture Gates\n    needs: [soak]\n"},
+		{"pr job needs a full job", archNeeds, "    name: Architecture Gates\n    needs: [schedule-guard, fips]\n"},
+		{"pr job needs a nightly job", archNeeds, "    name: Architecture Gates\n    needs: [schedule-guard, soak]\n"},
 		{"gate FULL_TIER flag differs", "          FULL_TIER: " + fullTierEnv, "          FULL_TIER: ${{ github.event_name == 'push' }}"},
 		{"gate NIGHTLY flag differs", "          NIGHTLY: " + nightlyTierIf, "          NIGHTLY: ${{ github.event_name == 'schedule' }}"},
 		{"gate drops check()", gateCheckFunc, "chk() {"},
