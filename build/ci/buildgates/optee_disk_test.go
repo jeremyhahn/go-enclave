@@ -14,6 +14,11 @@ const (
 	// every one of its steps after the select step carries.
 	opteeJob    = "optee"
 	opteeStepIf = "steps.select.outputs.run == 'true'"
+	// opteeRoomIf is the room step's if: the path gate, on the hosted runner
+	// only. The job can run on the bigdisk-docker pool (ruling 442), whose
+	// guest needs no room made and whose Docker daemon the step must not
+	// restart; the disk check still runs there.
+	opteeRoomIf = opteeStepIf + " && runner.environment == 'github-hosted'"
 	// opteeFixtureGB is the fixture image's unpacked size, rounded up (the
 	// fixture image contract in docs/backend-conformance/engineering.md). The
 	// disk check's NEED_GB must exceed it: the pull and the toolchain image
@@ -87,9 +92,12 @@ func opteeDiskViolations(src []byte) ([]string, error) {
 	case check < 0 || check > pull:
 		bad = append(bad, fmt.Sprintf("job %s: no step after the room is made and before the first pull (step %d) checks the free space on `%s` against NEED_GB", opteeJob, pull+1, dockerRootDir))
 	}
-	for _, i := range []int{room, check} {
-		if i >= 0 && fmt.Sprint(steps[i]["if"]) != opteeStepIf {
-			bad = append(bad, fmt.Sprintf("job %s step %d: if is %v, want %s", opteeJob, i+1, steps[i]["if"], opteeStepIf))
+	for _, c := range []struct {
+		i    int
+		want string
+	}{{room, opteeRoomIf}, {check, opteeStepIf}} {
+		if c.i >= 0 && fmt.Sprint(steps[c.i]["if"]) != c.want {
+			bad = append(bad, fmt.Sprintf("job %s step %d: if is %v, want %s", opteeJob, c.i+1, steps[c.i]["if"], c.want))
 		}
 	}
 	return bad, nil
@@ -111,7 +119,7 @@ func TestOPTEEJobMakesRoomForTheFixtureImage(t *testing.T) {
 
 func TestOPTEEDiskGate_RefusesWhatItMustRefuse(t *testing.T) {
 	const head = "jobs:\n  optee:\n    steps:\n      - id: select\n        run: echo run=true\n"
-	const room = "      - if: steps.select.outputs.run == 'true'\n        run: |\n          sudo rm -rf /opt/ghc\n"
+	const room = "      - if: " + opteeRoomIf + "\n        run: |\n          sudo rm -rf /opt/ghc\n"
 	const check = "      - if: steps.select.outputs.run == 'true'\n        env:\n          NEED_GB: 45\n        run: |\n          root=$(docker info --format '{{.DockerRootDir}}')\n          df -h \"$root\"\n          echo \"::error::under $NEED_GB GB\"; exit 1\n"
 	const harness = "      - if: steps.select.outputs.run == 'true'\n        run: make integration-test-arm-trustzone\n"
 	for _, tc := range []struct {
@@ -129,7 +137,8 @@ func TestOPTEEDiskGate_RefusesWhatItMustRefuse(t *testing.T) {
 		{"need not a number", room + strings.Replace(check, "NEED_GB: 45", "NEED_GB: lots", 1) + harness, false},
 		{"check never fails", room + strings.Replace(check, "exit 1", "true", 1) + harness, false},
 		{"check without the error line", room + strings.Replace(check, "::error::", "", 1) + harness, false},
-		{"room ungated", strings.Replace(room, "if: steps.select.outputs.run == 'true'", "if: always()", 1) + check + harness, false},
+		{"room ungated", strings.Replace(room, "if: "+opteeRoomIf, "if: always()", 1) + check + harness, false},
+		{"room on the pool too", strings.Replace(room, opteeRoomIf, opteeStepIf, 1) + check + harness, false},
 		{"check ungated", room + strings.Replace(check, "if: steps.select.outputs.run == 'true'", "if: always()", 1) + harness, false},
 		{"room moves the data root", strings.Replace(room, "sudo rm -rf /opt/ghc", `jq '. + {"data-root": "/mnt/docker"}' daemon.json`, 1) + check + harness, true},
 	} {

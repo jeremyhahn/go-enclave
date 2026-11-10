@@ -643,11 +643,14 @@ jobs:
   # check-public-literals` report path and line only (ci-standard.md §5,
   # Company Agent m605 item 8).
   #
-  # Runners: every job, CI Gate included, runs on ubuntu-latest. A job that
-  # builds an image first frees disk on the runner for the image build.
+  # Runners: every job, CI Gate included, runs on ubuntu-latest, except that
+  # the Docker jobs (image, lint-gates, fips, integration, soak, optee) run on
+  # the bigdisk-docker pool, a throwaway guest per job, for a push to main and
+  # a same-repository pull request (ruling 442). A job that builds an image
+  # first frees disk for the image build, on the hosted runner only.
   image:
     name: Devcontainer image [lint, build, test, security, deps-check, trivy image]
-    runs-on: ubuntu-latest
+    runs-on: ${{ ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","linux","x64","bigdisk-docker"]') || 'ubuntu-latest' }}
     needs: changes             # v1.24 (CA m749, m751 (a))
     timeout-minutes: 90       # CUSTOMIZE: give the stages honest headroom
     # CUSTOMIZE (v1.29.2): `built` is set by the build step, for a path-gated
@@ -681,6 +684,7 @@ jobs:
 
       # A GitHub-hosted runner has about 14 GB free; the image build needs more.
       - name: Free disk for the image build
+        if: runner.environment == 'github-hosted'
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
           df -h /
@@ -938,7 +942,7 @@ jobs:
   # and the job; the gates after it run on the next push.
   lint-gates:
     name: Lint Gates [toolchain image]
-    runs-on: ubuntu-latest
+    runs-on: ${{ ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","linux","x64","bigdisk-docker"]') || 'ubuntu-latest' }}
     if: ${{ !github.event.pull_request.draft }}   # v1.26
     timeout-minutes: 45       # CUSTOMIZE: the repo's lint-gates time, with honest headroom
     env:
@@ -960,6 +964,7 @@ jobs:
 
       # A GitHub-hosted runner has about 14 GB free; the image build needs more.
       - name: Free disk for the image build
+        if: runner.environment == 'github-hosted'
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
           df -h /
@@ -1024,7 +1029,7 @@ jobs:
     name: FIPS
     # v1.26: never on a draft PR, ci:full or not.
     if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')) && !github.event.pull_request.draft }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","linux","x64","bigdisk-docker"]') || 'ubuntu-latest' }}
     timeout-minutes: 60
     env:
       CI_STACK_PREFIX: ${{ github.event.repository.name }}-ci-
@@ -1042,6 +1047,7 @@ jobs:
 
       # A GitHub-hosted runner has about 14 GB free; the image build needs more.
       - name: Free disk for the image build
+        if: runner.environment == 'github-hosted'
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
           df -h /
@@ -1075,7 +1081,7 @@ jobs:
     name: Integration [integration image]
     # v1.26: never on a draft PR, ci:full or not.
     if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')) && !github.event.pull_request.draft }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","linux","x64","bigdisk-docker"]') || 'ubuntu-latest' }}
     timeout-minutes: 60       # CUSTOMIZE
     env:
       CI_STACK_PREFIX: ${{ github.event.repository.name }}-ci-
@@ -1099,6 +1105,7 @@ jobs:
 
       # A GitHub-hosted runner has about 14 GB free; the image build needs more.
       - name: Free disk for the image build
+        if: runner.environment == 'github-hosted'
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
           df -h /
@@ -1234,7 +1241,7 @@ jobs:
   soak:
     name: Soak [integration image]
     if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","linux","x64","bigdisk-docker"]') || 'ubuntu-latest' }}
     timeout-minutes: 90       # CUSTOMIZE: SOAK_MINUTES plus one iteration
     env:
       SOAK_MINUTES: 30        # CUSTOMIZE
@@ -1256,6 +1263,7 @@ jobs:
 
       # A GitHub-hosted runner has about 14 GB free; the image build needs more.
       - name: Free disk for the image build
+        if: runner.environment == 'github-hosted'
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
           df -h /
@@ -1472,7 +1480,7 @@ jobs:
     name: OP-TEE [arm-trustzone harness, fixture image]
     needs: [changes, image]
     if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')) && !github.event.pull_request.draft }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","linux","x64","bigdisk-docker"]') || 'ubuntu-latest' }}
     timeout-minutes: 180
     steps:
       # The path gate: selected only when the changes job's `optee` output
@@ -1511,7 +1519,7 @@ jobs:
       # larger /mnt filesystem, on the classic image store so every layer
       # lands under the data root. The next step checks the room.
       - name: Free disk for the image build
-        if: steps.select.outputs.run == 'true'
+        if: steps.select.outputs.run == 'true' && runner.environment == 'github-hosted'
         run: |
           df -h / /mnt "$(docker info --format '{{.DockerRootDir}}')"
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
