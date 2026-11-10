@@ -18,9 +18,13 @@ import (
 // GOPROXY as GO_BUILD_PROXY and the Dockerfile's default public proxy serves
 // the build. No workflow sets the module variables or rewrites module URLs,
 // and no forge credential reaches the build as the gomodauth secret.
+//
+// toolchainBuildMakeCall is the same call for the toolchain image alone,
+// which the lint and lint-gates jobs build (#277); it passes the same proxy.
 const (
-	imageBuildRunner   = hostedRunner
-	imageBuildMakeCall = `make docker-build GO_BUILD_PROXY="${GOPROXY:-}"`
+	imageBuildRunner       = hostedRunner
+	imageBuildMakeCall     = `make docker-build GO_BUILD_PROXY="${GOPROXY:-}"`
+	toolchainBuildMakeCall = `make docker-build-toolchain GO_BUILD_PROXY="${GOPROXY:-}"`
 )
 
 // hostedRunner is the one runner label every job in hostedWorkflows takes;
@@ -154,8 +158,8 @@ func imageBuildProxyViolations(src []byte) ([]string, error) {
 				bad = append(bad, fmt.Sprintf("job %s: builds the image on runs-on %v, want %s", name, job.RunsOn, imageBuildRunner))
 			}
 			for _, line := range strings.Split(st.Run, "\n") {
-				if strings.Contains(line, "make docker-build") && !strings.Contains(line, imageBuildMakeCall) {
-					bad = append(bad, fmt.Sprintf("job %s: %q does not pass GO_BUILD_PROXY; want %s", name, strings.TrimSpace(line), imageBuildMakeCall))
+				if strings.Contains(line, "make docker-build") && !strings.Contains(line, imageBuildMakeCall) && !strings.Contains(line, toolchainBuildMakeCall) {
+					bad = append(bad, fmt.Sprintf("job %s: %q does not pass GO_BUILD_PROXY; want %s or %s", name, strings.TrimSpace(line), imageBuildMakeCall, toolchainBuildMakeCall))
 				}
 			}
 		}
@@ -178,6 +182,29 @@ func TestImageBuildUsesTheModuleProxy(t *testing.T) {
 		}
 		for _, b := range bad {
 			t.Errorf("%s: %s", f, b)
+		}
+	}
+}
+
+// TestImageBuildUsesTheModuleProxy_RefusesAToolchainBuildWithoutTheProxy pins
+// the check on the toolchain-only build of ci.yml's lint and lint-gates jobs
+// (#277): the call without GO_BUILD_PROXY, or with another proxy, is refused.
+func TestImageBuildUsesTheModuleProxy_RefusesAToolchainBuildWithoutTheProxy(t *testing.T) {
+	src, err := os.ReadFile(filepath.Join(repoRoot(t), ".github/workflows/ci.yml"))
+	if err != nil {
+		t.Fatalf("read ci.yml: %v", err)
+	}
+	wf := string(src)
+	if !strings.Contains(wf, toolchainBuildMakeCall) {
+		t.Fatalf("ci.yml no longer contains %q; update this test", toolchainBuildMakeCall)
+	}
+	for _, repl := range []string{"make docker-build-toolchain", `make docker-build-toolchain GO_BUILD_PROXY="${{ vars.GO_BUILD_PROXY }}"`} {
+		bad, err := imageBuildProxyViolations([]byte(strings.ReplaceAll(wf, toolchainBuildMakeCall, repl)))
+		if err != nil {
+			t.Fatalf("parse: %v", err)
+		}
+		if len(bad) == 0 {
+			t.Errorf("%q: no violation; want a refusal", repl)
 		}
 	}
 }
