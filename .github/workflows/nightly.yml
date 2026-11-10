@@ -1,47 +1,14 @@
-# nightly-template: v1.9 — the known-red and long-horizon jobs, off the push path.
-# v1.9 (2026-10-31, Company Agent m1804, ci-template v1.30 fix 2): a
-# `lint-sweeps` job runs the repository's `make -k lint-sweeps` in its
+# nightly-template: v1.9 (customized)
+# The long-horizon checks, kept off the push path.
+# v1.9: a `lint-sweeps` job runs the repository's `make -k lint-sweeps` in its
 # toolchain image, nightly and on dispatch only, when the Makefile (or a
 # tracked *.mk) defines the target; without one it prints OK and passes. A
-# repository's lint sweeps never run in ci.yml: go-qrdb's ran in its PR lint
-# job at a 72-hour p95 of 87 minutes. It runs on bigdisk and needs the
-# scripts ci.yml ships (in-toolchain-image.sh, ci-image-cache.sh,
-# trim-ci-caches.sh). timeout-minutes is CUSTOMIZE, ceil(1.5 x the 72-hour p95).
-# v1.8 (2026-10-21): GO_VERSION 1.27.1 -> 1.27.3 for GO-2026-6809 (crypto/x509,
-# fixed in go1.27.3), with the portfolio-wide toolchain bump.
-# v1.7 (handbook#44): third-party actions pinned by commit (devops.md §9).
-# v1.6 (2026-09-27, automatethethings#189): GO_VERSION 1.26.7 -> 1.27.1, in
-# lockstep with ci-template v1.13.
-# v1.5 (2026-08-28, go-blockstore #22 round 2): the "Resolve pinned trivy version"
-# step reads .trivy-version as ONE bare token via awk and FAILS on a malformed
-# file, matching the Makefile parser and install-trivy.sh. The old
-# `tr -d ' \t\n\r'` scrubbed whitespace, so `0.74 .0` silently normalised to a
-# version nobody pinned and fed it to the trivy-action `version:` inputs. Ships
-# with the refreshed install-trivy.sh (idempotency fast-path removed — an
-# existing binary is no longer trusted on its own `--version` string).
-# v1.4: pin aquasecurity/trivy-action to a commit SHA (it was `@master`, twice —
-# a mutable third-party ref executing on a runner that holds security-events:
-# write) and wire its `version:` input from .trivy-version.
-# v1.4: replace `curl .../contrib/install.sh | sh` on the Gitea path with
-# scripts/install-trivy.sh — a pinned, checksum-verified installer that ships
-# with this template and is the SAME script `make install-tools` runs.
-# v1.4: run the misconfiguration scan on BOTH hosts. v1.3 conditioned it on
-# Gitea only while the two trivy-action steps scan vuln,secret, so on the GitHub
-# mirror the "portfolio-wide" misconfig scan (devops.md §8) ran nowhere.
-# All three found 2026-08-27, go-blockstore #7 Codex review.
-# v1.3: declare `permissions: security-events: write` (plus contents: read).
-# v1.2 uploaded SARIF via codeql-action/upload-sarif with no permissions
-# block, so under read-only default token permissions on the GitHub mirror
-# the upload fails with an authorization error — only on the side nobody
-# watches (found 2026-08-27, go-blockstore #6 Codex review).
-# v1.2: declare the workflow-level env block. v1.1 referenced
-# ${{ env.GO_VERSION }} in the fips job's setup-go step without ever declaring
-# it, so setup-go received an empty version (found 2026-08-27 wiring
-# go-blockstore #6). Repos that copied v1.1 have the same latent defect.
-# v1.1: .trivyignore now SHIPS WITH this template (same directory) and MUST be
-# copied to the repo root with it — trivy treats a missing ignore file as a
-# FATAL flag error and never scans (measured go-enclave 2026-08-26, 10 HIGH
-# CVEs hidden behind the FATAL; go-enclave PR #5).
+# repository's lint sweeps never run in ci.yml. The job needs the scripts
+# ci.yml ships (in-toolchain-image.sh, ci-image-cache.sh, trim-ci-caches.sh).
+# CUSTOMIZE (go-enclave, #277): the job runs on ubuntu-latest like every job
+# (#293), frees disk before it builds the toolchain image, and builds it with
+# GO_BUILD_PROXY and no forge credential, as ci.yml's jobs do. The trivy job
+# and the schedule are go-enclave's own.
 #
 # Jobs that verify a slow-moving property, or that were known-red with tracked
 # issues, do NOT run per push — a known-red job burning 60-90 runner-minutes
@@ -116,6 +83,13 @@ jobs:
             echo "OK: no lint-sweeps target in the Makefile; nothing to run"
             echo "has_target=false" >> "$GITHUB_OUTPUT"
           fi
+
+      # A GitHub-hosted runner has about 14 GB free; the image build needs more.
+      - name: Free disk for the image build
+        if: ${{ steps.probe.outputs.has_target == 'true' }}
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
 
       - name: Pull the toolchain image from the registry cache
         if: ${{ steps.probe.outputs.has_target == 'true' }}
