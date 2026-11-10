@@ -257,6 +257,35 @@ instruction files (`CLAUDE.md`, `AGENTS.md`, `.claude/`,
 `.serena/project.yml`) are reported, not refused: they are stripped from the
 tree at publish.
 
+The CI `lint` job also has a `Releasability (private patterns)` step, on every
+event the job runs on. It searches the tracked tree for the patterns in the
+Actions secret `RELEASABILITY_PATTERNS`, which a maintainer sets in the
+repository's settings. The secret holds the patterns themselves, one fixed
+string per line, for example `example-private-host`. The step runs
+`git grep -I -i -F`: a pattern matches anywhere in a line, without regard to
+case and not as a regular expression, and binary files are skipped. Blank
+lines and lines that start with `#` are dropped; every other line is taken
+whole, spaces included.
+
+| The run | The step |
+|---|---|
+| The secret is absent or empty, on a push to `main` | Fails |
+| The secret is absent or empty, on any other event (a pull request from a fork gets no secret) | Prints a notice and passes without a search |
+| The secret holds only blank lines and `#` lines | Fails, on every event |
+| A pattern matches | Fails and prints `path:line` of each match, never the value |
+| The search cannot run (`git grep` exits above 1) | Fails |
+| No pattern matches | Passes and prints the pattern count |
+
+`make check-releasability` reads the same name differently. There the
+environment variable `RELEASABILITY_PATTERNS` is the path of a site pattern
+file, not the patterns: one `<class><TAB><regex>` rule per line, the class one
+of `lab-address`, `lab-host` or `owner-path` and the rest a Go regular
+expression, with blank lines and `#` lines skipped and any other malformed line
+an error. Unset or empty, only the built-in rules run. No workflow passes the
+secret to `make check-releasability`, so in CI that gate runs its built-in
+rules. Do not reuse one for the other: a line of the secret has no class and
+is not read as a regular expression.
+
 ## Scripts
 
 | Script | Purpose |
