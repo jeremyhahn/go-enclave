@@ -931,3 +931,84 @@ func TestCIGateCheckPassesOnlyExplainedSkips(t *testing.T) {
 		})
 	}
 }
+
+// lintSweepsRule opens the make rule nightly.yml's Lint sweeps job looks for
+// (nightly-template v1.9); the rest of the line is its prerequisites.
+// shellQuoted is a quoted shell word that expands nothing.
+var (
+	lintSweepsRule = regexp.MustCompile(`^lint-sweeps[ \t]*:([^=].*)?$`)
+	shellQuoted    = regexp.MustCompile(`'[^']*'|"[^"$` + "`" + `]*"`)
+)
+
+// printsOnly reports whether a recipe line does nothing but print or
+// succeed: `true`, `:`, or one echo or printf whose words, outside quotes,
+// join no second command and expand nothing.
+func printsOnly(recipe string) bool {
+	cmd := strings.TrimLeft(strings.TrimSpace(recipe), "@+- \t")
+	if cmd == "true" || cmd == ":" {
+		return true
+	}
+	word, rest, _ := strings.Cut(cmd, " ")
+	if word != "echo" && word != "printf" {
+		return false
+	}
+	return !strings.ContainsAny(shellQuoted.ReplaceAllString(rest, ""), ";&|$`")
+}
+
+// lintSweepsViolations lists the lint-sweeps rules of a Makefile that sweep
+// nothing: no prerequisite, and a recipe that is empty or only prints. The
+// nightly job builds the toolchain image whenever the rule exists, whatever
+// it runs, so a rule that only prints costs an image build on every nightly
+// run and checks nothing. A Makefile with no such rule has no violation: the
+// job then prints that there is nothing to run and builds no image.
+func lintSweepsViolations(makefile string) []string {
+	lines := strings.Split(makefile, "\n")
+	var bad []string
+	for i, line := range lines {
+		m := lintSweepsRule.FindStringSubmatch(line)
+		if m == nil {
+			continue
+		}
+		prerequisites, _, _ := strings.Cut(m[1], "#")
+		sweeps := strings.TrimSpace(prerequisites) != ""
+		for _, recipe := range lines[i+1:] {
+			if !strings.HasPrefix(recipe, "\t") {
+				break
+			}
+			if strings.TrimSpace(recipe) != "" && !printsOnly(recipe) {
+				sweeps = true
+			}
+		}
+		if !sweeps {
+			bad = append(bad, fmt.Sprintf("line %d: the lint-sweeps target runs no sweep; remove it until it has one, because nightly.yml builds the toolchain image whenever the target exists", i+1))
+		}
+	}
+	return bad
+}
+
+func TestLintSweepsTargetRunsASweep(t *testing.T) {
+	for _, b := range lintSweepsViolations(readFile(t, filepath.Join(repoRoot(t), "Makefile"))) {
+		t.Errorf("Makefile: %s", b)
+	}
+	for _, tc := range []struct {
+		name, makefile string
+		wantBad        bool
+	}{
+		{"no target", "lint:\n\tgo vet ./...\n", false},
+		{"a target that only prints", ".PHONY: lint-sweeps\nlint-sweeps:\n\t@echo \"OK: no lint sweep\"\n", true},
+		{"a target that prints a sentence with a semicolon", "lint-sweeps:\n\t@echo \"OK: no sweep; it's all in the lint job\"\n", true},
+		{"a target that prints, then runs a command", "lint-sweeps:\n\t@echo sweeping; go vet ./...\n", false},
+		{"a target with no recipe", "lint-sweeps:\n\nlint:\n\tgo vet ./...\n", true},
+		{"a target that only succeeds", "lint-sweeps: # nothing yet\n\t@true\n", true},
+		{"a target that prints and runs a command", "lint-sweeps:\n\t@echo sweeping\n\tgo vet ./...\n", false},
+		{"a target that prints a command's output", "lint-sweeps:\n\t@echo \"$$(go vet ./... 2>&1)\"\n", false},
+		{"a target with a prerequisite", "lint-sweeps: lint-duplicates\n", false},
+		{"a variable of the same name", "lint-sweeps := lint-duplicates\n", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if bad := lintSweepsViolations(tc.makefile); (len(bad) > 0) != tc.wantBad {
+				t.Fatalf("violations: %v, want any: %v", bad, tc.wantBad)
+			}
+		})
+	}
+}
