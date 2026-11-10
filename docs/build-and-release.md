@@ -169,13 +169,16 @@ repository's volumes on that host exceed `CI_CACHE_MAX_GIB` (32).
 | Soak | nightly | `make ci-integration` looped on `ubuntu-latest` for 30 minutes, each iteration its own compose project |
 
 The **PR tier** runs on every event. The **full tier** runs on every event
-but a pull request (a push to `main`, the nightly schedule, `workflow_dispatch`)
-and on a pull request labelled `ci:full`. The **nightly tier** runs on the
-schedule (04:00 UTC) and on `workflow_dispatch`. Label a PR `ci:full` when it
-changes the API or fixes the integration suite. The label takes effect on the
-PR's next push or update-branch, or via `workflow_dispatch`, because a label
-change starts no run (`pull_request` lists only `opened`, `synchronize` and
-`reopened`). A pull request whose every changed file is markdown or under
+but a pull request (a push to `main`, the nightly schedule, `workflow_dispatch`
+on `main`) and on a pull request labelled `ci:full`. The **nightly tier** runs
+on the schedule (04:00 UTC) and on `workflow_dispatch` on `main`. Label a PR
+`ci:full` when it changes the API or fixes the integration suite. The label
+takes effect on the PR's next push or update-branch, because a label change
+starts no run (`pull_request` lists only `opened`, `synchronize` and
+`reopened`). A manual `workflow_dispatch` runs only on `main`: on any other
+ref the schedule guard refuses the run, no job that checks out the branch
+starts and CI Gate fails, so a dispatch cannot put a pull request on the full
+tier. A pull request whose every changed file is markdown or under
 `docs/` runs only the lint steps of the PR tier, the Lint Gates job included;
 on the full tier the build and test steps always run.
 
@@ -214,7 +217,7 @@ any other skip, failure or cancellation fails the gate.
 
 | Workflow | Trigger | Runs |
 |---|---|---|
-| `ci.yml` | push to `main`, pull request to `main`, nightly schedule, dispatch | The three tiers and the CI Gate; the one CI schedule |
+| `ci.yml` | push to `main`, pull request to `main`, nightly schedule, dispatch on `main` | The three tiers and the CI Gate; the one CI schedule |
 | `release.yml` | a `v*` tag | The [release flow](#release-flow) |
 | `nightly.yml` | dispatch only | `trivy-misconfig`, `trivy-sarif` |
 
