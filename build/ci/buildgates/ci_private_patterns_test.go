@@ -218,8 +218,24 @@ func privatePatternEnv(extra ...string) []string {
 	return append([]string{"PATH=" + os.Getenv("PATH"), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null"}, extra...)
 }
 
-// violations runs script once per privatePatternRuns row, the way the runner
-// runs a step with no shell key (bash -e), and lists what each run did wrong.
+// runStepScript runs a step's script the way the runner runs a step with no
+// shell key (bash -e), in dir and with env as its whole environment. It
+// returns what the step printed and whether it failed.
+func runStepScript(t *testing.T, script, dir string, env []string) (out string, failed bool) {
+	t.Helper()
+	cmd := exec.Command("bash", "-e", "-c", script)
+	cmd.Dir = dir
+	cmd.Env = env
+	b, err := cmd.CombinedOutput()
+	var exit *exec.ExitError
+	if err != nil && !errors.As(err, &exit) {
+		t.Fatalf("bash: %v", err)
+	}
+	return string(b), err != nil
+}
+
+// violations runs script once per privatePatternRuns row (runStepScript) and
+// lists what each run did wrong.
 func (fx privatePatternFixture) violations(t *testing.T, script string) []string {
 	t.Helper()
 	var bad []string
@@ -234,16 +250,8 @@ func (fx privatePatternFixture) violations(t *testing.T, script string) []string
 		case gitNoRepository:
 			env = append(env, "GIT_DIR="+filepath.Join(tmp, "no-repository"))
 		}
-		cmd := exec.Command("bash", "-e", "-c", script)
-		cmd.Dir = fx.repo
-		cmd.Env = env
-		b, err := cmd.CombinedOutput()
-		var exit *exec.ExitError
-		if err != nil && !errors.As(err, &exit) {
-			t.Fatalf("%s: bash: %v", r.name, err)
-		}
-		out := string(b)
-		if failed := err != nil; failed != r.wantFail {
+		out, failed := runStepScript(t, script, fx.repo, env)
+		if failed != r.wantFail {
 			bad = append(bad, fmt.Sprintf("%s: the step failed: %v, want %v; output:\n%s", r.name, failed, r.wantFail, out))
 		}
 		for _, w := range r.want {

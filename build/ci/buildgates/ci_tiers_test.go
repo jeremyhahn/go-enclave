@@ -477,6 +477,8 @@ func ciTierViolations(src []byte) ([]string, error) {
 	// but the changes job and the guard itself needs the guard and requires
 	// its run verdict, in its own `needs:` and `if:`: a job skipped only
 	// through another job's skip would run again once that job's `if:` moved.
+	// What the guard answers for each kind of run is held by running its
+	// script (TestScheduleGuardDecidesTheVerdict).
 	for _, name := range gated {
 		if name == changesJob || name == scheduleGuardJob {
 			continue
