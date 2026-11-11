@@ -10,7 +10,9 @@ package memscan
 
 import (
 	"crypto/rand"
+	"fmt"
 	"runtime"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -48,9 +50,17 @@ func testFindPlantsNoCopy(t *testing.T, n int) {
 	needle[1] = needle[0] ^ 1                                 // the filler below must not match the needle's start
 	home := uintptr(unsafe.Pointer(unsafe.SliceData(region))) // the needle's own mapping, excluded from the sweep
 
+	// The race detector changes what the thread holds when a signal lands,
+	// so the run that catches a planted copy is the one without -race; the
+	// race runs keep each round bounded rather than hide it.
 	for range 3 {
-		if err := findUnderSignals(needle, home); err != nil {
+		hits, err := findUnderSignals(needle, home)
+		if err != nil {
 			t.Fatalf("Find under signals: %v", err)
+		}
+		if len(hits) > 0 {
+			t.Fatalf("a sweep right after signals finds the needle in %d mapping(s) outside its own: %q; "+
+				"the sweep planted copies of what it looks for", len(hits), hits[0])
 		}
 	}
 	hits, err := Find(needle, home)
@@ -65,37 +75,76 @@ func testFindPlantsNoCopy(t *testing.T, n int) {
 
 // findUnderSignals runs Find on a locked thread and sends that thread
 // SIGURG (which the Go runtime takes and ignores) until Find returns.
-func findUnderSignals(needle []byte, home uintptr) error {
+func findUnderSignals(needle []byte, home uintptr) ([]string, error) {
+	type result struct {
+		hits []string
+		err  error
+	}
 	tids := make(chan int, 1)
-	done := make(chan error, 1)
+	done := make(chan result, 1)
+	var stop atomic.Bool
 	go func() {
 		runtime.LockOSThread()
 		defer runtime.UnlockOSThread()
 		tids <- syscall.Gettid()
 		// Memory dense with the needle's first byte is where a search
-		// falls back from a byte scan to a whole-needle compare.
-		_, err := mappingContains(firstByteReader(needle[0]), 0, 64<<20, needle, make([]byte, chunk+len(needle)-1))
-		if err == nil {
-			_, err = Find(needle, home)
+		// falls back from a byte scan to a whole-needle compare: the sweep
+		// stays on that path until the signals stop, so the last signal
+		// lands mid-compare. Find then sweeps from the same thread, whose
+		// signal stack still holds that frame.
+		buf := make([]byte, chunk+len(needle)-1)
+		for !stop.Load() {
+			if _, err := mappingContains(firstByteReader(needle[0]), 0, denseFill, needle, buf); err != nil {
+				done <- result{err: err}
+				return
+			}
 		}
-		done <- err
+		hits, err := Find(needle, home)
+		done <- result{hits, err}
 	}()
 	pid, tid := syscall.Getpid(), <-tids
+	// The interval leaves the sweeping thread room to make progress: under
+	// the race detector a signal every few microseconds starves it. The
+	// phase is wall-clock, so a starved signaller (GOMAXPROCS=1) ends it too.
+	tick := time.NewTicker(signalInterval)
+	defer tick.Stop()
+	deadline := time.NewTimer(sweepDeadline)
+	defer deadline.Stop()
+	end := time.Now().Add(signalPhase)
 	for {
 		select {
-		case err := <-done:
-			return err
-		default:
+		case r := <-done:
+			return r.hits, r.err
+		case <-deadline.C:
+			stop.Store(true)
+			return nil, fmt.Errorf("the sweep under signals did not finish within %v", sweepDeadline)
+		case <-tick.C:
+			if stop.Load() {
+				continue
+			}
+			if time.Now().After(end) {
+				stop.Store(true)
+				continue
+			}
 			_ = syscall.Tgkill(pid, tid, syscall.SIGURG)
-			time.Sleep(20 * time.Microsecond)
 		}
 	}
 }
+
+const (
+	denseFill      = chunk                  // memory dense with the needle's first byte
+	signalPhase    = 50 * time.Millisecond  // of signals to the sweeping thread per round
+	signalInterval = 200 * time.Microsecond // between signals to the sweeping thread
+	sweepDeadline  = 30 * time.Second       // a round that takes longer fails, never hangs
+)
 
 // firstByteReader is an io.ReaderAt over memory that holds only b.
 type firstByteReader byte
 
 func (r firstByteReader) ReadAt(p []byte, _ int64) (int, error) {
+	if len(p) > 0 && p[0] == byte(r) && p[len(p)-1] == byte(r) {
+		return len(p), nil // still filled from the last read: only this caller writes p
+	}
 	for i := range p {
 		p[i] = byte(r)
 	}
