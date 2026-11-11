@@ -235,7 +235,7 @@ func TestSignalRoundFailsAStarvedSender(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 4*signalPhase)
 	defer cancel()
 	tries := 0
-	sent, ok := signalRound(ctx, func() error {
+	sent, ok := signalRound(ctx, func() bool { return true }, func() error {
 		if tries++; tries > 10 {
 			return syscall.ESRCH
 		}
@@ -246,6 +246,24 @@ func TestSignalRoundFailsAStarvedSender(t *testing.T) {
 	}
 	if sent != 10 {
 		t.Fatalf("the round counted %d signal(s), want the 10 that landed", sent)
+	}
+}
+
+// TestSignalRoundFailsAChildThatNeverCompares names a thread that never
+// reaches its compare loop: every send lands, but none interrupts a
+// comparison, so the round must fail with nothing counted.
+func TestSignalRoundFailsAChildThatNeverCompares(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 4*signalPhase)
+	defer cancel()
+	sent, ok := signalRound(ctx, func() bool { return false }, func() error { return nil })
+	if ok {
+		t.Fatalf("a round whose child never compared passed with %d signal(s) counted", sent)
+	}
+	if sent != 0 {
+		t.Fatalf("the round counted %d signal(s) sent before the child compared, want 0", sent)
+	}
+	if err := roundError(sent, ok); !errors.Is(err, errTooFewSignals) {
+		t.Fatalf("the round's error is %v, want %v", err, errTooFewSignals)
 	}
 }
 
