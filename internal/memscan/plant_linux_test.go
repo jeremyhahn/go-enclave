@@ -157,26 +157,16 @@ func sweepChild(mode string, n int) int {
 // window. A round counts only once the sweeping thread has taken at least
 // minSignals signals: a window that runs out first proves nothing.
 func TestSweepUnderSignalsSendsTheMinimum(t *testing.T) {
-	// One P, and a worker that spins through the window: the signaler
-	// runs only when the worker is preempted, as under -cpu=1. After the
-	// window the Ps come back, and the round must go on signaling.
-	if runtime.NumCPU() < 2 {
-		t.Skip("needs two CPUs to give the signaler its P back")
-	}
-	prev := runtime.GOMAXPROCS(1)
-	defer runtime.GOMAXPROCS(prev)
-	spin := func() {
-		for end := time.Now().Add(2 * signalPhase); time.Now().Before(end); {
-		}
-		runtime.GOMAXPROCS(max(prev, 2))
-	}
-	needle := []byte{0x5a, 0x5b, 0x5c, 0x5d}
-	_, sent, err := sweepUnderSignals(needle, 0, spin)
+	// The child gets one P, as under -cpu=1, and its locked worker spins
+	// through the dense fill: a signal source that needs the child's
+	// scheduler starves there, and every round must still get its signals.
+	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(1))
+	out, code, err := runSweepChild(childSweep, 4, sweepDeadline)
 	if err != nil {
-		t.Fatalf("sweep under signals: %v", err)
+		t.Fatalf("%v\n%s", err, out)
 	}
-	if sent < minSignals {
-		t.Fatalf("the round ended after %d signal(s); want at least %d", sent, minSignals)
+	if code != 0 {
+		t.Fatalf("the sweep child at one P exited %d:\n%s", code, out)
 	}
 }
 
