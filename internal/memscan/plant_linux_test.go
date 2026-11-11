@@ -109,7 +109,7 @@ func sweepUnderSignals(needle []byte, home uintptr, limit time.Duration, hold fu
 	}
 	tids := make(chan int, 1)
 	done := make(chan result, 1)
-	var stop atomic.Bool
+	var stop, abort atomic.Bool // stop ends the dense loop; abort skips Find too
 	go func() {
 		runtime.LockOSThread()
 		defer runtime.UnlockOSThread()
@@ -129,6 +129,10 @@ func sweepUnderSignals(needle []byte, home uintptr, limit time.Duration, hold fu
 				return
 			}
 		}
+		if abort.Load() {
+			done <- result{}
+			return
+		}
 		hits, err := Find(needle, home)
 		done <- result{hits, err}
 	}()
@@ -146,7 +150,11 @@ func sweepUnderSignals(needle []byte, home uintptr, limit time.Duration, hold fu
 		case r := <-done:
 			return r.hits, r.err
 		case <-deadline.C:
+			// Stop the worker and wait for it: the caller releases the
+			// needle's mapping as soon as this returns.
+			abort.Store(true)
 			stop.Store(true)
+			<-done
 			return nil, fmt.Errorf("the sweep under signals did not finish within %v", limit)
 		case <-tick.C:
 			if stop.Load() {
