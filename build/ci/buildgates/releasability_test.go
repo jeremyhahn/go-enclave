@@ -338,7 +338,7 @@ func TestReleasability_PlantedValuesAreCaught(t *testing.T) {
 		class leakClass
 		match string
 	}{
-		{"forge address in a link", "[v0.1.0]: http://" + plant("192.168", ".1.91") + ":3001/x/y", classLabAddress, plant("192.168", ".1.91")},
+		{"forge address in a link", "[v0.1.0]: http://" + plant("192.168", ".1.91") + ":3001/x/y", classLabAddress, plant("192.168", ".1.91")}, // lab-string-ok: a planted fixture of the releasability gate's own test
 		{"management subnet", "ipmi at " + plant("192.168", ".0.102"), classLabAddress, plant("192.168", ".0.102")},
 		{"cluster subnet", plant("192.168", ".1.20"), classLabAddress, plant("192.168", ".1.20")},
 		{"measurement host", "// Measured on buildhost-04 at load ~26", classLabHost, "buildhost-04"},
@@ -618,7 +618,7 @@ func TestReleasability_PlantedTreeFailsTheGate(t *testing.T) {
 
 	git("init", "-q")
 	write("README.md", "clean\n")
-	write("docs/deploy.md", "clone from http://"+addr+":3001/x\n")
+	write("docs/deploy.md", "clone from http://"+addr+":3001/x\n") // lab-string-ok: a planted fixture of the releasability gate's own test
 	write("CLAUDE.md", "notes on "+addr+"\n")
 	write("docs/runner.md", "ssh gpuhost, then cd /home/owner/src\n")
 	write("local.mk", "X=1\n")
