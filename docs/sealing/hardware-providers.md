@@ -1,8 +1,8 @@
 # Hardware KeyProtector providers — design
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-11-08
-> Conflicts with this document are defects. Nothing in it is shipped yet: the TPM and secure-element code slices implement it, and once one ships the code is canonical for it and this document is fixed to match.
-> The design of the TPM and secure-element providers behind the [`KeyProtector` seam](engineering.md#provider-contract). The TPM provider is decided; the secure-element provider is an outline with its open questions.
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-11-10
+> Conflicts with this document are defects. The TPM provider ships in [`backends/tpm`](../../backends/tpm): the code is canonical for it, and this document is fixed to match. The secure-element provider is not shipped; its code slice implements the outline below once its open questions are answered.
+> The design of the TPM and secure-element providers behind the [`KeyProtector` seam](engineering.md#provider-contract). The TPM provider is shipped; the secure-element provider is an outline with its open questions.
 
 This is the design of the hardware providers of the `keyprotector-providers`
 row ([SPEC](../SPEC.md), #264). go-enclave owns the protected-memory
@@ -44,7 +44,13 @@ only; it is not a `RootUnsealer`.
 ### Device
 
 The provider opens `/dev/tpmrm0`, the kernel's TPM resource manager, once,
-when it is made, and releases it in `Close`. The resource manager gives the
+when it is made, and releases it in `Close`. `Open("")` takes that path
+(`DefaultPath`); on Linux, `Open` also takes another device path such as
+`/dev/tpm0`, or a simulator's command socket as `unix:<path>` or
+`tcp:<host:port>` (see [Transports](#transports)). On other systems `Open`
+returns an error matching `ErrUnsupportedPlatform`. The retries of
+[Error mapping](#error-mapping) default to 5 attempts with a 20 ms back-off
+that doubles after each attempt; `WithRetry` sets both. The resource manager gives the
 provider its own transient handle space and flushes whatever the provider
 left loaded when the file closes. One mutex per provider serializes the
 provider's command sequences on that file (see [Concurrency](#concurrency)).
@@ -439,22 +445,25 @@ gains no dependency. Nothing here is decided beyond the shape; the
 
 ## Open questions
 
-1. **Owner hierarchy authorization.** The design assumes the owner hierarchy
-   has an empty authorization value, as Linux distributions ship it. A TPM
-   whose owner auth is set refuses `TPM2_CreatePrimary` with
-   `TPM_RC_BAD_AUTH` (the provider's own error). Should the provider take the
-   owner auth as an option, and from where, without a credential in its
-   configuration?
+1. **Owner hierarchy authorization: resolved.** The provider takes no
+   owner-auth option: it authorizes `TPM2_CreatePrimary` under the owner
+   hierarchy with an empty password (`backends/tpm/protector.go:536`), as
+   Linux distributions ship the hierarchy. A TPM whose owner auth is set
+   refuses the command with `TPM_RC_BAD_AUTH`, which the provider returns as
+   its own error (`ErrCommandFailed`), so no credential enters its
+   configuration. An owner-auth option would be an addition to the API.
 2. **An active bus interposer.** The salted session hides the key from a
    passive observer. An attacker who can rewrite TPM responses can hand the
    provider a parent public key of its own and read the salt. Binding the
    session to an endorsement-key-certified key closes that, at the cost of an
    EK certificate chain; it is not in this design.
-3. **The parent's lifetime.** Creating the parent per call is fixed here.
-   Keeping it loaded as a transient object for the provider's lifetime
-   (flushed in `Close`) changes no TPM state either and removes one
-   `TPM2_CreatePrimary` per call; whether a resource-manager restart or a
-   context swap makes that fragile is for the code slice to measure.
+3. **The parent's lifetime: resolved.** The parent is created per call:
+   `Protect` and `Unprotect` each create it in `parentAndSession`
+   (`backends/tpm/protector.go:381`) and flush it with the call's other
+   handles in `cleanup` (`backends/tpm/protector.go:408`) before the call
+   returns. The provider keeps no parent loaded between calls, so a
+   resource-manager restart or a context swap cannot leave it a stale handle;
+   the cost is one `TPM2_CreatePrimary` per call.
 4. **Residual copy in go-tpm's buffers: resolved.** go-tpm v0.9.8 marshals
    `TPM2_Create`'s `inSensitive` in clear into heap buffers before it applies
    parameter encryption, and decrypts `TPM2_Unseal`'s response in place in a
