@@ -9,16 +9,18 @@
 package memscan
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"runtime"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -66,15 +68,61 @@ func runSweepChild(mode string, n int, limit time.Duration) (out string, code in
 		"-test.cpu="+strconv.Itoa(runtime.GOMAXPROCS(0)))
 	cmd.Env = append(os.Environ(), fmt.Sprintf("%s=%s %d", sweepChildEnv, mode, n))
 	cmd.WaitDelay = time.Second
-	b, err := cmd.CombinedOutput()
+	var errOut bytes.Buffer
+	cmd.Stderr = &errOut
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return "", -1, err
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return "", -1, err
+	}
+	if err := cmd.Start(); err != nil {
+		return "", -1, err
+	}
+	// The signals come from this process: a signal source inside the child
+	// needs the child's scheduler, which its spinning worker starves at one
+	// P. Each round the child names its sweeping thread; this process
+	// signals that thread, then tells the child to sweep or to give up.
+	var short error
+	var other strings.Builder
+	lines := bufio.NewScanner(stdout)
+	for lines.Scan() {
+		tid, ok := strings.CutPrefix(lines.Text(), roundTid)
+		if !ok {
+			other.WriteString(lines.Text() + "\n")
+			continue
+		}
+		id, err := strconv.Atoi(tid)
+		if err != nil {
+			short = fmt.Errorf("the child named no thread: %q", lines.Text())
+			_ = cmd.Process.Kill()
+			break
+		}
+		verdict := verdictSweep
+		if sent, ok := signalRound(ctx, cmd.Process.Pid, id); !ok {
+			verdict = verdictAbort
+			short = fmt.Errorf("%w: %d in %v, want %d", errTooFewSignals, sent, signalCap, minSignals)
+		}
+		if _, err := io.WriteString(stdin, verdict); err != nil {
+			break
+		}
+	}
+	_, _ = io.Copy(io.Discard, stdout)
+	err = cmd.Wait()
+	out = other.String() + errOut.String()
 	if ctx.Err() != nil {
-		return string(b), -1, fmt.Errorf("the sweep under signals did not finish within %v; the child was killed", limit)
+		return out, -1, fmt.Errorf("the sweep under signals did not finish within %v; the child was killed", limit)
+	}
+	if short != nil {
+		return out, -1, short
 	}
 	var exit *exec.ExitError
 	if errors.As(err, &exit) {
-		return string(b), exit.ExitCode(), nil
+		return out, exit.ExitCode(), nil
 	}
-	return string(b), 0, err
+	return out, 0, err
 }
 
 // TestSweepChild is the child process of runSweepChild; run on its own it
@@ -126,10 +174,14 @@ func sweepChild(mode string, n int) int {
 	// The race detector changes what the thread holds when a signal lands,
 	// so the run that catches a planted copy is the one without -race; the
 	// race runs keep each round bounded rather than hide it.
+	if err := syscall.SetNonblock(0, true); err != nil {
+		fmt.Fprintf(os.Stderr, "stdin: %v\n", err)
+		return exitChildError
+	}
 	for range 3 {
-		hits, sent, err := sweepUnderSignals(needle, home, nil)
-		if errors.Is(err, errTooFewSignals) {
-			fmt.Fprintln(os.Stderr, err)
+		hits, aborted, err := sweepRound(needle, home)
+		if aborted {
+			fmt.Fprintln(os.Stderr, "the parent could not deliver the round's signals")
 			return exitTooFewSignals
 		}
 		if err != nil {
@@ -137,7 +189,7 @@ func sweepChild(mode string, n int) int {
 			return exitChildError
 		}
 		if len(hits) > 0 {
-			fmt.Fprintf(os.Stderr, "a sweep right after %d signals finds the needle in %d mapping(s) outside its own: %q\n", sent, len(hits), hits[0])
+			fmt.Fprintf(os.Stderr, "a sweep right after its signals finds the needle in %d mapping(s) outside its own: %q\n", len(hits), hits[0])
 			return exitResidue
 		}
 	}
@@ -187,76 +239,68 @@ func TestSweepUnderSignalsBoundsAStalledSweep(t *testing.T) {
 	}
 }
 
-// sweepUnderSignals runs Find on a locked thread after sending that thread
-// SIGURG (which the Go runtime takes and ignores) while it compares memory
-// dense with the needle's first byte, and reports how many signals it
-// sent. hold, when not nil, runs on that thread first. Nothing here bounds
-// Find: the caller runs this in a child process it can kill.
-func sweepUnderSignals(needle []byte, home uintptr, hold func()) (hits []string, sent int, err error) {
-	type result struct {
-		hits []string
-		err  error
+// sweepRound runs in the child. It names its locked thread to the parent,
+// which sends that thread SIGURG (which the Go runtime takes and ignores)
+// while it compares memory dense with the needle's first byte, then runs
+// Find on that thread unless the parent gives up. Nothing here bounds
+// Find: the parent kills the child at its deadline.
+func sweepRound(needle []byte, home uintptr) (hits []string, aborted bool, err error) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	fmt.Printf("%s%d\n", roundTid, syscall.Gettid())
+	// Memory dense with the needle's first byte is where a search falls
+	// back from a byte scan to a whole-needle compare: the sweep stays on
+	// that path until the parent's verdict arrives, so the last signal
+	// lands mid-compare. Find then sweeps from the same thread, whose
+	// signal stack still holds that frame. The verdict is read on this
+	// thread, without the scheduler, from a non-blocking stdin.
+	buf := make([]byte, chunk+len(needle)-1)
+	verdict := make([]byte, 1)
+	for {
+		if _, err := mappingContains(firstByteReader(needle[0]), 0, denseFill, needle, buf); err != nil {
+			return nil, false, err
+		}
+		n, err := syscall.Read(0, verdict)
+		if errors.Is(err, syscall.EAGAIN) || errors.Is(err, syscall.EINTR) {
+			continue
+		}
+		if err != nil || n == 0 {
+			return nil, false, fmt.Errorf("reading the parent's verdict: %d byte(s), %v", n, err)
+		}
+		break
 	}
-	tids := make(chan int, 1)
-	done := make(chan result, 1)
-	var stop, abort atomic.Bool // stop ends the dense loop; abort skips Find too
-	go func() {
-		runtime.LockOSThread()
-		defer runtime.UnlockOSThread()
-		tids <- syscall.Gettid()
-		if hold != nil {
-			hold()
-		}
-		// Memory dense with the needle's first byte is where a search
-		// falls back from a byte scan to a whole-needle compare: the sweep
-		// stays on that path until the signals stop, so the last signal
-		// lands mid-compare. Find then sweeps from the same thread, whose
-		// signal stack still holds that frame.
-		buf := make([]byte, chunk+len(needle)-1)
-		for !stop.Load() {
-			if _, err := mappingContains(firstByteReader(needle[0]), 0, denseFill, needle, buf); err != nil {
-				done <- result{err: err}
-				return
-			}
-		}
-		if abort.Load() {
-			done <- result{}
-			return
-		}
-		hits, err := Find(needle, home)
-		done <- result{hits, err}
-	}()
-	pid, tid := syscall.Getpid(), <-tids
-	// The interval leaves the sweeping thread room to make progress: under
-	// the race detector a signal every few microseconds starves it. The
-	// round ends once the window has passed and the thread has taken
-	// minSignals signals; a signaler that cannot reach that many by
-	// signalCap fails the round rather than let it pass unsignaled.
+	if string(verdict) != verdictSweep {
+		return nil, true, nil
+	}
+	hits, err = Find(needle, home)
+	return hits, false, err
+}
+
+// signalRound sends SIGURG to the child's sweeping thread every
+// signalInterval. The interval leaves that thread room to make progress:
+// under the race detector a signal every few microseconds starves it. The
+// round ends once signalPhase has passed and the thread has taken
+// minSignals signals; a round that cannot reach that many by signalCap
+// reports false rather than pass unsignaled.
+func signalRound(ctx context.Context, pid, tid int) (sent int, ok bool) {
 	tick := time.NewTicker(signalInterval)
 	defer tick.Stop()
 	start := time.Now()
 	for {
 		select {
-		case r := <-done:
-			if r.err == nil && abort.Load() {
-				r.err = fmt.Errorf("%w: %d in %v, want %d", errTooFewSignals, sent, signalCap, minSignals)
-			}
-			return r.hits, sent, r.err
+		case <-ctx.Done():
+			return sent, false
 		case <-tick.C:
-			if stop.Load() {
-				continue
-			}
-			if took := time.Since(start); sent >= minSignals && took >= signalPhase {
-				stop.Store(true)
-				continue
-			} else if took >= signalCap {
-				abort.Store(true)
-				stop.Store(true)
-				continue
-			}
-			if syscall.Tgkill(pid, tid, syscall.SIGURG) == nil {
-				sent++
-			}
+		}
+		took := time.Since(start)
+		if sent >= minSignals && took >= signalPhase {
+			return sent, true
+		}
+		if took >= signalCap {
+			return sent, false
+		}
+		if syscall.Tgkill(pid, tid, syscall.SIGURG) == nil {
+			sent++
 		}
 	}
 }
@@ -272,6 +316,9 @@ const (
 	sweepDeadline  = 30 * time.Second       // the sweep child is killed after this, never hangs
 
 	sweepChildEnv     = "MEMSCAN_SWEEP_CHILD" // "<mode> <needle length>" for TestSweepChild
+	roundTid          = "sweep thread "       // the child's line naming a round's sweeping thread
+	verdictSweep      = "s"                   // the parent's byte: the signals landed, sweep now
+	verdictAbort      = "a"                   // the parent's byte: too few signals, give up
 	childSweep        = "sweep"               // three rounds under signals, then a check sweep
 	childStall        = "stall"               // stops itself while its sweep runs
 	exitResidue       = 2                     // a sweep found the needle outside its mapping
