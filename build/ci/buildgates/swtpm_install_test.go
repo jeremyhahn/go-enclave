@@ -78,18 +78,45 @@ func TestSwtpmInstallAptCallsRetry(t *testing.T) {
 	}
 }
 
+// swtpmStubSudo stands in for sudo: it finds the apt-get subcommand in its
+// arguments, counts the calls per subcommand in $STUB_DIR, and fails the
+// first $UPDATE_FAILS update calls and the first $INSTALL_FAILS install
+// calls.
+const swtpmStubSudo = `#!/bin/sh
+v=other
+for a in "$@"; do
+  case "$a" in update|install) v=$a; break ;; esac
+done
+f="$STUB_DIR/$v.count"
+n=$(cat "$f" 2>/dev/null || echo 0)
+n=$((n+1))
+echo "$n" > "$f"
+case "$v" in
+  update) max=$UPDATE_FAILS ;;
+  install) max=$INSTALL_FAILS ;;
+  *) max=0 ;;
+esac
+[ "$n" -gt "$max" ]
+`
+
+// swtpmRun is what one run of the step's script did.
+type swtpmRun struct {
+	updates, installs int  // apt-get update and install calls
+	swtpmRan          bool // the script reached swtpm --version
+}
+
 // runSwtpmInstall runs the step's script as GitHub runs a bash step, with
-// sudo, sleep and swtpm stubbed: sudo fails its first fails calls and
-// succeeds after. It returns the script's error and how many times it
-// called sudo.
-func runSwtpmInstall(t *testing.T, script string, fails int) (int, error) {
+// sudo, sleep and swtpm stubbed: apt-get update fails its first updateFails
+// calls and apt-get install its first installFails calls, and each succeeds
+// after.
+func runSwtpmInstall(t *testing.T, script string, updateFails, installFails int) (swtpmRun, error) {
 	t.Helper()
 	bin := t.TempDir()
-	count := filepath.Join(t.TempDir(), "count")
+	state := t.TempDir()
 	stubs := map[string]string{
-		"sudo":  "#!/bin/sh\nn=$(cat \"$SUDO_COUNT\" 2>/dev/null || echo 0)\nn=$((n+1))\necho \"$n\" > \"$SUDO_COUNT\"\n[ \"$n\" -gt \"$SUDO_FAILS\" ]\n",
+		"sudo":  swtpmStubSudo,
 		"sleep": "#!/bin/sh\nexit 0\n",
-		"swtpm": "#!/bin/sh\necho swtpm stub\n",
+		"swtpm": "#!/bin/sh\n: > \"$STUB_DIR/swtpm.ran\"\necho swtpm stub\n",
 	}
 	for name, body := range stubs {
 		if err := os.WriteFile(filepath.Join(bin, name), []byte(body), 0o755); err != nil {
@@ -99,39 +126,66 @@ func runSwtpmInstall(t *testing.T, script string, fails int) (int, error) {
 	cmd := exec.Command("bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", script)
 	cmd.Env = append(os.Environ(),
 		"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
-		"SUDO_COUNT="+count,
-		"SUDO_FAILS="+strconv.Itoa(fails),
+		"STUB_DIR="+state,
+		"UPDATE_FAILS="+strconv.Itoa(updateFails),
+		"INSTALL_FAILS="+strconv.Itoa(installFails),
 	)
 	out, err := cmd.CombinedOutput()
-	t.Logf("fails=%d output:\n%s", fails, out)
-	raw, rerr := os.ReadFile(count)
-	if rerr != nil {
-		return 0, err
+	t.Logf("update fails=%d install fails=%d output:\n%s", updateFails, installFails, out)
+	count := func(verb string) int {
+		raw, rerr := os.ReadFile(filepath.Join(state, verb+".count"))
+		if rerr != nil {
+			return 0
+		}
+		n, _ := strconv.Atoi(strings.TrimSpace(string(raw)))
+		return n
 	}
-	n, _ := strconv.Atoi(strings.TrimSpace(string(raw)))
-	return n, err
+	_, serr := os.Stat(filepath.Join(state, "swtpm.ran"))
+	return swtpmRun{updates: count("update"), installs: count("install"), swtpmRan: serr == nil}, err
 }
 
-// TestSwtpmInstallRetriesBounded pins the step's retry loop: one transient
-// failure does not fail the step, and a failure that lasts stops the step,
-// non-zero, after at most five attempts.
+// TestSwtpmInstallRetriesBounded pins the step's retry loop around both apt
+// calls: one transient failure of update or of install does not fail the
+// step, and a failure that lasts stops the step, non-zero, before swtpm
+// --version: after two to five attempts when update keeps failing, and after
+// exactly three install attempts when install keeps failing, which fails if
+// install leaves the loop.
 func TestSwtpmInstallRetriesBounded(t *testing.T) {
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skip("no bash")
 	}
 	script := swtpmInstallScript(t)
-
-	if _, err := runSwtpmInstall(t, script, 1); err != nil {
-		t.Errorf("one failed apt-get call failed the step (%v); want a retry that succeeds", err)
+	const always = 1000
+	cases := []struct {
+		name                      string
+		updateFails, installFails int
+		wantOK                    bool
+		minUpdates, maxUpdates    int
+		minInstalls, maxInstalls  int
+	}{
+		{"update fails once", 1, 0, true, 2, 2, 1, 1},
+		{"update keeps failing", always, 0, false, 2, 5, 0, 0},
+		{"install fails once", 0, 1, true, 2, 2, 2, 2},
+		{"install keeps failing", 0, always, false, 3, 3, 3, 3},
 	}
-
-	calls, err := runSwtpmInstall(t, script, 1000)
-	if err == nil {
-		t.Errorf("step exited zero although apt-get never succeeded")
-	}
-	// Every attempt stops at its failed apt-get update, so calls counts the
-	// attempts.
-	if calls < 2 || calls > 5 {
-		t.Errorf("step made %d attempts while apt-get kept failing; want 2 to 5", calls)
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			run, err := runSwtpmInstall(t, script, c.updateFails, c.installFails)
+			if c.wantOK && err != nil {
+				t.Errorf("step failed (%v); want a retry that succeeds", err)
+			}
+			if !c.wantOK && err == nil {
+				t.Errorf("step exited zero although apt-get never succeeded")
+			}
+			if run.swtpmRan != c.wantOK {
+				t.Errorf("swtpm --version reached = %v; want %v", run.swtpmRan, c.wantOK)
+			}
+			if run.updates < c.minUpdates || run.updates > c.maxUpdates {
+				t.Errorf("apt-get update ran %d times; want %d to %d", run.updates, c.minUpdates, c.maxUpdates)
+			}
+			if run.installs < c.minInstalls || run.installs > c.maxInstalls {
+				t.Errorf("apt-get install ran %d times; want %d to %d", run.installs, c.minInstalls, c.maxInstalls)
+			}
+		})
 	}
 }
