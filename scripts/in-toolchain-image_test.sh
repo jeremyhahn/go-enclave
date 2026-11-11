@@ -10,7 +10,8 @@
 #   usage: scripts/in-toolchain-image_test.sh   (also: make check-in-toolchain-image)
 set -eu
 
-here=$(cd "$(dirname "$0")" && pwd)
+# shellcheck source=lib.sh
+. "${0%/*}/lib.sh"
 pass=0
 fail=0
 ok() { pass=$((pass + 1)); printf 'ok   %s\n' "$1"; }
