@@ -61,7 +61,7 @@ func testFindPlantsNoCopy(t *testing.T, n int) {
 // runSweepChild runs sweepChild(mode, n) in a copy of this test binary and
 // kills it once limit passes. code is the child's exit status; err is set
 // only when the child could not run or was killed.
-func runSweepChild(mode string, n int, limit time.Duration) (out string, code int, err error) {
+func runSweepChild(mode string, n int, limit time.Duration) (out string, rounds []int, code int, err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), limit)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestSweepChild$", "-test.count=1",
@@ -72,14 +72,14 @@ func runSweepChild(mode string, n int, limit time.Duration) (out string, code in
 	cmd.Stderr = &errOut
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		return "", -1, err
+		return "", rounds, -1, err
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return "", -1, err
+		return "", rounds, -1, err
 	}
 	if err := cmd.Start(); err != nil {
-		return "", -1, err
+		return "", rounds, -1, err
 	}
 	// The signals come from this process: a signal source inside the child
 	// needs the child's scheduler, which its spinning worker starves at one
@@ -101,7 +101,10 @@ func runSweepChild(mode string, n int, limit time.Duration) (out string, code in
 			break
 		}
 		verdict := verdictSweep
-		if sent, ok := signalRound(ctx, cmd.Process.Pid, id); !ok {
+		pid := cmd.Process.Pid
+		sent, ok := signalRound(ctx, func() error { return syscall.Tgkill(pid, id, syscall.SIGURG) })
+		rounds = append(rounds, sent)
+		if !ok {
 			verdict = verdictAbort
 			short = fmt.Errorf("%w: %d in %v, want %d", errTooFewSignals, sent, signalCap, minSignals)
 		}
@@ -113,16 +116,16 @@ func runSweepChild(mode string, n int, limit time.Duration) (out string, code in
 	err = cmd.Wait()
 	out = other.String() + errOut.String()
 	if ctx.Err() != nil {
-		return out, -1, fmt.Errorf("the sweep under signals did not finish within %v; the child was killed", limit)
+		return out, rounds, -1, fmt.Errorf("the sweep under signals did not finish within %v; the child was killed", limit)
 	}
 	if short != nil {
-		return out, -1, short
+		return out, rounds, -1, short
 	}
 	var exit *exec.ExitError
 	if errors.As(err, &exit) {
-		return out, exit.ExitCode(), nil
+		return out, rounds, exit.ExitCode(), nil
 	}
-	return out, 0, err
+	return out, rounds, 0, err
 }
 
 // TestSweepChild is the child process of runSweepChild; run on its own it
@@ -306,7 +309,7 @@ func sweepRound(needle []byte, home uintptr) (hits []string, aborted bool, err e
 // round ends once signalPhase has passed and the thread has taken
 // minSignals signals; a round that cannot reach that many by signalCap
 // reports false rather than pass unsignaled.
-func signalRound(ctx context.Context, pid, tid int) (sent int, ok bool) {
+func signalRound(ctx context.Context, send func() error) (sent int, ok bool) {
 	tick := time.NewTicker(signalInterval)
 	defer tick.Stop()
 	start := time.Now()
@@ -323,7 +326,7 @@ func signalRound(ctx context.Context, pid, tid int) (sent int, ok bool) {
 		if took >= signalCap {
 			return sent, false
 		}
-		if syscall.Tgkill(pid, tid, syscall.SIGURG) == nil {
+		if send() == nil {
 			sent++
 		}
 	}
