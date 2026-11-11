@@ -60,7 +60,7 @@ jobs:
     env:
       CI_STACK_PREFIX: ${{ github.event.repository.name }}-ci-
       CI_CACHE_CLASS: main
-      CI_IMAGE_NAMESPACE: agent-ci-images
+      CI_IMAGE_NAMESPACE: agent-ci-images  # lab-string-ok: registry namespace name, no host or address
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 

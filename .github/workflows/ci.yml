@@ -2075,7 +2075,7 @@ jobs:
   # CUSTOMIZE (ruling 274(9), #206 comment 179925): the arm-trustzone harness
   # on the OP-TEE QEMU fixture. make integration-test-arm-trustzone compiles
   # the linux/arm64 test binary in the toolchain image and runs
-  # scripts/optee-fixture.sh harness in OPTEE_FIXTURE_IMAGE, the agent-ci-image
+  # scripts/optee-fixture.sh harness in OPTEE_FIXTURE_IMAGE, the CI image
   # Infra builds and keeps, whose prebuilt stack it boots: this job never
   # builds the stack (about 155 min cold). What the image holds is the
   # fixture image contract in docs/backend-conformance/engineering.md
