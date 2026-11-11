@@ -96,6 +96,7 @@ func runSweepChild(mode string, n int, limit time.Duration) (out string, rounds 
 		for scan.Scan() {
 			lines <- scan.Text()
 		}
+		_, _ = io.Copy(io.Discard, stdout) // a line too long to scan must not block the child
 	}()
 	comparing := func() bool {
 		for {
