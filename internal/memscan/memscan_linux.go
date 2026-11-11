@@ -148,7 +148,7 @@ func mappingContains(mem io.ReaderAt, lo, hi uintptr, needle, buf []byte) (bool,
 		n := readLen(off, hi, len(buf))
 		used = max(used, n)
 		read, rerr := mem.ReadAt(buf[:n], int64(off))
-		if read > 0 && bytes.Contains(buf[:read], needle) {
+		if read > 0 && contains(buf[:read], needle) {
 			return true, nil
 		}
 		if off+uintptr(read) >= hi {
@@ -165,6 +165,40 @@ func mappingContains(mem io.ReaderAt, lo, hi uintptr, needle, buf []byte) (bool,
 		off += uintptr(read - overlap)
 	}
 	return false, nil
+}
+
+// contains reports whether hay holds needle without ever holding more than
+// one byte of the needle in a register. bytes.Contains keeps a short needle
+// whole in registers while it compares, and a signal that lands then has
+// the kernel save those registers, byte-exact, into a frame on the thread's
+// signal stack, which lives in the Go heap and is never cleared: the sweep
+// would plant the copy it looks for, and a later sweep would report it.
+// IndexByte broadcasts only the needle's first byte; the compare below
+// loads one byte at a time.
+func contains(hay, needle []byte) bool {
+	last := len(hay) - len(needle)
+	for i := 0; i <= last; i++ {
+		j := bytes.IndexByte(hay[i:last+1], needle[0])
+		if j < 0 {
+			return false
+		}
+		i += j
+		if equalByByte(hay[i:i+len(needle)], needle) {
+			return true
+		}
+	}
+	return false
+}
+
+// equalByByte reports whether a and b, of b's length, hold the same bytes,
+// comparing one byte at a time (see contains).
+func equalByByte(a, b []byte) bool {
+	for k := range b {
+		if a[k] != b[k] {
+			return false
+		}
+	}
+	return true
 }
 
 // readLen is the length of one read of [off, hi) into a buffer of size max.
