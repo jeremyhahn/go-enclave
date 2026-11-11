@@ -238,7 +238,7 @@ lint-actions:
 # follows the `. lib.sh` every script sources. build/ci/*.sh are the workflows'
 # scripts, and CI_BASH_SCRIPTS the ci-template's bash ones, taken unchanged
 # from it; each names its own shell on its first line.
-CI_BASH_SCRIPTS := scripts/apk-index-sum.sh scripts/ci-image-cache.sh scripts/in-toolchain-image.sh scripts/reap-stale-ci-stacks.sh scripts/trim-ci-caches.sh
+CI_BASH_SCRIPTS := scripts/apk-index-sum.sh scripts/ci-image-cache.sh scripts/in-toolchain-image.sh scripts/in-toolchain-image_test.sh scripts/reap-stale-ci-stacks.sh scripts/trim-ci-caches.sh
 .PHONY: lint-scripts
 lint-scripts:
 	@sc=$(call tool,shellcheck,SHELLCHECK) && \
@@ -643,12 +643,18 @@ check-changelog-assembly: vet-buildgates
 check-scripts: vet-buildgates
 	@$(call gates,-run '^TestScripts')
 
-## lint-gates: the repository's own gates beside lint: check-buildgates, check-releasability, check-changelog-assembly, check-scripts (CI's lint-gates job)
+## check-in-toolchain-image: scripts/in-toolchain-image.sh caps the stage's CPU bound at the daemon's NCPU
+# A stub docker on PATH; no daemon, no network.
+.PHONY: check-in-toolchain-image
+check-in-toolchain-image:
+	@bash scripts/in-toolchain-image_test.sh
+
+## lint-gates: the repository's own gates beside lint: check-buildgates, check-releasability, check-changelog-assembly, check-scripts, check-in-toolchain-image (CI's lint-gates job)
 # ci.yml runs this as its own job, in parallel with `make lint`, so make lint
 # does not list it. tidy-check, lint-runtimesecret and lint-integration stay
 # in the image job.
 .PHONY: lint-gates
-lint-gates: check-buildgates check-releasability check-changelog-assembly check-scripts
+lint-gates: check-buildgates check-releasability check-changelog-assembly check-scripts check-in-toolchain-image
 	@echo "lint-gates completed successfully"
 
 # CI AGGREGATES. ci.yml and release.yml each call these, one per job, so a job
