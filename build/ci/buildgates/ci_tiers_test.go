@@ -46,7 +46,7 @@ const (
 	ciGateRunner = "ubuntu-latest"
 	// gateIf is the gate's `if:` (v1.29.3): always, but on a schedule run the
 	// guard's `busy` skips it, so a nightly never posts a green gate.
-	gateIf = "${{ always() && (github.event_name != 'schedule' || needs.schedule-guard.outputs.verdict != 'busy') }}"
+	gateIf = "${{ always() && (github.event_name != 'schedule' || needs.preflight.outputs.verdict != 'busy') }}"
 	// gateCheckFunc opens the gate's check() (v1.30), which judges each job's
 	// result against its tier.
 	gateCheckFunc = "check() {"
@@ -71,10 +71,14 @@ const (
 	lintGatesJob = "lint-gates"
 	// lintJob is the v1.30 job that runs lint, moved from the image job.
 	lintJob = "lint"
-	// scheduleGuardJob is the v1.29.3 job whose verdict gates the bigdisk jobs.
-	scheduleGuardJob = "schedule-guard"
-	// changesJob lists the changed files for the jobs with a path scope.
-	changesJob = "changes"
+	// preflightJob is the v1.34 job that holds the schedule guard (v1.29.3),
+	// whose verdict gates the guarded jobs, the changed-files step that sets
+	// the path scopes, and the architecture gates.
+	preflightJob = "preflight"
+	// scheduleGuardJob and changesJob are the jobs whose outputs the guard
+	// and the path scopes come from: both are preflightJob since v1.34.
+	scheduleGuardJob = preflightJob
+	changesJob       = preflightJob
 	// publishJob is the one job outside the gate (v1.30); its if holds
 	// publishGuard, so it never runs on github.com, where go-enclave lives and
 	// no `release` runner serves it (#277).
@@ -99,11 +103,11 @@ const (
 // parentheses: a tier's required terms, and the two any job may add.
 const (
 	termDraft   = "!github.event.pull_request.draft"
-	termRun     = "needs.schedule-guard.outputs.verdict == 'run'"
+	termRun     = "needs.preflight.outputs.verdict == 'run'"
 	termFull    = "github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')"
 	termNightly = "github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'"
-	termCode    = "needs.changes.outputs.docs_only != 'true'"
-	termScoped  = "needs.changes.outputs.lint_gates != 'false'"
+	termCode    = "needs.preflight.outputs.docs_only != 'true'"
+	termScoped  = "needs.preflight.outputs.lint_gates != 'false'"
 )
 
 // tierTerms are the terms each gate tier's job `if:` must hold; termDraft and
@@ -118,11 +122,11 @@ var tierTerms = map[string][]string{
 
 // ciJobTimeouts is every ci.yml job's timeout-minutes (#277): the measured
 // jobs at ceil(1.5 x p95), lint and publish-images at the template's value,
-// the swtpm and OP-TEE jobs at the values they had before the template, the
-// rest at 5.
+// the swtpm and OP-TEE jobs at the values they had before the template,
+// preflight at the template's 10 (v1.34), the rest at 5.
 var ciJobTimeouts = map[string]int{
-	"changes": 5, scheduleGuardJob: 5, publishJob: 60, lintJob: 30, "image": 32,
-	lintGatesJob: 20, "fips": 11, "integration": 22, "soak": 56, "arch-gates": 5, ciGateJob: 5,
+	preflightJob: 10, publishJob: 60, lintJob: 30, "image": 32,
+	lintGatesJob: 20, "fips": 11, "integration": 22, "soak": 56, ciGateJob: 5,
 	"tpm-swtpm": 30, "optee": 180,
 }
 
@@ -686,19 +690,22 @@ func TestCIGateTiers_RefusesWhatItMustRefuse(t *testing.T) {
 	}
 	ci := string(src)
 	const fullIf = "    if: " + fullTierJobIf + "\n"
-	const archIf = "    runs-on: ubuntu-latest\n    if: " + guardedPRJobIf + "   # v1.26\n"
-	const archNeeds = "    name: Architecture Gates\n    needs: schedule-guard\n"
+	// lintHead is the lint job's head: a PR-tier job that needs the preflight
+	// job for its guard (v1.34; the arch-gates job before), and lintIf its if.
+	const lintIf = "    if: " + guardedPRJobIf + "\n"
+	const lintHead = "    name: Lint [lint, gosec, deps-check, build tags]\n    runs-on: ubuntu-latest\n    needs: preflight   # v1.34\n" + lintIf
+	const lintNeeds = "    name: Lint [lint, gosec, deps-check, build tags]\n    runs-on: ubuntu-latest\n    needs: preflight   # v1.34\n"
 	const nightlyIf = "    if: ${{ (" + termNightly + ") && " + termRun + " }}\n"
 	const scopedIf = " && " + termScoped + " }}\n"
 	for _, tc := range []struct{ name, old, new string }{
 		{"full job tagged pr", `needs.fips.result }}" full`, `needs.fips.result }}" pr`},
-		{"pr job tagged full", `needs.arch-gates.result }}" pr`, `needs.arch-gates.result }}" full`},
+		{"pr job tagged full", `needs.lint.result }}" pr`, `needs.lint.result }}" full`},
 		{"unknown tag", `needs.image.result }}" code`, `needs.image.result }}" soon`},
 		{"nightly job tagged full", `needs.soak.result }}" nightly`, `needs.soak.result }}" full`},
 		{"full job tagged nightly", `needs.fips.result }}" full`, `needs.fips.result }}" nightly`},
 		{"code job tagged pr", `needs.image.result }}" code`, `needs.image.result }}" pr`},
 		{"untagged check", `needs.image.result }}" code`, `needs.image.result }}"`},
-		{"gate misses a need", "needs: [changes, schedule-guard, lint, image, lint-gates, fips, integration, soak, tpm-swtpm, optee, arch-gates]", "needs: [changes, schedule-guard, lint, image, lint-gates, fips, integration, tpm-swtpm, optee, arch-gates]"},
+		{"gate misses a need", "needs: [preflight, lint, image, lint-gates, fips, integration, soak, tpm-swtpm, optee]", "needs: [preflight, lint, image, lint-gates, fips, integration, tpm-swtpm, optee]"},
 		{"gate misses lint-gates", "lint, image, lint-gates, fips,", "lint, image, fips,"},
 		{"gate needs publish-images", "lint, image, lint-gates, fips,", "lint, image, lint-gates, publish-images, fips,"},
 		{"lint-gates tagged pr", `needs.lint-gates.result }}" scoped`, `needs.lint-gates.result }}" pr`},
@@ -707,21 +714,21 @@ func TestCIGateTiers_RefusesWhatItMustRefuse(t *testing.T) {
 		{"lint-gates job does not run make lint-gates", "make lint-gates GO_BUILD_TAGS", "make lint GO_BUILD_TAGS"},
 		{"lint-gates job runs make -k", "make lint-gates GO_BUILD_TAGS", "make -k lint-gates GO_BUILD_TAGS"},
 		{"image job names the image before reading the apk index", "          sum=$(scripts/apk-index-sum.sh)\n", "          sum=none\n"},
-		{"lint-gates skipped on a docs-only PR", "      - name: make lint-gates\n        if: ${{ !cancelled() &&", "      - name: make lint-gates\n        if: ${{ needs.changes.outputs.docs_only != 'true' && !cancelled() &&"}, //nolint:misspell // the Actions cancelled() function
+		{"lint-gates skipped on a docs-only PR", "      - name: make lint-gates\n        if: ${{ !cancelled() &&", "      - name: make lint-gates\n        if: ${{ needs.preflight.outputs.docs_only != 'true' && !cancelled() &&"}, //nolint:misspell // the Actions cancelled() function
 		{"the lint job runs a lint-gates gate too", "\"$TOOLCHAIN_IMAGE\" make tidy-check lint-runtimesecret lint-integration\n", "\"$TOOLCHAIN_IMAGE\" make tidy-check lint-runtimesecret lint-integration check-scripts\n"},
 		{"a lint step dropped", "\"$TOOLCHAIN_IMAGE\" make tidy-check lint-runtimesecret lint-integration\n", "\"$TOOLCHAIN_IMAGE\" make tidy-check\n"},
 		{"a lint step back in the image job", "      - name: make build\n", "      - name: make lint\n        run: make lint GO_BUILD_TAGS=x\n      - name: make build\n"},
-		{"changes job without its draft if", "    if: " + draftIf + "\n    timeout-minutes: 5", "    timeout-minutes: 5"},
-		{"arch-gates job without its draft if", archIf, "    runs-on: ubuntu-latest\n"},
-		{"arch-gates job on a draft's looser if", archIf, "    runs-on: ubuntu-latest\n    if: always()\n"},
+		{"preflight job without its draft if", "    if: " + draftIf + "\n    timeout-minutes: 10", "    timeout-minutes: 10"},
+		{"lint job without its if", lintHead, lintNeeds},
+		{"lint job on a draft's looser if", lintHead, lintNeeds + "    if: always()\n"},
 		{"full job runs on a draft", fullIf, "    if: ${{ (" + termFull + ") && " + termRun + " }}\n"},
 		{"full job runs a refused dispatch", fullIf, "    if: ${{ (" + termFull + ") && " + termDraft + " }}\n"},
 		{"full job's run verdict ored away", fullIf, "    if: ${{ ((" + termFull + ") && " + termDraft + ") || " + termRun + " }}\n"},
-		{"fips without the guard in needs", "    name: FIPS\n    needs: schedule-guard\n", "    name: FIPS\n"},
-		{"swtpm without the guard in needs", fullIf + "    needs: [changes, schedule-guard]\n", fullIf + "    needs: changes\n"},
-		{"optee guarded through the image job only", "    needs: [changes, image, schedule-guard]\n", "    needs: [changes, image]\n"},
-		{"arch-gates without the guard in needs", archNeeds, "    name: Architecture Gates\n"},
-		{"arch-gates runs a refused dispatch", archIf, "    runs-on: ubuntu-latest\n    if: " + draftIf + "   # v1.26\n"},
+		{"fips without the guard in needs", "    name: FIPS\n    needs: preflight   # v1.34\n", "    name: FIPS\n"},
+		{"swtpm without the guard in needs", fullIf + "    needs: preflight   # v1.34\n", fullIf + "    needs: lint\n"},
+		{"optee guarded through the image job only", "    needs: [preflight, image]   # v1.34\n", "    needs: [image]\n"},
+		{"lint without the guard in needs", lintHead, "    name: Lint [lint, gosec, deps-check, build tags]\n    runs-on: ubuntu-latest\n" + lintIf},
+		{"lint runs a refused dispatch", lintHead, lintNeeds + "    if: " + draftIf + "\n"},
 		{"gate does not fail on a draft", gateDraftCheck, `[ "${DRAFT}" = never ]`},
 		{"gate DRAFT flag differs", "          DRAFT: " + gateDraftEnv, "          DRAFT: ${{ github.event.pull_request.draft == false }}"},
 		{"gate draft check does not exit", "            exit 1\n          fi\n          BAD=0", "            :\n          fi\n          BAD=0"},
@@ -733,8 +740,8 @@ func TestCIGateTiers_RefusesWhatItMustRefuse(t *testing.T) {
 		{"full job with a looser if", fullIf, "    if: github.event_name == 'push' || github.event_name == 'pull_request'\n"},
 		{"nightly job without its if", nightlyIf, ""},
 		{"nightly job on the full tier's if", nightlyIf, fullIf},
-		{"pr job needs a full job", archNeeds, "    name: Architecture Gates\n    needs: [schedule-guard, fips]\n"},
-		{"pr job needs a nightly job", archNeeds, "    name: Architecture Gates\n    needs: [schedule-guard, soak]\n"},
+		{"pr job needs a full job", lintNeeds, "    name: Lint [lint, gosec, deps-check, build tags]\n    runs-on: ubuntu-latest\n    needs: [preflight, fips]\n"},
+		{"pr job needs a nightly job", lintNeeds, "    name: Lint [lint, gosec, deps-check, build tags]\n    runs-on: ubuntu-latest\n    needs: [preflight, soak]\n"},
 		{"gate FULL_TIER flag differs", "          FULL_TIER: " + fullTierEnv, "          FULL_TIER: ${{ github.event_name == 'push' }}"},
 		{"gate NIGHTLY flag differs", "          NIGHTLY: " + nightlyTierIf, "          NIGHTLY: ${{ github.event_name == 'schedule' }}"},
 		{"gate drops check()", gateCheckFunc, "chk() {"},
@@ -768,7 +775,7 @@ func TestCIGateTiers_RefusesWhatItMustRefuse(t *testing.T) {
 		{"job missing from the gate checks", imageCheck, ""},
 		{"lint-gates missing from the gate checks", "          check lint-gates  \"${{ needs.lint-gates.result }}\" scoped\n", ""},
 		{"job checked twice", imageCheck, imageCheck + imageCheck},
-		{"check names another job", `check arch-gates  "${{ needs.arch-gates`, `check arch-gates  "${{ needs.image`},
+		{"check names another job", `check lint        "${{ needs.lint.`, `check lint        "${{ needs.image.`},
 		{"check names a job outside needs", imageCheck, imageCheck + "          check publish-images \"${{ needs.publish-images.result }}\" pr\n"},
 		{"check before check()", "          BAD=0\n", "          BAD=0\n" + imageCheck},
 		{"check() defined twice", "      - name: Fail closed on any non-success\n", "      - name: Twice\n        run: |\n          check() { :; }\n      - name: Fail closed on any non-success\n"},

@@ -56,8 +56,8 @@
 #     starts warm.
 #
 # FETCHING happens only at build time and only through GO_BUILD_PROXY (default
-# the public proxy, then direct), passed explicitly to each step that
-# downloads. The images' ENV is GOPROXY=off, so a gate or the suite that
+# the public proxy, with no `direct` entry: ci-template v1.34.1, no direct
+# fetch anywhere), passed explicitly to each step that downloads. The images' ENV is GOPROXY=off, so a gate or the suite that
 # reaches for a module fails instead of fetching it.
 #
 # THE TOOLCHAIN adds, for the Makefile and scripts/:
@@ -103,7 +103,7 @@
 # fails when the two disagree.
 
 ARG GO_IMAGE=golang:1.27.4-alpine3.24@sha256:0a5f7fe796599ff487605987432e7619ae45beeb2fba4c2ce0b907879932aebf
-ARG GO_BUILD_PROXY=https://proxy.golang.org,direct
+ARG GO_BUILD_PROXY=https://proxy.golang.org
 
 # ---------------------------------------------------------------------------
 FROM ${GO_IMAGE} AS tools

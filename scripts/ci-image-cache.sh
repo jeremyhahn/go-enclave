@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# ci-image-cache.sh v2 (2026-11-08, Company Agent m2101 item 2): the
+# namespace comes only from CI_IMAGE_NAMESPACE, the repository Actions
+# variable; unset, the script stops.
 # ci-image-cache.sh v1 (ci-template v1.30, fix 1 of the 72-hour CI evaluation):
 # the toolchain image's registry cache. It ships beside ci.yml as
 # scripts/ci-image-cache.sh.
@@ -17,8 +20,9 @@
 # once per change to those files, by the release runner, and every other job
 # and runner pulls it instead of building it. The registry is the forge's own,
 # host[:port] from GITHUB_SERVER_URL, as in go-qrdb's scripts/ci-registry.sh;
-# no address is written here. The namespace is CI_IMAGE_NAMESPACE, by default
-# agent-ci-images, public for anonymous pull (ruling 217(4)); only the release
+# no address is written here. The namespace is CI_IMAGE_NAMESPACE, the
+# repository Actions variable (v2: no default here), public for anonymous
+# pull (ruling 217(4)); only the release
 # runner writes there (rulings 169 and 173). On github.com both commands do
 # nothing.
 #
@@ -42,7 +46,8 @@ case ${GITHUB_SERVER_URL:-} in
 esac
 host=${GITHUB_SERVER_URL#*://}
 host=${host%%/*}
-ns=${CI_IMAGE_NAMESPACE:-agent-ci-images}
+ns=${CI_IMAGE_NAMESPACE:-}
+[ -n "$ns" ] || die "CI_IMAGE_NAMESPACE is not set (the repository Actions variable)"
 
 local_tag=$(make -s toolchain-image) || die "make -s toolchain-image failed"
 case $local_tag in

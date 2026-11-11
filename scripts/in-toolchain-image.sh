@@ -4,7 +4,8 @@
 #   usage: scripts/in-toolchain-image.sh <image> <command...>
 #   e.g.   scripts/in-toolchain-image.sh go-enclave-toolchain:abc make build
 #
-# in-toolchain-template: v3 (ci-template v1.22.2). Ships beside ci.yml; copy it to
+# in-toolchain-template: v3 (ci-template v1.22.2), with v5's bridge GOPROXY
+# (ci-template v1.34.1: no `direct` entry). Ships beside ci.yml; copy it to
 # scripts/ with the workflow. From go-quicraft's scripts/in-toolchain-image.sh
 # (a141c3c), with the container prefix and uid taken from the environment.
 #
@@ -191,7 +192,10 @@ if [ "$network" = bridge ]; then
   # go keeps the checksum database note under $GOPATH/pkg/sumdb, and the
   # image's /go is read-only too: a per-run GOPATH on the tmpfs, never a
   # shared volume. GOMODCACHE is set, so it does not follow GOPATH.
-  args+=(--env "GOPROXY=https://proxy.golang.org,direct" --env "GOMODCACHE=$modcache"
+  # v5 (ci-template v1.34.1): DEVCACHE_GOPROXY first when the runner sets
+  # it, then the public proxy, and no `direct` entry (dependency-resolution.md,
+  # "No direct fetch, anywhere"); a GOPRIVATE path never uses GOPROXY.
+  args+=(--env "GOPROXY=${DEVCACHE_GOPROXY:+$DEVCACHE_GOPROXY|}https://proxy.golang.org" --env "GOMODCACHE=$modcache"
     --env GOPATH=/tmp/gopath)
   for v in GOPRIVATE GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0; do
     if [ -n "${!v:-}" ]; then args+=(--env "$v"); fi

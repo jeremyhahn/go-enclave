@@ -12,24 +12,29 @@ import (
 	"github.com/goccy/go-yaml"
 )
 
-// ci.yml's lint job carries the template's v1.31 private-pattern gate (#277).
-// The patterns are values that must not appear in a public tree, so they are
-// not in the repository: the step takes them from the RELEASABILITY_PATTERNS
-// secret, searches the tracked tree for them and prints the path and line of
-// a match, never the matched text. A push without the secret fails; any other
-// run without it (a pull request from a fork) passes with a notice. A search
-// that fails is not a search without a match: only git grep's status 1 passes,
-// and any status above it fails the step. The tracked releasability test
-// still runs; this step is beside it, not in its place.
+// ci.yml's lint job carries the template's private-pattern gate (#277; v1.32
+// to v1.33.2 since ci-template v1.34.1). The patterns are values that must not
+// appear in a public tree, so they are not in the repository: the step takes
+// them from the RELEASABILITY_PATTERNS secret, whose lines are
+// `class<TAB>regex`, checks each line, searches the tracked tree with the
+// regexes and prints the path and line of a match, never the matched text. A
+// malformed line, an unknown class or a regex grep -E refuses fails the step
+// with the line number only. A matched line that carries the waiver
+// `lab-string-ok: <reason>` is listed, path and line only, and does not fail;
+// a bare marker does. A push without the secret fails; any other run without
+// it (a pull request from a fork) passes with a notice. A search that fails
+// is not a search without a match: only git grep's status 0 or 1 is read, and
+// any status above it fails the step. The tracked releasability test still
+// runs; this step is beside it, not in its place.
 //
 // The step is checked twice: its text by privatePatternGateViolations, and
 // what it does by running its script in a repository that tracks one private
 // value (privatePatternRuns).
 const (
-	ciTemplateHeader     = "# ci-template: v1.31 (customized)"
+	ciTemplateHeader     = "# ci-template: v1.34.1 (customized)"
 	privatePatternStep   = "Releasability (private patterns)"
 	privatePatternSecret = "${{ secrets.RELEASABILITY_PATTERNS }}"
-	privatePatternSearch = `git grep -n -I -i -F -f "$pf" -- .`
+	privatePatternSearch = `git grep -n -I -i -E -f "$pf" -- .`
 	privatePatternCut    = "cut -d: -f1,2"
 	// privatePatternIf runs the step after a failed lint step too.
 	privatePatternIf = "${{ !cancelled() }}" //nolint:misspell // the Actions cancelled() function
@@ -82,11 +87,11 @@ func privatePatternGateViolations(src []byte) ([]string, error) {
 			if strings.Contains(st.Run, "${{") {
 				bad = append(bad, "the script interpolates an expression; the secret reaches it through env only")
 			}
-			if !strings.Contains(st.Run, privatePatternSearch+" | "+privatePatternCut) {
-				bad = append(bad, fmt.Sprintf("the search is not `%s` cut to path and line with `%s`", privatePatternSearch, privatePatternCut))
+			if !strings.Contains(st.Run, "out=$("+privatePatternSearch+") || rc=$?") || !strings.Contains(st.Run, privatePatternCut) {
+				bad = append(bad, fmt.Sprintf("the search is not `%s` with its status read, cut to path and line with `%s`", privatePatternSearch, privatePatternCut))
 			}
-			if strings.Contains(st.Run, "|| true") {
-				bad = append(bad, "the script discards a command's status with `|| true`; a search that fails must fail the step")
+			if !strings.Contains(st.Run, "case $rc in\n  0|1) ;;") {
+				bad = append(bad, "the search's status is not read: only 0 (a match) and 1 (none) may pass")
 			}
 			if !strings.Contains(st.Run, "if [ \"$EVENT\" = push ]; then\n    echo \"::error::") || !strings.Contains(st.Run, "    exit 1\n  fi\n  echo \"::notice::") {
 				bad = append(bad, "a push without the secret does not fail before the notice")
@@ -99,8 +104,11 @@ func privatePatternGateViolations(src []byte) ([]string, error) {
 				if strings.HasPrefix(l, "printf '%s\\n' \"$RELEASABILITY_PATTERNS\" | sed ") && strings.HasSuffix(l, "> \"$pf\"") {
 					continue
 				}
-				if l == "if [ -z \"$RELEASABILITY_PATTERNS\" ]; then" {
+				if l == "if [ -z \"$RELEASABILITY_PATTERNS\" ]; then" || l == "done <<< \"$RELEASABILITY_PATTERNS\"" {
 					continue
+				}
+				if strings.Contains(l, "git grep") && strings.Contains(l, "|| true") {
+					bad = append(bad, fmt.Sprintf("%q discards the search's status; a search that fails must fail the step", l))
 				}
 				if strings.Contains(l, "$RELEASABILITY_PATTERNS") || strings.Contains(l, "${RELEASABILITY_PATTERNS") {
 					bad = append(bad, fmt.Sprintf("%q uses the patterns outside the pattern file", l))
@@ -134,11 +142,17 @@ func privatePatternScript(src []byte) (string, error) {
 }
 
 // The fixture tree tracks privatePatternValue once, on line 2 of
-// privatePatternFile and in another letter case than its pattern.
+// privatePatternFile and in another letter case than its pattern;
+// privatePatternWaived on line 3 with the waiver and a reason, and
+// privatePatternBare on line 4 with a bare marker.
 const (
-	privatePatternValue = "private-value-seven"
-	privatePatternFile  = "docs/notes.txt"
-	privatePatternTree  = "a public line\nreach it at Private-Value-Seven today\n"
+	privatePatternValue  = "private-value-seven"
+	privatePatternWaived = "private-value-eight"
+	privatePatternBare   = "private-value-nine"
+	privatePatternFile   = "docs/notes.txt"
+	privatePatternTree   = "a public line\nreach it at Private-Value-Seven today\n" +
+		"the fixture private-value-eight lab-string-ok: a documented test value\n" +
+		"the fixture private-value-nine lab-string-ok:\n"
 )
 
 // The ways a run's search is made to fail, without a change to the script.
@@ -160,14 +174,24 @@ type privatePatternRun struct {
 }
 
 var privatePatternRuns = []privatePatternRun{
-	{"a match fails and shows path and line only", "# private names\n\nnot-in-the-tree\n" + privatePatternValue + "\n", "pull_request", "", true,
+	{"a match fails and shows path and line only", "# private names\n\nlab-host\tnot-in-the-tree\nlab-host\t" + privatePatternValue + "\n", "pull_request", "", true,
 		[]string{"::error::", privatePatternFile + ":2"}, []string{privatePatternValue, "0 matches"}},
-	{"no match passes", "# private names\nnot-in-the-tree\nnor-this\n", "push", "", false,
-		[]string{"releasability: 2 private patterns, 0 matches"}, []string{"::error::"}},
-	{"a search that exits 2 fails", "not-in-the-tree\n", "push", gitExits2, true,
-		[]string{"::error::", "search failed"}, []string{"0 matches"}},
-	{"a search outside a repository fails", "not-in-the-tree\n", "pull_request", gitNoRepository, true,
-		[]string{"::error::", "search failed"}, []string{"0 matches"}},
+	{"no match passes", "# private names\nlab-host\tnot-in-the-tree\nowner-path/i\tnor-this\n", "push", "", false,
+		[]string{"releasability: 2 private patterns, 0 matches, 0 waived"}, []string{"::error::"}},
+	{"a waived match passes and shows path and line only", "lab-host\t" + privatePatternWaived + "\n", "push", "", false,
+		[]string{"::notice::1 matched lines carry the lab-string-ok waiver", privatePatternFile + ":3", "0 matches, 1 waived"}, []string{privatePatternWaived, "::error::"}},
+	{"a bare waiver marker fails", "lab-host\t" + privatePatternBare + "\n", "push", "", true,
+		[]string{"::error::", privatePatternFile + ":4"}, []string{privatePatternBare, "0 matches"}},
+	{"a line without a class fails by number only", privatePatternValue + "\n", "push", "", true,
+		[]string{"::error::pattern line 1 is not class<TAB>regex"}, []string{privatePatternValue, "0 matches"}},
+	{"an unknown class fails by number only", "# names\nlab-thing\t" + privatePatternValue + "\nlab-host\tnot-in-the-tree\n", "push", "", true,
+		[]string{"::error::pattern line 2 has an unknown class"}, []string{privatePatternValue, "0 matches"}},
+	{"a regex grep -E refuses fails by number only", "lab-host\tprivate(value\n", "push", "", true,
+		[]string{"::error::pattern line 1 has a regex grep -E refuses"}, []string{"private(value", "0 matches"}},
+	{"a search that exits 2 fails", "lab-host\tnot-in-the-tree\n", "push", gitExits2, true,
+		[]string{"::error::", "git grep failed"}, []string{"0 matches"}},
+	{"a search outside a repository fails", "lab-host\tnot-in-the-tree\n", "pull_request", gitNoRepository, true,
+		[]string{"::error::", "git grep failed"}, []string{"0 matches"}},
 	{"a secret with no pattern fails", "# no pattern yet\n\n", "push", "", true,
 		[]string{"::error::"}, []string{"0 matches"}},
 	{"no secret on a push fails", "", "push", "", true,
@@ -312,26 +336,24 @@ func TestLintJobRunsThePrivatePatternGate_RefusesWhatItMustRefuse(t *testing.T) 
 	}
 	wf := string(src)
 	fx, skip := newPrivatePatternFixture(t)
-	const searchStatus = `; exit "${PIPESTATUS[0]}")`
 	for _, tc := range []struct{ name, old, new string }{
-		{"header back at v1.30", ciTemplateHeader, "# ci-template: v1.30 (customized)"},
+		{"header back at v1.33.2", ciTemplateHeader, "# ci-template: v1.33.2 (customized)"},
 		{"step renamed away", "- name: " + privatePatternStep, "- name: Releasability"},
 		{"step skipped after a failure", "- name: " + privatePatternStep + "\n        if: " + privatePatternIf, "- name: " + privatePatternStep + "\n        if: ${{ success() }}"},
 		{"patterns from a variable", privatePatternSecret, "${{ vars.RELEASABILITY_PATTERNS }}"},
-		{"matched text printed", " | " + privatePatternCut, ""},
-		{"search without fixed strings", privatePatternSearch, `git grep -n -f "$pf" -- .`},
+		{"matched text printed", "grep -v '^$' | cut -d: -f1,2 || true)", "grep -v '^$' || true)"},
+		{"search with fixed strings", privatePatternSearch, `git grep -n -I -i -F -f "$pf" -- .`},
 		{"push without the secret passes", "if [ \"$EVENT\" = push ]; then\n              echo \"::error::", "if [ \"$EVENT\" = never ]; then\n              echo \"::warning::"},
 		{"a match passes", "printf '%s\\n' \"$hits\"\n            exit 1", "printf '%s\\n' \"$hits\""},
 		{"patterns echoed", "pf=$(mktemp)", "echo \"$RELEASABILITY_PATTERNS\"\n          pf=$(mktemp)"},
 		{"pattern file printed", "pf=$(mktemp)", "pf=$(mktemp)\n          cat \"$pf\""},
 		{"pattern file left behind", "trap 'rm -f \"$pf\"' EXIT", "true"},
-		{"a failed search counted as no match", searchStatus, " || true)"},
-		{"the search's status lost in the pipe", searchStatus, ")"},
-		{"the search's status never read", ") || rc=$?", ") || :"},
-		// The line is taken with the one above it: the changed-files step
-		// reads a grep status the same way, earlier in the workflow.
-		{"a search error passes", ") || rc=$?\n          if [ \"$rc\" -gt 1 ]; then", ") || rc=$?\n          if [ \"$rc\" -gt 2 ]; then"},
-		{"a search error is a warning", "(git grep status $rc)\"\n            exit 1", "(git grep status $rc)\""},
+		{"a failed search counted as no match", ") || rc=$?\n          case $rc in", ") || true\n          case $rc in"},
+		{"a search error passes", "            0|1) ;;", "            0|1|2|128) ;;"},
+		{"a search error is a warning", "echo \"::error::git grep failed (rc $rc)\"\n              exit 1 ;;", "echo \"::warning::git grep failed (rc $rc)\" ;;"},
+		{"a malformed file passes", "if [ \"$bad\" != 0 ]; then", "if [ \"$bad\" = 9 ]; then"},
+		{"an unknown class accepted", "*) echo \"::error::pattern line $n has an unknown class\"; bad=1; continue ;;", "*) ;;"},
+		{"a bare waiver marker accepted", "waiver='lab-string-ok:[[:space:]]*[[:alnum:]]'", "waiver='lab-string-ok:'"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if !strings.Contains(wf, tc.old) {

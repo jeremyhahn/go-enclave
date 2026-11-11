@@ -1,4 +1,51 @@
-# ci-template: v1.31 (customized)
+# ci-template: v1.34.1 (customized)
+# v1.34.1 (2026-11-08, Company Agent m2226 item 2, ruling 377): one change.
+# GO_BUILD_PROXY is <DEVCACHE_GOPROXY>|https://proxy.golang.org, with no
+# trailing `direct`: the handbook allows no direct fetch anywhere
+# (dependency-resolution.md, "No direct fetch, anywhere"). A private module
+# is unaffected, because GOPRIVATE/GONOPROXY paths never use GOPROXY. Every
+# job, gate and tier is v1.34's, and in-toolchain-image.sh is v5. A
+# repository adopts v1.34.1 in its v1.34 adoption PR, or in one CI-file PR
+# if v1.34 is already merged.
+# v1.34 (2026-11-08, Company Agent m2211 item 2(b)): fewer jobs per run. The
+# `changes`, `schedule-guard` and `arch-gates` jobs are one `preflight` job,
+# in that order of concern but with the guard first and nothing checked out
+# before it. The template's job count goes from 10 to 8, and a PR run starts
+# two fewer hosted runners. Their outputs are needs.preflight.outputs.*, and
+# CI Gate checks `preflight` in their place. The unit and race shards are
+# the repositories' own CUSTOMIZE jobs: each merges its shards into one job
+# in its v1.34 adoption PR. A repository adopts v1.34 in one CI-file PR.
+# v1.33.2 (2026-11-08, Company Agent m2113 item 3, with InfoSec): the
+# releasability step takes an InfoSec waiver. A matched line that carries
+# `lab-string-ok: <reason>` on the same line, the colon and a reason
+# required, is not a failure; a bare marker is. The step prints the path and
+# line of each waived line as a notice and its count, never the value
+# (go-trusted-platform #1348's mechanism, ported).
+# v1.33.1 (2026-11-08, Company Agent m2107 item 4): comments only; the
+# pattern file's source is named in the template.
+# v1.33 (2026-11-08, Company Agent m2104 item 2): the releasability step
+# knows the five classes of the regenerated pattern file: coord-host,
+# internal-email, lab-address, lab-host and owner-path (optional `/i`).
+# With the v1.32 set of three, every gate run on the new secret failed on
+# an unknown class. The image namespace comes from the repository variable
+# CI_IMAGE_NAMESPACE (Company Agent m2101 item 2).
+# v1.32 (2026-11-08, Company Agent m2098 item 2, InfoSec finding): the
+# releasability step reads the private pattern file as it is written. Each
+# line is `class<TAB>regex` (blank and `#` lines skipped); v1.31 grepped the
+# whole line as one fixed string (-F), so no line could match and the gate
+# was green for a false reason. The step now checks the class (lab-address,
+# lab-host or owner-path, optional `/i`), checks each regex with grep -E,
+# fails on a malformed line printing its number only, and runs
+# `git grep -i -E` over the regex fields, printing path and line only.
+# CUSTOMIZE (go-enclave): v1.32 to v1.34.1 adopted in one CI-file PR. The
+# changes, schedule-guard and arch-gates jobs are the one `preflight` job; it
+# keeps go-enclave's `tpm` and `optee` outputs and their steps, and its
+# checkout takes the full history on a push as well, for the optee diff.
+# CI Gate checks `preflight` in place of the three. Every image build keeps
+# the inherited GOPROXY as GO_BUILD_PROXY and stages no forge credential
+# (#277), so v1.34.1's GO_BUILD_PROXY change has nothing to change here; the
+# toolchain stage's bridge GOPROXY takes v5's chain with no `direct` entry.
+# Runners are unchanged.
 # v1.31: the internal-name gate reads its patterns from outside the
 # repository. A public repository never lists internal names, hosts or
 # addresses, not even as patterns to refuse. The lint job's
@@ -649,13 +696,66 @@ env:
   RELEASABILITY_TEST: ""
 
 jobs:
+  # v1.34 (Company Agent m2211 item 2(b)): one preflight job instead of three.
+  # `Changed files`, `Schedule guard` and `Architecture Gates` were three jobs,
+  # each a hosted runner of its own on every run, in a saturated hosted queue.
+  # They are steps of this one job now, in this order: the schedule guard
+  # first, before anything is checked out, so AGENT_TOKEN (a schedule run and
+  # a push to main only) still reaches a step beside no repository code; then
+  # one checkout with persist-credentials false; then the changed-files step;
+  # then the architecture gates. The four outputs are the same, read as
+  # needs.preflight.outputs.*. A repository adopts v1.34 in one CI-file PR:
+  # its CUSTOMIZE jobs read needs.preflight where they read needs.changes or
+  # needs.schedule-guard, its own architecture steps move into this job, and
+  # CI Gate checks `preflight` in place of the three. The comments of the
+  # three former jobs follow.
   # v1.24 (CA m749, m751 (a)): a PR whose every changed file matches DOCS_ONLY_PATTERN
   # runs lint only; build and make coverage are skipped. Off pull_request, or
   # on a ci:full PR, docs_only is always false. Any doubt (a failed diff, an
   # empty list) reads as false, so the tier fails toward running the tests.
-  changes:
-    name: Changed files
+  # v1.29.3 (Company Agent ruling 255(10)/(11)(c)): one nightly per
+  # repository, and none while main is busy. On a schedule run only, this job
+  # asks the API whether this workflow has a push run on main in progress or
+  # waiting, and sets `verdict`: `run` (none, or not a schedule run), `busy`
+  # (one is) or `unreadable` (no count came back). On a schedule run every
+  # bigdisk job runs only on `run`; CI Gate skips on `busy` and fails on
+  # `unreadable`. The job runs on every event, not on schedule alone, so no
+  # bigdisk job's `needs` meets a skipped job off schedule; off schedule it
+  # makes no call. It checks nothing out, so no repository code runs beside
+  # the tokens.
+  # v1.30 (fixes 2, 3 and 5): two more verdicts. `refused`: a
+  # workflow_dispatch off main (no full tier on a PR branch, ever) or a pull
+  # request from a checkpoint branch (lane-ckpt/*); every job but the gate
+  # skips and CI Gate fails. `proven`: on a push to main, the newest of this
+  # workflow's last 20 successful runs whose head commit has this commit's tree
+  # and whose Integration job succeeded (a ci:full PR run, a dispatch on main,
+  # an earlier main run); the guard records its id as `proof`, every bigdisk
+  # job skips and CI Gate reads the skips as passed. A proof it cannot read
+  # leaves `run`: the full tier runs. A schedule run never gets `proven`,
+  # because its security stages read fresh vulnerability databases.
+  # Architecture gate (v1.20, Company Agent m270 item 9; go-xkms arch-gates).
+  # go-objstore owns every blob backend (docs/00), and a repo reaches it only
+  # through the packages that are its storage seam. Test files are exempt, and
+  # go-objstore itself passes. CUSTOMIZE: OBJSTORE_SEAMS, an extended regex of
+  # the paths that may import go-objstore (go-xkms: 'pkg/ca/|pkg/storage/');
+  # empty means none may. CUSTOMIZE: the repo's own layering rules (go-xkms:
+  # xkmsctl and xkey depend only on sdk/go) are further steps in this job.
+  # A source check with grep, not a stage: it runs on the runner's shell.
+  # v1.23: a lint-class check, so it stays on the PR tier.
+  # CUSTOMIZE (go-enclave, #277): on github.com, where go-enclave runs, the
+  # guard makes no API call, so it only refuses; `busy`, `unreadable` and
+  # `proven` cannot occur here.
+  preflight:
+    name: Preflight [changed files, schedule guard, architecture gates]
     runs-on: ubuntu-latest
+    # v1.26: a draft PR runs no CI; every job that needs this one skips with it.
+    if: ${{ !github.event.pull_request.draft }}
+    timeout-minutes: 10       # v1.34: the three jobs had 5 each
+    permissions:
+      actions: read
+      contents: read
+    env:
+      OBJSTORE_SEAMS: ''      # CUSTOMIZE
     outputs:
       docs_only: ${{ steps.diff.outputs.docs_only }}
       lint_gates: ${{ steps.diff.outputs.lint_gates }}   # v1.30
@@ -664,134 +764,6 @@ jobs:
       tpm: ${{ steps.diff.outputs.tpm }}
       # CUSTOMIZE: the optee job's path gate (step optee below).
       optee: ${{ steps.optee.outputs.optee }}
-    # v1.26: a draft PR runs no CI; the image job needs this one and skips with it.
-    if: ${{ !github.event.pull_request.draft }}
-    timeout-minutes: 5        # v1.30
-    steps:
-      # CUSTOMIZE: the optee step diffs every pull request and push, so the
-      # checkout runs for them too (the template's: a PR off the full tier).
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        if: ${{ github.event_name == 'pull_request' || github.event_name == 'push' }}
-        with:
-          fetch-depth: 0
-      - name: Is every changed file docs or markdown?
-        id: diff
-        env:
-          BASE: ${{ github.event.pull_request.base.sha }}
-          HEAD: ${{ github.event.pull_request.head.sha }}
-          EVENT: ${{ github.event_name }}
-          TPM_PATTERN: '^(backends/tpm/|scripts/swtpm-fixture\.sh$|\.github/workflows/ci\.yml$)'
-        run: |
-          # v1.30: lint_gates is false only on a PR whose changed files all
-          # miss LINT_GATES_PATTERN; any doubt runs the job.
-          # CUSTOMIZE (go-enclave, #277): each search answers from grep's own
-          # status. `found VAR` asks whether a changed file matches the
-          # pattern VAR names, and `found VAR -v` whether one misses it. 0 is
-          # yes and 1 is no. Any other status (a pattern that is no regular
-          # expression) and an empty pattern are a search that did not run:
-          # it answers yes with a warning, so docs_only stays false,
-          # lint_gates stays true and tpm is true. A broken pattern skips no
-          # job. grep reads the list from a here-string, so no pipe closes on
-          # a writer when grep -q stops at the first line.
-          found() {
-            local rc=0
-            if [ -z "${!1}" ]; then
-              echo "::warning::$1 is empty: no search of the changed files ran, and no job is skipped on it"
-              return 0
-            fi
-            grep -qE "${@:2}" -e "${!1}" <<< "$files" || rc=$?
-            if [ "$rc" -gt 1 ]; then
-              echo "::warning::$1: the search of the changed files failed (grep status $rc); no job is skipped on it"
-              return 0
-            fi
-            return "$rc"
-          }
-          docs_only=false lint_gates=true
-          tpm=false
-          if [ "$EVENT" = pull_request ]; then
-            if files=$(git diff --name-only --no-renames "$BASE...$HEAD"); then
-              if [ -n "$files" ]; then
-                if [ "$CI_FULL_TIER" != true ] && ! found DOCS_ONLY_PATTERN -v; then
-                  docs_only=true
-                fi
-                if [ "$CI_FULL_TIER" != true ] && ! found LINT_GATES_PATTERN; then
-                  lint_gates=false
-                fi
-                if found TPM_PATTERN; then
-                  tpm=true
-                fi
-                printf '%s\n' "$files"
-              fi
-            else
-              tpm=true   # an unknown diff runs the TPM suite rather than skip it
-            fi
-          fi
-          echo "docs only: $docs_only; lint-gates: $lint_gates"
-          echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
-          echo "lint_gates=$lint_gates" >> "$GITHUB_OUTPUT"
-          echo "tpm paths: $tpm"
-          echo "tpm=$tpm" >> "$GITHUB_OUTPUT"
-
-      # CUSTOMIZE: scripts/optee-selected.sh decides from the changed paths and
-      # the diff of scripts/tool-pins.sh (it lists what it selects on: the
-      # backend, its harness and fixture script, the Makefile, the scripts and
-      # image the recipe calls, and the pins it reads). Every schedule and
-      # workflow_dispatch selects the job, and so does a diff that cannot be
-      # taken or a selector that fails.
-      - name: Does the change reach the OP-TEE harness?
-        id: optee
-        env:
-          BASE: ${{ github.event_name == 'push' && github.event.before || github.event.pull_request.base.sha }}
-          HEAD: ${{ github.event_name == 'push' && github.sha || github.event.pull_request.head.sha }}
-          EVENT: ${{ github.event_name }}
-        run: |
-          optee=true
-          if [ "$EVENT" = pull_request ] || [ "$EVENT" = push ]; then
-            range="$BASE...$HEAD"
-            [ "$EVENT" = pull_request ] || range="$BASE..$HEAD"
-            files=$(mktemp)
-            pins=$(mktemp)
-            if git diff --name-only --no-renames "$range" > "$files" &&
-              git diff --no-renames "$range" -- scripts/tool-pins.sh > "$pins" &&
-              selected=$(sh scripts/optee-selected.sh "$pins" < "$files"); then
-              optee=$selected
-            fi
-            rm -f "$files" "$pins"
-          fi
-          echo "optee: $optee"
-          echo "optee=$optee" >> "$GITHUB_OUTPUT"
-
-  # v1.29.3: one schedule run per repository, and none while main is busy.
-  # On a schedule run only, and never on github.com, this job asks the API
-  # whether this workflow has a push run on main in progress or waiting, and
-  # sets `verdict`: `run` (none, or not a schedule run), `busy` (one is) or
-  # `unreadable` (no count came back). Every job that needs the guard runs
-  # only on `run`; CI Gate skips on `busy` and fails on `unreadable`. The job
-  # runs on every event, not on schedule alone, so no job's `needs` meets a
-  # skipped job off schedule; off schedule it makes no call. It checks
-  # nothing out, so no repository code runs beside the tokens.
-  # v1.30: two more verdicts. `refused`: a workflow_dispatch off main (no
-  # full tier on a PR branch, ever) or a pull request from a checkpoint
-  # branch; every job but the gate skips and CI Gate fails. `proven`: on a
-  # push to main off github.com, the newest of this workflow's last 20
-  # successful runs whose head commit has this commit's tree and whose
-  # Integration job succeeded; the guard records its id as `proof`, the
-  # guarded jobs skip and CI Gate reads the skips as passed. A proof it
-  # cannot read leaves `run`: the full tier runs. A schedule run never gets
-  # `proven`, because its security stages read fresh vulnerability databases.
-  # CUSTOMIZE (go-enclave, #277): on github.com, where go-enclave runs, the
-  # guard makes no API call, so it only refuses; `busy`, `unreadable` and
-  # `proven` cannot occur here.
-  schedule-guard:
-    name: Schedule guard
-    runs-on: ubuntu-latest
-    # v1.26: a draft PR runs no CI (as the changes job).
-    if: ${{ !github.event.pull_request.draft }}
-    timeout-minutes: 5        # v1.30
-    permissions:
-      actions: read
-      contents: read
-    outputs:
       verdict: ${{ steps.guard.outputs.verdict }}
       proof: ${{ steps.guard.outputs.proof }}   # v1.30
     steps:
@@ -906,6 +878,116 @@ jobs:
           echo "verdict=$verdict" >> "$GITHUB_OUTPUT"
           echo "proof=$PROOF" >> "$GITHUB_OUTPUT"
 
+      # v1.34: the full history on a PR run for the changed-files diff, one
+      # commit otherwise. No credential is left in the checkout. CUSTOMIZE:
+      # the optee step diffs every pull request and push, so both take the
+      # full history.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: ${{ (github.event_name == 'pull_request' || github.event_name == 'push') && '0' || '1' }}
+          persist-credentials: false
+
+      - name: Is every changed file docs or markdown?
+        id: diff
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+          EVENT: ${{ github.event_name }}
+          TPM_PATTERN: '^(backends/tpm/|scripts/swtpm-fixture\.sh$|\.github/workflows/ci\.yml$)'
+        run: |
+          # v1.30: lint_gates is false only on a PR whose changed files all
+          # miss LINT_GATES_PATTERN; any doubt runs the job.
+          # CUSTOMIZE (go-enclave, #277): each search answers from grep's own
+          # status. `found VAR` asks whether a changed file matches the
+          # pattern VAR names, and `found VAR -v` whether one misses it. 0 is
+          # yes and 1 is no. Any other status (a pattern that is no regular
+          # expression) and an empty pattern are a search that did not run:
+          # it answers yes with a warning, so docs_only stays false,
+          # lint_gates stays true and tpm is true. A broken pattern skips no
+          # job. grep reads the list from a here-string, so no pipe closes on
+          # a writer when grep -q stops at the first line.
+          found() {
+            local rc=0
+            if [ -z "${!1}" ]; then
+              echo "::warning::$1 is empty: no search of the changed files ran, and no job is skipped on it"
+              return 0
+            fi
+            grep -qE "${@:2}" -e "${!1}" <<< "$files" || rc=$?
+            if [ "$rc" -gt 1 ]; then
+              echo "::warning::$1: the search of the changed files failed (grep status $rc); no job is skipped on it"
+              return 0
+            fi
+            return "$rc"
+          }
+          docs_only=false lint_gates=true
+          tpm=false
+          if [ "$EVENT" = pull_request ]; then
+            if files=$(git diff --name-only --no-renames "$BASE...$HEAD"); then
+              if [ -n "$files" ]; then
+                if [ "$CI_FULL_TIER" != true ] && ! found DOCS_ONLY_PATTERN -v; then
+                  docs_only=true
+                fi
+                if [ "$CI_FULL_TIER" != true ] && ! found LINT_GATES_PATTERN; then
+                  lint_gates=false
+                fi
+                if found TPM_PATTERN; then
+                  tpm=true
+                fi
+                printf '%s\n' "$files"
+              fi
+            else
+              tpm=true   # an unknown diff runs the TPM suite rather than skip it
+            fi
+          fi
+          echo "docs only: $docs_only; lint-gates: $lint_gates"
+          echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
+          echo "lint_gates=$lint_gates" >> "$GITHUB_OUTPUT"
+          echo "tpm paths: $tpm"
+          echo "tpm=$tpm" >> "$GITHUB_OUTPUT"
+
+      # CUSTOMIZE: scripts/optee-selected.sh decides from the changed paths and
+      # the diff of scripts/tool-pins.sh (it lists what it selects on: the
+      # backend, its harness and fixture script, the Makefile, the scripts and
+      # image the recipe calls, and the pins it reads). Every schedule and
+      # workflow_dispatch selects the job, and so does a diff that cannot be
+      # taken or a selector that fails.
+      - name: Does the change reach the OP-TEE harness?
+        id: optee
+        env:
+          BASE: ${{ github.event_name == 'push' && github.event.before || github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event_name == 'push' && github.sha || github.event.pull_request.head.sha }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          optee=true
+          if [ "$EVENT" = pull_request ] || [ "$EVENT" = push ]; then
+            range="$BASE...$HEAD"
+            [ "$EVENT" = pull_request ] || range="$BASE..$HEAD"
+            files=$(mktemp)
+            pins=$(mktemp)
+            if git diff --name-only --no-renames "$range" > "$files" &&
+              git diff --no-renames "$range" -- scripts/tool-pins.sh > "$pins" &&
+              selected=$(sh scripts/optee-selected.sh "$pins" < "$files"); then
+              optee=$selected
+            fi
+            rm -f "$files" "$pins"
+          fi
+          echo "optee: $optee"
+          echo "optee=$optee" >> "$GITHUB_OUTPUT"
+
+      - name: No direct go-objstore import outside the storage seam
+        run: |
+          if [ "$(sed -n 's/^module //p' go.mod)" = github.com/jeremyhahn/go-objstore ]; then
+            echo "OK: this is go-objstore"; exit 0
+          fi
+          hits=$(grep -rln --include='*.go' '"github.com/jeremyhahn/go-objstore' . \
+                 | grep -v '_test\.go$' \
+                 | { if [ -n "$OBJSTORE_SEAMS" ]; then grep -vE "$OBJSTORE_SEAMS"; else cat; fi; } || true)
+          if [ -n "$hits" ]; then
+            echo "go-objstore may be imported only in the storage seam (OBJSTORE_SEAMS='$OBJSTORE_SEAMS'):"
+            echo "$hits"; exit 1
+          fi
+          echo "OK: no go-objstore import outside the storage seam"
+
   # v1.30 (fix 1): the toolchain image is built once per content hash, here,
   # and every other job pulls it (scripts/ci-image-cache.sh v1, ships beside
   # this file). On a push to main only: when the forge's registry lacks
@@ -925,7 +1007,7 @@ jobs:
     if: ${{ github.server_url != 'https://github.com' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     timeout-minutes: 60       # CUSTOMIZE: ceil(1.5 x a cold toolchain build's p95)
     env:
-      CI_IMAGE_NAMESPACE: agent-ci-images   # the template's default namespace; unused on github.com
+      CI_IMAGE_NAMESPACE: ${{ vars.CI_IMAGE_NAMESPACE }}   # m2101: a repository variable; ci-standard.md §9 (ruling 217(4))
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
@@ -951,13 +1033,13 @@ jobs:
   lint:
     name: Lint [lint, gosec, deps-check, build tags]
     runs-on: ubuntu-latest
-    needs: [changes, schedule-guard]
-    if: ${{ !github.event.pull_request.draft && needs.schedule-guard.outputs.verdict == 'run' }}
+    needs: preflight   # v1.34
+    if: ${{ !github.event.pull_request.draft && needs.preflight.outputs.verdict == 'run' }}
     timeout-minutes: 30       # CUSTOMIZE: ceil(1.5 x this job's 72-hour p95), ci-standard.md §12
     env:
       CI_STACK_PREFIX: ${{ github.event.repository.name }}-ci-
       CI_CACHE_CLASS: ${{ (github.event_name == 'push' || github.event_name == 'schedule') && 'main' || 'pr' }}
-      CI_IMAGE_NAMESPACE: agent-ci-images
+      CI_IMAGE_NAMESPACE: ${{ vars.CI_IMAGE_NAMESPACE }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
@@ -1007,15 +1089,22 @@ jobs:
         if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' }}
         run: scripts/in-toolchain-image.sh "$TOOLCHAIN_IMAGE" "make lint GO_BUILD_TAGS='$GO_BUILD_TAGS'"
 
-      # v1.31: the internal-name gate. Its patterns are internal values, so
-      # they never live in this repository: the Actions secret
-      # RELEASABILITY_PATTERNS carries the private pattern file (one fixed
-      # string per line, `#` comments). The step prints path and line of a
-      # match, never the value. A run without the secret (a fork PR) skips
-      # with a notice; a push to main without it fails.
-      # CUSTOMIZE (go-enclave, #277): the step reads git grep's own status.
-      # 0 is a match and 1 is none; any other status (a search that could
-      # not run) fails the step, and so does a secret that holds no pattern.
+      # v1.32 (2026-11-08, Company Agent m2098 item 2, InfoSec finding): the
+      # internal-name gate. Its patterns are internal values, so they never
+      # live in this repository: the Actions secret RELEASABILITY_PATTERNS
+      # carries the private pattern file (its source is kept outside
+      # this repository). Blank
+      # and `#` lines are skipped; every other line is `class<TAB>regex`, a
+      # class of coord-host, internal-email, lab-address, lab-host or
+      # owner-path (v1.33; an `/i` suffix is allowed) and a POSIX extended regex. A malformed line, an unknown
+      # class or a regex grep -E refuses fails the step, which prints the line
+      # number only. v1.31 grepped whole lines with -F, so no line matched and
+      # the gate was green for a false reason. The step prints path and line
+      # of a match, never the value. A run without the secret (a fork PR)
+      # skips with a notice; a push to main without it fails. v1.33.2: a
+      # matched line that carries the InfoSec waiver, `lab-string-ok: <reason>`
+      # (colon and reason required, public-hygiene.md), is listed as waived,
+      # path and line only, and does not fail; a bare marker still fails.
       - name: Releasability (private patterns)
         if: ${{ !cancelled() }}
         env:
@@ -1033,30 +1122,73 @@ jobs:
           pf=$(mktemp)
           chmod 600 "$pf"
           trap 'rm -f "$pf"' EXIT
-          printf '%s\n' "$RELEASABILITY_PATTERNS" | sed -e '/^[[:space:]]*$/d' -e '/^#/d' > "$pf"
-          if [ ! -s "$pf" ]; then
-            echo "::error::RELEASABILITY_PATTERNS holds no pattern; the gate has nothing to search for"
+          tab=$(printf '\t')
+          n=0 bad=0 count=0
+          while IFS= read -r line || [ -n "$line" ]; do
+            n=$((n + 1))
+            line=${line%$'\r'}
+            trimmed=${line#"${line%%[![:space:]]*}"}
+            case $trimmed in ''|'#'*) continue ;; esac
+            case $line in
+              *"$tab"*) ;;
+              *) echo "::error::pattern line $n is not class<TAB>regex"; bad=1; continue ;;
+            esac
+            class=${line%%"$tab"*}
+            re=${line#*"$tab"}
+            case $class in
+              coord-host|internal-email|lab-address|lab-host|owner-path) ;;
+              coord-host/i|internal-email/i|lab-address/i|lab-host/i|owner-path/i) ;;
+              *) echo "::error::pattern line $n has an unknown class"; bad=1; continue ;;
+            esac
+            if [ -z "$re" ]; then
+              echo "::error::pattern line $n has an empty regex"; bad=1; continue
+            fi
+            rc=0
+            grep -E -e "$re" /dev/null > /dev/null 2>&1 || rc=$?
+            if [ "$rc" -ge 2 ]; then
+              echo "::error::pattern line $n has a regex grep -E refuses"; bad=1; continue
+            fi
+            printf '%s\n' "$re" >> "$pf"
+            count=$((count + 1))
+          done <<< "$RELEASABILITY_PATTERNS"
+          if [ "$bad" != 0 ]; then
+            echo "::error::the private pattern file is malformed (line numbers above; the values are not shown)"
             exit 1
           fi
-          # go-enclave: fail on a search error (git grep status above 1), not only on a match.
+          if [ "$count" = 0 ]; then
+            echo "::error::RELEASABILITY_PATTERNS holds no class<TAB>regex line"
+            exit 1
+          fi
           rc=0
-          hits=$(git grep -n -I -i -F -f "$pf" -- . | cut -d: -f1,2; exit "${PIPESTATUS[0]}") || rc=$?
-          if [ "$rc" -gt 1 ]; then
-            echo "::error::the private-pattern search failed; nothing shows the tree is clean (git grep status $rc)"
-            exit 1
+          out=$(git grep -n -I -i -E -f "$pf" -- .) || rc=$?
+          case $rc in
+            0|1) ;;
+            *)
+              echo "::error::git grep failed (rc $rc)"
+              exit 1 ;;
+          esac
+          waiver='lab-string-ok:[[:space:]]*[[:alnum:]]'
+          waived=$(printf '%s\n' "$out" | grep -E -e "$waiver" | cut -d: -f1,2 || true)
+          hits=$(printf '%s\n' "$out" | grep -v -E -e "$waiver" | grep -v '^$' | cut -d: -f1,2 || true)
+          unset out
+          nw=0
+          if [ -n "$waived" ]; then
+            nw=$(printf '%s\n' "$waived" | wc -l)
+            echo "::notice::$nw matched lines carry the lab-string-ok waiver (path:line; the values are not shown):"
+            printf '%s\n' "$waived"
           fi
-          if [ "$rc" -eq 0 ] || [ -n "$hits" ]; then
+          if [ -n "$hits" ]; then
             echo "::error::internal names in the tracked tree (path:line; the values are not shown):"
             printf '%s\n' "$hits"
             exit 1
           fi
-          echo "releasability: $(wc -l < "$pf") private patterns, 0 matches"
+          echo "releasability: $count private patterns, 0 matches, $nw waived"
 
       # v1.26.1 (Company Agent m1128 (9)): a docs-only PR skips make coverage, so
       # it runs the releasability test alone; any other run gets it from make
       # coverage.
       - name: Releasability test (docs-only PR)
-        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && env.RELEASABILITY_TEST != '' && needs.changes.outputs.docs_only == 'true' }}
+        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && env.RELEASABILITY_TEST != '' && needs.preflight.outputs.docs_only == 'true' }}
         run: scripts/in-toolchain-image.sh "$TOOLCHAIN_IMAGE" "go test -count=1 -tags '$GO_BUILD_TAGS' $RELEASABILITY_TEST"
 
       # CUSTOMIZE (go-enclave): go-enclave's other static checks: go.mod
@@ -1072,13 +1204,13 @@ jobs:
       # (tests included), it is misspelled or dead. Compares files, not
       # packages, and a tag may swap files (a `!foo` stub for a `foo` body).
       - name: Assert every build tag selects code
-        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && env.GO_BUILD_TAGS != '' && needs.changes.outputs.docs_only != 'true' }}
+        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && env.GO_BUILD_TAGS != '' && needs.preflight.outputs.docs_only != 'true' }}
         run: scripts/in-toolchain-image.sh "$TOOLCHAIN_IMAGE" "GO_BUILD_TAGS='$GO_BUILD_TAGS' sh scripts/assert-build-tags.sh"
 
       # v1.30 (fix 5): gosec on the PR tier, through the developers' target,
       # with no network. On the full tier make security runs it in the image job.
       - name: make gosec (PR tier)
-        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && env.CI_FULL_TIER != 'true' && needs.changes.outputs.docs_only != 'true' }}
+        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && env.CI_FULL_TIER != 'true' && needs.preflight.outputs.docs_only != 'true' }}
         run: scripts/in-toolchain-image.sh "$TOOLCHAIN_IMAGE" "make gosec GO_BUILD_TAGS='$GO_BUILD_TAGS'"
 
       # Fails when a library, first-party or third-party, is behind its latest
@@ -1146,11 +1278,11 @@ jobs:
   image:
     name: Devcontainer image [build, test, security, trivy image]
     runs-on: ubuntu-latest
-    needs: [changes, schedule-guard]   # v1.24 (CA m749, m751 (a)); v1.29.3
+    needs: preflight   # v1.24 (CA m749, m751 (a)); v1.29.3; v1.34
     # v1.29.3: on a schedule run, only on the schedule guard's `run`. v1.30:
     # on every event only on `run` (not `refused`, not `proven`), and never
     # on a docs-only PR.
-    if: ${{ needs.schedule-guard.outputs.verdict == 'run' && needs.changes.outputs.docs_only != 'true' }}
+    if: ${{ needs.preflight.outputs.verdict == 'run' && needs.preflight.outputs.docs_only != 'true' }}
     timeout-minutes: 32       # CUSTOMIZE: ceil(1.5 x this job's 72-hour p95), ci-standard.md §12 (#277)
     # CUSTOMIZE (v1.29.2): `built` is set by the build step, for a path-gated
     # job's `if:` (header note). The optee job gates in a step instead, since
@@ -1158,7 +1290,7 @@ jobs:
     outputs:
       built: ${{ steps.build.outputs.built }}
     env:
-      CI_IMAGE_NAMESPACE: agent-ci-images   # v1.30
+      CI_IMAGE_NAMESPACE: ${{ vars.CI_IMAGE_NAMESPACE }}   # v1.30; m2101
       CI_STACK_PREFIX: ${{ github.event.repository.name }}-ci-
       # v1.22: the cache volumes' trust class. Only a push to main writes the
       # caches main's build reads; every other event, pull requests included,
@@ -1320,14 +1452,14 @@ jobs:
       # CUSTOMIZE: nested modules (sdk/go, xkey) and variants (FIPS) are built
       # by `make build` itself, never by an extra step here.
       - name: make build
-        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && needs.changes.outputs.docs_only != 'true' }}
+        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && needs.preflight.outputs.docs_only != 'true' }}
         run: scripts/in-toolchain-image.sh "$TOOLCHAIN_IMAGE" "make build GO_BUILD_TAGS='$GO_BUILD_TAGS'"
 
       # CUSTOMIZE (cross-build link check): compile, vet and link the test
       # binaries for every GOOS/GOARCH a consumer may build for; the 32-bit
       # targets catch uintptr comparisons that do not compile there.
       - name: make cross-build
-        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && needs.changes.outputs.docs_only != 'true' }}
+        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && needs.preflight.outputs.docs_only != 'true' }}
         run: scripts/in-toolchain-image.sh "$TOOLCHAIN_IMAGE" make cross-build
 
       # The test stage (m601 (c)): make coverage runs the whole unit suite with
@@ -1337,14 +1469,14 @@ jobs:
       # Tags matter here too: without them tag-gated packages are neither
       # tested nor counted. The integration stage is its own job below.
       - name: make coverage (unit tests and the threshold)
-        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && needs.changes.outputs.docs_only != 'true' }}
+        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && needs.preflight.outputs.docs_only != 'true' }}
         run: scripts/in-toolchain-image.sh "$TOOLCHAIN_IMAGE" "make coverage GO_BUILD_TAGS='$GO_BUILD_TAGS' COVERAGE_THRESHOLD=$COVERAGE_THRESHOLD"
 
       # CUSTOMIZE: the unit suite again, built with GOEXPERIMENT=runtimesecret,
       # the only build that compiles the key-schedule erasure (secret_erase.go).
       # The second half of `make ci-test` through v1.18.
       - name: make test-runtimesecret
-        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && needs.changes.outputs.docs_only != 'true' }}
+        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && needs.preflight.outputs.docs_only != 'true' }}
         run: scripts/in-toolchain-image.sh "$TOOLCHAIN_IMAGE" make test-runtimesecret
 
       # make security: gosec, govulncheck, go mod verify (devops.md §8), with
@@ -1404,17 +1536,17 @@ jobs:
   lint-gates:
     name: Lint Gates [toolchain image]
     runs-on: ubuntu-latest
-    needs: [changes, schedule-guard]     # v1.29.3; v1.30
+    needs: preflight     # v1.29.3; v1.30; v1.34
     # v1.26: never on a draft. v1.29.3: on a schedule run, only on the
     # schedule guard's `run`. v1.30: only on `run` on every event, and on a PR
     # only when a changed file matches LINT_GATES_PATTERN (fix 3).
-    if: ${{ !github.event.pull_request.draft && needs.schedule-guard.outputs.verdict == 'run' && needs.changes.outputs.lint_gates != 'false' }}
+    if: ${{ !github.event.pull_request.draft && needs.preflight.outputs.verdict == 'run' && needs.preflight.outputs.lint_gates != 'false' }}
     timeout-minutes: 20       # CUSTOMIZE: ceil(1.5 x this job's 72-hour p95), ci-standard.md §12 (#277)
     env:
       CI_STACK_PREFIX: ${{ github.event.repository.name }}-ci-
       # v1.22: the cache volumes' trust class (as in the image job).
       CI_CACHE_CLASS: ${{ (github.event_name == 'push' || github.event_name == 'schedule') && 'main' || 'pr' }}
-      CI_IMAGE_NAMESPACE: agent-ci-images   # v1.30
+      CI_IMAGE_NAMESPACE: ${{ vars.CI_IMAGE_NAMESPACE }}   # v1.30; m2101
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
@@ -1485,11 +1617,11 @@ jobs:
   # the job names it like the others and removes nothing.
   fips:
     name: FIPS
-    needs: schedule-guard
+    needs: preflight   # v1.34
     # v1.26: never on a draft PR, ci:full or not.
     # CUSTOMIZE (go-enclave, #277): and only on the guard's run verdict, so
     # a refused workflow_dispatch does not check out and run its branch.
-    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')) && !github.event.pull_request.draft && needs.schedule-guard.outputs.verdict == 'run' }}
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')) && !github.event.pull_request.draft && needs.preflight.outputs.verdict == 'run' }}
     runs-on: ubuntu-latest
     timeout-minutes: 11       # CUSTOMIZE: ceil(1.5 x this job's 72-hour p95), ci-standard.md §12 (#277)
     env:
@@ -1542,8 +1674,8 @@ jobs:
     # v1.26: never on a draft PR, ci:full or not. v1.29.3: on a schedule run,
     # only on the schedule guard's `run`. v1.30: only on `run` on every event
     # (a proven main push and a refused run skip it).
-    needs: schedule-guard
-    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')) && !github.event.pull_request.draft && needs.schedule-guard.outputs.verdict == 'run' }}
+    needs: preflight   # v1.34
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')) && !github.event.pull_request.draft && needs.preflight.outputs.verdict == 'run' }}
     runs-on: ubuntu-latest
     timeout-minutes: 22       # CUSTOMIZE: ceil(1.5 x this job's 72-hour p95), ci-standard.md §12 (#277)
     env:
@@ -1703,9 +1835,9 @@ jobs:
   soak:
     name: Soak [integration image]
     # v1.29.3: on a schedule run, only on the schedule guard's `run`.
-    needs: schedule-guard
+    needs: preflight   # v1.34
     # v1.30: a dispatch off main is refused, so soak runs only on `run`.
-    if: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && needs.schedule-guard.outputs.verdict == 'run' }}
+    if: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && needs.preflight.outputs.verdict == 'run' }}
     runs-on: ubuntu-latest
     timeout-minutes: 56       # CUSTOMIZE: SOAK_MINUTES plus one iteration, at least ceil(1.5 x the 72-hour p95) (#277)
     env:
@@ -1875,16 +2007,16 @@ jobs:
   # needs the image job as well, and its `if:` tests an image job output
   # that its build step sets (here `built`, which the image job declares in
   # `outputs:` when a repository adds such a job), never `needs.<job>.result`
-  # and never the changes job's outputs alone. Reading `needs.changes.outputs.*`
+  # and never the changes job's outputs alone. Reading `needs.preflight.outputs.*`
   # in the same `if:` is fine:
-  #   needs: [changes, image]
-  #   if: ${{ !cancelled() && needs.image.outputs.built == 'true' && !github.event.pull_request.draft && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.event_name == 'push' || (github.event_name == 'pull_request' && needs.changes.outputs.optee == 'true')) }}
+  #   needs: [preflight, image]
+  #   if: ${{ !cancelled() && needs.image.outputs.built == 'true' && !github.event.pull_request.draft && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.event_name == 'push' || (github.event_name == 'pull_request' && needs.preflight.outputs.optee == 'true')) }}
   # v1.29.3 (ruling 255(10)/(11)(c)): a CUSTOMIZE job on bigdisk adds
-  # `schedule-guard` to its needs and
-  # `(github.event_name != 'schedule' || needs.schedule-guard.outputs.verdict == 'run')`
+  # `preflight` to its needs (v1.34; `schedule-guard` before) and
+  # `(github.event_name != 'schedule' || needs.preflight.outputs.verdict == 'run')`
   # to its `if:`, so it skips on a schedule run while main is busy. One that
   # needs the image job skips with it already.
-  # v1.30: the test is `needs.schedule-guard.outputs.verdict == 'run'` on
+  # v1.30: the test is `needs.preflight.outputs.verdict == 'run'` on
   # every event, so the job skips on a proven main push and on a refused run,
   # and its check line in CI Gate is full, pr or code as before: the gate
   # reads a proven skip as passed. Its timeout-minutes is ceil(1.5 x its
@@ -1905,12 +2037,12 @@ jobs:
     name: TPM swtpm Conformance
     # v1.26: never on a draft PR, ci:full or not. #277: and only on the
     # guard's run verdict.
-    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')) && !github.event.pull_request.draft && needs.schedule-guard.outputs.verdict == 'run' }}
-    needs: [changes, schedule-guard]
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')) && !github.event.pull_request.draft && needs.preflight.outputs.verdict == 'run' }}
+    needs: preflight   # v1.34
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      TPM_SELECTED: ${{ github.event_name != 'pull_request' || needs.changes.outputs.tpm == 'true' }}
+      TPM_SELECTED: ${{ github.event_name != 'pull_request' || needs.preflight.outputs.tpm == 'true' }}
     steps:
       - name: Are the TPM paths selected?
         run: |
@@ -1954,8 +2086,8 @@ jobs:
   optee:
     name: OP-TEE [arm-trustzone harness, fixture image]
     # #277: the guard is named here too, not only reached through the image job.
-    needs: [changes, image, schedule-guard]
-    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')) && !github.event.pull_request.draft && needs.schedule-guard.outputs.verdict == 'run' }}
+    needs: [preflight, image]   # v1.34
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')) && !github.event.pull_request.draft && needs.preflight.outputs.verdict == 'run' }}
     runs-on: ubuntu-latest
     timeout-minutes: 180
     steps:
@@ -1964,7 +2096,7 @@ jobs:
       - name: Select the OP-TEE harness
         id: select
         env:
-          OPTEE: ${{ needs.changes.outputs.optee }}
+          OPTEE: ${{ needs.preflight.outputs.optee }}
         run: |
           if [ "$OPTEE" = true ]; then
             echo "optee selected: OP-TEE paths changed"
@@ -2041,41 +2173,6 @@ jobs:
       - name: make integration-test-arm-trustzone (fixture image)
         if: steps.select.outputs.run == 'true'
         run: make integration-test-arm-trustzone OPTEE_FIXTURE_IMAGE="$OPTEE_FIXTURE_IMAGE"
-
-  # Architecture gate (v1.20, Company Agent m270 item 9; go-xkms arch-gates).
-  # go-objstore owns every blob backend (docs/00), and a repo reaches it only
-  # through the packages that are its storage seam. Test files are exempt, and
-  # go-objstore itself passes. CUSTOMIZE: OBJSTORE_SEAMS, an extended regex of
-  # the paths that may import go-objstore (go-xkms: 'pkg/ca/|pkg/storage/');
-  # empty means none may. CUSTOMIZE: the repo's own layering rules (go-xkms:
-  # xkmsctl and xkey depend only on sdk/go) are further steps in this job.
-  # A source check with grep, not a stage: it runs on the runner's shell.
-  # v1.23: a lint-class check, so it stays on the PR tier.
-  arch-gates:
-    name: Architecture Gates
-    needs: schedule-guard
-    runs-on: ubuntu-latest
-    if: ${{ !github.event.pull_request.draft && needs.schedule-guard.outputs.verdict == 'run' }}   # v1.26
-    timeout-minutes: 5        # v1.30
-    env:
-      OBJSTORE_SEAMS: ''      # CUSTOMIZE
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-
-      - name: No direct go-objstore import outside the storage seam
-        run: |
-          if [ "$(sed -n 's/^module //p' go.mod)" = github.com/jeremyhahn/go-objstore ]; then
-            echo "OK: this is go-objstore"; exit 0
-          fi
-          hits=$(grep -rln --include='*.go' '"github.com/jeremyhahn/go-objstore' . \
-                 | grep -v '_test\.go$' \
-                 | { if [ -n "$OBJSTORE_SEAMS" ]; then grep -vE "$OBJSTORE_SEAMS"; else cat; fi; } || true)
-          if [ -n "$hits" ]; then
-            echo "go-objstore may be imported only in the storage seam (OBJSTORE_SEAMS='$OBJSTORE_SEAMS'):"
-            echo "$hits"; exit 1
-          fi
-          echo "OK: no go-objstore import outside the storage seam"
-
   # The single required check (devops.md §1). Every job above must appear in
   # BOTH the needs list and the results check — a gate that can pass vacuously
   # is worse than no gate. Do not use join(needs.*.result); it evaluates empty
@@ -2093,12 +2190,12 @@ jobs:
     # gate, so `CI / CI Gate (schedule)` posts `skipped` (Gitea 1.27.1 posts a
     # skipped job as `skipped`, not `success`), never a green nightly. Every
     # other verdict, an empty one included, runs it.
-    if: ${{ always() && (github.event_name != 'schedule' || needs.schedule-guard.outputs.verdict != 'busy') }}
+    if: ${{ always() && (github.event_name != 'schedule' || needs.preflight.outputs.verdict != 'busy') }}
     timeout-minutes: 5        # v1.30
     # CUSTOMIZE: the repo's job list. Add every CUSTOMIZE job here AND as a
     # check line below; remove none of the template's jobs. v1.30: lint
     # joins; publish-images is the one job outside the gate (see its comment).
-    needs: [changes, schedule-guard, lint, image, lint-gates, fips, integration, soak, tpm-swtpm, optee, arch-gates]
+    needs: [preflight, lint, image, lint-gates, fips, integration, soak, tpm-swtpm, optee]   # v1.34
     steps:
       - name: Fail closed on any non-success
         env:
@@ -2112,13 +2209,13 @@ jobs:
           DRAFT: ${{ github.event.pull_request.draft == true }}
           # v1.29.3: the schedule guard's verdict on a schedule run.
           SCHEDULE: ${{ github.event_name == 'schedule' }}
-          SCHEDULE_GUARD: ${{ needs.schedule-guard.outputs.verdict }}
+          SCHEDULE_GUARD: ${{ needs.preflight.outputs.verdict }}
           # v1.30: the proving run of a proven main push, the docs-only PR
           # flag (a `code` job skips on it) and the lint-gates path scope (a
           # `scoped` job skips when no file matched).
-          PROOF: ${{ needs.schedule-guard.outputs.proof }}
-          DOCS_ONLY: ${{ needs.changes.outputs.docs_only == 'true' }}
-          LINT_GATES_SEL: ${{ needs.changes.outputs.lint_gates != 'false' }}
+          PROOF: ${{ needs.preflight.outputs.proof }}
+          DOCS_ONLY: ${{ needs.preflight.outputs.docs_only == 'true' }}
+          LINT_GATES_SEL: ${{ needs.preflight.outputs.lint_gates != 'false' }}
         run: |
           if [ "${DRAFT}" = true ]; then
             echo "FAIL draft pull request: no CI runs on a draft. Mark it ready, then push an empty commit to start its run."
@@ -2160,8 +2257,7 @@ jobs:
           # full tier by its `if:` is marked full, one gated to schedule and
           # workflow_dispatch is nightly; every other job is pr. v1.30: a job
           # that skips on a docs-only PR is code, and lint-gates is scoped.
-          check changes     "${{ needs.changes.result }}" pr
-          check schedule-guard "${{ needs.schedule-guard.result }}" pr
+          check preflight   "${{ needs.preflight.result }}" pr
           check lint        "${{ needs.lint.result }}" pr
           check image       "${{ needs.image.result }}" code
           check lint-gates  "${{ needs.lint-gates.result }}" scoped
@@ -2170,5 +2266,4 @@ jobs:
           check soak        "${{ needs.soak.result }}" nightly
           check tpm-swtpm   "${{ needs.tpm-swtpm.result }}" full
           check optee       "${{ needs.optee.result }}" full
-          check arch-gates  "${{ needs.arch-gates.result }}" pr
           exit $BAD
