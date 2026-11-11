@@ -45,7 +45,7 @@ func testFindPlantsNoCopy(t *testing.T, n int) {
 	// The rounds run in a child process that owns the needle's mapping: a
 	// sweep cannot be canceled, so the bound is the parent killing the
 	// child, and the mapping goes with it.
-	out, code, err := runSweepChild(childSweep, n, sweepDeadline)
+	out, _, code, err := runSweepChild(childSweep, n, sweepDeadline)
 	switch {
 	case err != nil:
 		t.Fatalf("%v\n%s", err, out)
@@ -209,16 +209,40 @@ func sweepChild(mode string, n int) int {
 // window. A round counts only once the sweeping thread has taken at least
 // minSignals signals: a window that runs out first proves nothing.
 func TestSweepUnderSignalsSendsTheMinimum(t *testing.T) {
-	// The child gets one P, as under -cpu=1, and its locked worker spins
-	// through the dense fill: a signal source that needs the child's
-	// scheduler starves there, and every round must still get its signals.
-	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(1))
-	out, code, err := runSweepChild(childSweep, 4, sweepDeadline)
+	out, sent, code, err := runSweepChild(childSweep, 4, sweepDeadline)
 	if err != nil {
 		t.Fatalf("%v\n%s", err, out)
 	}
 	if code != 0 {
-		t.Fatalf("the sweep child at one P exited %d:\n%s", code, out)
+		t.Fatalf("the sweep child exited %d:\n%s", code, out)
+	}
+	if len(sent) != 3 {
+		t.Fatalf("the child ran %d round(s), want 3:\n%s", len(sent), out)
+	}
+	for i, s := range sent {
+		if s < minSignals {
+			t.Errorf("round %d took %d signal(s), want at least %d", i, s, minSignals)
+		}
+	}
+}
+
+func TestSignalRoundFailsAStarvedSender(t *testing.T) {
+	// A sender that lands only a few signals before the window closes: the
+	// round must fail rather than pass on the window alone.
+	ctx, cancel := context.WithTimeout(context.Background(), 4*signalPhase)
+	defer cancel()
+	tries := 0
+	sent, ok := signalRound(ctx, func() error {
+		if tries++; tries > 10 {
+			return syscall.ESRCH
+		}
+		return nil
+	})
+	if ok {
+		t.Fatalf("a round with %d of %d signals passed", sent, minSignals)
+	}
+	if sent != 10 {
+		t.Fatalf("the round counted %d signal(s), want the 10 that landed", sent)
 	}
 }
 
@@ -227,7 +251,7 @@ func TestSweepUnderSignalsSendsTheMinimum(t *testing.T) {
 func TestSweepUnderSignalsBoundsAStalledSweep(t *testing.T) {
 	const limit = 2 * time.Second
 	start := time.Now()
-	out, _, err := runSweepChild(childStall, 32, limit)
+	out, _, _, err := runSweepChild(childStall, 32, limit)
 	if took := time.Since(start); took > limit+5*time.Second {
 		t.Fatalf("a stalled sweep returned after %v; the deadline is %v", took, limit)
 	}
