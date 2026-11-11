@@ -227,12 +227,15 @@ flowchart LR
 | Error shaping (`contextFailure`, `providerFailure`) and key cleanup (`destroyOnFailure`) | [errors.go](../../errors.go) |
 | Conformance suite for providers | [providertest](../../providertest/providertest.go) — see [provider-conformance](../provider-conformance/architecture.md) |
 
-TPM, HSM and KMS providers live in higher layers and are injected through
-`NewSealer(WithKeyProtector(p))`, `NewSealer(WithRootUnsealer(p))`, or
-`SetSealer`.
-
-Planned providers behind the `KeyProtector` seam are memory (today's
-`SoftwareProvider`), TrustZone (the OP-TEE TA), secure element and TPM; the
+Three providers behind the `KeyProtector` seam ship in go-enclave: memory
+(`SoftwareProvider`), TPM ([`backends/tpm`](../../backends/tpm), its own
+module) and the TrustZone host side
+([`backends/armtrustzone`](../../backends/armtrustzone), whose OP-TEE TA
+side trusted-firmware implements). The secure-element provider is designed
+([hardware providers](hardware-providers.md#secure-element-provider-outline))
+and not yet built. HSM and KMS providers still come from higher layers and
+are injected through `NewSealer(WithKeyProtector(p))`,
+`NewSealer(WithRootUnsealer(p))`, or `SetSealer`; the
 [keyprotector-providers](../SPEC.md#features) row names them, their consumers
 and ruling 225(3).
 
