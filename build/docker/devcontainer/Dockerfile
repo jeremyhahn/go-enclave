@@ -28,7 +28,7 @@
 #
 # WHAT IS IN BASE, AND WHY NOTHING ELSE IS
 #
-#   * The Go toolchain the module declares (go.mod: `go 1.27.3`), from the
+#   * The Go toolchain the module declares (go.mod: `go 1.27.4`), from the
 #     official image PINNED BY DIGEST. The digest is the multi-arch index, so
 #     amd64 and arm64 runners resolve the same release; a tag alone is an
 #     unpinned toolchain (devops §9a: how the Go 1.27.0/swiss breakage entered
@@ -102,7 +102,7 @@
 # the toolchain's content tag (scripts/devcontainer.sh inputs); build/ci/buildgates
 # fails when the two disagree.
 
-ARG GO_IMAGE=golang:1.27.3-alpine3.24@sha256:b8c9b82affbbb82a020bbcf998dad2ba9516944ac7e883524642a481a9505e9c
+ARG GO_IMAGE=golang:1.27.4-alpine3.24@sha256:0a5f7fe796599ff487605987432e7619ae45beeb2fba4c2ce0b907879932aebf
 ARG GO_BUILD_PROXY=https://proxy.golang.org,direct
 
 # ---------------------------------------------------------------------------

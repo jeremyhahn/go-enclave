@@ -3,7 +3,7 @@
 // go.mod stays interface-only. Do NOT add a replace or a go.work.
 module github.com/jeremyhahn/go-enclave/backends/armtrustzone
 
-go 1.27.3
+go 1.27.4
 
 require (
 	github.com/jeremyhahn/go-enclave v0.11.1-alpha
