@@ -83,36 +83,63 @@ func runSweepChild(mode string, n int, limit time.Duration) (out string, rounds 
 	}
 	// The signals come from this process: a signal source inside the child
 	// needs the child's scheduler, which its spinning worker starves at one
-	// P. Each round the child names its sweeping thread; this process
-	// signals that thread, then tells the child to sweep or to give up.
+	// P. Each round the child names its sweeping thread, then says when
+	// that thread is comparing; this process signals that thread, counting
+	// only what it sends after the second line, then tells the child to
+	// sweep or to give up.
 	var short error
 	var other strings.Builder
-	lines := bufio.NewScanner(stdout)
-	for lines.Scan() {
-		tid, ok := strings.CutPrefix(lines.Text(), roundTid)
+	lines := make(chan string)
+	go func() {
+		defer close(lines)
+		scan := bufio.NewScanner(stdout)
+		for scan.Scan() {
+			lines <- scan.Text()
+		}
+	}()
+	comparing := func() bool {
+		for {
+			select {
+			case line, open := <-lines:
+				if !open {
+					return false
+				}
+				if line == roundComparing {
+					return true
+				}
+				other.WriteString(line + "\n")
+			default:
+				return false
+			}
+		}
+	}
+	for line := range lines {
+		tid, ok := strings.CutPrefix(line, roundTid)
 		if !ok {
-			other.WriteString(lines.Text() + "\n")
+			other.WriteString(line + "\n")
 			continue
 		}
 		id, err := strconv.Atoi(tid)
 		if err != nil {
-			short = fmt.Errorf("the child named no thread: %q", lines.Text())
+			short = fmt.Errorf("the child named no thread: %q", line)
 			_ = cmd.Process.Kill()
 			break
 		}
 		verdict := verdictSweep
 		pid := cmd.Process.Pid
-		sent, ok := signalRound(ctx, func() error { return syscall.Tgkill(pid, id, syscall.SIGURG) })
+		sent, ok := signalRound(ctx, comparing, func() error { return syscall.Tgkill(pid, id, syscall.SIGURG) })
 		rounds = append(rounds, sent)
 		if !ok {
 			verdict = verdictAbort
-			short = fmt.Errorf("%w: %d in %v, want %d", errTooFewSignals, sent, signalCap, minSignals)
+			short = roundError(sent, ok)
 		}
 		if _, err := io.WriteString(stdin, verdict); err != nil {
 			break
 		}
 	}
-	_, _ = io.Copy(io.Discard, stdout)
+	for line := range lines { // until the child exits
+		other.WriteString(line + "\n")
+	}
 	err = cmd.Wait()
 	out = other.String() + errOut.String()
 	if ctx.Err() != nil {
@@ -284,9 +311,10 @@ func TestSweepUnderSignalsBoundsAStalledSweep(t *testing.T) {
 	}
 }
 
-// sweepRound runs in the child. It names its locked thread to the parent,
-// which sends that thread SIGURG (which the Go runtime takes and ignores)
-// while it compares memory dense with the needle's first byte, then runs
+// sweepRound runs in the child. It names its locked thread to the parent
+// and says so again once its first compare pass returns; the parent sends
+// that thread SIGURG (which the Go runtime takes and ignores) while it
+// compares memory dense with the needle's first byte, then runs
 // Find on that thread unless the parent gives up. Nothing here bounds
 // Find: the parent kills the child at its deadline.
 func sweepRound(needle []byte, home uintptr) (hits []string, aborted bool, err error) {
@@ -301,9 +329,16 @@ func sweepRound(needle []byte, home uintptr) (hits []string, aborted bool, err e
 	// thread, without the scheduler, from a non-blocking stdin.
 	buf := make([]byte, chunk+len(needle)-1)
 	verdict := make([]byte, 1)
+	announced := false
 	for {
 		if _, err := mappingContains(firstByteReader(needle[0]), 0, denseFill, needle, buf); err != nil {
 			return nil, false, err
+		}
+		if !announced {
+			// Only now is this thread in the compare loop: the parent
+			// counts no signal it sent before this line.
+			fmt.Println(roundComparing)
+			announced = true
 		}
 		n, err := syscall.Read(0, verdict)
 		if errors.Is(err, syscall.EAGAIN) || errors.Is(err, syscall.EINTR) {
@@ -323,31 +358,47 @@ func sweepRound(needle []byte, home uintptr) (hits []string, aborted bool, err e
 
 // signalRound sends SIGURG to the child's sweeping thread every
 // signalInterval. The interval leaves that thread room to make progress:
-// under the race detector a signal every few microseconds starves it. The
-// round ends once signalPhase has passed and the thread has taken
-// minSignals signals; a round that cannot reach that many by signalCap
-// reports false rather than pass unsignaled.
-func signalRound(ctx context.Context, send func() error) (sent int, ok bool) {
+// under the race detector a signal every few microseconds starves it. A
+// send counts only once comparing reports that the child has finished a
+// compare pass, so a thread that is named but never compares takes no
+// counted signal. The round ends once signalPhase has passed since then
+// and minSignals sends have counted; a round that cannot reach that many
+// by signalCap reports false rather than pass unsignaled.
+func signalRound(ctx context.Context, comparing func() bool, send func() error) (sent int, ok bool) {
 	tick := time.NewTicker(signalInterval)
 	defer tick.Stop()
 	start := time.Now()
+	var compared time.Time // when the child said it is comparing; zero until then
 	for {
 		select {
 		case <-ctx.Done():
 			return sent, false
 		case <-tick.C:
 		}
-		took := time.Since(start)
-		if sent >= minSignals && took >= signalPhase {
-			return sent, true
-		}
-		if took >= signalCap {
+		if time.Since(start) >= signalCap {
 			return sent, false
+		}
+		if compared.IsZero() {
+			if !comparing() {
+				continue
+			}
+			compared = time.Now()
+		}
+		if sent >= minSignals && time.Since(compared) >= signalPhase {
+			return sent, true
 		}
 		if send() == nil {
 			sent++
 		}
 	}
+}
+
+// roundError is the error for a round signalRound reported as (sent, ok).
+func roundError(sent int, ok bool) error {
+	if ok {
+		return nil
+	}
+	return fmt.Errorf("%w: %d in %v, want %d", errTooFewSignals, sent, signalCap, minSignals)
 }
 
 var errTooFewSignals = errors.New("too few signals reached the sweeping thread")
@@ -362,6 +413,7 @@ const (
 
 	sweepChildEnv     = "MEMSCAN_SWEEP_CHILD" // "<mode> <needle length>" for TestSweepChild
 	roundTid          = "sweep thread "       // the child's line naming a round's sweeping thread
+	roundComparing    = "sweep comparing"     // the child's line once its first compare pass returned
 	verdictSweep      = "s"                   // the parent's byte: the signals landed, sweep now
 	verdictAbort      = "a"                   // the parent's byte: too few signals, give up
 	childSweep        = "sweep"               // three rounds under signals, then a check sweep
