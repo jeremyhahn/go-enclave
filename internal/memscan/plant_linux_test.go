@@ -40,7 +40,7 @@ func TestFindPlantsNoCopyOfTheNeedle(t *testing.T) {
 
 func testFindPlantsNoCopy(t *testing.T, n int) {
 	// The rounds run in a child process that owns the needle's mapping: a
-	// sweep cannot be cancelled, so the bound is the parent killing the
+	// sweep cannot be canceled, so the bound is the parent killing the
 	// child, and the mapping goes with it.
 	out, code, err := runSweepChild(childSweep, n, sweepDeadline)
 	switch {
@@ -155,11 +155,11 @@ func sweepChild(mode string, n int) int {
 // window. A round counts only once the sweeping thread has taken at least
 // minSignals signals: a window that runs out first proves nothing.
 func TestSweepUnderSignalsSendsTheMinimum(t *testing.T) {
-	// One P, and a worker that spins through the window: the signaller
+	// One P, and a worker that spins through the window: the signaler
 	// runs only when the worker is preempted, as under -cpu=1. After the
-	// window the Ps come back, and the round must go on signalling.
+	// window the Ps come back, and the round must go on signaling.
 	if runtime.NumCPU() < 2 {
-		t.Skip("needs two CPUs to give the signaller its P back")
+		t.Skip("needs two CPUs to give the signaler its P back")
 	}
 	prev := runtime.GOMAXPROCS(1)
 	defer runtime.GOMAXPROCS(prev)
@@ -238,8 +238,8 @@ func sweepUnderSignals(needle []byte, home uintptr, hold func()) (hits []string,
 	// The interval leaves the sweeping thread room to make progress: under
 	// the race detector a signal every few microseconds starves it. The
 	// round ends once the window has passed and the thread has taken
-	// minSignals signals; a signaller that cannot reach that many by
-	// signalCap fails the round rather than let it pass unsignalled.
+	// minSignals signals; a signaler that cannot reach that many by
+	// signalCap fails the round rather than let it pass unsignaled.
 	tick := time.NewTicker(signalInterval)
 	defer tick.Stop()
 	start := time.Now()
