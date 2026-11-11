@@ -73,9 +73,36 @@ func testFindPlantsNoCopy(t *testing.T, n int) {
 	}
 }
 
+// TestSweepUnderSignalsJoinsItsWorkerOnTimeout holds the worker past the
+// deadline. The sweep must fail, and must return only once its worker has
+// stopped: the caller unmaps the needle's mapping as soon as it returns,
+// and a worker still sweeping would read memory that is gone.
+func TestSweepUnderSignalsJoinsItsWorkerOnTimeout(t *testing.T) {
+	var released atomic.Bool
+	hold := func() {
+		time.Sleep(200 * time.Millisecond)
+		released.Store(true)
+	}
+	needle := []byte{0x5a, 0x5b, 0x5c, 0x5d}
+	_, err := sweepUnderSignals(needle, 0, 10*time.Millisecond, hold)
+	if err == nil {
+		t.Fatal("a worker held past the deadline: want the deadline's error, got nil")
+	}
+	if !released.Load() {
+		t.Fatalf("the sweep returned %q while its worker was still running; the caller would release the needle under it", err)
+	}
+}
+
 // findUnderSignals runs Find on a locked thread and sends that thread
 // SIGURG (which the Go runtime takes and ignores) until Find returns.
 func findUnderSignals(needle []byte, home uintptr) ([]string, error) {
+	return sweepUnderSignals(needle, home, sweepDeadline, nil)
+}
+
+// sweepUnderSignals is findUnderSignals with its deadline as a parameter
+// and hold, when not nil, run by the worker before it sweeps: the timeout
+// path's test delays the worker with it.
+func sweepUnderSignals(needle []byte, home uintptr, limit time.Duration, hold func()) ([]string, error) {
 	type result struct {
 		hits []string
 		err  error
@@ -87,6 +114,9 @@ func findUnderSignals(needle []byte, home uintptr) ([]string, error) {
 		runtime.LockOSThread()
 		defer runtime.UnlockOSThread()
 		tids <- syscall.Gettid()
+		if hold != nil {
+			hold()
+		}
 		// Memory dense with the needle's first byte is where a search
 		// falls back from a byte scan to a whole-needle compare: the sweep
 		// stays on that path until the signals stop, so the last signal
@@ -108,7 +138,7 @@ func findUnderSignals(needle []byte, home uintptr) ([]string, error) {
 	// phase is wall-clock, so a starved signaller (GOMAXPROCS=1) ends it too.
 	tick := time.NewTicker(signalInterval)
 	defer tick.Stop()
-	deadline := time.NewTimer(sweepDeadline)
+	deadline := time.NewTimer(limit)
 	defer deadline.Stop()
 	end := time.Now().Add(signalPhase)
 	for {
@@ -117,7 +147,7 @@ func findUnderSignals(needle []byte, home uintptr) ([]string, error) {
 			return r.hits, r.err
 		case <-deadline.C:
 			stop.Store(true)
-			return nil, fmt.Errorf("the sweep under signals did not finish within %v", sweepDeadline)
+			return nil, fmt.Errorf("the sweep under signals did not finish within %v", limit)
 		case <-tick.C:
 			if stop.Load() {
 				continue
