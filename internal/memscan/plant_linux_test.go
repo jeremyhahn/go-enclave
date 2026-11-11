@@ -73,36 +73,53 @@ func testFindPlantsNoCopy(t *testing.T, n int) {
 	}
 }
 
-// TestSweepUnderSignalsJoinsItsWorkerOnTimeout holds the worker past the
-// deadline. The sweep must fail, and must return only once its worker has
-// stopped: the caller unmaps the needle's mapping as soon as it returns,
-// and a worker still sweeping would read memory that is gone.
-func TestSweepUnderSignalsJoinsItsWorkerOnTimeout(t *testing.T) {
-	var released atomic.Bool
-	hold := func() {
-		time.Sleep(200 * time.Millisecond)
-		released.Store(true)
+// TestSweepUnderSignalsSendsTheMinimum holds the worker past the signal
+// window. A round counts only once the sweeping thread has taken at least
+// minSignals signals: a window that runs out first proves nothing.
+func TestSweepUnderSignalsSendsTheMinimum(t *testing.T) {
+	// One P, and a worker that spins through the window: the signaller
+	// runs only when the worker is preempted, as under -cpu=1.
+	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(1))
+	spin := func() {
+		for end := time.Now().Add(2 * signalPhase); time.Now().Before(end); {
+		}
 	}
 	needle := []byte{0x5a, 0x5b, 0x5c, 0x5d}
-	_, err := sweepUnderSignals(needle, 0, 10*time.Millisecond, hold)
-	if err == nil {
-		t.Fatal("a worker held past the deadline: want the deadline's error, got nil")
+	_, sent, err := sweepUnderSignals(needle, 0, sweepDeadline, spin)
+	if err != nil {
+		t.Fatalf("sweep under signals: %v", err)
 	}
-	if !released.Load() {
-		t.Fatalf("the sweep returned %q while its worker was still running; the caller would release the needle under it", err)
+	if sent < minSignals {
+		t.Fatalf("the round ended after %d signal(s); want at least %d", sent, minSignals)
+	}
+}
+
+// TestSweepUnderSignalsBoundsAStalledSweep stalls the sweep past its
+// deadline. The sweep must fail within the bound, wherever it is stuck.
+func TestSweepUnderSignalsBoundsAStalledSweep(t *testing.T) {
+	const limit = 100 * time.Millisecond
+	needle := []byte{0x5a, 0x5b, 0x5c, 0x5d}
+	start := time.Now()
+	_, _, err := sweepUnderSignals(needle, 0, limit, func() { time.Sleep(3 * time.Second) })
+	if took := time.Since(start); took > limit+time.Second {
+		t.Fatalf("a stalled sweep returned after %v; the deadline is %v", took, limit)
+	}
+	if err == nil {
+		t.Fatal("a stalled sweep: want the deadline's error, got nil")
 	}
 }
 
 // findUnderSignals runs Find on a locked thread and sends that thread
 // SIGURG (which the Go runtime takes and ignores) until Find returns.
 func findUnderSignals(needle []byte, home uintptr) ([]string, error) {
-	return sweepUnderSignals(needle, home, sweepDeadline, nil)
+	hits, _, err := sweepUnderSignals(needle, home, sweepDeadline, nil)
+	return hits, err
 }
 
 // sweepUnderSignals is findUnderSignals with its deadline as a parameter
 // and hold, when not nil, run by the worker before it sweeps: the timeout
 // path's test delays the worker with it.
-func sweepUnderSignals(needle []byte, home uintptr, limit time.Duration, hold func()) ([]string, error) {
+func sweepUnderSignals(needle []byte, home uintptr, limit time.Duration, hold func()) (hits []string, sent int, err error) {
 	type result struct {
 		hits []string
 		err  error
@@ -148,14 +165,14 @@ func sweepUnderSignals(needle []byte, home uintptr, limit time.Duration, hold fu
 	for {
 		select {
 		case r := <-done:
-			return r.hits, r.err
+			return r.hits, sent, r.err
 		case <-deadline.C:
 			// Stop the worker and wait for it: the caller releases the
 			// needle's mapping as soon as this returns.
 			abort.Store(true)
 			stop.Store(true)
 			<-done
-			return nil, fmt.Errorf("the sweep under signals did not finish within %v", limit)
+			return nil, sent, fmt.Errorf("the sweep under signals did not finish within %v", limit)
 		case <-tick.C:
 			if stop.Load() {
 				continue
@@ -164,13 +181,16 @@ func sweepUnderSignals(needle []byte, home uintptr, limit time.Duration, hold fu
 				stop.Store(true)
 				continue
 			}
-			_ = syscall.Tgkill(pid, tid, syscall.SIGURG)
+			if syscall.Tgkill(pid, tid, syscall.SIGURG) == nil {
+				sent++
+			}
 		}
 	}
 }
 
 const (
 	denseFill      = chunk                  // memory dense with the needle's first byte
+	minSignals     = 50                     // a round counts only after this many
 	signalPhase    = 50 * time.Millisecond  // of signals to the sweeping thread per round
 	signalInterval = 200 * time.Microsecond // between signals to the sweeping thread
 	sweepDeadline  = 30 * time.Second       // a round that takes longer fails, never hangs
