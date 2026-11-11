@@ -2061,11 +2061,19 @@ jobs:
           go-version-file: backends/tpm/go.mod
           cache-dependency-path: backends/tpm/go.sum
 
+      # Retries, so that one transient mirror or DNS error does not fail the
+      # job: one such error failed main (#326).
       - name: Install swtpm
         if: ${{ env.TPM_SELECTED == 'true' }}
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends swtpm swtpm-tools
+          for attempt in 1 2 3; do
+            if sudo apt-get -o Acquire::Retries=5 update &&
+               sudo apt-get -o Acquire::Retries=5 install -y --no-install-recommends swtpm swtpm-tools; then
+              break
+            fi
+            [ "$attempt" = 3 ] && { echo "swtpm install failed after $attempt attempts"; exit 1; }
+            echo "swtpm install attempt $attempt failed; retrying in 20 s"; sleep 20
+          done
           swtpm --version
 
       - name: make integration-test-tpm
