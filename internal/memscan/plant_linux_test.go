@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -61,7 +62,8 @@ func testFindPlantsNoCopy(t *testing.T, n int) {
 func runSweepChild(mode string, n int, limit time.Duration) (out string, code int, err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), limit)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestSweepChild$", "-test.count=1")
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestSweepChild$", "-test.count=1",
+		"-test.cpu="+strconv.Itoa(runtime.GOMAXPROCS(0)))
 	cmd.Env = append(os.Environ(), fmt.Sprintf("%s=%s %d", sweepChildEnv, mode, n))
 	cmd.WaitDelay = time.Second
 	b, err := cmd.CombinedOutput()
