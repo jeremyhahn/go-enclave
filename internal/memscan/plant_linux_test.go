@@ -46,7 +46,7 @@ func testFindPlantsNoCopy(t *testing.T, n int) {
 		t.Fatalf("rand.Read: %v", err)
 	}
 	needle[1] = needle[0] ^ 1                                 // the filler below must not match the needle's start
-	home := uintptr(unsafe.Pointer(unsafe.SliceData(region))) //nolint:gosec // the needle's own mapping, excluded from the sweep
+	home := uintptr(unsafe.Pointer(unsafe.SliceData(region))) // the needle's own mapping, excluded from the sweep
 
 	for range 3 {
 		if err := findUnderSignals(needle, home); err != nil {
