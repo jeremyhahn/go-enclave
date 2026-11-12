@@ -85,6 +85,25 @@ func CheckRefusal(ctx context.Context, cfg RefusalConfig) error {
 		findings = append(findings, budgetErr)
 	}
 	names := enclave.BackendNames()
+	// Each call is measured on its own, right after it returns: Probe must
+	// not hide a change New made by undoing it, nor New one Probe makes.
+	// An empty slot is a measured baseline too: a call that installs the
+	// allocator moves it from "no process allocator" to the installed one.
+	measured := budgetErr == nil
+	checkBudget := func(call string) {
+		if !measured {
+			return
+		}
+		after, err := budgetOf("after " + call)
+		switch {
+		case err != nil:
+			measured = false
+			findings = append(findings, err)
+		case after != budget:
+			fail(PropertyRefusalBudget, "%s moved the locked-memory budget from %s to %s", call, budget, after)
+		}
+		budget = after
+	}
 
 	b, panicked, err := refusalNew(cfg.New)
 	switch {
@@ -101,12 +120,14 @@ func CheckRefusal(ctx context.Context, cfg RefusalConfig) error {
 	default:
 		judge("New", err)
 	}
+	checkBudget("New")
 	// An ended context aborts the check, as it does a TestBackend run: Probe
 	// is not called on it, and what Probe returns once it ends is no finding.
 	if err := ctx.Err(); cfg.Probe != nil && err != nil {
 		findings = append(findings, &AbortedError{Cause: err})
 	} else if cfg.Probe != nil {
 		panicked, err := refusalProbe(ctx, cfg.Probe)
+		checkBudget("Probe")
 		switch {
 		case ctx.Err() != nil:
 			findings = append(findings, &AbortedError{Cause: ctx.Err()})
@@ -121,17 +142,6 @@ func CheckRefusal(ctx context.Context, cfg RefusalConfig) error {
 
 	if after := enclave.BackendNames(); !slices.Equal(names, after) {
 		fail(PropertyRefusalRegistration, "registered backends went from %q to %q", names, after)
-	}
-	// An empty slot is a measured baseline too: a New that installs the
-	// allocator moves it from "no process allocator" to the installed one.
-	if budgetErr == nil {
-		after, err := budgetOf("after the refusal")
-		switch {
-		case err != nil:
-			findings = append(findings, err)
-		case after != budget:
-			fail(PropertyRefusalBudget, "locked-memory budget went from %s to %s", budget, after)
-		}
 	}
 	return findingsOf(findings)
 }
