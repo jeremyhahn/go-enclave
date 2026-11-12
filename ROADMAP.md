@@ -36,6 +36,7 @@ Its layer is the base of the stack, under go-quicraft: [SPEC purpose](docs/SPEC.
 ## Next
 
 - **keyprotector-providers** — the `KeyProtector` provider seam's planned providers (memory, TrustZone, secure element, TPM) and named consumers (go-xkms's `EnclaveBackend`, trusted-firmware's TA); the blob contract is [contract v1](docs/sealing/engineering.md#blob-contract-v1) — [#264](../../issues/264) — in progress
+- **intel-sgx** — a backend on Intel SGX implementing the backend seam; design [docs/backends/intel-sgx.md](docs/backends/intel-sgx.md) — [#193](../../issues/193) — planned
 
 ## Later
 
@@ -44,7 +45,6 @@ Its layer is the base of the stack, under go-quicraft: [SPEC purpose](docs/SPEC.
 ## Future
 
 - **mac-secure-enclave** — a backend on the Mac Secure Enclave implementing the backend seam — [#192](../../issues/192) — open
-- **intel-sgx** — a backend on Intel SGX implementing the backend seam — [#193](../../issues/193) — open
 - **amd-sev** — a backend on AMD SEV implementing the backend seam — [#194](../../issues/194) — open
 - **imx-edgelock-enclave** — a backend that binds xkmsd to the trusted-imx95 secure world through that repo's interface — [#195](../../issues/195) — open
 - **intel-tdx** — a backend on Intel TDX implementing the backend seam — [#199](../../issues/199) — open

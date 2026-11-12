@@ -1,0 +1,3 @@
+### Added
+
+- **The `intel-sgx` backend imports and sweeps** (#193): `Import` takes material and AES-256-GCM wrapping and data keys (any other algorithm is a `*enclave.CapabilityError` naming `CapabilityImport`, a key of the wrong length `ErrInvalidImport`) and wipes the caller's slice on every return path; `Sweep` destroys every live handle the backend made. Following the design's recommendation, a handle keeps its material in a memory enclave from `enclave.NewMemory` inside the SGX enclave, so SGX2 is not required; handles give byte access, constant-time comparison and `Freeze`. Nothing changes for callers of the root module.
