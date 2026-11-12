@@ -20,9 +20,11 @@ const EvidenceFormat = tsmProvider
 // before any request. The provider must read tdx_guest and the generation
 // must count exactly this call's write, or the call fails with a
 // [*TSMReportError] (its Cause [ErrTSMReportConflict] for a moved
-// generation). Calls on one Backend are serialized. Off a TD it refuses with
-// a [*TSMReportError] naming the step; off linux/amd64 with a
-// [*GuestDeviceError]. An ended ctx returns its own error.
+// generation). Calls on one Backend are serialized; a call waiting for
+// another returns its ctx's error as soon as ctx ends. Off a TD it refuses
+// with a [*TSMReportError] naming the step; off linux/amd64, or on a Backend
+// [New] did not make, with a [*GuestDeviceError]. An ended ctx returns its
+// own error.
 func (b *Backend) Attest(ctx context.Context, nonce []byte) (enclave.Evidence, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -31,8 +33,18 @@ func (b *Backend) Attest(ctx context.Context, nonce []byte) (enclave.Evidence, e
 	if err != nil {
 		return enclave.Evidence{}, err
 	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return enclave.Evidence{}, err
+	}
+	if err := b.unconstructed(); err != nil {
+		return enclave.Evidence{}, err
+	}
+	select {
+	case b.slot <- struct{}{}:
+	case <-ctx.Done():
+		return enclave.Evidence{}, ctx.Err()
+	}
+	defer func() { <-b.slot }()
 	q, err := attest(ctx, rd)
 	if err != nil {
 		return enclave.Evidence{}, err

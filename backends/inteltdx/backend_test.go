@@ -54,7 +54,7 @@ func TestIdentity(t *testing.T) {
 
 // testBackend is a backend as New returns it, without New's probe, so tests
 // run off a TD.
-func testBackend() *Backend { return &Backend{} }
+func testBackend() *Backend { return newBackend() }
 
 // TestUnconstructedBackendRefuses: a Backend New did not make confines
 // nothing and refuses Import and Attest with the typed unavailable error, so

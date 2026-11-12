@@ -93,8 +93,8 @@ func TestAttestEndedContext(t *testing.T) {
 // holdSlot takes b's Attest slot, as a call waiting on a slow quote does,
 // until release is called.
 func holdSlot(b *Backend) (release func()) {
-	b.mu.Lock()
-	return b.mu.Unlock
+	b.slot <- struct{}{}
+	return func() { <-b.slot }
 }
 
 // TestAttestDeadlineWhileSlotHeld: a caller whose deadline ends while another

@@ -24,6 +24,9 @@ const aes256KeyBytes = 32
 // enclave.WipeAll's first phase already sweeps.
 func (b *Backend) Import(ctx context.Context, material []byte, opts ...enclave.ImportOption) (enclave.Handle, error) {
 	defer enclave.Wipe(material)
+	if err := b.unconstructed(); err != nil {
+		return nil, err
+	}
 	spec, err := enclave.NewImportSpec(opts...)
 	if err != nil {
 		return nil, err
