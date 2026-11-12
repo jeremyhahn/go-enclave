@@ -128,7 +128,7 @@ func TestSecretmemDirect_SecretFileSizesTheFile(t *testing.T) {
 	if err := unix.Fstat(fd, &st); err != nil {
 		t.Fatalf("fstat: %v", err)
 	}
-	if st.Size != int64(pageSize) {
+	if st.Size != pageSize {
 		t.Fatalf("size = %d, want %d", st.Size, pageSize)
 	}
 }
