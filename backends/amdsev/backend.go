@@ -168,19 +168,38 @@ func (b *Backend) Import(ctx context.Context, material []byte, opts ...enclave.I
 
 // Sweep destroys every live handle the backend made and returns how many it
 // could not, with the first such error. A destroyed handle waits out its
-// in-flight borrows, which are bounded by their callers, so ctx is unused.
-func (b *Backend) Sweep(context.Context) (int, error) {
+// in-flight borrows; Sweep waits for each destroy or for ctx to end, which
+// returns ctx.Err() with every handle not yet destroyed counted as held (a
+// destroy already started still finishes). A nil ctx is
+// context.Background().
+func (b *Backend) Sweep(ctx context.Context) (int, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		b.mu.Lock()
+		n := len(b.handles)
+		b.mu.Unlock()
+		return n, err
+	}
 	b.mu.Lock()
 	hs := slices.Collect(maps.Keys(b.handles))
 	b.mu.Unlock()
 	held := 0
 	var first error
-	for _, h := range hs {
-		if err := h.Destroy(); err != nil {
-			held++
-			if first == nil {
-				first = err
+	for i, h := range hs {
+		done := make(chan error, 1)
+		go func() { done <- h.Destroy() }()
+		select {
+		case err := <-done:
+			if err != nil {
+				held++
+				if first == nil {
+					first = err
+				}
 			}
+		case <-ctx.Done():
+			return held + len(hs) - i, ctx.Err()
 		}
 	}
 	return held, first
