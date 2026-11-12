@@ -180,6 +180,27 @@ func TestCheckRefusalCatches(t *testing.T) {
 			}
 			return cfg
 		}(), PropertyRefusalBudget},
+		{"probe moves budget", func() RefusalConfig {
+			// New refuses cleanly; Probe alone moves the limit.
+			cfg := passingRefusal()
+			lower := budgetFault(alloc).New
+			cfg.Probe = func(context.Context) error {
+				_, _ = lower()
+				return &hardwareError{step: "probe"}
+			}
+			return cfg
+		}(), PropertyRefusalBudget},
+		{"probe leaks", func() RefusalConfig {
+			// New refuses cleanly; Probe keeps a reservation it takes.
+			cfg := passingRefusal()
+			cfg.Probe = func(context.Context) error {
+				if b, err := alloc.NewSized(1); err == nil {
+					t.Cleanup(func() { _ = b.Destroy() })
+				}
+				return &hardwareError{step: "probe"}
+			}
+			return cfg
+		}(), PropertyRefusalBudget},
 		{"leak released by probe", func() RefusalConfig {
 			// New keeps a reservation and Probe releases it: a constructor
 			// that leaks when called alone.
