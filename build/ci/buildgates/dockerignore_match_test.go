@@ -8,10 +8,11 @@ import (
 )
 
 // dockerignoreMatches reports whether one dockerignore pattern line (without
-// its leading !) excludes the slash-separated name: the pattern matches the
-// name or one of its parent directories, as in dockerignoreAdmits.
+// its leading !) excludes the slash-separated name: the line is parsed by
+// dockerignorePattern, and the pattern matches the name or one of its parent
+// directories, as in dockerignoreAdmits.
 func dockerignoreMatches(line, name string) (bool, error) {
-	pattern := strings.Split(line, "/")
+	_, pattern := dockerignorePattern(line)
 	segs := strings.Split(name, "/")
 	for n := 1; n <= len(segs); n++ {
 		ok, err := matchSegments(pattern, segs[:n])
