@@ -72,7 +72,11 @@ type CommandError struct {
 
 // Error implements error.
 func (e *CommandError) Error() string {
-	return ErrCommandFailed.Error() + ": " + e.Command + ": " + e.Err.Error()
+	s := ErrCommandFailed.Error() + ": " + e.Command
+	if e.Err != nil {
+		s += ": " + e.Err.Error()
+	}
+	return s
 }
 
 // Is reports whether target is [ErrCommandFailed].

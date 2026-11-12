@@ -67,7 +67,6 @@ var errorRows = map[string]errorRow{
 		wraps:     true,
 		as:        asType[*CommandError],
 		prefix:    "tpm: ",
-		defect:    "CommandError.Error dereferences a nil Err",
 	},
 	"KeySizeError": {
 		zero:      &KeySizeError{},
