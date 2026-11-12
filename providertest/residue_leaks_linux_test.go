@@ -63,9 +63,8 @@ func (p *keepingProtector) Unprotect(ctx context.Context, blob, key []byte) erro
 type retentionOutcome int
 
 const (
-	caught      retentionOutcome = iota // a *FindingsError naming the residue property
-	passes                              // no error: nothing is retained
-	notMeasured                         // a *NotMeasuredError naming the residue property
+	caught retentionOutcome = iota // a *FindingsError with the one residue finding
+	passes                         // no error: nothing is retained
 )
 
 // anonMapping maps one anonymous page with flags and unmaps it in t.Cleanup.
@@ -263,11 +262,6 @@ func assertRetentionOutcome(t *testing.T, err error, want retentionOutcome) {
 		if err != nil {
 			t.Fatalf("the suite failed a provider that retains nothing:\n%v", err)
 		}
-	case notMeasured:
-		var nm *NotMeasuredError
-		if !errors.As(err, &nm) || nm.Property != residueProperty {
-			t.Fatalf("got %v (%T), want a *NotMeasuredError for %q", err, err, residueProperty)
-		}
 	case caught:
 		if err == nil {
 			t.Fatal("the suite PASSED a provider that keeps a copy of the key; the residue sweep missed it")
@@ -275,6 +269,9 @@ func assertRetentionOutcome(t *testing.T, err error, want retentionOutcome) {
 		var findings *FindingsError
 		if !errors.As(err, &findings) {
 			t.Fatalf("got %T, want a *FindingsError:\n%v", err, err)
+		}
+		if len(findings.Findings) != 1 {
+			t.Fatalf("want exactly the residue finding, got %d:\n%v", len(findings.Findings), err)
 		}
 		for _, f := range findings.Findings {
 			var pe *PropertyError
