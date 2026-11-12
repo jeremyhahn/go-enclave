@@ -97,19 +97,19 @@ COVERAGE_THRESHOLD := 90
 
 # VALUES FROM OUTSIDE ARE DATA, NEVER SHELL OR MAKE SOURCE.
 #
-# TAG/SHA/MAIN_REF come from a pushed tag (git allows v`id`), VERSION from a
-# maintainer, the rest from a workflow or command line. $(TAG) in a recipe is
-# pasted into shell source before any validator runs, and a command-line
-# variable is recursively expanded on export, so $(shell ...) in it runs inside
-# make. raw_bind stores each unexpanded and exports it; recipes read only
-# "$$TAG" and the scripts validate the whole string. Never write $(TAG),
-# $(SHA), $(MAIN_REF), $(VERSION), $(TOOL_INSTALL) or $(COVERAGE_THRESHOLD) in
-# a recipe.
+# TAG/SHA/MAIN_REF/REF come from a pushed tag or ref (git allows v`id`),
+# VERSION from a maintainer, the rest from a workflow or command line. $(TAG)
+# in a recipe is pasted into shell source before any validator runs, and a
+# command-line variable is recursively expanded on export, so $(shell ...) in
+# it runs inside make. raw_bind stores each unexpanded and exports it; recipes
+# read only "$$TAG" and the scripts validate the whole string. Never write
+# $(TAG), $(SHA), $(MAIN_REF), $(REF), $(VERSION), $(TOOL_INSTALL) or
+# $(COVERAGE_THRESHOLD) in a recipe.
 #
 # Paths are raw-bound the same way. Only operator flag lists (TESTFLAGS,
 # GOSEC_FLAGS, TRIVY_FS_FLAGS, INTEGRATION_TESTFLAGS, CROSS_TARGETS) and
 # constants defined here are spliced into recipes.
-EXTERNAL_VARS := TAG SHA MAIN_REF VERSION TOOL_INSTALL COVERAGE_THRESHOLD
+EXTERNAL_VARS := TAG SHA MAIN_REF REF VERSION TOOL_INSTALL COVERAGE_THRESHOLD
 $(call raw_bind,$(EXTERNAL_VARS))
 
 # CI VARIABLES (handbook devcontainer.md §6): ci.yml passes them, so they are
