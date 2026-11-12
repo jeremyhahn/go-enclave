@@ -75,11 +75,11 @@ func run(args []string, stdout, stderr io.Writer) int {
 // read none.
 func scan(pid int, needle []byte, stderr io.Writer) ([]string, error) {
 	dir := "/proc/" + strconv.Itoa(pid)
-	maps, err := os.ReadFile(dir + "/maps")
+	maps, err := os.ReadFile(dir + "/maps") //nolint:gosec // /proc/<pid>, pid a parsed integer
 	if err != nil {
 		return nil, err
 	}
-	mem, err := os.Open(dir + "/mem")
+	mem, err := os.Open(dir + "/mem") //nolint:gosec // /proc/<pid>, pid a parsed integer
 	if err != nil {
 		return nil, err
 	}
@@ -151,7 +151,7 @@ func contains(mem io.ReaderAt, lo, hi uint64, needle, buf []byte) (bool, error) 
 		}
 		keep = min(len(needle)-1, total)
 		copy(buf, buf[total-keep:total])
-		off += uint64(got)
+		off += uint64(got) //nolint:gosec // 0 < got <= len(buf)
 	}
 	return false, nil
 }

@@ -60,7 +60,7 @@ func hold(needle string) {
 // only in the child) and returns its pid. The child exits with the test.
 func holder(t *testing.T, needle string) int {
 	t.Helper()
-	cmd := exec.Command(os.Args[0], "-test.run=^$") //nolint:gosec // the test binary itself
+	cmd := exec.Command(os.Args[0], "-test.run=^$")
 	cmd.Env = append(os.Environ(), holdEnv+"="+needle)
 	in, err := cmd.StdinPipe()
 	if err != nil {
@@ -171,7 +171,7 @@ func TestHostScan_ScriptPassesTheStatusThrough(t *testing.T) {
 		{"no arguments", nil, 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			cmd := exec.Command("sh", append([]string{script}, tc.args...)...) //nolint:gosec // the script under test
+			cmd := exec.Command("sh", append([]string{script}, tc.args...)...)
 			cmd.Env = append(os.Environ(), "AMDSEV_HOSTSCAN="+os.Args[0], helperEnv+"=1")
 			out, err := cmd.CombinedOutput()
 			rc := 0
