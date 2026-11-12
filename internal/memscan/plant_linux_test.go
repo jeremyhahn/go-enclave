@@ -521,13 +521,14 @@ func sweepRound(needle []byte, home uintptr, mode string) (hits []string, aborte
 	var st passState
 	buf := make([]byte, chunk+len(needle)-1)
 	pass := func(flag bool) error {
-		// The flag is set only from the end of each buffer fill until
-		// mappingContains returns, and each fill starts a new window
-		// (seq), so a counted bracket spans one search of the filled
-		// buffer: never a fill, nor this loop's clock checks.
-		r := markedReader{b: needle[0], st: &st, flag: flag}
+		// Each search reads denseSpan a buffer at a time. The flag is set
+		// only from the end of a fill to the start of the next one in the
+		// same search (see markedReader), so a counted bracket spans one
+		// compare of the filled buffer: never a fill, the buffer clear
+		// before the search returns, nor this loop's clock checks.
+		r := markedReader{b: needle[0], st: &st, flag: flag, hi: denseSpan}
 		for start := time.Now(); ; {
-			_, err := mappingContains(r, 0, denseFill, needle, buf)
+			_, err := mappingContains(r, 0, denseSpan, needle, buf)
 			st.inside.Store(false)
 			if err != nil {
 				return err
@@ -583,7 +584,7 @@ func sweepRound(needle []byte, home uintptr, mode string) (hits []string, aborte
 			// Running and busy in marked passes, but never comparing:
 			// each fill opens a window that closes at once, as one does
 			// after a search. None may count.
-			r := markedReader{b: needle[0], st: &st, flag: true}
+			r := markedReader{b: needle[0], st: &st, flag: true, hi: denseSpan}
 			_, _ = r.ReadAt(buf[:denseFill], 0)
 			st.inside.Store(false)
 		case childOutside:
@@ -626,19 +627,20 @@ type passState struct {
 // sendAfter it takes the state again, inside first. A signal counts only
 // when both show the thread in the same compare window: seq never moved
 // and inside was set at both looks. A window runs from the end of one
-// buffer fill to the return of the search over that buffer, so the
-// fill and the pass loop's clock checks lie outside every window.
+// buffer fill to the start of the next fill of the same search (see
+// markedReader), so the fills, the search's return, the buffer clear
+// before it and the pass loop's clock checks lie outside every window.
 //
 // What a counted signal proves: it was delivered to the running
-// sweeping thread during one marked compare window. SIGURG was not
-// pending on the thread before it was sent, so it did not coalesce
-// with an earlier one; it was no longer pending after, so the thread
-// took it; and the thread was running, with its on-CPU time advancing,
-// before and after it. What it does not prove: that the signal
-// interrupted the needle-comparison instructions themselves rather than
-// other code inside the window, such as mappingContains clearing its
-// buffer before it returns. That remaining precision is tracked in
-// issue #331. On the verdict byte readParent stores it in st and ends.
+// sweeping thread inside one marked compare window, that is while it ran
+// contains over a filled buffer or the few instructions of offset
+// arithmetic between that compare and the next read, which never touch
+// the needle. It did not land in the buffer clear: the read after which a
+// search returns opens no window. SIGURG was not pending on the thread
+// before it was sent, so it did not coalesce with an earlier one; it was
+// no longer pending after, so the thread took it; and the thread was
+// running, with its on-CPU time advancing, before and after it. On the
+// verdict byte readParent stores it in st and ends.
 func readParent(st *passState, done chan<- error) {
 	in := make([]byte, 512)
 	acked, signaled := 0, 0
@@ -818,6 +820,7 @@ var errTooFewSignals = errors.New("too few signals reached the sweeping thread")
 
 const (
 	denseFill      = chunk                  // memory dense with the needle's first byte, per scan of a pass
+	denseSpan      = 16 * denseFill         // the region one search of a pass reads, a buffer at a time
 	minSignals     = 50                     // a round counts only after this many
 	signalPhase    = 50 * time.Millisecond  // of signals to the sweeping thread per round
 	signalInterval = 200 * time.Microsecond // between signals to the sweeping thread
@@ -867,9 +870,16 @@ func (r firstByteReader) ReadAt(p []byte, _ int64) (int, error) {
 	return len(p), nil
 }
 
-// markedReader is a firstByteReader that clears st's in-compare flag
-// while it fills p, then opens a new compare window: seq moves on and
-// the flag is set to flag until the caller clears it.
+// markedReader is a firstByteReader over [0, hi) that clears st's
+// in-compare flag while it fills p. It then opens a new compare window,
+// seq moving on and the flag set to flag, only when the read keeps
+// mappingContains in its loop: a full read with no error that ends before
+// hi, over memory dense with b, which cannot hold a needle that is not one
+// repeated byte. mappingContains then compares the buffer and reads again,
+// and that next read closes the window as it starts. So a window spans one
+// contains call and the loop's offset arithmetic, never a fill, the return
+// or the buffer clear before it: the read after which the search returns
+// opens none.
 //
 // With none set it reads nothing and returns io.EOF, so the search skips
 // its compare and returns at once, clearing its buffer.
@@ -878,6 +888,7 @@ type markedReader struct {
 	st   *passState
 	flag bool
 	none bool
+	hi   int64
 }
 
 func (r markedReader) ReadAt(p []byte, off int64) (int, error) {
@@ -887,6 +898,6 @@ func (r markedReader) ReadAt(p []byte, off int64) (int, error) {
 		n, err = firstByteReader(r.b).ReadAt(p, off)
 	}
 	r.st.seq.Add(1)
-	r.st.inside.Store(r.flag)
+	r.st.inside.Store(r.flag && err == nil && n == len(p) && off+int64(n) < r.hi)
 	return n, err
 }
