@@ -47,7 +47,7 @@ func importOK(t *testing.T, b *Backend, material []byte, opts ...enclave.ImportO
 }
 
 func TestBackendIsImporterNotSweeper(t *testing.T) {
-	var b enclave.Backend = &Backend{}
+	var b enclave.Backend = testBackend()
 	if _, ok := b.(enclave.Importer); !ok {
 		t.Fatal("the backend is not an enclave.Importer")
 	}
@@ -59,7 +59,7 @@ func TestBackendIsImporterNotSweeper(t *testing.T) {
 }
 
 func TestImportMaterial(t *testing.T) {
-	b := &Backend{}
+	b := testBackend()
 	want := seq(48)
 	material := bytes.Clone(want)
 	h := importOK(t, b, material, enclave.WithPurpose(enclave.PurposeMaterial))
@@ -94,7 +94,7 @@ func TestImportAES256GCMKey(t *testing.T) {
 	for _, p := range []enclave.Purpose{enclave.PurposeWrappingKey, enclave.PurposeDataKey} {
 		t.Run(string(p), func(t *testing.T) {
 			material := seq(32)
-			h := importOK(t, &Backend{}, material,
+			h := importOK(t, testBackend(), material,
 				enclave.WithPurpose(p), enclave.WithAlgorithm(enclave.AlgorithmAES256GCM))
 			if !zeroed(material) {
 				t.Fatal("key not wiped after a successful Import")
@@ -138,7 +138,7 @@ func TestImportRefusals(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			material := seq(tt.n)
-			h, err := (&Backend{}).Import(tt.ctx, material, tt.opts...)
+			h, err := testBackend().Import(tt.ctx, material, tt.opts...)
 			if h != nil {
 				_ = h.Destroy()
 				t.Fatalf("Import returned a handle (%T) with err %v", h, err)
@@ -154,7 +154,7 @@ func TestImportRefusals(t *testing.T) {
 }
 
 func TestHandleFreezeAndDestroy(t *testing.T) {
-	h := importOK(t, &Backend{}, seq(32), enclave.WithPurpose(enclave.PurposeMaterial))
+	h := importOK(t, testBackend(), seq(32), enclave.WithPurpose(enclave.PurposeMaterial))
 	var f enclave.Freezer
 	if !enclave.As(h, &f) {
 		t.Fatal("handle does not reach Freezer through enclave.As")
@@ -194,7 +194,7 @@ const frozenWriteEnv = "INTELTDX_TEST_FROZEN_WRITE"
 
 func TestHandleFreezeIsReadOnly(t *testing.T) {
 	if os.Getenv(frozenWriteEnv) == "1" {
-		h, err := (&Backend{}).Import(context.Background(), seq(32), enclave.WithPurpose(enclave.PurposeMaterial))
+		h, err := testBackend().Import(context.Background(), seq(32), enclave.WithPurpose(enclave.PurposeMaterial))
 		if err != nil {
 			os.Exit(3)
 		}

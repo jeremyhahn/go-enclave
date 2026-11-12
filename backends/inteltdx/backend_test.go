@@ -33,7 +33,7 @@ func TestNewRefusesWhereProbeRefuses(t *testing.T) {
 }
 
 func TestIdentity(t *testing.T) {
-	b := &Backend{}
+	b := testBackend()
 	if b.Name() != "intel-tdx" || Name != "intel-tdx" {
 		t.Fatalf("Name() = %q, want intel-tdx", b.Name())
 	}
@@ -49,6 +49,32 @@ func TestIdentity(t *testing.T) {
 	}
 	if (&Backend{}) == b {
 		t.Fatal("two backends share an address")
+	}
+}
+
+// testBackend is a backend as New returns it, without New's probe, so tests
+// run off a TD.
+func testBackend() *Backend { return &Backend{} }
+
+// TestUnconstructedBackendRefuses: a Backend New did not make confines
+// nothing and refuses Import and Attest with the typed unavailable error, so
+// a sealer that requires erasure cannot accept it.
+func TestUnconstructedBackendRefuses(t *testing.T) {
+	b := &Backend{}
+	if b.ConfinesProcess() {
+		t.Fatal("ConfinesProcess() = true for a Backend New did not make")
+	}
+	material := make([]byte, 32)
+	h, err := b.Import(context.Background(), material, enclave.WithPurpose(enclave.PurposeMaterial))
+	if h != nil {
+		_ = h.Destroy()
+	}
+	var gde *GuestDeviceError
+	if h != nil || !errors.Is(err, ErrGuestDeviceUnavailable) || !errors.As(err, &gde) {
+		t.Fatalf("Import on an unconstructed Backend = %v, %v; want nil, *GuestDeviceError", h, err)
+	}
+	if _, err := b.Attest(context.Background(), []byte{1}); !errors.Is(err, ErrGuestDeviceUnavailable) {
+		t.Fatalf("Attest on an unconstructed Backend = %v, want ErrGuestDeviceUnavailable", err)
 	}
 }
 

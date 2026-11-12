@@ -16,7 +16,7 @@ func TestAttestRefusesOffTD(t *testing.T) {
 	if _, err := os.Stat(tsmReportRoot); err == nil {
 		t.Skip(tsmReportRoot + " is present: the report paths are the integration target's")
 	}
-	ev, err := (&Backend{}).Attest(context.Background(), []byte("nonce"))
+	ev, err := testBackend().Attest(context.Background(), []byte("nonce"))
 	var te *TSMReportError
 	if !errors.As(err, &te) || te.Op != "stat" {
 		t.Fatalf("Attest() = %v, want a TSMReportError at stat", err)
@@ -33,7 +33,7 @@ func TestAttestRefusesOffTD(t *testing.T) {
 // lock covers the shared state. Off a TD every call refuses.
 func TestAttestConcurrent(t *testing.T) {
 	skipInTD(t)
-	b := &Backend{}
+	b := testBackend()
 	var wg sync.WaitGroup
 	for i := range 8 {
 		wg.Add(1)

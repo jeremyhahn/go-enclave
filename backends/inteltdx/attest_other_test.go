@@ -12,7 +12,7 @@ import (
 // Off linux/amd64 the stub's Attest refuses with the typed unavailable error
 // and no cause, after the nonce check.
 func TestAttestRefusesPlatform(t *testing.T) {
-	ev, err := (&Backend{}).Attest(context.Background(), []byte("nonce"))
+	ev, err := testBackend().Attest(context.Background(), []byte("nonce"))
 	var ge *GuestDeviceError
 	if !errors.As(err, &ge) || ge.Cause != nil {
 		t.Fatalf("Attest() = %v, want a GuestDeviceError without a cause", err)

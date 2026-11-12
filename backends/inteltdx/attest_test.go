@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	enclave "github.com/jeremyhahn/go-enclave"
 )
@@ -14,7 +15,7 @@ var _ enclave.Attester = (*Backend)(nil)
 // A nonce of no bytes or of more than REPORTDATA holds is refused before any
 // request, on every platform.
 func TestAttestRefusesNonceLength(t *testing.T) {
-	b := &Backend{}
+	b := testBackend()
 	for _, n := range []int{0, reportDataSize + 1} {
 		ev, err := b.Attest(context.Background(), make([]byte, n))
 		if !errors.Is(err, enclave.ErrInvalidNonce) {
@@ -84,7 +85,40 @@ func TestReportDataCopies(t *testing.T) {
 func TestAttestEndedContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := (&Backend{}).Attest(ctx, []byte{1}); !errors.Is(err, context.Canceled) {
+	if _, err := testBackend().Attest(ctx, []byte{1}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Attest(canceled) = %v, want context.Canceled", err)
+	}
+}
+
+// holdSlot takes b's Attest slot, as a call waiting on a slow quote does,
+// until release is called.
+func holdSlot(b *Backend) (release func()) {
+	b.mu.Lock()
+	return b.mu.Unlock
+}
+
+// TestAttestDeadlineWhileSlotHeld: a caller whose deadline ends while another
+// call holds the slot returns its context's error at once, not after the
+// other call's quote.
+func TestAttestDeadlineWhileSlotHeld(t *testing.T) {
+	b := testBackend()
+	release := holdSlot(b)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := b.Attest(ctx, []byte{1})
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		release()
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Attest(deadline, slot held) = %v, want context.DeadlineExceeded", err)
+		}
+	case <-time.After(5 * time.Second):
+		release()
+		<-done
+		t.Fatal("Attest waited past its deadline behind a held slot")
 	}
 }
