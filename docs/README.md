@@ -58,7 +58,8 @@ line.
 [version 2](sealing/engineering.md#envelope-version), which binds the version
 byte into the AAD; a contract v1 envelope (version 0) still opens unchanged,
 and nothing rewrites one. An envelope of any other version is refused with the
-new `ErrUnknownSealedVersion` before any allocation or key.
+new `ErrUnknownSealedVersion` before any key is touched or anything is
+decrypted.
 
 A version 2 envelope never reaches an older release. A `Sealed` exists only in
 the memory of the process that sealed it: there is no serialized form and no
@@ -85,8 +86,9 @@ dependencies are still `golang.org/x/sys` alone.
 
 ### v0.11.1-alpha (from v0.11.0)
 
-**Nothing to change.** The root module's code is that of v0.11.0-alpha; the
-nested `arm-trustzone` and `tpm` modules require the root at this tag.
+**Nothing to change.** The tag is on the v0.11.0-alpha release commit, so
+the root module's code is that of v0.11.0-alpha. The nested `arm-trustzone`
+and `tpm` modules, which ship after it, require the root at this tag.
 
 ### v0.11.0-alpha (from v0.10)
 
@@ -106,8 +108,9 @@ nested `arm-trustzone` and `tpm` modules require the root at this tag.
 ### v0.10.0-alpha (from v0.9)
 
 **Build with Go 1.27.3 or later**, for GO-2026-6809 (crypto/x509). Nothing
-else changes for Go callers: every other entry of the release is CI, tooling
-or documentation.
+else changes for Go callers: every other entry of the release is CI, tooling,
+documentation or a `providertest` fix that makes a nondeterministic root
+fail on "DIFFERENT roots" rather than on unwritten bytes.
 
 ### v0.9.0 (from v0.8)
 
