@@ -1,0 +1,3 @@
+### Added
+
+- **`intel-tdx` backend: `Import` and handles** (#199). `Backend.Import` moves material into a memory enclave from `enclave.NewMemory` inside the TD (design Q6) and returns a `*Handle` with `ByteAccess` and `Freezer`. It takes `PurposeMaterial` and the key purposes for AES-256-GCM; another algorithm is a `*enclave.CapabilityError` naming `CapabilityImport`, a wrong key length `ErrInvalidImport`, an ended context its own error, and the caller's slice is wiped on every path. The backend keeps no handle registry and is not a `Sweeper` (design Q7): `WipeAll` already sweeps memory enclaves. The root module does not change.
