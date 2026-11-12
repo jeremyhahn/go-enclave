@@ -4,7 +4,7 @@
 
 Move the `amd-sev` row from `future` to `planned`: record what the
 development host offers, fold it into the proposal
-[docs/backends/amd-sev.md](../backends/amd-sev.md), and give a proposed
+[docs/backends/amd-sev.md](amd-sev.md), and give a proposed
 answer to each open question (Q1 to Q9) for the owner's sign-off.
 
 ## Slices
