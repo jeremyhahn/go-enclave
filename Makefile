@@ -649,6 +649,12 @@ check-scripts: vet-buildgates
 check-in-toolchain-image:
 	@bash scripts/in-toolchain-image_test.sh
 
+## check-fuzz-runner: build/fuzz/fuzz.sh finds, selects and fuzzes every target, and stops at the first failure
+# A stub go on PATH; no module is built and nothing is fuzzed.
+.PHONY: check-fuzz-runner
+check-fuzz-runner:
+	@sh build/fuzz/fuzz_test.sh
+
 ## lint-gates: the repository's own gates beside lint: check-buildgates, check-releasability, check-changelog-assembly, check-scripts, check-in-toolchain-image (CI's lint-gates job)
 # ci.yml runs this as its own job, in parallel with `make lint`, so make lint
 # does not list it. tidy-check, lint-runtimesecret and lint-integration stay
