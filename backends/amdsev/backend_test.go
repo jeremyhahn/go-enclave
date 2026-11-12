@@ -28,6 +28,28 @@ func TestNewRefusesOutsideAnSNPGuest(t *testing.T) {
 	}
 }
 
+// TestZeroBackendRefusesImport: a Backend New did not build is no SNP
+// guest's backend, so it neither claims confinement nor holds key material.
+func TestZeroBackendRefusesImport(t *testing.T) {
+	var b Backend
+	if b.ConfinesProcess() {
+		t.Error("zero Backend ConfinesProcess = true, want false")
+	}
+	material := []byte("secret material")
+	h, err := b.Import(context.Background(), material, enclave.WithPurpose(enclave.PurposeMaterial))
+	if h != nil {
+		_ = h.Destroy()
+	}
+	if !errors.Is(err, ErrSNPGuestUnavailable) {
+		t.Errorf("zero Backend Import = %v, want ErrSNPGuestUnavailable", err)
+	}
+	for i, c := range material {
+		if c != 0 {
+			t.Fatalf("Import left material byte %d set", i)
+		}
+	}
+}
+
 func TestNewEndedContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
