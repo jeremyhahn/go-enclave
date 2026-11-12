@@ -37,7 +37,7 @@ func TestNewEndedContext(t *testing.T) {
 
 func TestBackendIdentity(t *testing.T) {
 	var b enclave.Backend = &Backend{}
-	if got := b.Name(); got != "amd-sev" || got != Name {
+	if got := b.Name(); got != "amd-sev" || Name != "amd-sev" {
 		t.Errorf("Name() = %q, want amd-sev", got)
 	}
 	p, ok := b.(enclave.Prober)
