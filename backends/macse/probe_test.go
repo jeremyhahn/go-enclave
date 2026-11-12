@@ -38,14 +38,13 @@ func TestProbe_RefusesWithoutTheBinding(t *testing.T) {
 }
 
 func TestProbe_Context(t *testing.T) {
-	//nolint:staticcheck // SA1012: the seam says a nil ctx never ends
 	if err := probe(nil); !errors.Is(err, ErrSecureEnclaveUnavailable) {
 		t.Fatalf("probe(nil) = %v, want ErrSecureEnclaveUnavailable", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if err := probe(ctx); !errors.Is(err, context.Canceled) {
-		t.Fatalf("probe(cancelled) = %v, want context.Canceled", err)
+		t.Fatalf("probe(canceled) = %v, want context.Canceled", err)
 	}
 }
 

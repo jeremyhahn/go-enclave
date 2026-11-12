@@ -3,6 +3,7 @@ package macse
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 
 	enclave "github.com/jeremyhahn/go-enclave"
@@ -35,10 +36,18 @@ func TestBackend_NameRankProbe(t *testing.T) {
 	}
 }
 
+var (
+	registerOnce sync.Once
+	registerErr  error
+)
+
 // Registered by main, the backend loses Detect to a lower-ranked one here,
 // and its refusal reaches main wrapped in a *ProbeError.
 func TestDetect_PassesOverTheBackend(t *testing.T) {
-	if err := enclave.Register(&Backend{}); err != nil {
+	// The registry is the process's: register once across -count and -cpu
+	// runs of this test.
+	registerOnce.Do(func() { registerErr = enclave.Register(&Backend{}) })
+	if err := registerErr; err != nil {
 		t.Fatal(err)
 	}
 	chosen, results := enclave.Detect(context.Background())
