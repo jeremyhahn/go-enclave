@@ -2407,6 +2407,30 @@ func TestScriptsReleaseTreeCheck_ANonReleaseTagRefuses(t *testing.T) {
 	}
 }
 
+// A tree object has the tag's tree but is no commit, so SPEC release criterion
+// 8 (one published commit) is not met by it: both inputs must name commits.
+func TestScriptsReleaseTreeCheck_ATreeInsteadOfACommitRefuses(t *testing.T) {
+	dir, git := treeCheckRepo(t)
+	tree := git("rev-parse", "v1.2.3^{tree}")
+	git("tag", "tree-only", tree)
+	git("tag", "v2.0.0", tree)
+	git("tag", "-a", "-m", "v2.0.1", "v2.0.1", tree)
+	for _, tc := range []struct{ tag, ref, want string }{
+		{"v1.2.3", tree, "REF '" + tree + "' does not name a commit"},
+		{"v1.2.3", "tree-only", "REF 'tree-only' does not name a commit"},
+		{"v2.0.0", "published", "TAG 'v2.0.0' does not name a commit"},
+		{"v2.0.1", "published", "TAG 'v2.0.1' does not name a commit"},
+	} {
+		out, ok := runScript(t, dir, nil, "release-tree-check.sh", tc.tag, tc.ref)
+		if ok {
+			t.Fatalf("TAG=%s REF=%s: a tree passed as a commit:\n%s", tc.tag, tc.ref, out)
+		}
+		if !strings.Contains(out, tc.want) {
+			t.Errorf("TAG=%s REF=%s: want %q:\n%s", tc.tag, tc.ref, tc.want, out)
+		}
+	}
+}
+
 func TestScriptsReleaseTreeCheck_WritesNothing(t *testing.T) {
 	dir, git := treeCheckRepo(t)
 	treeCheckBranch(t, git, "extra-file", func() {
