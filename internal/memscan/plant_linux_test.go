@@ -373,6 +373,19 @@ func TestSweepUnderSignalsFailsSignalsOutsideCompares(t *testing.T) {
 	}
 }
 
+// A thread parked inside a marked pass keeps the pass state a comparing
+// thread shows, but a signal to it interrupts the runtime, not a compare:
+// the round must count none of them.
+func TestSweepUnderSignalsFailsAParkedChild(t *testing.T) {
+	out, sent, _, err := runSweepChild(childParked, 32, sweepDeadline)
+	if !errors.Is(err, errTooFewSignals) {
+		t.Fatalf("a round whose thread parked inside its pass: want %v, got %v (signals %v)\n%s", errTooFewSignals, err, sent, out)
+	}
+	if len(sent) != 1 || sent[0] != 0 {
+		t.Fatalf("a round whose thread parked inside its pass counted %v signal(s), want [0]", sent)
+	}
+}
+
 // TestSweepNeedleNeverStartsWithZero: a needle that starts with a zero
 // byte sends Find's search to a whole-needle compare at every zero byte of
 // the process, which under the race detector takes seconds per sweep and
@@ -446,6 +459,16 @@ func sweepRound(needle []byte, home uintptr, mode string) (hits []string, aborte
 		switch mode {
 		case childPause:
 			time.Sleep(time.Millisecond)
+		case childParked:
+			// The pass is marked but the thread never compares in it: the
+			// goroutine blocks until the verdict, so its locked thread
+			// parks in the runtime while every signal lands. None may
+			// count.
+			st.seq.Add(1)
+			st.inside.Store(true)
+			verdict := <-done
+			st.inside.Store(false)
+			done <- verdict // for the receive below
 		case childOutside:
 			// The pass compares with the flag clear and the sleep after it
 			// takes most signals: none of them may count.
@@ -590,6 +613,7 @@ const (
 	childStall        = "stall"               // stops itself while its sweep runs
 	childPause        = "pause"               // compares once before its signals, then stops comparing
 	childOutside      = "outside"             // compares outside its in-compare flag, sleeps between passes
+	childParked       = "parked"              // marks a pass, then parks its thread in it until the verdict
 	exitResidue       = 2                     // a sweep found the needle outside its mapping
 	exitTooFewSignals = 3                     // a round could not reach minSignals
 	exitChildError    = 4                     // the child could not run its sweep
