@@ -5,9 +5,11 @@
 
 ## Problem
 
-go-enclave will hold material in hardware enclaves: TEEs (Intel TDX and SGX,
-AMD SEV-SNP), secure elements and TPMs, and NVIDIA Blackwell confidential
-computing. Locked, guarded, zeroized memory (the memory enclave) is the strategy
+go-enclave will hold material in hardware enclaves: TEEs (Intel SGX), secure
+elements and TPMs, and NVIDIA Blackwell confidential computing. A confidential
+VM (AMD SEV-SNP, Intel TDX) is not a backend: it protects every page of the
+guest alike, so its attestation and sealing are proposed apart from this seam
+([confidential-vm](confidential-vm.md)). Locked, guarded, zeroized memory (the memory enclave) is the strategy
 for a node that has none of them, and stands in as its enclave. The API must
 not freeze around that one memory-backed implementation. It needs a seam that:
 
@@ -137,7 +139,7 @@ its `ByteAccess`.
 
 ### What each backend class provides
 
-| Capability | On | Locked memory | TEE memory (TDX, SEV-SNP, SGX, GPU CC) | Secure element, TPM[^tpm] |
+| Capability | On | Locked memory | TEE memory (SGX, GPU CC) | Secure element, TPM[^tpm] |
 |---|---|---|---|---|
 | `ByteAccess` | handle | yes | yes | no: material never leaves the device |
 | `Freezer` | handle | yes | where the platform can protect pages | no: read-only by nature |
@@ -191,7 +193,10 @@ certification, a secure element's key attestation). `Evidence` is a `Format`
 name the backend documents plus the raw `Data`. The nonce is 1 to 64 bytes,
 the report-data size of TDX and SEV-SNP; a backend that cannot bind every byte
 refuses rather than truncating. Verification belongs to the format's verifier,
-outside this module, which never parses evidence.
+outside this module, which never parses evidence. `Attester` does not embed
+`Backend`, so a value outside any backend can implement it too: the
+[confidential-vm proposal](confidential-vm.md#attestation-a-standalone-attester)
+attests a confidential VM that way.
 
 ### A missing capability
 
@@ -546,7 +551,9 @@ trust domain. Guest memory is already private to the TD, so its handles are
 locked-memory enclaves; what it adds is attestation and confinement. It
 depends on go-enclave, never the reverse. A backend can equally be a nested
 module in this repository, as `backends/armtrustzone` is; the dependency rule
-is the same. The [intel-tdx proposal](intel-tdx.md) develops this sketch.
+is the same. The sketch shows the seam's mechanics only: go-enclave will not
+ship a TDX backend, because inside a trust domain such a handle is ordinary
+guest memory ([why not a backend](confidential-vm.md#why-not-a-backend)).
 
 ```go
 package tdx // module github.com/jeremyhahn/go-enclave-tdx

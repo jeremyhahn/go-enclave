@@ -44,15 +44,14 @@ Each is its own Go module and requires the root module, never the reverse.
 
 ### Backend proposals
 
-Designs for future backends. None is implemented; each is a starting point for
+Designs for future features. None is implemented; each is a starting point for
 its [ROADMAP](../ROADMAP.md#future) row.
 
-| Proposal | Backend |
+| Proposal | What it covers |
 |---|---|
-| [amd-sev](backends/amd-sev.md) | AMD SEV-SNP confidential VMs |
-| [intel-tdx](backends/intel-tdx.md) | Intel TDX trust domains |
-| [imx-edgelock-enclave](backends/imx-edgelock-enclave.md) | NXP i.MX 95 EdgeLock Secure Enclave |
-| [nvidia-blackwell](backends/nvidia-blackwell.md) | NVIDIA Blackwell confidential computing |
+| [confidential-vm](backends/confidential-vm.md) | Attestation and, on SEV-SNP, a derived-key `KeyProtector` for a process in an AMD SEV-SNP or Intel TDX confidential VM. Not a backend |
+| [imx-edgelock-enclave](backends/imx-edgelock-enclave.md) | A backend on the NXP i.MX 95 EdgeLock Secure Enclave |
+| [nvidia-blackwell](backends/nvidia-blackwell.md) | A backend on NVIDIA Blackwell confidential computing, inside a confidential VM |
 
 ### Project
 

@@ -142,10 +142,13 @@ These are design proposals. No code exists for them yet:
 
 | Backend | Proposal |
 |---|---|
-| AMD SEV-SNP | [amd-sev.md](amd-sev.md) |
-| Intel TDX | [intel-tdx.md](intel-tdx.md) |
 | NXP i.MX 95 EdgeLock Enclave | [imx-edgelock-enclave.md](imx-edgelock-enclave.md) |
 | NVIDIA Blackwell confidential computing | [nvidia-blackwell.md](nvidia-blackwell.md) |
+
+A program in an AMD SEV-SNP or Intel TDX confidential VM keeps its usual
+backend: the VM already encrypts every page of the guest against the host.
+Its attestation and SEV-SNP sealing are proposed in
+[confidential-vm.md](confidential-vm.md), which is not a backend.
 
 ## Troubleshooting
 
