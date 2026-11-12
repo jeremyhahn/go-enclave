@@ -53,6 +53,12 @@ type fakeTEE struct {
 	shortSeals int               // SEALs still to answer TEE_ERROR_SHORT_BUFFER
 	shortSize  uint64            // the size those answers ask for
 	blockCmd   uint32            // a command that waits for its cancel
+	blockSkip  int               // blockCmd calls still to let through first
+	nthCmd     uint32            // a command whose nth call fails
+	nthLeft    int               // nthCmd calls still to let through first
+	nthCode    uint32            // the code that call answers, when nthErr is nil
+	nthErr     error             // the errno the INVOKE ioctl of that call returns
+	randoms    int               // GET_RANDOM calls answered
 	entered    chan struct{}     // closed when blockCmd arrives
 	cancels    map[uint32]chan struct{}
 	canceled   map[uint32]bool
@@ -184,8 +190,25 @@ func (f *fakeTEE) shortSeal(times int, size uint64) {
 func (f *fakeTEE) blockOn(cmd uint32) <-chan struct{} {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.blockCmd, f.entered = cmd, make(chan struct{})
+	f.blockCmd, f.blockSkip, f.entered = cmd, 0, make(chan struct{})
 	return f.entered
+}
+
+// blockOnNth is blockOn for the nth (from 1) call of cmd: the calls before
+// it are answered as usual.
+func (f *fakeTEE) blockOnNth(cmd uint32, nth int) <-chan struct{} {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.blockCmd, f.blockSkip, f.entered = cmd, nth-1, make(chan struct{})
+	return f.entered
+}
+
+// failNth makes the nth (from 1) call of cmd fail once: its INVOKE ioctl
+// returns errno when errno is non-nil, else the TA answers code.
+func (f *fakeTEE) failNth(cmd uint32, nth int, code uint32, errno error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.nthCmd, f.nthLeft, f.nthCode, f.nthErr = cmd, nth-1, code, errno
 }
 
 func (f *fakeTEE) faultf(format string, args ...any) {
@@ -376,11 +399,25 @@ func (f *fakeTEE) invoke(fd int, b *teeInvokeBuf) (<-chan struct{}, error) {
 	}
 	f.invokes = append(f.invokes, rec)
 
+	if f.nthCmd != 0 && b.Arg.Func == f.nthCmd {
+		if f.nthLeft > 0 {
+			f.nthLeft--
+		} else {
+			f.nthCmd = 0
+			if f.nthErr != nil {
+				return nil, f.nthErr
+			}
+			b.Arg.Ret, b.Arg.RetOrigin = f.nthCode, OriginTrustedApp
+			return nil, nil
+		}
+	}
 	if code, ok := f.failures[b.Arg.Func]; ok {
 		b.Arg.Ret, b.Arg.RetOrigin = code, OriginTrustedApp
 		return nil, nil
 	}
-	if f.blockCmd != 0 && b.Arg.Func == f.blockCmd {
+	if f.blockCmd != 0 && b.Arg.Func == f.blockCmd && f.blockSkip > 0 {
+		f.blockSkip--
+	} else if f.blockCmd != 0 && b.Arg.Func == f.blockCmd {
 		f.blockCmd = 0
 		close(f.entered)
 		if f.canceled[b.Arg.CancelID] {
@@ -449,6 +486,18 @@ func (f *fakeTEE) ta(cmd uint32, params *[teeNumParams]teeParam, mems [teeNumPar
 			return teecErrorShortBuffer
 		}
 		copy(out, pt)
+		return teecSuccess
+	case taCmdGetRandom:
+		// The kth call fills its window with the byte k, so a test can
+		// tell where each chunk landed.
+		out := mems[0]
+		if types != [teeNumParams]uint64{teeParamAttrTypeMemrefOutput} || len(out) == 0 || len(out) > taRandomMax {
+			return fakeErrBadParameters
+		}
+		f.randoms++
+		for i := range out {
+			out[i] = byte(f.randoms)
+		}
 		return teecSuccess
 	}
 	return fakeErrNotSupported
