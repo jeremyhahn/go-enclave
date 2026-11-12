@@ -69,7 +69,7 @@ func TestCheckRefusalPasses(t *testing.T) {
 	}
 	cfg := passingRefusal()
 	cfg.Probe = nil
-	if err := CheckRefusal(nil, cfg); err != nil { //nolint:staticcheck // a nil ctx never ends
+	if err := CheckRefusal(nil, cfg); err != nil {
 		t.Fatalf("CheckRefusal(clean refusal, no Probe) = %v, want nil", err)
 	}
 }
