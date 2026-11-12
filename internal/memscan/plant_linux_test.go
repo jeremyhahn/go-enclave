@@ -425,6 +425,21 @@ func TestSweepUnderSignalsFailsABusyNonComparingChild(t *testing.T) {
 	}
 }
 
+// TestSweepUnderSignalsFailsSignalsInTheBufferClear pins that a signal
+// counts only inside the needle comparison: a child whose searches skip
+// their compare and spend their time clearing the buffer, as
+// mappingContains does before it returns, must count none.
+func TestSweepUnderSignalsFailsSignalsInTheBufferClear(t *testing.T) {
+	requireRunEvidence(t)
+	out, sent, _, err := runSweepChild(childClear, 32, controlDeadline)
+	if !errors.Is(err, errTooFewSignals) {
+		t.Fatalf("a round whose signals all landed in a buffer clear: want %v, got %v (signals %v)\n%s", errTooFewSignals, err, sent, out)
+	}
+	if len(sent) != 1 || sent[0] != 0 {
+		t.Fatalf("a round whose signals all landed in a buffer clear counted %v signal(s), want [0]", sent)
+	}
+}
+
 // A signal the thread cannot take stays pending, and so must not count
 // as delivered: block SIGURG on a locked thread, send it, and the
 // delivery check must see it pending until the thread unblocks it.
@@ -539,8 +554,19 @@ func sweepRound(needle []byte, home uintptr, mode string) (hits []string, aborte
 	// pass state this thread publishes.
 	done := make(chan error, 1)
 	go readParent(&st, done)
+	var wide []byte // childClear's buffer
+	if mode == childClear {
+		wide = make([]byte, clearSpan)
+	}
 	for st.verdict.Load() == 0 {
 		switch mode {
+		case childClear:
+			// Each search reads nothing: it skips its compare, clears all
+			// of wide and returns, so nearly every signal lands in the
+			// clear. None may count.
+			r := markedReader{b: needle[0], st: &st, flag: true, none: true}
+			_, _ = mappingContains(r, 0, 2*clearSpan, needle, wide)
+			st.inside.Store(false)
 		case childPause:
 			time.Sleep(time.Millisecond)
 		case childParked:
@@ -820,6 +846,8 @@ const (
 	childOutside      = "outside"              // compares outside its in-compare flag, sleeps between passes
 	childBusy         = "busy"                 // spins through fills and bookkeeping in marked passes, never compares
 	childParked       = "parked"               // marks a pass, then parks its thread in it until the verdict
+	childClear        = "clear"                // searches that read nothing: each skips its compare and only clears its buffer
+	clearSpan         = 64 << 20               // the buffer a childClear search clears, so the clear outlasts a signal's two looks
 	exitResidue       = 2                      // a sweep found the needle outside its mapping
 	exitTooFewSignals = 3                      // a round could not reach minSignals
 	exitChildError    = 4                      // the child could not run its sweep
@@ -842,15 +870,22 @@ func (r firstByteReader) ReadAt(p []byte, _ int64) (int, error) {
 // markedReader is a firstByteReader that clears st's in-compare flag
 // while it fills p, then opens a new compare window: seq moves on and
 // the flag is set to flag until the caller clears it.
+//
+// With none set it reads nothing and returns io.EOF, so the search skips
+// its compare and returns at once, clearing its buffer.
 type markedReader struct {
 	b    byte
 	st   *passState
 	flag bool
+	none bool
 }
 
 func (r markedReader) ReadAt(p []byte, off int64) (int, error) {
 	r.st.inside.Store(false)
-	n, err := firstByteReader(r.b).ReadAt(p, off)
+	n, err := 0, io.EOF
+	if !r.none {
+		n, err = firstByteReader(r.b).ReadAt(p, off)
+	}
 	r.st.seq.Add(1)
 	r.st.inside.Store(r.flag)
 	return n, err
