@@ -286,6 +286,36 @@ func TestCheckRefusalCancelled(t *testing.T) {
 			t.Fatalf("CheckRefusal = %v, want no finding against Probe", err)
 		}
 	})
+	t.Run("before New without Probe", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		var called atomic.Bool
+		cfg := withNew(func() (enclave.Backend, error) {
+			called.Store(true)
+			return nil, &hardwareError{step: "open"}
+		})
+		cfg.Probe = nil
+		err := CheckRefusal(ctx, cfg)
+		if !errors.Is(err, ErrAborted) || !errors.Is(err, context.Canceled) {
+			t.Fatalf("CheckRefusal = %v, want %v from %v", err, ErrAborted, context.Canceled)
+		}
+		if called.Load() {
+			t.Fatal("New ran on a context that had already ended")
+		}
+	})
+	t.Run("during New without Probe", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		cfg := withNew(func() (enclave.Backend, error) {
+			cancel()
+			return nil, &hardwareError{step: "open"}
+		})
+		cfg.Probe = nil
+		err := CheckRefusal(ctx, cfg)
+		if !errors.Is(err, ErrAborted) || !errors.Is(err, context.Canceled) {
+			t.Fatalf("CheckRefusal = %v, want %v from %v", err, ErrAborted, context.Canceled)
+		}
+	})
 	t.Run("during Probe", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
