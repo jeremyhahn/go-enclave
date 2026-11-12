@@ -7,7 +7,7 @@
 
 The memory enclave keeps material in `mlock`'d, guarded pages
 ([platform contract](../memory-enclave/engineering.md#platform-contract)), and
-[linux-secretmem](linux-secretmem.md) would take those pages out of the
+[linux-secretmem](../linux-secretmem/architecture.md) would take those pages out of the
 kernel's direct map. Both defend against the kernel and processes of the
 machine the program runs on. When that machine is a virtual machine, neither
 defends against what sits below it:
@@ -305,7 +305,7 @@ to AMD's ARK proves the chip.
 ### Q3: rank
 
 - **Rank 2** (recommended): above locked memory (0) and linux-secretmem's
-  proposed 1 ([its Q3](linux-secretmem.md#q3-rank)). The hardware rows' order
+  proposed 1 ([its Q3](../linux-secretmem/architecture.md#d3-rank-1)). The hardware rows' order
   among themselves is for the owner to rule once across the sibling
   proposals; this one recommends that secure elements, whose keys never leave
   the device, rank above TEE memory, which the guest kernel can read.
@@ -330,7 +330,7 @@ to AMD's ARK proves the chip.
 - **A memory enclave** (recommended): `enclave.NewMemory` in private guest
   memory, through go-enclave's exported API only; the guest kernel can still
   read it, as the table above says.
-- **secretmem inside the guest**, once [linux-secretmem](linux-secretmem.md)
+- **secretmem inside the guest**, once [linux-secretmem](../linux-secretmem/architecture.md)
   ships: SNP against the host plus secretmem against the guest kernel's GUP
   paths and direct map. It needs go-enclave to export a secretmem
   constructor, which that row's Q1 (in tree, unexported) does not give, and it

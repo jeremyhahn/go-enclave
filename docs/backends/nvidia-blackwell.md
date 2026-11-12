@@ -24,7 +24,7 @@ gate, so a CVM with a Blackwell GPU attests as one environment.
 
 ## What nvidia-blackwell adds over the memory enclave and linux-secretmem
 
-| Path to the material | Memory enclave | [linux-secretmem](linux-secretmem.md) | CPU TEE backend (intel-tdx, amd-sev) | nvidia-blackwell |
+| Path to the material | Memory enclave | [linux-secretmem](../linux-secretmem/architecture.md) | CPU TEE backend (intel-tdx, amd-sev) | nvidia-blackwell |
 |---|---|---|---|---|
 | Host kernel, hypervisor, host root | readable | readable: secretmem guards one kernel's own paths, not a hypervisor's | refused: CVM private memory | refused: material is held where the CPU TEE backend holds it |
 | `/proc/<pid>/mem`, `ptrace`, GUP inside the same kernel | readable | refused | readable to the CVM's own root | as the CPU TEE backend |

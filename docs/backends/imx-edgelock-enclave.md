@@ -7,7 +7,7 @@
 
 go-xkms's `hsm-appliance` feature runs xkmsd on an NXP FRDM-IMX95-PRO board
 (i.MX 95) as a dedicated HSM appliance. On that board xkmsd's keys can sit in
-the memory enclave, or in [linux-secretmem](linux-secretmem.md) once that row
+the memory enclave, or in [linux-secretmem](../linux-secretmem/architecture.md) once that row
 lands, but both keep the material in Linux's own memory: a kernel exploit, a
 DMA-capable peripheral or a cold-boot attack on the board's DRAM reaches it.
 

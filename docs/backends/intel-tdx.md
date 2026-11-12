@@ -7,7 +7,7 @@
 
 The memory enclave keeps material in `mlock`'d, guarded pages
 ([platform contract](../memory-enclave/engineering.md#platform-contract)), and
-[linux-secretmem](linux-secretmem.md) proposes removing them from the kernel's
+[linux-secretmem](../linux-secretmem/architecture.md) proposes removing them from the kernel's
 direct map. Both still trust everything below the process: the host kernel,
 and on a virtual machine the hypervisor, the host's administrators and any
 device that can DMA into guest memory. On a shared or rented host those are
