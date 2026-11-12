@@ -46,6 +46,7 @@ func testFindPlantsNoCopy(t *testing.T, n int) {
 	// The rounds run in a child process that owns the needle's mapping: a
 	// sweep cannot be canceled, so the bound is the parent killing the
 	// child, and the mapping goes with it.
+	requireRunEvidence(t)
 	out, _, code, err := runSweepChild(childSweep, n, sweepDeadline)
 	switch {
 	case err != nil:
@@ -162,10 +163,22 @@ func runSweepChild(mode string, n int, limit time.Duration) (out string, rounds 
 					return ctx.Err()
 				}
 			}
+			// The child's pass state shows only that the marked pass has
+			// not returned; a thread parked inside it shows the same. So
+			// the signal counts only when this process saw the thread
+			// running just before it and running, with more time on the
+			// CPU, just after it; otherwise the child is told to drop it.
+			after := sendIdle
+			ran, running := runEvidence(pid, id, 0, false)
 			if err := syscall.Tgkill(pid, id, syscall.SIGURG); err != nil {
 				return err
 			}
-			_, err := io.WriteString(stdin, sendAfter)
+			if running {
+				if _, ranOn := runEvidence(pid, id, ran, true); ranOn {
+					after = sendAfter
+				}
+			}
+			_, err := io.WriteString(stdin, after)
 			return err
 		}
 		sent, ok := signalRound(ctx, signaled, send)
@@ -287,6 +300,7 @@ func sweepNeedleStart(needle []byte) {
 func TestSweepUnderSignalsSendsTheMinimum(t *testing.T) {
 	// A 32-byte random needle: a short one can match unrelated memory and
 	// fail the round as residue rather than on its signal count.
+	requireRunEvidence(t)
 	out, sent, code, err := runSweepChild(childSweep, 32, sweepDeadline)
 	if err != nil {
 		t.Fatalf("%v\n%s", err, out)
@@ -349,6 +363,7 @@ func TestSignalRoundFailsAChildThatNeverCompares(t *testing.T) {
 // would: it compares before its round's signals and never after, so its
 // round must fail with nothing counted.
 func TestSweepUnderSignalsFailsAPausedChild(t *testing.T) {
+	requireRunEvidence(t)
 	out, sent, _, err := runSweepChild(childPause, 32, sweepDeadline)
 	if !errors.Is(err, errTooFewSignals) {
 		t.Fatalf("a round whose child stopped comparing: want %v, got %v (signals %v)\n%s", errTooFewSignals, err, sent, out)
@@ -364,6 +379,7 @@ func TestSweepUnderSignalsFailsAPausedChild(t *testing.T) {
 // no signal is shown to have interrupted a comparison, so the round must
 // count none and fail.
 func TestSweepUnderSignalsFailsSignalsOutsideCompares(t *testing.T) {
+	requireRunEvidence(t)
 	out, sent, _, err := runSweepChild(childOutside, 32, sweepDeadline)
 	if !errors.Is(err, errTooFewSignals) {
 		t.Fatalf("a round whose signals all landed between compare passes: want %v, got %v (signals %v)\n%s", errTooFewSignals, err, sent, out)
@@ -377,6 +393,7 @@ func TestSweepUnderSignalsFailsSignalsOutsideCompares(t *testing.T) {
 // thread shows, but a signal to it interrupts the runtime, not a compare:
 // the round must count none of them.
 func TestSweepUnderSignalsFailsAParkedChild(t *testing.T) {
+	requireRunEvidence(t)
 	out, sent, _, err := runSweepChild(childParked, 32, sweepDeadline)
 	if !errors.Is(err, errTooFewSignals) {
 		t.Fatalf("a round whose thread parked inside its pass: want %v, got %v (signals %v)\n%s", errTooFewSignals, err, sent, out)
@@ -434,9 +451,18 @@ func sweepRound(needle []byte, home uintptr, mode string) (hits []string, aborte
 	pass := func(flag bool) error {
 		st.seq.Add(1)
 		st.inside.Store(flag)
-		_, err := mappingContains(firstByteReader(needle[0]), 0, denseFill, needle, buf)
-		st.inside.Store(false)
-		return err
+		defer st.inside.Store(false)
+		// One pass compares for passSpan, so a whole bracket, its run
+		// evidence and, at one P, the scheduler handing the P to the
+		// reader and back, fits inside a single pass.
+		for start := time.Now(); ; {
+			if _, err := mappingContains(firstByteReader(needle[0]), 0, denseFill, needle, buf); err != nil {
+				return err
+			}
+			if time.Since(start) >= passSpan || st.verdict.Load() != 0 {
+				return nil
+			}
+		}
 	}
 	if mode == childPause {
 		// Its one pass ends before the parent learns the thread, so no
@@ -540,6 +566,8 @@ func readParent(st *passState, done chan<- error) {
 					fmt.Printf("%s%d\n", roundSignaled, signaled)
 				}
 				open = false
+			case sendIdle[0]:
+				open = false
 			default:
 				st.verdict.Store(uint32(b))
 				done <- nil
@@ -591,10 +619,65 @@ func roundError(sent int, ok bool) error {
 	return fmt.Errorf("%w: %d in %v, want %d", errTooFewSignals, sent, signalCap, minSignals)
 }
 
+// threadRun reads the scheduler state letter and the on-CPU nanoseconds
+// of thread tid of process pid from /proc.
+func threadRun(pid, tid int) (state byte, ran uint64, err error) {
+	dir := fmt.Sprintf("/proc/%d/task/%d/", pid, tid)
+	stat, err := os.ReadFile(dir + "stat")
+	if err != nil {
+		return 0, 0, err
+	}
+	i := bytes.LastIndexByte(stat, ')') // the command name may hold anything
+	if i < 0 || i+2 >= len(stat) {
+		return 0, 0, fmt.Errorf("unparsable %sstat: %q", dir, stat)
+	}
+	sched, err := os.ReadFile(dir + "schedstat")
+	if err != nil {
+		return 0, 0, err
+	}
+	f := strings.Fields(string(sched))
+	if len(f) == 0 {
+		return 0, 0, fmt.Errorf("empty %sschedstat", dir)
+	}
+	ran, err = strconv.ParseUint(f[0], 10, 64)
+	return stat[i+2], ran, err
+}
+
+// runEvidence polls thread tid of process pid for up to runWait and
+// returns its on-CPU time once the thread is running (state R) with more
+// than since nanoseconds on the CPU. A parked thread is never R and gains
+// nothing past the time its signal handler takes. When strict, a read
+// that finds the thread not running ends the wait without evidence.
+func runEvidence(pid, tid int, since uint64, strict bool) (uint64, bool) {
+	deadline := time.Now().Add(runWait)
+	for {
+		state, ran, err := threadRun(pid, tid)
+		if err != nil {
+			return 0, false
+		}
+		if state == 'R' && ran > since {
+			return ran, true
+		}
+		if (strict && state != 'R') || time.Now().After(deadline) {
+			return 0, false
+		}
+		time.Sleep(runPoll)
+	}
+}
+
+// requireRunEvidence skips a test whose rounds need run evidence the
+// kernel does not give: without schedstat no signal could count.
+func requireRunEvidence(t *testing.T) {
+	t.Helper()
+	if _, _, err := threadRun(os.Getpid(), syscall.Gettid()); err != nil {
+		t.Skipf("a signal counts only with evidence its thread was running, and this kernel gives none: %v", err)
+	}
+}
+
 var errTooFewSignals = errors.New("too few signals reached the sweeping thread")
 
 const (
-	denseFill      = 64 << 10               // memory dense with the needle's first byte, per compare pass
+	denseFill      = 64 << 10               // memory dense with the needle's first byte, per scan of a pass
 	minSignals     = 50                     // a round counts only after this many
 	signalPhase    = 50 * time.Millisecond  // of signals to the sweeping thread per round
 	signalInterval = 200 * time.Microsecond // between signals to the sweeping thread
@@ -606,18 +689,22 @@ const (
 	roundSignaled     = "sweep signaled "     // the child's count of compare passes a send landed in
 	roundAck          = "sweep ack "          // the child's count of sendBefore bytes it took the pass state at
 	sendBefore        = "b"                   // the parent's byte before each signal
-	sendAfter         = "k"                   // the parent's byte after each signal
-	verdictSweep      = "s"                   // the parent's byte: the signals landed, sweep now
-	verdictAbort      = "a"                   // the parent's byte: too few signals, give up
-	childSweep        = "sweep"               // three rounds under signals, then a check sweep
-	childStall        = "stall"               // stops itself while its sweep runs
-	childPause        = "pause"               // compares once before its signals, then stops comparing
-	childOutside      = "outside"             // compares outside its in-compare flag, sleeps between passes
-	childParked       = "parked"              // marks a pass, then parks its thread in it until the verdict
-	exitResidue       = 2                     // a sweep found the needle outside its mapping
-	exitTooFewSignals = 3                     // a round could not reach minSignals
-	exitChildError    = 4                     // the child could not run its sweep
-	verdictFailed     = 0x100                 // passState.verdict once stdin failed: no parent byte
+	sendAfter         = "k"                   // the parent's byte after each signal it saw land on a running thread
+	sendIdle          = "i"                   // the parent's byte after a signal it could not tie to a running thread
+	runWait           = 50 * time.Millisecond // for the run evidence around each signal
+	runPoll           = 100 * time.Microsecond
+	passSpan          = 200 * time.Millisecond // a compare pass lasts at least this
+	verdictSweep      = "s"                    // the parent's byte: the signals landed, sweep now
+	verdictAbort      = "a"                    // the parent's byte: too few signals, give up
+	childSweep        = "sweep"                // three rounds under signals, then a check sweep
+	childStall        = "stall"                // stops itself while its sweep runs
+	childPause        = "pause"                // compares once before its signals, then stops comparing
+	childOutside      = "outside"              // compares outside its in-compare flag, sleeps between passes
+	childParked       = "parked"               // marks a pass, then parks its thread in it until the verdict
+	exitResidue       = 2                      // a sweep found the needle outside its mapping
+	exitTooFewSignals = 3                      // a round could not reach minSignals
+	exitChildError    = 4                      // the child could not run its sweep
+	verdictFailed     = 0x100                  // passState.verdict once stdin failed: no parent byte
 )
 
 // firstByteReader is an io.ReaderAt over memory that holds only b.
