@@ -90,7 +90,6 @@ func TestProbeNilContext(t *testing.T) {
 	f := newFakeTEE(t, false)
 	b := fakeBackend(t, f)
 	defer func() { _ = b.Close() }()
-	//nolint:staticcheck // a nil ctx is the case under test
 	if err := b.Probe(nil); err != nil {
 		t.Fatalf("Probe(nil) = %v", err)
 	}
