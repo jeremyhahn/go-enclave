@@ -220,6 +220,10 @@ the network today, so nothing below runs until it is.
   process that selects intel-tdx on a GPU host then attests an environment
   that omits a device inside its TCB.
 
+Proposed answer (for owner sign-off): for the owner to rule; the proposal's
+lean is the composing backend, because the GPU is inside the CVM's TCB and an
+attestation that omits it is incomplete.
+
 ### Q2: how it reaches the CPU TEE backend
 
 - **A constructor argument** (recommended): `main` builds the intel-tdx or
@@ -229,6 +233,10 @@ the network today, so nothing below runs until it is.
   configuration and fails when `main` registers in another order.
 - **Its own CPU attestation:** duplicates the intel-tdx and amd-sev rows.
 
+Proposed answer (for owner sign-off): a constructor argument, because it keeps
+the dependency explicit and lets the backend compose amd-sev or intel-tdx
+without duplicating either row.
+
 ### Q3: rank
 
 - **`inner.Rank() + 1`** (recommended): above the CVM alone, so `Detect`
@@ -237,6 +245,11 @@ the network today, so nothing below runs until it is.
 - **A fixed number:** needs the hardware rows to agree a scale, which
   [detection](../backend-detection/architecture.md#scope-fence) leaves to them,
   and can drift from `inner`'s.
+
+Proposed answer (for owner sign-off): for the owner to rule, together with the
+hardware rows' order that [amd-sev's Q3](amd-sev.md#q3-rank) also leaves to
+the owner; the proposal's lean is `inner.Rank() + 1`, because it needs no
+shared scale.
 
 ### Q4: nonce and evidence format
 
@@ -251,6 +264,11 @@ the network today, so nothing below runs until it is.
 - **Refuse any nonce but 32 bytes:** breaks the seam's 1-to-64 contract and
   fails `backendtest`.
 
+Proposed answer (for owner sign-off): a CMW collection with the GPU nonce
+`SHA-256(nonce)`, because this backend carries several evidence items, which
+amd-sev's single report does not, and CMW is now a published RFC rather than
+the draft amd-sev's Q6 declined to pin.
+
 ### Q5: how it reaches the GPU
 
 - **go-nvml** (recommended): NVIDIA's Go binding of NVML, which loads
@@ -261,6 +279,10 @@ the network today, so nothing below runs until it is.
 - **Running `nvattest` or `nvidia-smi conf-compute`:** a process per call and
   parsed text output.
 
+Proposed answer (for owner sign-off): go-nvml, because NVML is NVIDIA's
+documented interface, and arm-trustzone's pure-Go choice rested on a stable
+kernel uapi header that the NVIDIA driver's private ioctls do not offer.
+
 ### Q6: which parts and modes
 
 - **Recommended:** Blackwell only, CC on, DevTools off, and only the multi-GPU
@@ -270,6 +292,10 @@ the network today, so nothing below runs until it is.
 - **Every CC-capable architecture and mode NVML reports:** wider, but claims
   parts nobody has proven.
 
+Proposed answer (for owner sign-off): Blackwell only, CC on, DevTools off,
+single GPU first, because a hardware row claims only what it has proven on
+the real part, as the owner ruled for every hardware backend.
+
 ### Q7: where the conformance harness lives
 
 - **In go-enclave's `test/integration`** behind its own build tag, as the
@@ -277,6 +303,10 @@ the network today, so nothing below runs until it is.
   is (recommended): one place proves every hardware row against the seam.
 - **Only in the backend's module:** simpler, but go-enclave would not see the
   run that proves the row.
+
+Proposed answer (for owner sign-off): in go-enclave's `test/integration`
+behind its own build tag, because arm-trustzone's ruled Decision 1 keeps the
+backend, the seam and its harness changing together in this repository.
 
 ## Rejected alternatives
 
