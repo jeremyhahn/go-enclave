@@ -146,7 +146,7 @@ func TestSealerHelpersNilReceiver(t *testing.T) {
 
 func TestSealerHelpersDestroyOrRetain(t *testing.T) {
 	b := newStickyImporter()
-	h, err := b.Import(t.Context(), make([]byte, 32))
+	h, err := b.Import(t.Context(), make([]byte, 32), WithPurpose(PurposeMaterial))
 	if err != nil {
 		t.Fatalf("Import: %v", err)
 	}
@@ -195,7 +195,7 @@ func TestSealerHelpersDestroyOrRetain(t *testing.T) {
 
 	// A handle whose Destroy succeeds is not retained, and the failure
 	// passes through unchanged.
-	h2, err := b.Import(t.Context(), make([]byte, 32))
+	h2, err := b.Import(t.Context(), make([]byte, 32), WithPurpose(PurposeMaterial))
 	if err != nil {
 		t.Fatalf("Import: %v", err)
 	}
