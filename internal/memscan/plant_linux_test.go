@@ -71,7 +71,7 @@ func testFindPlantsNoCopy(t *testing.T, n int) {
 
 // findUnderSignals runs Find on a locked thread and sends that thread
 // SIGURG (which the Go runtime takes and ignores) until Find returns or
-// signalFor has passed, then waits for Find without signalling.
+// signalFor has passed, then waits for Find without signaling.
 func findUnderSignals(needle []byte, home uintptr) error {
 	tids := make(chan int, 1)
 	done := make(chan error, 1)
@@ -105,7 +105,7 @@ func findUnderSignals(needle []byte, home uintptr) error {
 const (
 	// firstByteRegion is the size of the first-byte memory each sweep reads.
 	firstByteRegion = 4 * chunk
-	// signalFor bounds how long each sweep is signalled.
+	// signalFor bounds how long each sweep is signaled.
 	signalFor = 2 * time.Second
 )
 
