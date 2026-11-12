@@ -411,7 +411,6 @@ func residueConfig(flt faults) Config {
 // residue sweep unmeasured: such bytes are everywhere in a process, so a sweep
 // that finds them after the end proves nothing about the backend.
 func TestBackendConformance_UniformMaterialUnmeasured(t *testing.T) {
-	t.Skip("defect: uniform material is reported as residue after Destroy")
 	cfg := Config{
 		New:                 func() (enclave.Backend, error) { return enclave.DefaultBackend(), nil },
 		BackendCapabilities: []enclave.Capability{enclave.CapabilityProbe},
