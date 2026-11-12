@@ -21,6 +21,7 @@ go-enclave implements no draft.
 | [TCG_TPM2_r1p59_Part1_Architecture_pub.pdf](TCG_TPM2_r1p59_Part1_Architecture_pub.pdf) | Trusted Platform Module Library, Part 1: Architecture | Family 2.0, Level 00, Revision 01.59, November 2019 (see [TCG TPM 2.0](#tcg-tpm-20)); sha256 `18e393ef8f61d4c5deebb578cc4220b025fdaff2c28a7e3264f16e37796c3d9b` | `tpm`: the salted, parameter-encrypted session in `startSession` ([protector.go](../../backends/tpm/protector.go)) and the `KDFa` and CFB parameter encryption it relies on |
 | [TCG_TPM2_r1p59_Part2_Structures_pub.pdf](TCG_TPM2_r1p59_Part2_Structures_pub.pdf) | Trusted Platform Module Library, Part 2: Structures | Family 2.0, Level 00, Revision 01.59, November 2019; sha256 `95b27445c8a3302bffaf0eed0e729f228698d0296a91161f51320fbe4d7c5121` | `tpm`: `TPMT_PUBLIC` in `parentTemplate`, `storageTemplate` ([blob.go](../../backends/tpm/blob.go)); the format-one response codes the error mapping reads |
 | [TCG_TPM2_r1p59_Part3_Commands_pub.pdf](TCG_TPM2_r1p59_Part3_Commands_pub.pdf) | Trusted Platform Module Library, Part 3: Commands | Family 2.0, Level 00, Revision 01.59, November 2019; sha256 `d2e5e7187574d383b00ff966c33b30a96e3f5165cbfae20a4d094e5794f3b9bb` | `tpm`: `TPM2_Create` in `create` and `TPM2_Unseal` in `unseal` ([unseal.go](../../backends/tpm/unseal.go)), marshaled by the provider; `TPM2_CreatePrimary`, `TPM2_StartAuthSession`, `TPM2_Load`, `TPM2_FlushContext` in `createPrimary`, `startSession`, `load`, `flush` ([protector.go](../../backends/tpm/protector.go)) |
+| [TCG_EK_Credential_Profile_for_TPM_Family_2_0_Level_0_Version_2_7_Pub.pdf](TCG_EK_Credential_Profile_for_TPM_Family_2_0_Level_0_Version_2_7_Pub.pdf) | TCG EK Credential Profile for TPM Family 2.0; Level 0 | Version 2.7, March 16, 2026 (see [TCG TPM 2.0](#tcg-tpm-20)); sha256 `b021106be50d5f391064ef702ca5f98249b614a90f2672931f45b79b2f441c2f` | `tpm`: the parent's template in `parentTemplate` and `storageTemplate` ([blob.go](../../backends/tpm/blob.go)), §5.3.4 Template L-2: ECC NIST P256 (Storage), with `unique.x` set from the label |
 
 ## TCG TPM 2.0
 
@@ -37,3 +38,13 @@ sha256 in its row. Their licence (each document's "Licenses and Notices",
 page ii) grants the rights to reproduce, distribute, display and perform the
 specification for the purpose of developing products based on it, which is
 the purpose of these copies.
+
+The parent's template is the storage template of the EK credential profile,
+§5.3.4 Template L-2: ECC NIST P256 (Storage), at the profile's latest
+version, 2.7, which this index pins. The copy is
+the publisher's file from
+<https://trustedcomputinggroup.org/resources/documents/http-trustedcomputinggroup-org-wp-content-uploads-tcg-ek-credential-profile>,
+renamed to drop the download suffix. Its licence (page ii, "Disclaimers,
+Notices, and License Terms") permits a copy for examining or implementing TCG
+specifications, distributed with its disclaimers; the file is unaltered and
+carries them.
