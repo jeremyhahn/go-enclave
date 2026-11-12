@@ -35,8 +35,15 @@ func (b *Backend) Attest(ctx context.Context, nonce []byte) (enclave.Evidence, e
 	if err != nil {
 		return enclave.Evidence{}, err
 	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
+	if !b.constructed {
+		return enclave.Evidence{}, ErrSGXUnavailable
+	}
+	select {
+	case b.attestSem <- struct{}{}:
+	case <-ctx.Done():
+		return enclave.Evidence{}, ctx.Err()
+	}
+	defer func() { <-b.attestSem }()
 	if err := ctx.Err(); err != nil {
 		return enclave.Evidence{}, err
 	}

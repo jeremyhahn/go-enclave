@@ -35,6 +35,9 @@ var (
 // path.
 func (b *Backend) Import(ctx context.Context, material []byte, opts ...enclave.ImportOption) (enclave.Handle, error) {
 	defer enclave.Wipe(material)
+	if !b.constructed {
+		return nil, ErrSGXUnavailable
+	}
 	spec, err := enclave.NewImportSpec(opts...)
 	if err != nil {
 		return nil, err
@@ -71,19 +74,41 @@ func (b *Backend) Import(ctx context.Context, material []byte, opts ...enclave.I
 // could not release, as [enclave.Sweeper] describes. The memory enclaves'
 // Destroy waits out in-flight borrows itself, so ctx bounds nothing here; a
 // nil or done ctx still releases everything.
-func (b *Backend) Sweep(_ context.Context) (held int, err error) {
+func (b *Backend) Sweep(ctx context.Context) (held int, err error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	b.handlesMu.Lock()
 	live := make([]*handle, 0, len(b.handles))
 	for h := range b.handles {
 		live = append(live, h)
 	}
 	b.handlesMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return len(live), err
+	}
 
+	// Destroy waits for a borrowed handle; run the Destroys aside so the
+	// wait selects on ctx. A canceled Sweep counts the rest as held; their
+	// Destroys still finish when the borrows end.
+	results := make(chan error, len(live))
+	go func() {
+		for _, h := range live {
+			results <- h.Destroy()
+		}
+	}()
 	var errs []error
-	for _, h := range live {
-		if derr := h.Destroy(); derr != nil {
-			held++
-			errs = append(errs, derr)
+	for done := 0; done < len(live); done++ {
+		select {
+		case derr := <-results:
+			if derr != nil {
+				held++
+				errs = append(errs, derr)
+			}
+		case <-ctx.Done():
+			held += len(live) - done
+			errs = append(errs, ctx.Err())
+			return held, errors.Join(errs...)
 		}
 	}
 	return held, errors.Join(errs...)

@@ -14,13 +14,13 @@ const promptly = 2 * time.Second
 
 // newTestBackend returns a Backend built as New builds one, without the
 // hardware probe.
-func newTestBackend() *Backend { return &Backend{} }
+func newTestBackend() *Backend { return newBackend() }
 
 // holdAttestSlot takes the attestation slot until the test ends.
 func holdAttestSlot(t *testing.T, b *Backend) {
 	t.Helper()
-	b.mu.Lock()
-	t.Cleanup(b.mu.Unlock)
+	b.attestSem <- struct{}{}
+	t.Cleanup(func() { <-b.attestSem })
 }
 
 func TestUnconstructedBackendRefusesUse(t *testing.T) {
@@ -109,6 +109,25 @@ func TestAttestHonoursContextWhileSlotHeld(t *testing.T) {
 	}
 }
 
+// TestAttestOnUnconstructedBackend guards the nil semaphore: an
+// unconstructed Backend refuses at once instead of blocking on it.
+func TestAttestOnUnconstructedBackend(t *testing.T) {
+	var b Backend
+	done := make(chan error, 1)
+	go func() {
+		_, err := b.Attest(context.Background(), []byte{1})
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrSGXUnavailable) {
+			t.Fatalf("Attest on an unconstructed Backend: err = %v, want ErrSGXUnavailable", err)
+		}
+	case <-time.After(promptly):
+		t.Fatal("Attest on an unconstructed Backend did not return")
+	}
+}
+
 // TestNewRefusesOutsideEnclave runs the real constructor on a host that is
 // not in an SGX enclave (or not linux/amd64): it refuses with the typed
 // unavailable error and builds no backend.
@@ -130,7 +149,7 @@ func TestNewRefusesOutsideEnclave(t *testing.T) {
 // TestBackendShape checks the fixed facts of a backend; the zero value is
 // used because New refuses here.
 func TestBackendShape(t *testing.T) {
-	var b Backend
+	b := newTestBackend()
 	if b.Name() != "intel-sgx" || b.Rank() != 2 || !b.ConfinesProcess() {
 		t.Fatalf("Name, Rank, ConfinesProcess = %q, %d, %v; want intel-sgx, 2, true", b.Name(), b.Rank(), b.ConfinesProcess())
 	}

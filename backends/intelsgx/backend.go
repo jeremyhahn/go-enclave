@@ -19,12 +19,22 @@ const rank = 2
 // Backend is the intel-sgx backend. It exists only inside a non-debug SGX
 // enclave that can quote: [New] refuses everywhere else.
 type Backend struct {
-	// mu serializes [Backend.Attest]'s request and check.
-	mu sync.Mutex
+	// constructed is set only by newBackend, so a Backend that New did not
+	// build claims no confinement and refuses use.
+	constructed bool
+
+	// attestSem is a one-slot semaphore serializing [Backend.Attest]'s
+	// request and check; a waiter selects on its context.
+	attestSem chan struct{}
 
 	// handlesMu guards handles, the live imported handles Sweep destroys.
 	handlesMu sync.Mutex
 	handles   map[*handle]struct{}
+}
+
+// newBackend returns a constructed Backend; only New and tests call it.
+func newBackend() *Backend {
+	return &Backend{constructed: true, attestSem: make(chan struct{}, 1)}
 }
 
 var (
@@ -43,7 +53,7 @@ func New(ctx context.Context) (*Backend, error) {
 	if err := probe(ctx); err != nil {
 		return nil, err
 	}
-	return &Backend{}, nil
+	return newBackend(), nil
 }
 
 // Name returns [Name].
@@ -63,6 +73,7 @@ func (*Backend) Probe(ctx context.Context) error {
 	return probe(ctx)
 }
 
-// ConfinesProcess reports true: the backend was built only inside a
-// non-debug enclave, which holds the whole process.
-func (*Backend) ConfinesProcess() bool { return true }
+// ConfinesProcess reports true for a Backend New built: New succeeds only
+// inside a non-debug enclave, which holds the whole process. A Backend New
+// did not build reports false.
+func (b *Backend) ConfinesProcess() bool { return b.constructed }
