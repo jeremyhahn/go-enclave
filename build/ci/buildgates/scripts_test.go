@@ -2245,6 +2245,190 @@ func requireNoPwned(t *testing.T, dir, context string) {
 	})
 }
 
+// ---------------------------------------------------------------------------
+// release-tree-check.sh
+
+// treeCheckRepo builds a scratch repository with a tagged release (v1.2.3, two
+// commits deep, one executable file) and a branch `published` holding one
+// parentless commit with exactly the tag's tree: the squashed commit a public
+// release publishes. It returns the directory and a git that runs in it.
+func treeCheckRepo(t *testing.T) (string, func(args ...string) string) {
+	t.Helper()
+	dir := writeTree(t, map[string]string{"README.md": "readme\n", "run.sh": "#!/bin/sh\n"})
+	env := map[string]string{
+		"GIT_CONFIG_GLOBAL": os.DevNull, "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_COUNT": "0",
+		"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com",
+		"GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.com",
+	}
+	git := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = layerEnv(os.Environ(), env)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	git("init", "-q", "-b", "main")
+	git("add", "README.md")
+	git("commit", "-q", "-m", "first")
+	if err := os.Chmod(filepath.Join(dir, "run.sh"), 0o755); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	git("add", "run.sh")
+	git("commit", "-q", "-m", "second")
+	git("tag", "-a", "-m", "v1.2.3", "v1.2.3")
+	squashed := git("commit-tree", "-m", "v1.2.3", "v1.2.3^{tree}")
+	git("branch", "published", squashed)
+	return dir, git
+}
+
+// treeCheckBranch commits a change on a branch off the tag, so that branch's
+// tree differs from the tag's by exactly that change.
+func treeCheckBranch(t *testing.T, git func(...string) string, branch string, change func()) {
+	t.Helper()
+	git("checkout", "-q", "-b", branch, "v1.2.3")
+	change()
+	git("commit", "-q", "-m", branch)
+	git("checkout", "-q", "main")
+	if st := git("status", "--porcelain"); st != "" {
+		t.Fatalf("scratch tree is dirty after %s:\n%s", branch, st)
+	}
+}
+
+// gitDirSnapshot records every file under .git with its size and mtime.
+func gitDirSnapshot(t *testing.T, dir string) string {
+	t.Helper()
+	var b strings.Builder
+	err := filepath.Walk(filepath.Join(dir, ".git"), func(p string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(&b, "%s %d %d %v\n", p, info.Size(), info.ModTime().UnixNano(), info.Mode())
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk .git: %v", err)
+	}
+	return b.String()
+}
+
+func TestScriptsReleaseTreeCheck_EqualTreesPass(t *testing.T) {
+	dir, git := treeCheckRepo(t)
+	if git("rev-parse", "published") == git("rev-parse", "v1.2.3^{commit}") {
+		t.Fatal("the published commit must be a different commit from the tagged one")
+	}
+	for _, ref := range []string{"published", "v1.2.3", "main"} {
+		out, ok := runScript(t, dir, nil, "release-tree-check.sh", "v1.2.3", ref)
+		if !ok {
+			t.Fatalf("REF=%s: equal trees refused:\n%s", ref, out)
+		}
+		if tree := git("rev-parse", "v1.2.3^{tree}"); !strings.Contains(out, tree) {
+			t.Errorf("REF=%s: the pass line does not name the tree %s:\n%s", ref, tree, out)
+		}
+	}
+}
+
+func TestScriptsReleaseTreeCheck_ADifferentTreeRefusesNamingBoth(t *testing.T) {
+	dir, git := treeCheckRepo(t)
+	write := func(name, body string) func() {
+		return func() {
+			if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+				t.Fatalf("write %s: %v", name, err)
+			}
+			git("add", name)
+		}
+	}
+	treeCheckBranch(t, git, "changed-file", write("README.md", "readme, edited\n"))
+	treeCheckBranch(t, git, "changed-mode", func() {
+		if err := os.Chmod(filepath.Join(dir, "run.sh"), 0o644); err != nil {
+			t.Fatalf("chmod: %v", err)
+		}
+		git("add", "run.sh")
+	})
+	treeCheckBranch(t, git, "extra-file", write("extra.txt", "extra\n"))
+	for _, ref := range []string{"changed-file", "changed-mode", "extra-file"} {
+		out, ok := runScript(t, dir, nil, "release-tree-check.sh", "v1.2.3", ref)
+		if ok {
+			t.Fatalf("REF=%s: a different tree passed:\n%s", ref, out)
+		}
+		tagTree, refTree := git("rev-parse", "v1.2.3^{tree}"), git("rev-parse", ref+"^{tree}")
+		if tagTree == refTree {
+			t.Fatalf("REF=%s: the scratch branch did not change the tree", ref)
+		}
+		if lines := strings.Count(strings.TrimSpace(out), "\n") + 1; lines != 1 {
+			t.Errorf("REF=%s: want one line, got %d:\n%s", ref, lines, out)
+		}
+		if !strings.Contains(out, tagTree) || !strings.Contains(out, refTree) {
+			t.Errorf("REF=%s: the refusal does not name both trees (%s, %s):\n%s", ref, tagTree, refTree, out)
+		}
+	}
+}
+
+func TestScriptsReleaseTreeCheck_AnUnresolvedTagOrRefRefuses(t *testing.T) {
+	dir, _ := treeCheckRepo(t)
+	for _, tc := range []struct{ tag, ref, want string }{
+		{"v9.9.9", "published", "v9.9.9"},
+		{"v1.2.3", "no-such-branch", "no-such-branch"},
+		{"v1.2.3", "", "REF"},
+		{"", "published", "TAG"},
+	} {
+		out, ok := runScript(t, dir, nil, "release-tree-check.sh", tc.tag, tc.ref)
+		if ok {
+			t.Fatalf("TAG=%q REF=%q passed:\n%s", tc.tag, tc.ref, out)
+		}
+		if !strings.Contains(out, tc.want) {
+			t.Errorf("TAG=%q REF=%q: the refusal does not name %q:\n%s", tc.tag, tc.ref, tc.want, out)
+		}
+	}
+	if out, ok := runScript(t, dir, nil, "release-tree-check.sh", "v1.2.3"); ok {
+		t.Fatalf("a missing REF passed:\n%s", out)
+	}
+}
+
+func TestScriptsReleaseTreeCheck_ANonReleaseTagRefuses(t *testing.T) {
+	dir, git := treeCheckRepo(t)
+	// Each names the tagged commit, so only the version check can refuse it.
+	for _, tag := range []string{"v1.2.3-beta", "1.2.3", "v1.2", "v01.2.3", "latest", "--all"} {
+		if !strings.HasPrefix(tag, "-") {
+			git("tag", tag, "v1.2.3^{commit}")
+		}
+		out, ok := runScript(t, dir, nil, "release-tree-check.sh", tag, "published")
+		if ok {
+			t.Fatalf("TAG=%s passed:\n%s", tag, out)
+		}
+		if !strings.Contains(out, "is not vX.Y.Z") {
+			t.Errorf("TAG=%s: want the version refusal:\n%s", tag, out)
+		}
+	}
+}
+
+func TestScriptsReleaseTreeCheck_WritesNothing(t *testing.T) {
+	dir, git := treeCheckRepo(t)
+	treeCheckBranch(t, git, "extra-file", func() {
+		if err := os.WriteFile(filepath.Join(dir, "extra.txt"), []byte("x\n"), 0o644); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		git("add", "extra.txt")
+	})
+	refs := git("for-each-ref", "--format=%(refname) %(objectname)")
+	before := gitDirSnapshot(t, dir)
+	for _, args := range [][]string{{"v1.2.3", "published"}, {"v1.2.3", "extra-file"}, {"v9.9.9", "published"}, {"v1.2.3-beta", "published"}} {
+		runScript(t, dir, nil, "release-tree-check.sh", args...)
+	}
+	if after := gitDirSnapshot(t, dir); after != before {
+		t.Errorf("the script changed .git:\nbefore:\n%s\nafter:\n%s", before, after)
+	}
+	if got := git("for-each-ref", "--format=%(refname) %(objectname)"); got != refs {
+		t.Errorf("refs changed:\nbefore:\n%s\nafter:\n%s", refs, got)
+	}
+	if st := git("status", "--porcelain"); st != "" {
+		t.Errorf("the work tree changed:\n%s", st)
+	}
+}
+
 func readLog(t *testing.T, log string) string {
 	t.Helper()
 	b, err := os.ReadFile(log)
