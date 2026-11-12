@@ -1,0 +1,3 @@
+### Added
+
+- The nvidia-blackwell backend is an `enclave.Attester`: `Attest(ctx, nonce)` returns `Evidence` of format `application/cmw+json`, a CMW collection holding the CPU TEE backend's evidence over the nonce as given and, for each GPU, its attestation report over `SHA-256(nonce)` (plus the CEC report when present) and both PEM certificate chains (#200). A nonce outside 1 to 64 bytes is `enclave.ErrInvalidNonce`; on a host without the driver or a ready Blackwell GPU, `Attest` returns `Probe`'s typed refusal and never asks the CPU TEE backend. A GPU call that fails is `*GPUAttestationError` naming the GPU.
