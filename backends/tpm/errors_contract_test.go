@@ -57,7 +57,6 @@ var errorRows = map[string]errorRow{
 		wraps:     true,
 		as:        asType[*DeviceError],
 		prefix:    "tpm: ",
-		defect:    "DeviceError.Error dereferences a nil Err",
 	},
 	"CommandError": {
 		zero: &CommandError{},
