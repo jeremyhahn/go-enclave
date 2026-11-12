@@ -48,12 +48,29 @@ func (b *Backend) Attest(ctx context.Context, nonce []byte) (enclave.Evidence, e
 	case <-ctx.Done():
 		return enclave.Evidence{}, ctx.Err()
 	}
-	defer func() { <-b.slot }()
-	q, err := attestWork(ctx, rd)
-	if err != nil {
-		return enclave.Evidence{}, err
+	// The work runs under a context that does not end with the caller's and
+	// holds the slot until it returns, so a caller that cancels leaves the
+	// slot taken until the device call it started is done and no second
+	// Attest overlaps it. The caller still returns ctx.Err() at once.
+	type result struct {
+		quote []byte
+		err   error
 	}
-	return enclave.Evidence{Format: EvidenceFormat, Data: q}, nil
+	done := make(chan result, 1)
+	go func() {
+		defer func() { <-b.slot }()
+		q, err := attestWork(context.WithoutCancel(ctx), rd)
+		done <- result{quote: q, err: err}
+	}()
+	select {
+	case r := <-done:
+		if r.err != nil {
+			return enclave.Evidence{}, r.err
+		}
+		return enclave.Evidence{Format: EvidenceFormat, Data: r.quote}, nil
+	case <-ctx.Done():
+		return enclave.Evidence{}, ctx.Err()
+	}
 }
 
 // reportData lays nonce out as REPORTDATA. Q4, recommended answer: the nonce
