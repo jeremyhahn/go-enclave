@@ -14,6 +14,10 @@ import (
 // backend invents no second name.
 const EvidenceFormat = tsmProvider
 
+// attestWork is the quote work Attest runs while it holds the slot. It is a
+// variable so a test can stand in for the guest device.
+var attestWork = attest
+
 // Attest returns a TD quote whose REPORTDATA carries nonce, through a
 // configfs-tsm report directory of its own (the design's "Attestation").
 // nonce is 1 to 64 bytes; any other length is [enclave.ErrInvalidNonce]
@@ -45,7 +49,7 @@ func (b *Backend) Attest(ctx context.Context, nonce []byte) (enclave.Evidence, e
 		return enclave.Evidence{}, ctx.Err()
 	}
 	defer func() { <-b.slot }()
-	q, err := attest(ctx, rd)
+	q, err := attestWork(ctx, rd)
 	if err != nil {
 		return enclave.Evidence{}, err
 	}

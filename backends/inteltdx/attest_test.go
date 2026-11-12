@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -120,5 +121,87 @@ func TestAttestDeadlineWhileSlotHeld(t *testing.T) {
 		release()
 		<-done
 		t.Fatal("Attest waited past its deadline behind a held slot")
+	}
+}
+
+// TestAttestCancelKeepsSlotUntilWorkReturns proves that a caller who cancels
+// while its quote work is blocked gets ctx.Err() at once, and that a second
+// Attest does not start its work until the first one's work has returned. The
+// stand-in work behaves as quote does: the device call runs on, and only the
+// wait for it is bounded by ctx.
+func TestAttestCancelKeepsSlotUntilWorkReturns(t *testing.T) {
+	b := testBackend()
+	gate := make(chan struct{})
+	started := make(chan struct{}, 2)
+	var active, overlap atomic.Int32
+	prev := attestWork
+	t.Cleanup(func() { attestWork = prev })
+	attestWork = func(ctx context.Context, _ [reportDataSize]byte) ([]byte, error) {
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			if active.Add(1) > 1 {
+				overlap.Add(1)
+			}
+			started <- struct{}{}
+			<-gate
+			active.Add(-1)
+		}()
+		select {
+		case <-done:
+			return []byte{0xAA}, nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+
+	ctx1, cancel1 := context.WithCancel(context.Background())
+	defer cancel1()
+	first := make(chan error, 1)
+	go func() {
+		_, err := b.Attest(ctx1, []byte{1})
+		first <- err
+	}()
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		close(gate)
+		t.Fatal("first Attest never started its quote work")
+	}
+	cancel1()
+	select {
+	case err := <-first:
+		if !errors.Is(err, context.Canceled) {
+			close(gate)
+			t.Fatalf("Attest(cancelled) = %v, want context.Canceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		close(gate)
+		t.Fatal("Attest did not return at once after its caller cancelled")
+	}
+
+	second := make(chan error, 1)
+	go func() {
+		_, err := b.Attest(context.Background(), []byte{2})
+		second <- err
+	}()
+	select {
+	case <-started:
+		close(gate)
+		<-second
+		t.Fatal("second Attest started its quote work while the first one's work was still running")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(gate)
+	select {
+	case err := <-second:
+		if err != nil {
+			t.Fatalf("second Attest = %v, want nil", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("second Attest did not finish after the first one's work returned")
+	}
+	if n := overlap.Load(); n != 0 {
+		t.Fatalf("quote work overlapped %d times, want 0", n)
 	}
 }
