@@ -3,6 +3,7 @@ package amdsev
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"testing"
 	"time"
@@ -73,6 +74,29 @@ func TestSweepHonoursContext(t *testing.T) {
 	//nolint:staticcheck // SA1012: a nil context is part of Sweep's contract.
 	if held, err := b.Sweep(nil); held != 0 || err != nil {
 		t.Errorf("Sweep(nil) = %d, %v, want 0, nil", held, err)
+	}
+}
+
+// TestDebugGuestNotConfined: a guest whose policy allows debug lets the
+// host read its memory, so the backend New builds for it claims no
+// confinement; a guest without the debug bit does.
+func TestDebugGuestNotConfined(t *testing.T) {
+	for _, debug := range []bool{false, true} {
+		raw := make([]byte, ReportSize)
+		if debug {
+			binary.LittleEndian.PutUint64(raw[offPolicy:], policyDebug)
+		}
+		r, err := ParseReport(raw)
+		if err != nil {
+			t.Fatalf("ParseReport: %v", err)
+		}
+		if r.Debug() != debug {
+			t.Fatalf("Report.Debug = %v, want %v", r.Debug(), debug)
+		}
+		b := newBackend(r)
+		if got := b.ConfinesProcess(); got == debug {
+			t.Errorf("debug=%v: ConfinesProcess = %v, want %v", debug, got, !debug)
+		}
 	}
 }
 
