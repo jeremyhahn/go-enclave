@@ -38,6 +38,12 @@ run by `make check-project-scripts`, which `make lint-gates` runs.
    - lint-integration passes with no package.
 3. Changelog fragment `changelog.d/349-script-shell-tests.md`.
 
+## Where this plan lives
+
+`docs/plan-349.md`, not `docs/plans/349.md`: build/ci/buildgates requires
+every directory under docs/ other than reference/ to be a feature in
+scripts/features.map, and this change does not touch buildgates.
+
 ## Out of scope
 
 `build/ci/buildgates` and the ci-template scripts in `CI_BASH_SCRIPTS`; the
