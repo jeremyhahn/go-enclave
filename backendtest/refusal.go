@@ -78,8 +78,9 @@ func CheckRefusal(ctx context.Context, cfg RefusalConfig) error {
 		}
 	}
 
-	names := enclave.BackendNames()
+	// The baseline starts the process allocator before New runs (see budgetOf).
 	budget := budgetOf()
+	names := enclave.BackendNames()
 
 	b, panicked, err := refusalNew(cfg.New)
 	switch {
@@ -87,7 +88,10 @@ func CheckRefusal(ctx context.Context, cfg RefusalConfig) error {
 		fail(PropertyRefusalNew, "New panicked: %v", panicked)
 	case err == nil:
 		fail(PropertyRefusalNew, "New returned %T and no error on a host without the hardware", b)
-	case !isNilInterface(b):
+	case b != nil && isNilInterface(b):
+		fail(PropertyRefusalNew, "New returned a nil %T inside the interface with its error %q; a refusal returns a nil interface", b, err)
+		judge("New", err)
+	case b != nil:
 		fail(PropertyRefusalNew, "New returned %T with its error %q; a refusal returns a nil interface", b, err)
 		judge("New", err)
 	default:
@@ -108,8 +112,12 @@ func CheckRefusal(ctx context.Context, cfg RefusalConfig) error {
 	if after := enclave.BackendNames(); !slices.Equal(names, after) {
 		fail(PropertyRefusalRegistration, "registered backends went from %q to %q", names, after)
 	}
-	if after := budgetOf(); after != budget {
-		fail(PropertyRefusalBudget, "locked-memory budget went from %s to %s", budget, after)
+	// With no baseline allocator there is nothing to compare, and a second
+	// budgetOf would start one itself.
+	if !budget.unset {
+		if after := budgetOf(); after != budget {
+			fail(PropertyRefusalBudget, "locked-memory budget went from %s to %s", budget, after)
+		}
 	}
 	return findingsOf(findings)
 }
@@ -150,6 +158,12 @@ func (s budgetSnapshot) String() string {
 }
 
 // budgetOf snapshots the process allocator's identity, limit and reservations.
+// The enclave package has no read-only view of the process allocator, so the
+// first call starts it. CheckRefusal makes that first call before the
+// constructor runs, so New and Probe see the same started allocator the
+// comparison reads, and it takes the second snapshot only when the first one
+// found an allocator: when the first could not start one, a second call would
+// start it itself and report the check's own side effect as the module's.
 func budgetOf() budgetSnapshot {
 	a, err := enclave.ProcessAllocator()
 	if err != nil || isNilInterface(a) {

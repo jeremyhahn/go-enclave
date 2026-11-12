@@ -178,7 +178,15 @@ func TestCheckRefusalCatches(t *testing.T) {
 // CheckRefusal must report as a budget change.
 func budgetFault(alloc enclave.Allocator) RefusalConfig {
 	return withNew(func() (enclave.Backend, error) {
-		_, _ = alloc.ForceLimit(alloc.Limit() + 1)
+		// Lower an unbounded limit instead: MaxInt64+1 would wrap negative
+		// and ForceLimit would refuse it, moving nothing.
+		limit := alloc.Limit()
+		if limit < math.MaxInt64 {
+			limit++
+		} else {
+			limit--
+		}
+		_, _ = alloc.ForceLimit(limit)
 		return nil, &hardwareError{step: "open"}
 	})
 }
