@@ -246,7 +246,8 @@ to AMD's ARK proves the chip.
    the host kernel, QEMU and OVMF versions. HPE sells its EPYC model of this
    generation as the DL385 Gen10 Plus v2; the record settles which part is
    installed. A Rome (7002) CPU cannot run SNP, and the plan stops there for
-   the owner.
+   the owner. The first record is [below](#host-record); the CPU is Milan,
+   so that stop does not apply.
 2. **The runner.** A self-hosted runner on that host launches a fresh SNP
    guest per job from a pinned, measured image (OVMF plus a direct-boot
    kernel, initrd and command line covered by the launch measurement), with
@@ -278,6 +279,29 @@ to AMD's ARK proves the chip.
    VMPL0; the reports carry the guest kernel's VMPL, and a `privlevel` below
    the floor is refused.
 
+### Host record
+
+The development host is an AMD EPYC 73F3 (Milan) server. Surveyed read-only
+on 2026-11-12 from an unprivileged container on that host:
+
+| Item | Value |
+| --- | --- |
+| CPU (`/proc/cpuinfo`) | AMD EPYC 73F3 16-Core Processor; family 25 (0x19), model 1, stepping 1: Zen 3, EPYC 7003 (Milan), SNP-capable |
+| Microcode | `0xa0011e0` |
+| CPU flags | `sev`, `sev_es`; no `sev_snp` |
+| `kvm_amd` parameters | `sev=Y`, `sev_es=Y`, `sev_snp=N` |
+| Device nodes | `/dev/sev`, `/dev/kvm`, `/dev/sev-guest`: not visible from the container |
+| Host kernel | Linux 7.0 (`7.0.0-43-generic`) |
+| ASP firmware, SNP API version and build | not visible from the container (the kernel log is not readable there) |
+| QEMU, OVMF | not yet recorded |
+
+SEV and SEV-ES are enabled. SNP is not yet: the missing `sev_snp` flag and
+`sev_snp=N` say the BIOS or host kernel has not turned it on. Enabling SNP and
+granting the runner access to `/dev/sev` and `/dev/kvm` are pending, and the
+record is completed (ASP firmware SNP API version and build, QEMU, OVMF, the
+server model) when they land. Until then no step of this plan past step 1
+runs: an SEV-ES guest refuses the backend's probe by design (step 6).
+
 ## Open questions
 
 ### Q1: in-tree or out-of-tree
@@ -291,6 +315,10 @@ to AMD's ARK proves the chip.
   `golang.org/x/sys`), but it is hardware-specific code, which the boundary
   excludes.
 
+Proposed answer (for owner sign-off): out of tree, its own module; the SPEC
+boundary excludes hardware-specific code here, and the host record adds
+nothing that needs an unexported API.
+
 ### Q2: the report interface
 
 - **configfs-tsm** (recommended): the kernel's vendor-neutral report ABI, the
@@ -302,6 +330,10 @@ to AMD's ARK proves the chip.
   give no SVSM path. Only `SNP_GET_DERIVED_KEY` has no configfs equivalent
   ([Q8](#q8-derived-keys)).
 
+Proposed answer (for owner sign-off): configfs-tsm; the host kernel (7.0) is
+well past 6.7, the pinned guest image's kernel is chosen at or above it, and
+it keeps the SVSM path Q7 needs.
+
 ### Q3: rank
 
 - **Rank 2** (recommended): above locked memory (0) and linux-secretmem's
@@ -312,6 +344,10 @@ to AMD's ARK proves the chip.
 - **A wide band** (for example 100 for TEE memory, 200 for secure elements):
   room between classes, at the cost of numbers with no meaning but their
   order ([detection scope fence](../backend-detection/architecture.md#scope-fence)).
+
+Proposed answer (for owner sign-off): left to the owner, who rules the
+hardware rows' order once across the sibling proposals; this proposal's input
+stays rank 2, and the host record does not bear on it.
 
 ### Q4: the detection probe
 
@@ -325,6 +361,10 @@ to AMD's ARK proves the chip.
   trip, but it passes a guest whose VMPCK the driver disabled or whose user
   may not create entries, which then fails at the first `Attest`.
 
+Proposed answer (for owner sign-off): the full probe, one report over a fresh
+nonce; test plan step 6 needs a probe that refuses the SEV-ES guests this host
+already runs and passes only a guest that can attest.
+
 ### Q5: handle memory
 
 - **A memory enclave** (recommended): `enclave.NewMemory` in private guest
@@ -336,6 +376,10 @@ to AMD's ARK proves the chip.
   constructor, which that row's Q1 (in tree, unexported) does not give, and it
   fails on the guests that refuse `memfd_secret`. Recommended as a later
   change, after both rows ship.
+
+Proposed answer (for owner sign-off): a memory enclave now, secretmem inside
+the guest as a later change once both rows ship; go-enclave exports no
+secretmem constructor today.
 
 ### Q6: evidence shape
 
@@ -351,6 +395,10 @@ to AMD's ARK proves the chip.
   everything, but it adopts a draft, to be pinned and watched, for a
   convenience the native interface already gives.
 
+Proposed answer (for owner sign-off): the report alone, in the
+`sev-snp-report` format the seam already names; the certificate table stays on
+the native interface, and no draft is adopted.
+
 ### Q7: VMPL and the SVSM
 
 - **Support a guest under an SVSM** (recommended): reports are requested at
@@ -359,6 +407,10 @@ to AMD's ARK proves the chip.
   go-xkms's backend, not this one.
 - **VMPL0 guests only:** simpler, but refuses the deployments where an SVSM
   gives the guest a measured boot through its vTPM.
+
+Proposed answer (for owner sign-off): support a guest under an SVSM; Milan's
+SNP has the VMPLs it needs, so test plan step 7 runs on this host once SNP is
+enabled.
 
 ### Q8: derived keys
 
@@ -371,6 +423,9 @@ to AMD's ARK proves the chip.
 - **A `Deriver` handle in this row:** wider at first ship, and it decides the
   sealing questions inside a memory-backend row.
 
+Proposed answer (for owner sign-off): not in this row; sealing to a chip is a
+`RootUnsealer` with questions of its own, for a row of its own.
+
 ### Q9: the verifier the tests use
 
 - **The `sev-snp-report` verifier of go-trusted-platform** (recommended), the
@@ -380,6 +435,11 @@ to AMD's ARK proves the chip.
 - **A third-party verifier** (for example `github.com/google/go-sev-guest`'s
   `verify`) as a test-only dependency of the backend module: available now,
   but it proves a verifier the portfolio does not run.
+
+Proposed answer (for owner sign-off): left to the owner. The proposal's
+recommendation stands (go-trusted-platform's `sev-snp-report` verifier, added
+there first if missing); the host record does not bear on it, and the choice
+decides a dependency of another project.
 
 ## Rejected alternatives
 
