@@ -148,7 +148,7 @@ func runSweepChild(mode string, n int, limit time.Duration) (out string, rounds 
 			// The child takes the pass state at sendBefore; the signal
 			// must go out after that, never before it.
 			befores++
-			wait := time.NewTimer(signalCap)
+			wait := time.NewTimer(ackWait)
 			defer wait.Stop()
 			for acked < befores {
 				select {
@@ -167,14 +167,21 @@ func runSweepChild(mode string, n int, limit time.Duration) (out string, rounds 
 			// not returned; a thread parked inside it shows the same. So
 			// the signal counts only when this process saw the thread
 			// running just before it and running, with more time on the
-			// CPU, just after it; otherwise the child is told to drop it.
+			// CPU, just after it, and saw the signal taken: no SIGURG
+			// pending on the thread before it (a pending one would absorb
+			// it) and none pending after it, so the kernel delivered this
+			// one to the running thread. Otherwise the child is told to
+			// drop it.
 			after := sendIdle
 			ran, running := runEvidence(pid, id, 0, false)
+			if running && urgPending(pid, id) {
+				running = false
+			}
 			if err := syscall.Tgkill(pid, id, syscall.SIGURG); err != nil {
 				return err
 			}
 			if running {
-				if _, ranOn := runEvidence(pid, id, ran, true); ranOn {
+				if _, ranOn := runEvidence(pid, id, ran, true); ranOn && urgDelivered(pid, id) {
 					after = sendAfter
 				}
 			}
@@ -321,7 +328,7 @@ func TestSweepUnderSignalsSendsTheMinimum(t *testing.T) {
 func TestSignalRoundFailsAStarvedSender(t *testing.T) {
 	// A sender that lands only a few signals before the window closes: the
 	// round must fail rather than pass on the window alone.
-	ctx, cancel := context.WithTimeout(context.Background(), 4*signalPhase)
+	ctx, cancel := context.WithTimeout(context.Background(), roundReserve+4*signalPhase)
 	defer cancel()
 	// The child stands in as one that counts every landed send.
 	tries, landed := 0, 0
@@ -344,7 +351,7 @@ func TestSignalRoundFailsAStarvedSender(t *testing.T) {
 // reaches its compare loop: every send lands, but none interrupts a
 // comparison, so the round must fail with nothing counted.
 func TestSignalRoundFailsAChildThatNeverCompares(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 4*signalPhase)
+	ctx, cancel := context.WithTimeout(context.Background(), roundReserve+4*signalPhase)
 	defer cancel()
 	sent, ok := signalRound(ctx, func() int { return 0 }, func() error { return nil })
 	if ok {
@@ -364,7 +371,7 @@ func TestSignalRoundFailsAChildThatNeverCompares(t *testing.T) {
 // round must fail with nothing counted.
 func TestSweepUnderSignalsFailsAPausedChild(t *testing.T) {
 	requireRunEvidence(t)
-	out, sent, _, err := runSweepChild(childPause, 32, sweepDeadline)
+	out, sent, _, err := runSweepChild(childPause, 32, controlDeadline)
 	if !errors.Is(err, errTooFewSignals) {
 		t.Fatalf("a round whose child stopped comparing: want %v, got %v (signals %v)\n%s", errTooFewSignals, err, sent, out)
 	}
@@ -380,7 +387,7 @@ func TestSweepUnderSignalsFailsAPausedChild(t *testing.T) {
 // count none and fail.
 func TestSweepUnderSignalsFailsSignalsOutsideCompares(t *testing.T) {
 	requireRunEvidence(t)
-	out, sent, _, err := runSweepChild(childOutside, 32, sweepDeadline)
+	out, sent, _, err := runSweepChild(childOutside, 32, controlDeadline)
 	if !errors.Is(err, errTooFewSignals) {
 		t.Fatalf("a round whose signals all landed between compare passes: want %v, got %v (signals %v)\n%s", errTooFewSignals, err, sent, out)
 	}
@@ -394,12 +401,47 @@ func TestSweepUnderSignalsFailsSignalsOutsideCompares(t *testing.T) {
 // the round must count none of them.
 func TestSweepUnderSignalsFailsAParkedChild(t *testing.T) {
 	requireRunEvidence(t)
-	out, sent, _, err := runSweepChild(childParked, 32, sweepDeadline)
+	out, sent, _, err := runSweepChild(childParked, 32, controlDeadline)
 	if !errors.Is(err, errTooFewSignals) {
 		t.Fatalf("a round whose thread parked inside its pass: want %v, got %v (signals %v)\n%s", errTooFewSignals, err, sent, out)
 	}
 	if len(sent) != 1 || sent[0] != 0 {
 		t.Fatalf("a round whose thread parked inside its pass counted %v signal(s), want [0]", sent)
+	}
+}
+
+// A signal the thread cannot take stays pending, and so must not count
+// as delivered: block SIGURG on a locked thread, send it, and the
+// delivery check must see it pending until the thread unblocks it.
+func TestUrgDeliveredNeedsTheSignalTaken(t *testing.T) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	pid, tid := os.Getpid(), syscall.Gettid()
+	if urgPending(pid, tid) {
+		t.Skip("SIGURG is already pending on this thread, or /proc gives no SigPnd")
+	}
+	const sigBlock, sigSetmask = 0, 2
+	set := uint64(1) << (uint(syscall.SIGURG) - 1)
+	var old uint64
+	if _, _, e := syscall.RawSyscall6(syscall.SYS_RT_SIGPROCMASK, sigBlock,
+		uintptr(unsafe.Pointer(&set)), uintptr(unsafe.Pointer(&old)), 8, 0, 0); e != 0 {
+		t.Fatalf("rt_sigprocmask: %v", e)
+	}
+	restore := func() {
+		_, _, _ = syscall.RawSyscall6(syscall.SYS_RT_SIGPROCMASK, sigSetmask,
+			uintptr(unsafe.Pointer(&old)), 0, 8, 0, 0)
+	}
+	if err := syscall.Tgkill(pid, tid, syscall.SIGURG); err != nil {
+		restore()
+		t.Fatalf("tgkill: %v", err)
+	}
+	blocked := urgDelivered(pid, tid)
+	restore()
+	if blocked {
+		t.Fatal("a SIGURG the thread blocked counted as delivered")
+	}
+	if !urgDelivered(pid, tid) {
+		t.Fatal("a SIGURG the thread unblocked still shows pending")
 	}
 }
 
@@ -584,12 +626,16 @@ func readParent(st *passState, done chan<- error) {
 // passes a send landed in, so a thread that is named but descheduled, or
 // that stops comparing, adds nothing however many sends succeed. The round
 // ends once that count reaches minSignals and signalPhase has passed since
-// the first; a round that cannot get there by signalCap reports false
-// rather than pass unsignaled.
+// the first. The count, not a fixed window, ends the round: a slow
+// thread, as under the race detector and coverage, takes longer to reach
+// it but is held to the same rule. A round that cannot get there before
+// roundReserve of ctx's deadline remains reports false rather than pass
+// unsignaled, and leaves the child time to take its abort verdict.
 func signalRound(ctx context.Context, signaled func() int, send func() error) (count int, ok bool) {
 	tick := time.NewTicker(signalInterval)
 	defer tick.Stop()
-	start := time.Now()
+	stop, bounded := ctx.Deadline()
+	stop = stop.Add(-roundReserve)
 	var first time.Time // when the child first reported a signaled pass
 	for {
 		select {
@@ -604,7 +650,7 @@ func signalRound(ctx context.Context, signaled func() int, send func() error) (c
 		if count >= minSignals && time.Since(first) >= signalPhase {
 			return count, true
 		}
-		if time.Since(start) >= signalCap {
+		if bounded && !time.Now().Before(stop) {
 			return count, false
 		}
 		_ = send() // a send that fails lands in no pass, so it never counts
@@ -616,7 +662,7 @@ func roundError(sent int, ok bool) error {
 	if ok {
 		return nil
 	}
-	return fmt.Errorf("%w: %d in %v, want %d", errTooFewSignals, sent, signalCap, minSignals)
+	return fmt.Errorf("%w: %d before the deadline, want %d", errTooFewSignals, sent, minSignals)
 }
 
 // threadRun reads the scheduler state letter and the on-CPU nanoseconds
@@ -665,6 +711,41 @@ func runEvidence(pid, tid int, since uint64, strict bool) (uint64, bool) {
 	}
 }
 
+// urgPending reports whether SIGURG is pending on thread tid of process
+// pid, by its SigPnd mask in /proc; a read that fails counts as pending,
+// so it never lets a signal count.
+func urgPending(pid, tid int) bool {
+	status, err := os.ReadFile(fmt.Sprintf("/proc/%d/task/%d/status", pid, tid))
+	if err != nil {
+		return true
+	}
+	_, rest, found := bytes.Cut(status, []byte("\nSigPnd:"))
+	if !found {
+		return true
+	}
+	line, _, _ := bytes.Cut(rest, []byte("\n"))
+	mask, err := strconv.ParseUint(strings.TrimSpace(string(line)), 16, 64)
+	if err != nil {
+		return true
+	}
+	return mask&(1<<(uint(syscall.SIGURG)-1)) != 0
+}
+
+// urgDelivered polls for up to runWait until SIGURG is no longer pending
+// on thread tid of process pid: the kernel took the signal sent to it.
+func urgDelivered(pid, tid int) bool {
+	deadline := time.Now().Add(runWait)
+	for {
+		if !urgPending(pid, tid) {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(runPoll)
+	}
+}
+
 // requireRunEvidence skips a test whose rounds need run evidence the
 // kernel does not give: without schedstat no signal could count.
 func requireRunEvidence(t *testing.T) {
@@ -681,8 +762,12 @@ const (
 	minSignals     = 50                     // a round counts only after this many
 	signalPhase    = 50 * time.Millisecond  // of signals to the sweeping thread per round
 	signalInterval = 200 * time.Microsecond // between signals to the sweeping thread
-	signalCap      = 5 * time.Second        // a round that cannot reach minSignals by then fails
-	sweepDeadline  = 30 * time.Second       // the sweep child is killed after this, never hangs
+	ackWait        = 5 * time.Second        // for the child to take the pass state at a sendBefore
+	roundReserve   = 2 * time.Second        // a round stops signaling this long before the child's deadline
+	sweepDeadline  = 120 * time.Second      // the sweep child is killed after this, never hangs
+	// controlDeadline bounds a child whose rounds must fail: it signals
+	// for twice the old fixed window before its round gives up.
+	controlDeadline = roundReserve + 10*time.Second
 
 	sweepChildEnv     = "MEMSCAN_SWEEP_CHILD" // "<mode> <needle length>" for TestSweepChild
 	roundTid          = "sweep thread "       // the child's line naming a round's sweeping thread
