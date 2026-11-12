@@ -2112,6 +2112,8 @@ func TestScriptsMakeEntryPoints_TreatHostileValuesAsData(t *testing.T) {
 		{"release VERSION", "release", "VERSION", map[string]string{"AGENT_GIT": "/bin/false"}, false, ""},
 		{"release-candidate VERSION", "release-candidate", "VERSION", map[string]string{"AGENT_GIT": "/bin/false"}, false, ""},
 		{"release-alpha VERSION", "release-alpha", "VERSION", map[string]string{"AGENT_GIT": "/bin/false"}, false, ""},
+		{"release-tree-check TAG", "release-tree-check", "TAG", map[string]string{"REF": "main"}, false, ""},
+		{"release-tree-check REF", "release-tree-check", "REF", map[string]string{"TAG": "v0.0.1"}, false, ""},
 		{"lint-scripts TOOL_INSTALL", "lint-scripts", "TOOL_INSTALL", nil, false, ""},
 		// `coverage` checks the floor before the suite runs, so a refused value
 		// costs nothing.
@@ -2124,7 +2126,7 @@ func TestScriptsMakeEntryPoints_TreatHostileValuesAsData(t *testing.T) {
 				// happens: point it at nothing.
 				env := map[string]string{
 					"FORGE_API_URL": "http://127.0.0.1:9/api/v1", "FORGE_REPOSITORY": "owner/repo", "FORGE_TOKEN": "x",
-					"TAG": "", "SHA": "", "MAIN_REF": "", "VERSION": "",
+					"TAG": "", "SHA": "", "MAIN_REF": "", "REF": "", "VERSION": "",
 				}
 				var assignments []string
 				for k, v := range tc.fixed {
