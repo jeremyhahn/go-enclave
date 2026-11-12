@@ -300,6 +300,11 @@ plan names the board and nothing stands in for it.
 - **A trusted-imx95 daemon** on a Unix socket: a second normal-world process
   every request trusts, and one more component to attest.
 
+Proposed answer (for owner sign-off): the Linux TEE subsystem with the
+GlobalPlatform TEE Client API, because arm-trustzone's ruled design already
+speaks it in pure Go over `/dev/tee0`, so the client is shared and no
+device-specific ABI or cgo enters go-enclave.
+
 ### Q2: where the module lives
 
 - **Its own Go module in this repository, beside arm-trustzone's backend**
@@ -314,6 +319,11 @@ plan names the board and nothing stands in for it.
   would make every consumer link a device client.
 - **trusted-imx95**: refused by the owner's correction; it is not a Go project.
 
+Proposed answer (for owner sign-off): its own Go module in this repository,
+beside arm-trustzone's backend, because the arm-trustzone ruling placed that
+backend in the nested module `backends/armtrustzone` on the same terms, and
+both keep the root module free of hardware code.
+
 ### Q3: rank
 
 - **Above arm-trustzone** (recommended): on the i.MX 95 both may be registered
@@ -327,6 +337,11 @@ plan names the board and nothing stands in for it.
 - **Below arm-trustzone**: only if the secure world kept the keys in its own
   memory rather than the ELE, which item 3 of trusted-imx95's list excludes.
 
+Proposed answer (for owner sign-off): left to the owner, because the hardware
+rows' order among themselves is to be ruled once across the sibling proposals
+([amd-sev's Q3](amd-sev.md#q3-rank)); this proposal's recommendation, above
+arm-trustzone, stands as input to that ruling.
+
 ### Q4: the detection probe
 
 - **Recommended:** `Probe(ctx)` checks `ctx`, opens `/dev/tee0`, checks
@@ -339,6 +354,11 @@ plan names the board and nothing stands in for it.
   the trusted application or speaks another ABI version.
 - **A full key round trip** (generate, sign, destroy): proves more but writes
   to the key store on every `Detect`; `backendtest` covers it instead.
+
+Proposed answer (for owner sign-off): the recommended probe (session open and
+version command, no key made), because it passes only a board that can serve
+requests, as amd-sev's recommended probe does with one report, while leaving
+the ELE's key store untouched.
 
 ### Q5: what `Import` holds
 
@@ -354,6 +374,10 @@ plan names the board and nothing stands in for it.
   returning it on request: that is byte access across the boundary, which the
   secure-element class does not give.
 
+Proposed answer (for owner sign-off): wrapping and data keys only, as `AEAD`
+handles, because it keeps `NewSealer(…, WithBackend(b))` usable for xkmsd
+while no key material ever crosses back out of the secure world.
+
 ### Q6: the evidence format
 
 - **trusted-imx95 emits an Entity Attestation Token** ([RFC 9711](https://www.rfc-editor.org/rfc/rfc9711))
@@ -367,6 +391,11 @@ plan names the board and nothing stands in for it.
 - Either way go-enclave passes the bytes through unparsed; the choice is
   trusted-imx95's, recorded here because go-xkms's verifier depends on it.
 
+Proposed answer (for owner sign-off): an Entity Attestation Token (RFC 9711)
+emitted by trusted-imx95, because it is a published standard the verifier
+already parses, and like amd-sev's recommended evidence it passes through
+go-enclave unparsed in a format the seam names.
+
 ### Q7: device lifecycle at the probe
 
 - **The probe does not refuse an open lifecycle** (recommended): `Detect`
@@ -377,12 +406,21 @@ plan names the board and nothing stands in for it.
   a development board would fall back to locked memory with no way to test the
   backend, and it puts an appraisal decision in go-enclave.
 
+Proposed answer (for owner sign-off): the probe does not refuse an open
+lifecycle, because detection selects by rank and never attests, so appraisal
+stays with the relying party, as amd-sev leaves VMPL policy to its verifier.
+
 ### Q8: consumers
 
 No seam changes: the backend implements the existing interfaces, so go-xkms's
 `hsm-appliance` gains it when xkmsd's `main` registers it and calls `Detect`.
 go-xkms names the seam on its side. Recommended: no other consumer's SPEC
 gains a row, since only the appliance runs on the part.
+
+Proposed answer (for owner sign-off): left to the owner, because which
+consumers gain a row is a decision across the consumers' SPECs, outside
+go-enclave; this proposal's recommendation, go-xkms's `hsm-appliance` only,
+stands as input to that ruling.
 
 ## Rejected alternatives
 
