@@ -17,23 +17,25 @@ In both cases a quote from the CPU alone no longer describes everything that
 can reach the material: the GPU's own evidence is part of the environment's.
 
 The backend proposed here is a narrow one
-([Q1](#q1-does-a-blackwell-backend-make-sense)): it holds material where the
-CPU TEE backend holds it, and adds the GPU's evidence and a readiness gate, so
-a CVM with a Blackwell GPU attests as one environment.
+([Q1](#q1-does-a-blackwell-backend-make-sense)): it holds material in a memory
+enclave in the CVM's private memory, and adds the GPU's evidence to the CPU's
+and a readiness gate, so a CVM with a Blackwell GPU attests as one
+environment. It depends on [confidential-vm](confidential-vm.md), which is not
+a backend: that feature's `Attester` supplies the CPU's evidence.
 
 ## Threat model: what nvidia-blackwell adds
 
-| Path to the material | Memory enclave | [linux-secretmem](../linux-secretmem/architecture.md) | CPU TEE backend ([intel-tdx](intel-tdx.md), [amd-sev](amd-sev.md)) | nvidia-blackwell |
+| Path to the material | Memory enclave | [linux-secretmem](../linux-secretmem/architecture.md) | Memory enclave in a CVM ([confidential-vm](confidential-vm.md)) | nvidia-blackwell |
 |---|---|---|---|---|
-| Host kernel, hypervisor, host root | readable | readable: secretmem guards one kernel's own paths, not a hypervisor's | refused: CVM private memory | refused: material is held where the CPU TEE backend holds it |
-| `/proc/<pid>/mem`, `ptrace`, GUP inside the same kernel | readable | refused | readable to the CVM's own root | as the CPU TEE backend |
-| A GPU accepted into the CVM's TCB (TEE-I/O) | not applicable | not applicable | reaches private memory; its evidence is not in this backend's `Attest` | reaches private memory; its evidence is in `Attest` |
-| Evidence from `Attester` | none: the host's platform attests | none: the host's platform attests | the CPU's report | the CPU's report and one GPU report per GPU, bound to one nonce |
-| Selected by `Detect` when | always (rank 0) | the kernel allows `memfd_secret` | the process runs in that CVM | the process runs in that CVM and every GPU is in CC mode and set ready |
+| Host kernel, hypervisor, host root | readable | readable: secretmem guards one kernel's own paths, not a hypervisor's | refused: CVM private memory | refused: the same private memory |
+| `/proc/<pid>/mem`, `ptrace`, GUP inside the same kernel | readable | refused | readable to the CVM's own root | the same |
+| A GPU accepted into the CVM's TCB (TEE-I/O) | not applicable | not applicable | reaches private memory; its evidence is not in confidential-vm's `Attest` | reaches private memory; its evidence is in `Attest` |
+| Evidence from `Attester` | none: the host's platform attests | none: the host's platform attests | the CPU's report, from confidential-vm's standalone `Attester` | the CPU's report and one GPU report per GPU, bound to one nonce |
+| Selected by `Detect` when | always (rank 0) | the kernel allows `memfd_secret` | never: confidential-vm is not a backend | the process runs in a CVM and every GPU is in CC mode and set ready |
 
-It adds no protection to the material itself beyond the CPU TEE's: the bytes
-sit in the same private memory. What it adds is evidence that covers the GPU
-and a probe that refuses a GPU not yet admitted.
+It adds no protection to the material itself beyond the CVM's: the bytes sit
+in the same private memory. What it adds is evidence that covers the GPU and
+a probe that refuses a GPU not yet admitted.
 
 ## Hardware mechanism
 
@@ -53,9 +55,9 @@ revision current when the code is written.
   NVIDIA's host tooling. DevTools mode (`NVML_CC_SYSTEM_DEVTOOLS_MODE_ON`) is a
   debugging mode and does not count as on.
 - **The CPU TEE.** GPU CC runs only inside a CVM: an Intel TDX trust domain or
-  an AMD SEV-SNP guest, which the [intel-tdx](intel-tdx.md) and
-  [amd-sev](amd-sev.md) proposals cover. KVM with VFIO passes the GPU
-  through.
+  an AMD SEV-SNP guest, whose attestation the
+  [confidential-vm](confidential-vm.md) proposal covers. KVM with VFIO passes
+  the GPU through.
 - **Two data paths.** Without TEE-I/O, the driver encrypts every transfer
   between the CVM and the GPU through bounce buffers in shared memory, and
   the GPU never reaches private memory. With TEE-I/O, PCIe IDE encrypts the
@@ -97,15 +99,15 @@ revision current when the code is written.
 and every GPU it can see, under one nonce ([Q4](#q4-nonce-and-evidence-format)):
 
 1. checks `ctx` and the nonce (1 to 64 bytes, else `enclave.ErrInvalidNonce`);
-2. asks the CPU TEE backend's `Attest` for the CPU report over the nonce as given;
+2. asks confidential-vm's `Attester` for the CPU report over the nonce as given;
 3. asks each GPU for its report over `SHA-256(nonce)`, the 32 bytes the GPU
    binds, and for its certificate chain;
 4. returns one `Evidence` whose `Format` names the composite and whose `Data`
    is a CMW collection ([RFC 9999](https://www.rfc-editor.org/rfc/rfc9999.html),
    July 2026) of the CPU's evidence and each GPU's report and chain.
 
-The relying party verifies each member with its own verifier (the CPU TEE
-backend's, and NVAT or NRAS for the GPUs), recomputes `SHA-256(nonce)`, and
+The relying party verifies each member with its own verifier (an SNP report
+or TD quote verifier for the CPU, NVAT or NRAS for the GPUs), recomputes `SHA-256(nonce)`, and
 checks that the set of GPUs is the one it expects. This backend's handles do
 not attest: no per-key evidence exists on a GPU.
 
@@ -113,13 +115,13 @@ not attest: no per-key evidence exists on a GPU.
 
 ```mermaid
 flowchart LR
-  main -->|"New(inner)"| nb[nvidia-blackwell]
+  main -->|"confidentialvm.NewAttester()"| cpu[confidential-vm Attester]
+  main -->|"New(cpu)"| nb[nvidia-blackwell]
   main -->|Register| reg[(registry)]
   main -->|Detect ctx| detect[Detect]
   detect -->|"Rank 0, Probe nil"| lm[locked memory]
-  detect -->|"inner Rank, Probe: CVM"| cpu[CPU TEE backend]
-  detect -->|"inner Rank + 1, Probe: CVM, NVML, CC on, ready"| nb
-  nb -->|"Import, ConfinesProcess"| cpu
+  detect -->|"Rank, Probe: NVML, CC on, ready"| nb
+  nb -->|"Import: memory enclave in CVM memory"| h[Handle: ByteAccess, Freezer]
   nb -->|"Attest: CPU report"| cpu
   nb -->|"Attest: GPU report, chain"| nvml[NVML: libnvidia-ml]
 ```
@@ -127,20 +129,21 @@ flowchart LR
 - **Its own module**, as every hardware backend is: the root module carries no
   hardware code, and this one adds a dependency (Q5) the root module cannot
   take.
-- **A composing backend** (Q1, Q2): its constructor takes the CPU TEE backend
-  `main` built (`inner`) and refuses one that is not an `Importer`, `Attester`
-  and `Prober` whose `ConfinesProcess` is true, with `*enclave.CapabilityError`.
+- **A composing backend** (Q1, Q2): its constructor takes the
+  confidential-vm `Attester` `main` built (`cpu`) and refuses a nil one.
+  confidential-vm's constructor succeeds only inside a CVM, so holding `cpu`
+  proves the process runs in one.
 - It implements `Backend` (name `nvidia-blackwell`), `Importer`, `Confiner`,
-  `Attester` and `Prober`. `Import` delegates to `inner` and wraps the handle so
-  `Backend()` returns this backend. The wrapped handle is `ByteAccess` and
-  `Freezer`, `As` reaches `inner`'s handle, and a handle `inner` makes without
-  both is destroyed and refused with `*enclave.CapabilityError`. It is no
-  `Sweeper`: the handles are `inner`'s, swept as `inner`'s are.
-- **Rank** is `inner.Rank() + 1` (Q3), fixed at construction.
-- **Probe**, run only from `Detect`: checks `ctx`, runs `inner.Probe(ctx)`, then
-  loads NVML and requires at least one GPU, every GPU Blackwell, CC on, DevTools
-  off, a multi-GPU mode proven on target hardware (Q6), and the ready state
-  set. It fetches no evidence.
+  `Attester` and `Prober`. `Import` puts the material in a memory enclave
+  (`enclave.NewMemory`) in the CVM's private memory and wraps it so
+  `Backend()` returns this backend; the handle is `ByteAccess` and `Freezer`.
+  `ConfinesProcess` is true. It is no `Sweeper`: `WipeAll`'s first phase
+  already sweeps every memory enclave.
+- **Rank** is fixed (Q3).
+- **Probe**, run only from `Detect`: checks `ctx`, then loads NVML and
+  requires at least one GPU, every GPU Blackwell, CC on, DevTools off, a
+  multi-GPU mode proven on target hardware (Q6), and the ready state set. It
+  fetches no evidence.
 - It passes `backendtest` on target hardware ([test strategy](#test-strategy)).
 - **Linux only.** The module builds for Linux; nothing is proposed for any
   other GOOS, since NVIDIA's CC stack runs only in Linux guests.
@@ -158,13 +161,14 @@ reused where their meaning holds.
 | No GPU visible; CC off; DevTools on; a multi-GPU mode not proven; ready state not set | probe | `*ConfComputeError{Device, Setting, Value}` matching `ErrConfComputeUnavailable` |
 | A GPU that is not Blackwell | probe | `*GPUArchitectureError{Device, Architecture}` matching `ErrUnsupportedGPU` |
 | A GPU's report or certificate chain cannot be fetched | `Attest` | `*GPUAttestationError{Device, Cause}` matching `ErrGPUAttestation` |
-| `inner` lacks `Importer`, `Attester` or `Prober`, or does not confine; `inner`'s handle lacks `ByteAccess` or `Freezer` | construction, `Import` | `*enclave.CapabilityError` |
+| `cpu` is nil | construction | `ErrInvalidAttester` |
 | An empty or 65-byte nonce | `Attest` | `enclave.ErrInvalidNonce` |
-| `inner`'s own failures (no CVM, its report refused) | probe, `Import`, `Attest` | `inner`'s typed error, unwrapped by `errors.Is` and `errors.As` |
+| `cpu`'s own failures (its report refused) | `Attest` | `cpu`'s typed error, unwrapped by `errors.Is` and `errors.As` |
+| Locked memory refused | `Import` | the memory enclave's existing `ErrLockedMemoryUnavailable` |
 | `ctx` ended | every call taking one | the context's error |
 
 A probe failure reaches `main` wrapped in `Detect`'s `*ProbeError`, and
-`Detect` keeps the next-ranked backend, normally `inner`. Nothing falls back
+`Detect` keeps the next-ranked backend. Nothing falls back
 after construction ([a missing capability](architecture.md#a-missing-capability)).
 
 ## Test strategy
@@ -178,20 +182,20 @@ signs a report that verifies to NVIDIA's root.
   Intel TDX or AMD SEV-SNP, the GPU passed through to a CVM with KVM and VFIO.
   The CVM is the deployment itself, not a stand-in for the GPU. TEE-I/O is
   tested when the CPU and kernel carry it.
-- **Order.** The inner backend (intel-tdx or amd-sev) passes its own
-  `backendtest` on that host first; this backend depends on one of them.
+- **Order.** confidential-vm's `Attester` passes its own tests in that CVM
+  first; this backend depends on it.
 - **Conformance.** `backendtest.TestBackend` inside the CVM, under `-race`:
   `BackendCapabilities` `CapabilityImport`, `CapabilityConfine`,
   `CapabilityAttest`, `CapabilityProbe`; handle cases `material` (purpose
   material) and `wrapping-key` (AES-256-GCM), each `CapabilityBytes` and
   `CapabilityFreeze`; the residue sweep runs. `VerifyEvidence` splits the CMW
-  collection, verifies the CPU member with `inner`'s verifier and each GPU
+  collection, verifies the CPU member with confidential-vm's verifier and each GPU
   member with NVAT in local mode, and checks both nonces.
 - **Probe on the same part.** CC on and ready: nil. Ready state not yet set:
   `ErrConfComputeUnavailable`. CC switched off by the host and the GPU passed
   through again: the same. DevTools mode: the same. Driver unloaded:
   `ErrNVMLUnavailable`. `Detect` selects this backend in the first case and
-  `inner` in the others.
+  the next-ranked backend in the others.
 - **Attestation.** Evidence verifies with NVAT locally and through NRAS. It
   fails for another nonce, for an altered report, and with a GPU's member
   removed from the collection.
@@ -204,36 +208,39 @@ signs a report that verifies to NVIDIA's root.
 
 ### Q1: does a Blackwell backend make sense
 
-- **A composing backend** (recommended): material where the CPU TEE backend
-  holds it, plus the GPUs' evidence and the readiness gate. It makes sense
-  because the GPU is in the CVM's TCB: with TEE-I/O it reaches private memory,
-  and an environment whose evidence leaves it out is not fully attested.
+- **A composing backend** (recommended): material in a memory enclave in the
+  CVM, plus the GPUs' evidence and the readiness gate. It makes sense because
+  the GPU is in the CVM's TCB: with TEE-I/O it reaches private memory, and an
+  environment whose evidence leaves it out is not fully attested. Its handles
+  add nothing over a memory enclave in the CVM, the reason confidential-vm is
+  not a backend; what the backend adds is the probe that gates selection on
+  the GPUs and the evidence that covers them.
 - **A key-holding backend in GPU memory** (CUDA allocations in the protected
   region): the material must come back to the CPU for `ByteAccess`, the GPU's
   memory is managed by the CVM's own driver, so it is no harder to reach than
   CVM memory, and it needs the CUDA runtime. Recommended against.
-- **No backend:** leave GPU evidence to the platform's attestation layer.
-  Coherent, but a process that selects intel-tdx on a GPU host then attests
+- **No backend:** a standalone `Attester` that adds the GPUs' evidence to
+  confidential-vm's, as confidential-vm itself is. Coherent, and consistent
+  with confidential-vm, but nothing then refuses work before the GPUs are
+  admitted, and a caller that attests through confidential-vm alone attests
   an environment that omits a device inside its TCB.
 
-### Q2: how it reaches the CPU TEE backend
+### Q2: how it reaches the CPU evidence
 
-- **A constructor argument** (recommended): `main` builds the intel-tdx or
-  amd-sev backend and passes it in. The dependency is explicit, no lookup runs
-  at import, and either CPU backend works.
-- **`enclave.Lookup` by name** inside the constructor: hides the dependency in
-  configuration and fails when `main` registers in another order.
-- **Its own CPU attestation:** duplicates the intel-tdx and amd-sev backends.
+- **A constructor argument** (recommended): `main` builds confidential-vm's
+  `Attester` and passes it in. The dependency is explicit, no lookup runs at
+  import, and either CVM platform works.
+- **Its own CPU attestation:** duplicates confidential-vm.
 
 ### Q3: rank
 
-- **`inner.Rank() + 1`** (recommended): above the CVM alone, so `Detect`
-  prefers the attestation that covers the GPU when the GPU is ready, and falls
-  back to `inner` by rank when it is not. Rank stays the backend's own
-  property.
-- **A fixed number:** needs the hardware backends to agree a scale, which
-  [detection](../backend-detection/architecture.md#scope-fence) leaves to them,
-  and can drift from `inner`'s.
+- **Rank 10** (recommended): above locked memory (0), linux-secretmem (1) and
+  arm-trustzone (2), with room for further software backends between, so
+  `Detect` prefers it when the GPUs are ready and keeps a lower backend when
+  they are not. The value is agreed once across the hardware proposals, as
+  [detection](../backend-detection/architecture.md#scope-fence) leaves to them.
+- **Rank 3**, the next free value: simpler, but every later software backend
+  would have to sit above a hardware one or renumber it.
 
 ### Q4: nonce and evidence format
 
@@ -296,4 +303,4 @@ signs a report that verifies to NVIDIA's root.
 No key material in GPU memory, no CUDA, no setting of CC mode or the ready
 state, no verification of evidence, no Hopper and no NVSwitch evidence until
 tested, no code in the root module, nothing off Linux, and no protection for
-the material beyond the CPU TEE's.
+the material beyond the CVM's.

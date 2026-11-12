@@ -7,8 +7,8 @@
 
 `main` registers the backends it links in ([backends](../backends/architecture.md)):
 a TEE, a secure element, locked memory. Which one a process should use
-depends on the host. The TEE module is linked, but the machine may not be
-a TDX guest, and the secure element may be unplugged. Without detection,
+depends on the host. The TEE module is linked, but the machine may lack
+the TEE, and the secure element may be unplugged. Without detection,
 configuration names one with `Lookup`, so every deployment must know its host.
 A deployment wants the most secure backend this host can run, chosen by go-enclave, with
 locked memory as the floor. The choice must also stay observable: an operator
