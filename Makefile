@@ -553,8 +553,8 @@ $(IT_FIPS_TARGETS): integration-test-fips-%:
 .PHONY: lint-integration
 lint-integration:
 	@sh scripts/lint-integration.sh $(INTEGRATION_PACKAGES)
-	@"$(GO)" test -count=1 -tags=integration ./test/integration/internal/devcontainer/
-	@bin=$(call tool,golangci-lint,GOLANGCI) && "$$bin" $(GOLANGCI_FLAGS) --build-tags=integration ./test/integration/...
+	@"$(GO)" test -count=1 -tags=integration ./test/internal/devcontainer/
+	@bin=$(call tool,golangci-lint,GOLANGCI) && "$$bin" $(GOLANGCI_FLAGS) --build-tags=integration ./test/integration/... ./test/internal/...
 
 # THE DEVCONTAINER (build/docker/devcontainer/): one Dockerfile, two stages.
 # `toolchain` is Go plus every pin in scripts/tool-pins.sh, and runs every gate

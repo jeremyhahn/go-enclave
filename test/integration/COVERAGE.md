@@ -44,7 +44,8 @@ enclave suite (provider-conformance below), which gates its coverage at
 These files hold no feature tests; each is named for what it provides.
 
 - `main_test.go`: `TestMain`, which refuses to run outside the devcontainer
-  (`../internal/devcontainer`).
+  (`test/internal/devcontainer`, outside the suites so its unit tests
+  carry no feature prefix).
 - `procfs_test.go`: the `/proc/self` oracle (status VmLck, smaps VmFlags, and a
   residue sweep that reports every address the material is at).
 - `isolation_test.go`: re-runs a test in a fresh child process with its own
