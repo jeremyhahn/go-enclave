@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/fips140"
 	"crypto/hkdf"
 	"crypto/sha256"
 	"encoding/binary"
@@ -314,8 +315,82 @@ func marshalContract(t *testing.T, v any) []byte {
 	return append(data, '\n')
 }
 
+// open reverses wrap and seal: nonce || ciphertext || tag under key. It uses
+// NewGCMWithRandomNonce, which reads that layout and, unlike a GCM with a
+// caller's nonce, FIPS 140-only mode allows.
+func (contractRef) open(key, sealed, aad []byte) ([]byte, error) {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+	g, err := cipher.NewGCMWithRandomNonce(block)
+	if err != nil {
+		return nil, err
+	}
+	return g.Open(nil, nil, sealed, aad)
+}
+
+// verify checks v's expected bytes without sealing: the HKDF key, each
+// blob's header and nonce, and that each opens to its inputs.
+func (r contractRef) verify(t *testing.T, v contractVector) {
+	t.Helper()
+	header := func(version, kind byte, gen uint32) []byte {
+		h := []byte{version, kind, 0, 0, 0, 0}
+		binary.BigEndian.PutUint32(h[2:], gen)
+		return h
+	}
+	unwrap := func(what string, wrapping, blob, wantHeader, wantNonce, wantKey []byte) {
+		if len(blob) != refHeaderLen+refNonceLen+len(wantKey)+refTagLen ||
+			!bytes.Equal(blob[:refHeaderLen], wantHeader) ||
+			!bytes.Equal(blob[refHeaderLen:refHeaderLen+refNonceLen], wantNonce) {
+			t.Errorf("%s: %s layout differs from the document", v.Name, what)
+			return
+		}
+		if k, err := r.open(wrapping, blob[refHeaderLen:], blob[:refHeaderLen]); err != nil || !bytes.Equal(k, wantKey) {
+			t.Errorf("%s: %s does not open to its key: %v", v.Name, what, err)
+		}
+	}
+	if v.KEK == nil {
+		if !bytes.Equal(v.DerivedKey, r.hkdf(v.RootKey, nil, refProtectInfo)) {
+			t.Errorf("%s: derived_key is not the documented Protect key", v.Name)
+		}
+		unwrap("blob", v.DerivedKey, v.Blob, header(refBlobVersion, refKindProvider, 0), v.BlobNonce, v.DEK)
+	} else {
+		if !bytes.Equal(v.DerivedKey, r.hkdf(v.RootKey, v.WrappingSalt, refWrappingInfo)) {
+			t.Errorf("%s: derived_key is not the documented wrapping key", v.Name)
+		}
+		unwrap("kek_blob", v.DerivedKey, v.KEKBlob, header(refBlobVersion, refKindKEK, v.KEKGeneration), v.KEKNonce, v.KEK)
+		unwrap("blob", v.KEK, v.Blob, header(refBlobVersion, refKindDEK, v.KEKGeneration), v.BlobNonce, v.DEK)
+	}
+	if !bytes.Equal(v.AAD, r.aad(v.EnvelopeVersion, v.Blob)) {
+		t.Errorf("%s: aad is not the documented AAD", v.Name)
+	}
+	if !bytes.HasPrefix(v.Sealed, v.SealedNonce) {
+		t.Errorf("%s: sealed does not lead with sealed_nonce", v.Name)
+	}
+	if p, err := r.open(v.DEK, v.Sealed, v.AAD); err != nil || !bytes.Equal(p, v.Plaintext) {
+		t.Errorf("%s: sealed does not open to the plaintext: %v", v.Name, err)
+	}
+}
+
 func TestContractV1_ReferenceEncoder(t *testing.T) {
+	if fips140.Enforced() {
+		// FIPS 140-only mode refuses a GCM with a caller's nonce, so the
+		// fixed-nonce vectors cannot be rebuilt here; they are opened
+		// instead. The rebuild runs in every other mode.
+		vectors, _ := loadContractVectors(t)
+		var r contractRef
+		for _, v := range vectors {
+			r.verify(t, v)
+		}
+		return
+	}
 	files, refusals := contractExpected()
+	for _, f := range files {
+		for _, v := range f.Vectors {
+			contractRef{}.verify(t, v)
+		}
+	}
 	want := map[string][]byte{refusalsFile: marshalContract(t, refusals)}
 	for name, f := range files {
 		want[name] = marshalContract(t, f)
