@@ -56,8 +56,8 @@ func (e *SNPGuestError) Unwrap() error { return e.Cause }
 // SNPReportError reports that one report request in an SNP guest failed. It
 // matches [ErrSNPReport].
 type SNPReportError struct {
-	// Op is the failing step, as [SNPGuestError.Op] lists, or "size" for a
-	// report that is not [ReportSize] bytes.
+	// Op is the failing step, as [SNPGuestError.Op] lists; "outblob" with a
+	// [*ReportSizeError] cause for a report that is not [ReportSize] bytes.
 	Op string
 	// Cause is the step's error.
 	Cause error
