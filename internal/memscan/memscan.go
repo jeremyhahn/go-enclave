@@ -54,7 +54,8 @@ func Addr(b []byte) (uintptr, error) {
 // ("7f0c…-7f0c… rw-p …") and returns its bounds; any other smaps line
 // ("Size:   4 kB") fails the hex parse. The bounds are parsed at
 // bits.UintSize, so on a 32-bit target a value that does not fit is reported
-// unparsable rather than narrowed.
+// unparsable rather than narrowed. A low bound above the high one is not a
+// header: ok is false.
 func ParseMapsHeader(line string) (lo, hi uintptr, ok bool) {
 	first, _, cut := strings.Cut(line, " ")
 	if !cut {
@@ -69,7 +70,7 @@ func ParseMapsHeader(line string) (lo, hi uintptr, ok bool) {
 		return 0, 0, false
 	}
 	rv, err := strconv.ParseUint(r, 16, bits.UintSize)
-	if err != nil {
+	if err != nil || lv > rv {
 		return 0, 0, false
 	}
 	return uintptr(lv), uintptr(rv), true

@@ -100,9 +100,6 @@ func FuzzParseMapsHeader(f *testing.F) {
 	f.Fuzz(func(t *testing.T, line string) {
 		lo, hi, ok := ParseMapsHeader(line)
 		rlo, rhi, rok := refMapsHeader(line)
-		if ok && lo > hi {
-			t.Skip("defect: ParseMapsHeader accepts a header whose low bound is above its high bound")
-		}
 		want := rok && rlo <= rhi
 		if ok != want {
 			t.Fatalf("ParseMapsHeader(%q) ok = %v, want %v", line, ok, want)
