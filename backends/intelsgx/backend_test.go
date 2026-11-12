@@ -42,7 +42,7 @@ func TestUnconstructedBackendRefusesUse(t *testing.T) {
 
 // TestProbeRefusesUnconstructedBackend guards detection: a Backend that New
 // did not build must not pass Probe on a usable host, or it would displace
-// working backends while its Import and Attest always refuse. A cancelled
+// working backends while its Import and Attest always refuse. A canceled
 // ctx tells the paths apart without hardware: the probe helper returns
 // ctx.Err(), the refusal returns ErrSGXUnavailable before probing.
 func TestProbeRefusesUnconstructedBackend(t *testing.T) {

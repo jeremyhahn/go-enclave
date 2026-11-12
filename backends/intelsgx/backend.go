@@ -65,8 +65,13 @@ func (*Backend) Rank() int { return rank }
 // Probe checks that this process is still in a non-debug SGX enclave that can
 // quote, as [New] does. It returns ctx.Err() when ctx ends first, and an
 // error matching [ErrSGXUnavailable] naming the failing step otherwise. A
-// nil ctx is context.Background.
-func (*Backend) Probe(ctx context.Context) error {
+// nil ctx is context.Background. A Backend that New did not build (nil or
+// the zero value) fails with [ErrSGXUnavailable] before probing, so
+// detection never selects an instance whose Import and Attest refuse.
+func (b *Backend) Probe(ctx context.Context) error {
+	if b == nil || !b.constructed {
+		return ErrSGXUnavailable
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
