@@ -173,11 +173,11 @@ func TestAttestCancelKeepsSlotUntilWorkReturns(t *testing.T) {
 	case err := <-first:
 		if !errors.Is(err, context.Canceled) {
 			close(gate)
-			t.Fatalf("Attest(cancelled) = %v, want context.Canceled", err)
+			t.Fatalf("Attest(canceled) = %v, want context.Canceled", err)
 		}
 	case <-time.After(5 * time.Second):
 		close(gate)
-		t.Fatal("Attest did not return at once after its caller cancelled")
+		t.Fatal("Attest did not return at once after its caller canceled")
 	}
 
 	second := make(chan error, 1)
