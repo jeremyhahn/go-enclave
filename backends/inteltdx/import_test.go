@@ -107,7 +107,7 @@ func TestImportAES256GCMKey(t *testing.T) {
 }
 
 func TestImportRefusals(t *testing.T) {
-	cancelled, cancel := context.WithCancel(context.Background())
+	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
 	key := []enclave.ImportOption{
 		enclave.WithPurpose(enclave.PurposeDataKey), enclave.WithAlgorithm(enclave.AlgorithmAES256GCM),
@@ -129,7 +129,7 @@ func TestImportRefusals(t *testing.T) {
 			func(err error) bool { return errors.Is(err, enclave.ErrInvalidImport) }},
 		{"no purpose", context.Background(), 32, nil,
 			func(err error) bool { return errors.Is(err, enclave.ErrInvalidImport) }},
-		{"cancelled ctx", cancelled, 32, key,
+		{"canceled ctx", canceled, 32, key,
 			func(err error) bool { return errors.Is(err, context.Canceled) }},
 		{"empty material", context.Background(), 0,
 			[]enclave.ImportOption{enclave.WithPurpose(enclave.PurposeMaterial)},
