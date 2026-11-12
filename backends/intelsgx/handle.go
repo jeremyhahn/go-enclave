@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"time"
 
 	"github.com/jeremyhahn/go-enclave"
 )
@@ -72,9 +73,11 @@ func (b *Backend) Import(ctx context.Context, material []byte, opts ...enclave.I
 }
 
 // Sweep destroys every live handle this backend made and returns how many it
-// could not release, as [enclave.Sweeper] describes. The memory enclaves'
-// Destroy waits out in-flight borrows itself, so ctx bounds nothing here; a
-// nil or done ctx still releases everything.
+// could not release, as [enclave.Sweeper] describes. Unborrowed handles are
+// wiped whatever ctx is; ctx bounds only the wait for borrowed ones, which a
+// nil or done ctx leaves held. Sweep starts no goroutine that outlives it: a
+// handle it leaves held is wiped, and any failure reported, by a later Sweep
+// or Destroy.
 func (b *Backend) Sweep(ctx context.Context) (held int, err error) {
 	b.handlesMu.Lock()
 	live := make([]*handle, 0, len(b.handles))
@@ -116,29 +119,48 @@ func (b *Backend) Sweep(ctx context.Context) (held int, err error) {
 		return held + len(borrowed), err
 	}
 
-	results := make(chan error, len(borrowed))
-	for _, h := range borrowed {
-		go func() {
-			h.borrow.Lock()
-			defer h.borrow.Unlock()
-			results <- h.destroy()
-		}()
-	}
-	for done := range len(borrowed) {
-		select {
-		case derr := <-results:
+	// Retry the borrowed handles from this goroutine until each borrow ends
+	// or ctx does. No worker outlives the call, so every wipe runs while a
+	// caller still receives its result: a handle left held is wiped, and its
+	// failure reported, by a later Sweep or Destroy.
+	wait := sweepRetryMin
+	for {
+		remaining := borrowed[:0]
+		for _, h := range borrowed {
+			if !h.borrow.TryLock() {
+				remaining = append(remaining, h)
+				continue
+			}
+			derr := h.destroy()
+			h.borrow.Unlock()
 			if derr != nil {
 				held++
 				err = errors.Join(err, derr)
 			}
-		case <-ctx.Done():
-			// A ctx ending during the sweep is not an error: the rest are
-			// held, and their wipes still run when the borrows end.
-			return held + len(borrowed) - done, err
 		}
+		borrowed = remaining
+		if len(borrowed) == 0 {
+			return held, err
+		}
+		timer := time.NewTimer(wait)
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			timer.Stop()
+			// A ctx ending during the sweep is not an error: the rest are
+			// held until a later Sweep or Destroy.
+			return held + len(borrowed), err
+		}
+		wait = min(2*wait, sweepRetryMax)
 	}
-	return held, err
 }
+
+// sweepRetryMin and sweepRetryMax bound the backoff between Sweep's retries
+// of borrowed handles.
+const (
+	sweepRetryMin = 50 * time.Microsecond
+	sweepRetryMax = 5 * time.Millisecond
+)
 
 // track records a live handle for [Backend.Sweep].
 func (b *Backend) track(h *handle) {
