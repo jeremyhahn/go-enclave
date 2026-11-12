@@ -72,6 +72,9 @@ type FindingsError struct {
 
 // Error renders each finding on its own line.
 func (e *FindingsError) Error() string {
+	if len(e.Findings) == 0 {
+		return "backendtest: no findings"
+	}
 	msg := ""
 	for i, f := range e.Findings {
 		if i > 0 {

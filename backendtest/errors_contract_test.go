@@ -42,8 +42,6 @@ type errorContractRow struct {
 	// Unwrap() []error returns. Both nil: the type has no Unwrap method.
 	cause    error
 	findings []error
-	// defect names a known defect in zero's message; the check is skipped.
-	defect string
 }
 
 func asType[T error](err error) (error, bool) {
@@ -84,7 +82,6 @@ func errorContractRows() []errorContractRow {
 			fullIs:   []string{"ErrNotMeasured"},
 			as:       asType[*FindingsError],
 			findings: []error{property, notMeasured},
-			defect:   "a FindingsError with no findings has an empty message",
 		},
 		{
 			name: "PropertyError",
@@ -137,11 +134,8 @@ func TestErrorContract(t *testing.T) {
 				}
 			}
 			t.Run("message", func(t *testing.T) {
-				checkErrorMessage(t, "full", row.full)
-				if row.defect != "" {
-					t.Skip("defect: " + row.defect)
-				}
 				checkErrorMessage(t, "zero", row.zero)
+				checkErrorMessage(t, "full", row.full)
 			})
 			t.Run("is", func(t *testing.T) {
 				checkSentinels(t, "zero", row.zero, row.zeroIs)
