@@ -40,6 +40,27 @@ func TestUnconstructedBackendRefusesUse(t *testing.T) {
 	}
 }
 
+// TestProbeRefusesUnconstructedBackend guards detection: a Backend that New
+// did not build must not pass Probe on a usable host, or it would displace
+// working backends while its Import and Attest always refuse. A cancelled
+// ctx tells the paths apart without hardware: the probe helper returns
+// ctx.Err(), the refusal returns ErrSGXUnavailable before probing.
+func TestProbeRefusesUnconstructedBackend(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	var zero Backend
+	if err := zero.Probe(ctx); !errors.Is(err, ErrSGXUnavailable) {
+		t.Fatalf("Probe on the zero Backend: err = %v, want ErrSGXUnavailable", err)
+	}
+	var nilBackend *Backend
+	if err := nilBackend.Probe(ctx); !errors.Is(err, ErrSGXUnavailable) {
+		t.Fatalf("Probe on a nil *Backend: err = %v, want ErrSGXUnavailable", err)
+	}
+	if err := newTestBackend().Probe(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Probe on a constructed Backend: err = %v, want the probe's context.Canceled", err)
+	}
+}
+
 func TestSweepHonoursContextWhileHandleBorrowed(t *testing.T) {
 	b := newTestBackend()
 	h, err := b.Import(context.Background(), []byte("material"), enclave.WithPurpose(enclave.PurposeMaterial))
