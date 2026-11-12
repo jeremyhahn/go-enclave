@@ -21,6 +21,10 @@ const rank = 2
 type Backend struct {
 	// mu serializes [Backend.Attest]'s request and check.
 	mu sync.Mutex
+
+	// handlesMu guards handles, the live imported handles Sweep destroys.
+	handlesMu sync.Mutex
+	handles   map[*handle]struct{}
 }
 
 var (
