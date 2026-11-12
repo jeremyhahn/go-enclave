@@ -553,6 +553,7 @@ $(IT_FIPS_TARGETS): integration-test-fips-%:
 .PHONY: lint-integration
 lint-integration:
 	@sh scripts/lint-integration.sh $(INTEGRATION_PACKAGES)
+	@"$(GO)" test -count=1 -tags=integration ./test/integration/internal/devcontainer/
 	@bin=$(call tool,golangci-lint,GOLANGCI) && "$$bin" $(GOLANGCI_FLAGS) --build-tags=integration ./test/integration/...
 
 # THE DEVCONTAINER (build/docker/devcontainer/): one Dockerfile, two stages.
