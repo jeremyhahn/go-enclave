@@ -82,3 +82,44 @@ type ReportSizeError struct {
 func (e *ReportSizeError) Error() string {
 	return fmt.Sprintf("amdsev: report is %d bytes, want %d", e.Got, ReportSize)
 }
+
+// FirmwareError is the cause of an [*SNPReportError] whose Op is
+// "derived-key": the guest request reached the sev-guest driver and the
+// firmware, the hypervisor or the response refused it.
+type FirmwareError struct {
+	// FWError is the firmware's error word, the low half of exitinfo2: an
+	// SEV firmware status code, or all ones when the request never reached
+	// the firmware.
+	FWError uint32
+	// VMMError is the hypervisor's error word, the high half of exitinfo2:
+	// 1 for a buffer too short, 2 for a host too busy to take the request.
+	VMMError uint32
+	// Status is the response's STATUS word when the ioctl succeeded and the
+	// firmware refused the key request, such as 0x16 for an invalid
+	// parameter.
+	Status uint32
+	// Errno is the ioctl's *os.SyscallError, nil when Status refused.
+	Errno error
+}
+
+func (e *FirmwareError) Error() string {
+	if e.Errno == nil {
+		return fmt.Sprintf("amdsev: firmware refused the key request: status %#x", e.Status)
+	}
+	return fmt.Sprintf("amdsev: guest request refused: firmware error %#x, hypervisor error %#x: %v",
+		e.FWError, e.VMMError, e.Errno)
+}
+
+// Unwrap returns Errno.
+func (e *FirmwareError) Unwrap() error { return e.Errno }
+
+// KeySizeError reports a key destination that is not 32 bytes, refused
+// before any request.
+type KeySizeError struct {
+	// Got is the destination's length.
+	Got int
+}
+
+func (e *KeySizeError) Error() string {
+	return fmt.Sprintf("amdsev: key destination is %d bytes, want %d", e.Got, derivedKeySize)
+}
