@@ -117,6 +117,25 @@ func TestProbeRefusesWithoutTheDriver(t *testing.T) {
 	}
 }
 
+// TestProbeLoadsNoNVMLWithoutTheDriver covers the step order on Linux: the
+// driver check refuses first, so NVML is never loaded and no NVMLError comes
+// back.
+func TestProbeLoadsNoNVMLWithoutTheDriver(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("the driver and NVML steps run on Linux only")
+	}
+	requireNoDriver(t)
+	err := Probe(context.Background())
+	var de *DriverError
+	if !errors.As(err, &de) {
+		t.Fatalf("Probe = %v, want the *DriverError first", err)
+	}
+	var ne *NVMLError
+	if errors.As(err, &ne) {
+		t.Errorf("Probe = %v, want no *NVMLError: NVML loads only after the driver check", err)
+	}
+}
+
 func TestProbeHonoursAnEndedContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
