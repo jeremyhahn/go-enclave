@@ -27,7 +27,6 @@ bad() {
   printf 'FAIL %s (rc=%s)\n' "$1" "$rc"
   cut -c1-200 "$D/out"
 }
-skip() { printf 'SKIP defect: %s\n' "$1"; }
 
 D=$(mktemp -d)
 trap 'rm -rf "$D"' EXIT
@@ -129,21 +128,17 @@ shells='sh'
 command -v bash > /dev/null 2>&1 && shells="$shells bash"
 
 for s in $shells; do
-  if [ "$s" = sh ]; then
-    nopkg_=1
-    refused sh "no package" 'usage: run-integration-tests.sh <package>'
-    pkg_=
-    refused sh "an empty package" 'usage: run-integration-tests.sh <package>'
-    drop_=FLOOR
-    refused sh "the floor unset" 'GO_ENCLAVE_IT_COVERAGE_FLOOR is required'
-    refused sh "the floor empty" 'GO_ENCLAVE_IT_COVERAGE_FLOOR is required' GO_ENCLAVE_IT_COVERAGE_FLOOR=
-    drop_=COVERPKG
-    refused sh "COVERPKG unset" 'GO_ENCLAVE_IT_COVERPKG is required'
-    drop_=TESTFLAGS
-    refused sh "TESTFLAGS unset" 'GO_ENCLAVE_IT_TESTFLAGS is required'
-  else
-    skip "$s: a \${VAR:?} refusal exits with the shell's own status (127 in bash), not 2"
-  fi
+  nopkg_=1
+  refused "$s" "no package" 'usage: run-integration-tests.sh <package>'
+  pkg_=
+  refused "$s" "an empty package" 'usage: run-integration-tests.sh <package>'
+  drop_=FLOOR
+  refused "$s" "the floor unset" 'GO_ENCLAVE_IT_COVERAGE_FLOOR is required'
+  refused "$s" "the floor empty" 'GO_ENCLAVE_IT_COVERAGE_FLOOR is required' GO_ENCLAVE_IT_COVERAGE_FLOOR=
+  drop_=COVERPKG
+  refused "$s" "COVERPKG unset" 'GO_ENCLAVE_IT_COVERPKG is required'
+  drop_=TESTFLAGS
+  refused "$s" "TESTFLAGS unset" 'GO_ENCLAVE_IT_TESTFLAGS is required'
   pkg_=Demo
   refused "$s" "a capital in the package" 'invalid package name'
   pkg_=../demo
