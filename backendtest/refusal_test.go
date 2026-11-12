@@ -3,6 +3,8 @@ package backendtest
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sync/atomic"
 	"testing"
 
 	enclave "github.com/jeremyhahn/go-enclave"
@@ -28,6 +30,18 @@ func stepOf(err error) (string, bool) {
 
 // refusalBackend is the backend a faulty fake registers or returns.
 type refusalBackend struct{}
+
+// namedRefusalBackend is a refusalBackend under a caller-chosen name, so a
+// test can register a fresh name on every run of the test binary.
+type namedRefusalBackend struct {
+	refusalBackend
+	name string
+}
+
+func (b namedRefusalBackend) Name() string { return b.name }
+
+// registerRuns numbers the registers case's registrations across runs.
+var registerRuns atomic.Int64
 
 func (refusalBackend) Name() string                    { return "refusal-fake" }
 func (refusalBackend) Rank() int                       { return 2 }
@@ -122,7 +136,12 @@ func TestCheckRefusalCatches(t *testing.T) {
 		{"registers", withNew(func() (enclave.Backend, error) {
 			if !registered {
 				registered = true
-				_ = enclave.Register(refusalBackend{})
+				// The registry is process-wide and has no unregister, so each
+				// run (-count, -cpu) registers a name no earlier run took.
+				name := fmt.Sprintf("refusal-fake-%d", registerRuns.Add(1))
+				if err := enclave.Register(namedRefusalBackend{name: name}); err != nil {
+					t.Errorf("Register(%q) = %v", name, err)
+				}
 			}
 			return nil, &hardwareError{step: "open"}
 		}), PropertyRefusalRegistration},
