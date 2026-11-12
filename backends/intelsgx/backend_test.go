@@ -78,8 +78,10 @@ func TestSweepHonoursContextWhileHandleBorrowed(t *testing.T) {
 	}()
 	select {
 	case r := <-done:
-		if !errors.Is(r.err, context.DeadlineExceeded) {
-			t.Fatalf("Sweep err = %v, want context.DeadlineExceeded", r.err)
+		// Per the Sweeper contract a ctx ending during the sweep is not
+		// an error: the borrowed handle is counted as held.
+		if r.err != nil {
+			t.Fatalf("Sweep err = %v, want nil", r.err)
 		}
 		if r.held != 1 {
 			t.Fatalf("Sweep held = %d, want 1", r.held)

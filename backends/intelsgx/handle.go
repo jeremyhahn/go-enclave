@@ -3,6 +3,7 @@ package intelsgx
 import (
 	"context"
 	"errors"
+	"sync"
 
 	"github.com/jeremyhahn/go-enclave"
 )
@@ -75,43 +76,68 @@ func (b *Backend) Import(ctx context.Context, material []byte, opts ...enclave.I
 // Destroy waits out in-flight borrows itself, so ctx bounds nothing here; a
 // nil or done ctx still releases everything.
 func (b *Backend) Sweep(ctx context.Context) (held int, err error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	b.handlesMu.Lock()
 	live := make([]*handle, 0, len(b.handles))
 	for h := range b.handles {
 		live = append(live, h)
 	}
 	b.handlesMu.Unlock()
-	if err := ctx.Err(); err != nil {
-		return len(live), err
+
+	// Wipe every handle no reader holds at once and side by side, whatever
+	// ctx is: ctx bounds only the wait for borrowed handles, and a borrowed
+	// handle never delays the others.
+	errs := make([]error, len(live))
+	var borrowed []*handle
+	var wg sync.WaitGroup
+	for i, h := range live {
+		if !h.borrow.TryLock() {
+			borrowed = append(borrowed, h)
+			continue
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer h.borrow.Unlock()
+			errs[i] = h.destroy()
+		}()
+	}
+	wg.Wait()
+	for _, derr := range errs {
+		if derr != nil {
+			held++
+		}
+	}
+	err = errors.Join(errs...)
+	if len(borrowed) == 0 {
+		return held, err
+	}
+	// A nil or done ctx never waits: the borrowed handles are held.
+	if ctx == nil || ctx.Err() != nil {
+		return held + len(borrowed), err
 	}
 
-	// Destroy waits for a borrowed handle; run the Destroys aside so the
-	// wait selects on ctx. A canceled Sweep counts the rest as held; their
-	// Destroys still finish when the borrows end.
-	results := make(chan error, len(live))
-	go func() {
-		for _, h := range live {
-			results <- h.Destroy()
-		}
-	}()
-	var errs []error
-	for done := 0; done < len(live); done++ {
+	results := make(chan error, len(borrowed))
+	for _, h := range borrowed {
+		go func() {
+			h.borrow.Lock()
+			defer h.borrow.Unlock()
+			results <- h.destroy()
+		}()
+	}
+	for done := range len(borrowed) {
 		select {
 		case derr := <-results:
 			if derr != nil {
 				held++
-				errs = append(errs, derr)
+				err = errors.Join(err, derr)
 			}
 		case <-ctx.Done():
-			held += len(live) - done
-			errs = append(errs, ctx.Err())
-			return held, errors.Join(errs...)
+			// A ctx ending during the sweep is not an error: the rest are
+			// held, and their wipes still run when the borrows end.
+			return held + len(borrowed) - done, err
 		}
 	}
-	return held, errors.Join(errs...)
+	return held, err
 }
 
 // track records a live handle for [Backend.Sweep].
@@ -136,6 +162,9 @@ func (b *Backend) forget(h *handle) {
 type handle struct {
 	mem     enclave.ByteAccess
 	backend *Backend
+	// borrow is read-held while a caller reads the bytes, so Sweep can tell
+	// a borrowed handle from one it may wipe at once.
+	borrow sync.RWMutex
 }
 
 // Size reports the material's length, or 0 once destroyed.
@@ -148,10 +177,18 @@ func (h *handle) IsAlive() bool { return h.mem.IsAlive() }
 func (h *handle) Backend() enclave.Backend { return h.backend }
 
 // WithBytes calls fn with a view of the material.
-func (h *handle) WithBytes(fn func([]byte) error) error { return h.mem.WithBytes(fn) }
+func (h *handle) WithBytes(fn func([]byte) error) error {
+	h.borrow.RLock()
+	defer h.borrow.RUnlock()
+	return h.mem.WithBytes(fn)
+}
 
 // EqualTo reports, in constant time, whether the handle holds exactly other.
-func (h *handle) EqualTo(other []byte) (bool, error) { return h.mem.EqualTo(other) }
+func (h *handle) EqualTo(other []byte) (bool, error) {
+	h.borrow.RLock()
+	defer h.borrow.RUnlock()
+	return h.mem.EqualTo(other)
+}
 
 // Freeze makes the material read-only.
 func (h *handle) Freeze() error {
@@ -164,7 +201,10 @@ func (h *handle) Freeze() error {
 
 // Destroy wipes the material and drops the handle from the registry. It is
 // idempotent; an error leaves the handle registered so Sweep retries it.
-func (h *handle) Destroy() error {
+func (h *handle) Destroy() error { return h.destroy() }
+
+// destroy releases the memory and drops h from the backend's live set.
+func (h *handle) destroy() error {
 	if err := h.mem.Destroy(); err != nil {
 		return err
 	}
