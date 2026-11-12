@@ -49,8 +49,8 @@ func (r *registryRace) register(i int) {
 		if !r.winners[i].CompareAndSwap(nil, b) {
 			r.fail(&r.once, "Register(%q) returned nil twice", name)
 		}
-		if got, err := Lookup(name); err != nil || got != Backend(b) {
-			r.fail(&r.lookups, "Lookup(%q) after its Register = %v, %v; want the registered backend", name, got, err)
+		if err := lookupIs(b); err != nil {
+			r.fail(&r.lookups, "after its Register: %w", err)
 		}
 	case errors.As(err, &exists) && exists.Name == name:
 		r.duplicates.Add(1)
@@ -80,15 +80,21 @@ func (r *registryRace) read(prev []string) []string {
 		}
 	}
 	for i := range r.winners {
-		b := r.winners[i].Load()
-		if b == nil {
-			continue
-		}
-		if got, err := Lookup(b.name); err != nil || got != Backend(b) {
-			r.fail(&r.lookups, "Lookup(%q) after its Register = %v, %v; want the registered backend", b.name, got, err)
+		if b := r.winners[i].Load(); b != nil {
+			if err := lookupIs(b); err != nil {
+				r.fail(&r.lookups, "after its Register: %w", err)
+			}
 		}
 	}
 	return names
+}
+
+// lookupIs reports an error unless Lookup returns b under b's name.
+func lookupIs(b *fakeBackend) error {
+	if got, err := Lookup(b.name); err != nil || got != Backend(b) {
+		return fmt.Errorf("Lookup(%q) = %v, %v; want the registered backend", b.name, got, err)
+	}
+	return nil
 }
 
 // runRegistryRace starts, at one signal, one writer per name, duplicators
@@ -191,12 +197,10 @@ func TestRegistryConcurrent(t *testing.T) {
 	t.Run("LookupAfterRegister", func(t *testing.T) {
 		reportRace(t, r.lookups)
 		for i := range r.winners {
-			b := r.winners[i].Load()
-			if b == nil {
-				continue
-			}
-			if got, err := Lookup(b.name); err != nil || got != Backend(b) {
-				t.Errorf("Lookup(%q) = %v, %v; want the registered backend", b.name, got, err)
+			if b := r.winners[i].Load(); b != nil {
+				if err := lookupIs(b); err != nil {
+					t.Error(err)
+				}
 			}
 		}
 	})
