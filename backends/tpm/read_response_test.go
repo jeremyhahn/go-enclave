@@ -60,7 +60,7 @@ func (c *chunkReader) Read(b []byte) (int, error) {
 func tpmResponse(size int) []byte {
 	b := make([]byte, size)
 	b[0], b[1] = 0x80, 0x01
-	binary.BigEndian.PutUint32(b[2:6], uint32(size)) //nolint:gosec // test sizes are small
+	binary.BigEndian.PutUint32(b[2:6], uint32(size))
 	for i := 10; i < size; i++ {
 		b[i] = byte(i)
 	}
@@ -152,7 +152,7 @@ func FuzzReadResponse(f *testing.F) {
 			switch {
 			case size < header || size > bufLen:
 				wantErr = errOutOfRange
-			case uint32(len(resp)) >= size: //nolint:gosec // len is non-negative
+			case uint32(len(resp)) >= size:
 				wantN, wantErr = int(size), nil
 			}
 		}
