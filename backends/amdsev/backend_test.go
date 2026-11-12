@@ -1,0 +1,86 @@
+package amdsev
+
+import (
+	"context"
+	"errors"
+	"testing"
+
+	enclave "github.com/jeremyhahn/go-enclave"
+)
+
+// TestNewRefusesOutsideAnSNPGuest: the constructor runs the probe's check, so
+// outside an SNP guest no backend is built and the error says "not here". The
+// in-guest pass belongs to the later slice that runs inside an SNP guest.
+func TestNewRefusesOutsideAnSNPGuest(t *testing.T) {
+	b, err := New(context.Background())
+	if err == nil {
+		t.Skip("this host is an SNP guest: the in-guest conformance run covers it")
+	}
+	if b != nil {
+		t.Errorf("New returned a backend with error %v", err)
+	}
+	if !errors.Is(err, ErrSNPGuestUnavailable) || errors.Is(err, ErrSNPReport) {
+		t.Errorf("New = %v, want an error matching ErrSNPGuestUnavailable only", err)
+	}
+	if perr := (&Backend{}).Probe(context.Background()); perr == nil || perr.Error() != err.Error() {
+		t.Errorf("Probe = %v, want the constructor's verdict %v", perr, err)
+	}
+}
+
+func TestNewEndedContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := New(ctx); !errors.Is(err, context.Canceled) {
+		t.Errorf("New(canceled) = %v, want context.Canceled", err)
+	}
+}
+
+func TestBackendIdentity(t *testing.T) {
+	var b enclave.Backend = &Backend{}
+	if got := b.Name(); got != "amd-sev" || got != Name {
+		t.Errorf("Name() = %q, want amd-sev", got)
+	}
+	p, ok := b.(enclave.Prober)
+	if !ok || p.Rank() != 2 {
+		t.Errorf("Backend is not a Prober of rank 2")
+	}
+	for name, ok := range map[string]bool{
+		"Importer": implements[enclave.Importer](b),
+		"Attester": implements[enclave.Attester](b),
+		"Confiner": implements[enclave.Confiner](b),
+		"Sweeper":  implements[enclave.Sweeper](b),
+	} {
+		if !ok {
+			t.Errorf("Backend does not implement enclave.%s", name)
+		}
+	}
+	// A backend New did not build confines nothing.
+	if (&Backend{}).ConfinesProcess() {
+		t.Errorf("ConfinesProcess() = true on a backend New did not build")
+	}
+}
+
+func implements[T any](v any) bool {
+	_, ok := v.(T)
+	return ok
+}
+
+func TestAttestRefusesBadNonce(t *testing.T) {
+	for _, n := range []int{0, ReportDataSize + 1} {
+		if _, err := (&Backend{}).Attest(context.Background(), make([]byte, n)); !errors.Is(err, enclave.ErrInvalidNonce) {
+			t.Errorf("Attest(%d-byte nonce) = %v, want ErrInvalidNonce", n, err)
+		}
+	}
+}
+
+// TestAttestOutsideAnSNPGuest: with no report interface, Attest says "not
+// here" rather than returning evidence of unknown provenance.
+func TestAttestOutsideAnSNPGuest(t *testing.T) {
+	ev, err := (&Backend{}).Attest(context.Background(), []byte("nonce"))
+	if err == nil {
+		t.Skip("this host is an SNP guest: the in-guest conformance run covers it")
+	}
+	if !errors.Is(err, ErrSNPGuestUnavailable) || ev.Data != nil {
+		t.Errorf("Attest = %v, %d bytes; want ErrSNPGuestUnavailable and no evidence", err, len(ev.Data))
+	}
+}
