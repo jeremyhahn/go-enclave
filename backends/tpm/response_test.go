@@ -419,3 +419,90 @@ func FuzzCut2B(f *testing.F) {
 		}
 	})
 }
+
+// listingScript decodes fuzz input into at most eight GetCapability
+// responses. Each response starts with an op byte: op%3 == 0 is a page of
+// listed handles of mixed types, 1 a page with a run of consecutive
+// transient handles, 2 a raw frame with an arbitrary body.
+func listingScript(b []byte) [][]byte {
+	types := []byte{0x80, 0x81, 0x01, 0x02, 0x03, 0x40}
+	var script [][]byte
+	for len(b) > 0 && len(script) < 8 {
+		op := b[0]
+		b = b[1:]
+		switch op % 3 {
+		case 0:
+			if len(b) < 1 {
+				return script
+			}
+			more, n := b[0]&1 == 1, int(b[0]>>1)
+			b = b[1:]
+			var hs []tpm2.TPMHandle
+			for ; n > 0 && len(b) >= 3; n-- {
+				hs = append(hs, tpm2.TPMHandle(uint32(types[int(b[0])%len(types)])<<24|uint32(b[1])<<8|uint32(b[2])))
+				b = b[3:]
+			}
+			script = append(script, handlesPage(more, hs...))
+		case 1:
+			if len(b) < 4 {
+				return script
+			}
+			start := tpm2.TPMHandle(0x80000000 | uint32(b[2])<<8 | uint32(b[3]))
+			script = append(script, handlesPage(b[0]&1 == 1, handleRun(start, 2*int(b[1]))...))
+			b = b[4:]
+		default:
+			if len(b) < 2 {
+				return script
+			}
+			tag := uint16(0x8001)
+			if b[0]&1 == 1 {
+				tag = 0x8002
+			}
+			rc := tpm2.TPMRC(b[0] >> 1)
+			n := min(int(b[1]), len(b)-2)
+			script = append(script, frame(tag, rc, b[2:2+n]))
+			b = b[2+n:]
+		}
+	}
+	return script
+}
+
+// FuzzListType runs listType against a fuzzed script of GetCapability
+// responses (the last one repeats) and checks what it lists: only handles
+// of the asked type, strictly ascending, at most maxListedHandles of them,
+// nothing on an error, and the transport's buffers wiped either way.
+func FuzzListType(f *testing.F) {
+	f.Add([]byte{0, 0x05, 0, 0, 1, 0, 0, 4, 0, 0x02, 0, 0, 9})
+	f.Add([]byte{0, 0x03, 0, 0, 3})
+	f.Add([]byte{2, 0, 3, 0, 0, 0})
+	f.Fuzz(func(t *testing.T, b []byte) {
+		script := listingScript(b)
+		if len(script) == 0 {
+			return
+		}
+		d, _, alloc := newScriptedDevice(t, script...)
+		const ht = tpm2.TPMHTTransient
+		got, err := d.listType(context.Background(), ht)
+		if err != nil {
+			if got != nil {
+				t.Fatalf("listType = %x with error %v; want nil", got, err)
+			}
+		} else {
+			if len(got) > maxListedHandles {
+				t.Fatalf("listType listed %d handles; at most %d allowed", len(got), maxListedHandles)
+			}
+			for i, h := range got {
+				if uint32(h)>>24 != uint32(ht) {
+					t.Fatalf("listType listed %x, not of type %x", h, ht)
+				}
+				if i > 0 && h <= got[i-1] {
+					t.Fatalf("listType listed %x after %x; not strictly ascending", h, got[i-1])
+				}
+			}
+		}
+		if !bytes.Equal(d.t.rsp, make([]byte, len(d.t.rsp))) {
+			t.Fatal("listType left a response in the transport buffer")
+		}
+		checkCommandWiped(t, alloc)
+	})
+}
