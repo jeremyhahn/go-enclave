@@ -6,7 +6,6 @@ import (
 	"errors"
 	"os"
 	"strings"
-	"sync"
 )
 
 // attestationDir is Gramine's attestation pseudo-filesystem, present inside
@@ -16,7 +15,29 @@ const attestationDir = "/dev/attestation"
 
 // attestationMu serializes the backend's writes to user_report_data and reads
 // of quote: the files are per process, so two writers in one process race.
-var attestationMu sync.Mutex
+// It is a one-slot semaphore so a waiter can give up when its ctx ends.
+var attestationMu = make(chan struct{}, 1)
+
+// lockAttestation takes attestationMu, or returns ctx's error if ctx ends
+// first. An ended ctx never takes it.
+func lockAttestation(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	select {
+	case attestationMu <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	if err := ctx.Err(); err != nil {
+		unlockAttestation()
+		return err
+	}
+	return nil
+}
+
+// unlockAttestation releases attestationMu.
+func unlockAttestation() { <-attestationMu }
 
 // probe is the detection probe (open question Q5, recommended option): it
 // checks ctx, reads attestation_type (it must be "dcap"), reads the enclave's
@@ -60,9 +81,12 @@ func probe(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	quote, qerr := quoteOver(nonce)
-	if qerr != nil {
+	quote, err := quoteOver(ctx, nonce)
+	if qerr := (*SGXQuoteError)(nil); errors.As(err, &qerr) {
 		return &SGXEnclaveError{Op: qerr.Op, Cause: qerr}
+	}
+	if err != nil {
+		return err
 	}
 	if err := checkQuote(quote, nonce); err != nil {
 		return &SGXEnclaveError{Op: opQuote, Cause: err}
@@ -71,10 +95,15 @@ func probe(ctx context.Context) error {
 }
 
 // quoteOver writes reportData (64 bytes) to user_report_data and reads the
-// quote, under attestationMu.
-func quoteOver(reportData []byte) ([]byte, *SGXQuoteError) {
-	attestationMu.Lock()
-	defer attestationMu.Unlock()
+// quote, under attestationMu. It returns ctx's error if ctx ends before the
+// lock is taken, or has ended once it is, and starts no request then; any
+// other failure is an [*SGXQuoteError]. A file read the library OS is
+// blocking in is not interrupted.
+func quoteOver(ctx context.Context, reportData []byte) ([]byte, error) {
+	if err := lockAttestation(ctx); err != nil {
+		return nil, err
+	}
+	defer unlockAttestation()
 	// O_WRONLY without O_CREATE: the pseudo-file exists in an enclave, and
 	// nothing is ever created outside one.
 	f, err := os.OpenFile(attestationDir+"/user_report_data", os.O_WRONLY, 0)

@@ -23,9 +23,9 @@ func attestQuote(ctx context.Context, reportData []byte) ([]byte, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	quote, qerr := quoteOver(reportData)
-	if qerr != nil {
-		return nil, qerr
+	quote, err := quoteOver(ctx, reportData)
+	if err != nil {
+		return nil, err
 	}
 	if err := checkQuote(quote, reportData); err != nil {
 		return nil, err
