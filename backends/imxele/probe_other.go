@@ -10,5 +10,5 @@ package imxele
 // ABI is the same on every Linux architecture, so Linux hosts take the real
 // path and refuse at "open" when the device is absent.
 func probeDevice(path string) error {
-	return &TEEDeviceError{Path: path, Op: "platform"}
+	return &TEEDeviceError{Path: path, Op: opPlatform}
 }

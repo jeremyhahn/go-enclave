@@ -149,7 +149,7 @@ PKGDIR_memscan      := ./internal/memscan
 # build/ci/buildgates. coverage runs their unit tests too, with -race, after
 # the root packages; the floor measures the root packages only (their device
 # paths need the device).
-BACKEND_MODULES := backends/armtrustzone backends/tpm
+BACKEND_MODULES := backends/armtrustzone backends/imxele backends/tpm
 
 # FEATURE MAPPING (local-software-factory §7). A feature is a directory
 # docs/<feature>/, mapped in scripts/features.map to its package, its

@@ -22,6 +22,14 @@ const (
 	teeIOCVersion = 2<<30 | teeVersionSize<<16 | 0xa4<<8
 )
 
+// The steps a [*TEEDeviceError] names in its Op.
+const (
+	opOpen     = "open"
+	opVersion  = "version"
+	opClose    = "close"
+	opPlatform = "platform"
+)
+
 // teeVersion is struct tee_ioctl_version_data.
 type teeVersion struct {
 	ImplID, ImplCaps, GenCaps uint32
@@ -69,8 +77,13 @@ func probe(ctx context.Context, path string) error {
 	if err := probeDevice(path); err != nil {
 		return err
 	}
-	// The session and version-command steps need trusted-imx95's published
-	// trusted application UUID and command ABI; until then the backend
-	// refuses here rather than probe usable.
+	return probeSession(path)
+}
+
+// probeSession is the session and version-command steps. They need
+// trusted-imx95's published trusted application UUID and command ABI; until
+// then the backend refuses here rather than probe usable. The next slice
+// replaces it with TEE_IOC_OPEN_SESSION and the version command.
+var probeSession = func(string) error {
 	return &TEESessionError{Cause: errTAUnpublished}
 }

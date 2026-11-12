@@ -55,10 +55,10 @@ func TestCheckVersion(t *testing.T) {
 	}
 }
 
-func TestProbeHonoursCancelledContext(t *testing.T) {
+func TestProbeHonoursCanceledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if err := probe(ctx, DefaultEndpoint); !errors.Is(err, context.Canceled) {
-		t.Fatalf("probe(cancelled) = %v, want context.Canceled", err)
+		t.Fatalf("probe(canceled ctx) = %v, want context.Canceled", err)
 	}
 }
