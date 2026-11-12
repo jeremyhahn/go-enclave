@@ -153,8 +153,6 @@ calls_are() { printf '%s\n' "$@" > "$D/want"; cmp -s "$D/want" "$D/calls"; }
 tmp_empty() { [ -z "$(ls -A "$D/tmp")" ]; }
 swtpm_gone() { [ -f "$D/swtpm.pid" ] && ! kill -0 "$(cat "$D/swtpm.pid")" 2>/dev/null; }
 check() { if "$@"; then ok "$what"; else bad "$what"; fi; }
-# defect: a case a known defect fails; shown, not failed, until its fix lands.
-defect() { if "$@"; then ok "$what"; else printf 'SKIP defect: %s\n' "$what"; fi; }
 all() { for _c in "$@"; do eval "$_c" || return 1; done; }
 
 # --- swtpm-fixture.sh ---------------------------------------------------------
@@ -306,7 +304,7 @@ lcalls() {
 
 run "$D/root" "$SH" "$li"
 what="lint-integration: no package is a usage error"
-defect all 'rc_is 1' 'says "usage:"' no_calls
+check all 'rc_is 1' 'says "usage:"' no_calls
 
 run "$D/root" "$SH" "$li" enclave other
 what="lint-integration: every package's suite needs the integration tag"
