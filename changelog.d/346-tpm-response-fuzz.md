@@ -1,6 +1,6 @@
 ### Added
 
-- `backends/tpm`: malformed-response tables and the `FuzzExecuteResponse` and `FuzzCut2B` fuzz targets, with seed corpora, for the TPM command-response path; a test proves the transport never hands the parser less than the response header (#346).
+- `backends/tpm`: malformed-response tables and the `FuzzExecuteResponse`, `FuzzCut2B` and `FuzzListType` fuzz targets, with seed corpora, for the TPM command-response path; a test proves the transport never hands the parser less than the response header (#346).
 
 ### Fixed
 
