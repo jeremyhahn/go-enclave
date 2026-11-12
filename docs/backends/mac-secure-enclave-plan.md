@@ -15,6 +15,10 @@ decides the design's open questions.
    - `docs/SPEC.md`: row `mac-secure-enclave` `future` → `planned`, design link.
    - `ROADMAP.md`: the bullet moves from Future to Later with the design link.
    - `changelog.d/192-mac-secure-enclave-design.md`: an Added fragment.
+   - This plan lives beside the proposal, not in `docs/plans/`: the
+     feature-map gate treats every `docs/` directory as a feature.
+   - Departure: the SPEC and ROADMAP edits are not in this branch: both
+     files are protected, and their edit follows in a change allowed to make it.
    - Tests: `make check-changelog-assembly`, `make check-releasability`,
      `make check-buildgates`.
 2. **Owner rulings.** Each answered open question replaces its options in the
