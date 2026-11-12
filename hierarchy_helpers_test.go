@@ -151,7 +151,7 @@ func TestInitFailure(t *testing.T) {
 	t.Parallel()
 	errHolder := errors.New("test: slot holder failed")
 
-	cancelled, cancel := context.WithCancel(context.Background())
+	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
 	expired, cancelExpired := context.WithDeadline(context.Background(), time.Unix(0, 0))
 	t.Cleanup(cancelExpired)
@@ -161,7 +161,7 @@ func TestInitFailure(t *testing.T) {
 
 	t.Run("nil err with an ended ctx", func(t *testing.T) {
 		t.Parallel()
-		if err := initFailure(cancelled, nil); err != nil {
+		if err := initFailure(canceled, nil); err != nil {
 			t.Fatalf("initFailure = %v, want nil", err)
 		}
 	})
@@ -186,7 +186,7 @@ func TestInitFailure(t *testing.T) {
 		ctx   context.Context //nolint:containedctx // table input
 		ended error
 	}{
-		{name: "cancelled", ctx: cancelled, ended: context.Canceled},
+		{name: "canceled", ctx: canceled, ended: context.Canceled},
 		{name: "deadline exceeded", ctx: expired, ended: context.DeadlineExceeded},
 	}
 	for _, tc := range ended {
@@ -220,7 +220,7 @@ func TestInitFailure(t *testing.T) {
 	t.Run("seal failure without the ended ctx is wrapped", func(t *testing.T) {
 		t.Parallel()
 		in := fmt.Errorf("%w: test: no ctx", ErrSealFailed)
-		err := initFailure(cancelled, in)
+		err := initFailure(canceled, in)
 		if err == in || !errors.Is(err, context.Canceled) || !errors.Is(err, in) { //nolint:errorlint // identity is the contract
 			t.Fatalf("initFailure = %v, want it wrapped with context.Canceled", err)
 		}
