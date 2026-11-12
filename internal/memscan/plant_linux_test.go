@@ -346,16 +346,15 @@ func TestSignalRoundFailsAChildThatNeverCompares(t *testing.T) {
 
 // TestSweepUnderSignalsFailsAPausedChild runs a child that compares once
 // and then stops comparing, as a thread descheduled after its first pass
-// would: only the sends that landed in that one pass count, so its round
-// must fail short of minSignals.
+// would: it compares before its round's signals and never after, so its
+// round must fail with nothing counted.
 func TestSweepUnderSignalsFailsAPausedChild(t *testing.T) {
 	out, sent, _, err := runSweepChild(childPause, 32, sweepDeadline)
 	if !errors.Is(err, errTooFewSignals) {
 		t.Fatalf("a round whose child stopped comparing: want %v, got %v (signals %v)\n%s", errTooFewSignals, err, sent, out)
 	}
-	// Signals that landed in its one compare pass count; none after it.
-	if len(sent) != 1 || sent[0] >= minSignals {
-		t.Fatalf("a round whose child stopped comparing counted %v signal(s), want one round under %d", sent, minSignals)
+	if len(sent) != 1 || sent[0] != 0 {
+		t.Fatalf("a round whose child stopped comparing counted %v signal(s), want [0]", sent)
 	}
 }
 
@@ -417,6 +416,22 @@ func TestSweepUnderSignalsBoundsAStalledSweep(t *testing.T) {
 func sweepRound(needle []byte, home uintptr, mode string) (hits []string, aborted bool, err error) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
+	var st passState
+	buf := make([]byte, chunk+len(needle)-1)
+	pass := func(flag bool) error {
+		st.seq.Add(1)
+		st.inside.Store(flag)
+		_, err := mappingContains(firstByteReader(needle[0]), 0, denseFill, needle, buf)
+		st.inside.Store(false)
+		return err
+	}
+	if mode == childPause {
+		// Its one pass ends before the parent learns the thread, so no
+		// signal can land in it.
+		if err := pass(true); err != nil {
+			return nil, false, err
+		}
+	}
 	fmt.Printf("%s%d\n", roundTid, syscall.Gettid())
 	// Memory dense with the needle's first byte is where a search falls
 	// back from a byte scan to a whole-needle compare: the sweep stays on
@@ -425,30 +440,22 @@ func sweepRound(needle []byte, home uintptr, mode string) (hits []string, aborte
 	// signal stack still holds that frame. This thread never reads stdin:
 	// readParent does, on another goroutine, and judges each signal by the
 	// pass state this thread publishes.
-	var st passState
 	done := make(chan error, 1)
 	go readParent(&st, done)
-	buf := make([]byte, chunk+len(needle)-1)
 	for st.verdict.Load() == 0 {
-		st.seq.Add(1)
-		if mode == childOutside {
+		switch mode {
+		case childPause:
+			time.Sleep(time.Millisecond)
+		case childOutside:
 			// The pass compares with the flag clear and the sleep after it
 			// takes most signals: none of them may count.
-			if _, cerr := mappingContains(firstByteReader(needle[0]), 0, denseFill, needle, buf); cerr != nil {
-				return nil, false, cerr
+			if err := pass(false); err != nil {
+				return nil, false, err
 			}
 			time.Sleep(time.Millisecond)
-			continue
-		}
-		st.inside.Store(true)
-		_, cerr := mappingContains(firstByteReader(needle[0]), 0, denseFill, needle, buf)
-		st.inside.Store(false)
-		if cerr != nil {
-			return nil, false, cerr
-		}
-		if mode == childPause {
-			for st.verdict.Load() == 0 {
-				time.Sleep(time.Millisecond)
+		default:
+			if err := pass(true); err != nil {
+				return nil, false, err
 			}
 		}
 	}
@@ -581,7 +588,7 @@ const (
 	verdictAbort      = "a"                   // the parent's byte: too few signals, give up
 	childSweep        = "sweep"               // three rounds under signals, then a check sweep
 	childStall        = "stall"               // stops itself while its sweep runs
-	childPause        = "pause"               // compares once, then stops comparing while signaled
+	childPause        = "pause"               // compares once before its signals, then stops comparing
 	childOutside      = "outside"             // compares outside its in-compare flag, sleeps between passes
 	exitResidue       = 2                     // a sweep found the needle outside its mapping
 	exitTooFewSignals = 3                     // a round could not reach minSignals
