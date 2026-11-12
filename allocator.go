@@ -694,6 +694,19 @@ func ProcessAllocator() (Allocator, error) {
 	return allocatorOut(processAllocatorSlot.get())
 }
 
+// InstalledAllocator reports the process-wide allocator if one is installed,
+// and false if none is. Unlike [ProcessAllocator] it never installs the
+// default, so a caller can inspect the budget without fixing the allocator
+// and leaving a later [SetAllocator] to fail with [ErrAllocatorInstalled].
+func InstalledAllocator() (Allocator, bool) {
+	processAllocatorSlot.mu.Lock()
+	defer processAllocatorSlot.mu.Unlock()
+	if processAllocatorSlot.value == nil {
+		return nil, false
+	}
+	return processAllocatorSlot.value, true
+}
+
 // defaultProcessAllocator is split out so every ceiling shape can be tested.
 func defaultProcessAllocator(limit LockedMemoryLimit) *budgetAllocator {
 	if !limit.Bounded {

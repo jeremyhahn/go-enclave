@@ -78,8 +78,12 @@ func CheckRefusal(ctx context.Context, cfg RefusalConfig) error {
 		}
 	}
 
-	// The baseline starts the process allocator before New runs (see budgetOf).
-	budget := budgetOf()
+	// The baseline reads the process allocator without installing one, so
+	// the check itself never fixes the allocator a later SetAllocator needs.
+	budget, budgetErr := budgetOf("before New")
+	if budgetErr != nil {
+		findings = append(findings, budgetErr)
+	}
 	names := enclave.BackendNames()
 
 	b, panicked, err := refusalNew(cfg.New)
@@ -97,9 +101,15 @@ func CheckRefusal(ctx context.Context, cfg RefusalConfig) error {
 	default:
 		judge("New", err)
 	}
-	if cfg.Probe != nil {
+	// An ended context aborts the check, as it does a TestBackend run: Probe
+	// is not called on it, and what Probe returns once it ends is no finding.
+	if err := ctx.Err(); cfg.Probe != nil && err != nil {
+		findings = append(findings, &AbortedError{Cause: err})
+	} else if cfg.Probe != nil {
 		panicked, err := refusalProbe(ctx, cfg.Probe)
 		switch {
+		case ctx.Err() != nil:
+			findings = append(findings, &AbortedError{Cause: ctx.Err()})
 		case panicked != nil:
 			fail(PropertyRefusalProbe, "Probe panicked: %v", panicked)
 		case err == nil:
@@ -112,10 +122,14 @@ func CheckRefusal(ctx context.Context, cfg RefusalConfig) error {
 	if after := enclave.BackendNames(); !slices.Equal(names, after) {
 		fail(PropertyRefusalRegistration, "registered backends went from %q to %q", names, after)
 	}
-	// With no baseline allocator there is nothing to compare, and a second
-	// budgetOf would start one itself.
-	if !budget.unset {
-		if after := budgetOf(); after != budget {
+	// An empty slot is a measured baseline too: a New that installs the
+	// allocator moves it from "no process allocator" to the installed one.
+	if budgetErr == nil {
+		after, err := budgetOf("after the refusal")
+		switch {
+		case err != nil:
+			findings = append(findings, err)
+		case after != budget:
 			fail(PropertyRefusalBudget, "locked-memory budget went from %s to %s", budget, after)
 		}
 	}
@@ -157,17 +171,21 @@ func (s budgetSnapshot) String() string {
 	return fmt.Sprintf("%p limit %d in use %d", s.alloc, s.limit, s.inUse)
 }
 
-// budgetOf snapshots the process allocator's identity, limit and reservations.
-// The enclave package has no read-only view of the process allocator, so the
-// first call starts it. CheckRefusal makes that first call before the
-// constructor runs, so New and Probe see the same started allocator the
-// comparison reads, and it takes the second snapshot only when the first one
-// found an allocator: when the first could not start one, a second call would
-// start it itself and report the check's own side effect as the module's.
-func budgetOf() budgetSnapshot {
-	a, err := enclave.ProcessAllocator()
-	if err != nil || isNilInterface(a) {
-		return budgetSnapshot{unset: true}
+// installedAllocator reads the process allocator without installing the
+// default one; a variable so a test can stand in an unreadable allocator.
+var installedAllocator = enclave.InstalledAllocator
+
+// budgetOf snapshots the process allocator's identity, limit and reservations
+// without installing one: an empty slot is the "no process allocator"
+// snapshot, so a New that installs the allocator changes the budget. An
+// installed allocator that cannot be read is an error, never "unset".
+func budgetOf(when string) (budgetSnapshot, error) {
+	a, ok := installedAllocator()
+	if !ok {
+		return budgetSnapshot{unset: true}, nil
 	}
-	return budgetSnapshot{alloc: a, inUse: a.InUse(), limit: a.Limit()}
+	if isNilInterface(a) {
+		return budgetSnapshot{}, &BudgetNotMeasuredError{When: when}
+	}
+	return budgetSnapshot{alloc: a, inUse: a.InUse(), limit: a.Limit()}, nil
 }
