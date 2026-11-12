@@ -1,31 +1,30 @@
 # Intel TDX backend — architecture (proposal)
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-27
-> Conflicts with this document are defects. A planned feature ([SPEC](../SPEC.md#features), row `intel-tdx`, status future): no code exists, and no code is written until the owner decides the [open questions](#open-questions) and an Intel TDX host is on the network; each answer then replaces its options here. The backend is out of tree, so its code, tests and user docs live in its own module; this file moves there when the module gains sources.
+> **Status: REFERENCE** · Scope: go-enclave · Last verified: 2026-11-12
+> Proposal — not implemented. A design for the future backend in [SPEC](../SPEC.md#features) row `intel-tdx`. No code exists, and every identifier here is a proposal, not an API you can call. The [open questions](#open-questions) mark a recommended answer; none is decided.
 
 ## Problem
 
 The memory enclave keeps material in `mlock`'d, guarded pages
 ([platform contract](../memory-enclave/engineering.md#platform-contract)), and
-[linux-secretmem](linux-secretmem.md) proposes removing them from the kernel's
-direct map. Both still trust everything below the process: the host kernel,
-and on a virtual machine the hypervisor, the host's administrators and any
-device that can DMA into guest memory. On a shared or rented host those are
-the parties the owner of the material trusts least, and neither backend can
-prove to a remote peer what code holds the material.
+[linux-secretmem](../linux-secretmem/architecture.md) removes them from the
+kernel's direct map. Both still trust everything below the process: the host
+kernel, and on a virtual machine the hypervisor, the host's administrators
+and any device that can DMA into guest memory. On a shared or rented host
+those are the parties the owner of the material trusts least, and neither
+backend can prove to a remote peer what code holds the material.
 
 Intel Trust Domain Extensions (TDX) run a whole virtual machine, a trust
-domain (TD), in memory the host cannot read: the CPU encrypts it with a key
+domain (TD), in memory the host cannot read. The CPU encrypts it with a key
 per TD, and the TDX module, running in the CPU's SEAM mode, keeps the
 hypervisor out of the TD's private pages and registers. The TDX module also
 signs what the TD was launched with, so the TD can prove it to a peer. The
-backend proposed here is the go-enclave backend for a process running inside a
-TD: it holds material in the TD's private memory, reports that the whole
-process is confined, and attests the platform with a TD quote. It is the
-`go-enclave-tdx` module the [out-of-tree backend](architecture.md#an-out-of-tree-backend)
-sketch already describes.
+backend proposed here is the go-enclave backend for a process running inside
+a TD: it holds material in the TD's private memory, reports that the whole
+process is confined, and attests the platform with a TD quote. It develops
+the [out-of-tree backend](architecture.md#an-out-of-tree-backend) sketch.
 
-## What intel-tdx adds over the memory enclave and linux-secretmem
+## Threat model: what intel-tdx adds
 
 | Path to the material | Memory enclave | linux-secretmem | intel-tdx (inside a TD) |
 |---|---|---|---|
@@ -36,16 +35,16 @@ sketch already describes.
 | Physical memory (DIMM read, cold boot) | plaintext | plaintext | ciphertext under the TD's key |
 | The guest kernel inside the TD | readable | removed from the direct map | readable: the guest kernel is inside the TD's trust boundary |
 | Code inside the process | readable | readable | readable |
-| Proof to a remote peer | the host's platform attests the environment ([SPEC boundaries](../SPEC.md#boundaries)) | the same | its own: a TD quote over the caller's nonce ([attestation](#attestation)) |
+| Proof to a remote peer | the host's platform attests the environment ([SPEC boundaries](../SPEC.md#boundaries)) | the same | its own: a TD quote over the caller's nonce ([attestation](#attestation-flow)) |
 
-The boundary is the whole TD, not the handle: every page of the process,
-its heap copies and key schedules included
+The boundary is the whole TD, not the handle. Every page of the process, its
+heap copies and key schedules included
 ([key-schedule exposure](architecture.md#key-schedule-exposure)), is private
 to the TD. That is why the backend is a `Confiner`. What runs inside the TD,
 the guest kernel and firmware included, is inside the trusted base; the
 quote is what lets a verifier judge it.
 
-## Hardware, firmware and kernel requirements
+## Hardware mechanism
 
 Sources, each pinned to a kernel tag or document revision when the code is
 written and copied into the module's `docs/reference/` then (see
@@ -62,7 +61,7 @@ written and copied into the module's `docs/reference/` then (see
 - [Intel TDX guest support](https://docs.kernel.org/arch/x86/tdx.html) in the
   kernel's x86 documentation.
 
-**Hardware and firmware (the host).**
+### Hardware and firmware (the host)
 
 - An Intel Xeon with TDX (5th Gen Xeon Scalable or Xeon 6), with TME-MK and
   TDX enabled in the BIOS and the TDX module loaded by its SEAM loader.
@@ -75,7 +74,7 @@ written and copied into the module's `docs/reference/` then (see
   `quote-generation-socket`). The VMM runs the TD on the real CPU; it is not
   an emulator.
 
-**Kernel interfaces (the guest).**
+### Kernel interfaces (the guest)
 
 - **`/dev/tdx_guest`** (`CONFIG_TDX_GUEST_DRIVER`, Linux 6.2). Its one
   ioctl, `TDX_CMD_GET_REPORT0`, takes 64 bytes of REPORTDATA and returns the
@@ -85,7 +84,7 @@ written and copied into the module's `docs/reference/` then (see
   device is `tdx_guest`, as its sysfs path shows.)
 - **configfs-tsm reports** (`CONFIG_TSM_REPORTS`, Linux 6.7), at
   `/sys/kernel/config/tsm/report/`. A caller creates a report directory,
-  writes up to 64 bytes to `inblob`, and reads the quote from `outblob`;
+  writes up to 64 bytes to `inblob`, and reads the quote from `outblob`.
   `provider` reads `tdx_guest`, and `generation` counts writes so a caller
   can detect a concurrent writer. The kernel turns the request into the
   GetQuote hypercall, which the VMM forwards to QGS. A quote too large for
@@ -99,10 +98,10 @@ written and copied into the module's `docs/reference/` then (see
 - **Privileges.** The device node and the configfs tree are root's as the
   kernel creates them. A non-root service needs access granted by the
   deployment; the user doc will say how.
-- **Linux on x86-64 only.** A TD is an x86-64 virtual machine, and the owner
-  ruled Linux the only runtime target.
+- **Linux on x86-64 only.** A TD is an x86-64 virtual machine, and Linux is
+  the only guest OS whose interfaces this design uses.
 
-## Attestation
+## Attestation flow
 
 Roles follow the RATS architecture, [RFC 9334](https://www.rfc-editor.org/rfc/rfc9334)
 (January 2023), as written:
@@ -119,9 +118,8 @@ Roles follow the RATS architecture, [RFC 9334](https://www.rfc-editor.org/rfc/rf
   them), the TDX module's identity and TCB level, and REPORTDATA, signed by
   the Quoting Enclave's attestation key under the platform's PCK certificate
   chain to Intel's root.
-- **Verifier:** outside go-enclave and outside this backend. The SPEC puts
-  platform attestation with go-xkms and go-trusted-platform
-  ([boundaries](../SPEC.md#boundaries)); a deployment may use Intel's
+- **Verifier:** outside go-enclave and outside this backend
+  ([SPEC boundaries](../SPEC.md#boundaries)). A deployment may use Intel's
   Quote Verification Library or a service that wraps it. It checks the
   signature chain against Intel's collateral (PCK CRLs, TCB info, QE
   identity), REPORTDATA against the nonce, the DEBUG bit, the TCB status and
@@ -133,9 +131,7 @@ The backend never parses, appraises or caches a quote, as the seam requires
 it reads is its own TDREPORT's DEBUG attribute in the probe (Q3), to refuse a
 TD whose memory the host can read.
 
-## Shape proposed
-
-Recommended answers to the open questions are marked; none is decided.
+## API mapping onto the backend seam
 
 ```mermaid
 flowchart LR
@@ -148,10 +144,10 @@ flowchart LR
   ev --> verifier[verifier, outside go-enclave]
 ```
 
-- **Out of tree** ([SPEC](../SPEC.md#boundaries): no hardware code in this
-  module): module `github.com/jeremyhahn/go-enclave-tdx` (Q1), depending on
-  go-enclave and `golang.org/x/sys` only; the ioctl and the configfs and
-  sysfs files need nothing more. go-enclave never depends on it.
+- **Its own module** (Q1), depending on go-enclave and `golang.org/x/sys`
+  only: the ioctl and the configfs and sysfs files need nothing more. The root
+  module carries no hardware code ([SPEC](../SPEC.md#boundaries)) and never
+  depends on it.
 - **Name** `intel-tdx`, the SPEC row's name (the
   [sketch](architecture.md#an-out-of-tree-backend)'s `tdx` changes with the
   code). `main` registers it; nothing registers it at import.
@@ -171,20 +167,20 @@ flowchart LR
   never share `inblob`), writes the 64-byte REPORTDATA (Q4), reads `outblob`,
   checks `provider` is `tdx_guest` and `generation` counts exactly its own
   write, and removes the directory on every path.
-- **Rank 10** (Q2); the probe runs only from `Detect` (Q3).
+- **Rank 10** (Q2). The probe runs only from `Detect` (Q3).
 - **Builds everywhere, works in a TD.** The code is `linux && amd64`; every
   other target builds a stub whose constructor and probe return the typed
   unavailable error, so a cross-platform `main` that registers it builds and
   selects another backend.
-- **Kernel floor 6.7**, for reports and quotes; the measurement methods
+- **Kernel floor 6.7**, for reports and quotes. The measurement methods
   return the typed unavailable error below 6.16.
-- It passes `backendtest` on the real hardware ([test plan](#test-plan)).
+- It passes `backendtest` on target hardware ([test strategy](#test-strategy)).
 
 ## Failure modes
 
 Every failure is a typed error. The names are proposals for the module's own
 `errors.go`, named for the mechanism (the device, the report interface, the
-register), not the contents; go-enclave's errors are reused where their
+register), not the contents. go-enclave's errors are reused where their
 meaning holds.
 
 | Failure | Where | Proposed error |
@@ -204,20 +200,19 @@ lower-ranked backend stays selected. After a successful probe the backend
 never falls back: a failing `Attest` or `Import` returns its error
 ([a missing capability](architecture.md#a-missing-capability)).
 
-## Test plan
+## Test strategy
 
-The owner ruled (2026-10-17) that a hardware backend is proven on the real
-part only: no simulator, emulator or mock device, here or in CI. The plan is
-written for one Intel TDX host, on the owner's shopping list and not on the
-network today; until it is, no test of the device paths runs anywhere.
+The backend is proven on target hardware: an Intel TDX host. No simulator,
+emulator or mock `/dev/tdx_guest` stands in for it, because only a real TDX
+module and Quoting Enclave produce a quote that verifies to Intel's root.
 
-**The fixture.** The host above (TDX and SGX enabled, DCAP's QGS and PCCS
+**The fixture.** A TDX host (TDX and SGX enabled, DCAP's QGS and PCCS
 running, KVM and QEMU with TDX), launching one TD from a pinned guest image:
 Linux 6.16 or later with the TDX guest driver, configfs-tsm and the
-measurement registers, Go at the module's toolchain pin. A self-hosted CI
-runner inside that TD runs the module's integration target
-(`make integration-test-intel-tdx`, `-tags=integration`, `-race`). A second
-TD launched with DEBUG set is the negative fixture for `ErrDebugTD`.
+measurement registers, and Go at the module's toolchain pin. A CI runner
+inside that TD runs the module's integration target (`-tags=integration`,
+`-race`). A second TD launched with DEBUG set is the negative fixture for
+`ErrDebugTD`.
 
 **Inside the TD:**
 
@@ -225,8 +220,8 @@ TD launched with DEBUG set is the negative fixture for `ErrDebugTD`.
    `Attest` and `Probe`, and one handle case, `material`
    (`PurposeMaterial`, 32 bytes, `Bytes` and `Freeze`), plus one per key
    purpose. `VerifyEvidence` verifies the quote with the reference verifier
-   (Q9) against Intel's collateral, then compares REPORTDATA with the nonce:
-   the suite's check that evidence for one nonce fails against another is
+   (Q9) against Intel's collateral, then compares REPORTDATA with the nonce.
+   The suite's check that evidence for one nonce fails against another is
    the binding test. The residue sweep runs (Linux).
 2. `Detect` with the backend registered selects `intel-tdx` and reports
    locked memory's result beside it.
@@ -250,29 +245,33 @@ under the integration tag. go-enclave's own CI gains nothing.
 
 ## Open questions
 
-### Q1: one module per row, or one confidential-VM module
+### Q1: one module per backend, or one confidential-VM module
 
-- **One module per row** (recommended): `go-enclave-tdx` for this row, as the
-  sketch names it; amd-sev gets its own. Each is tested on its own hardware
-  and released on its own, and a TDX defect never blocks a SEV release.
-- **One `go-enclave-coco` module** for TDX and SEV-SNP, which both reach
+- **One module per backend** (recommended): a module for intel-tdx, and one
+  for amd-sev. Each is tested on its own hardware and released on its own,
+  and a TDX defect never blocks a SEV release. Each may be a nested module
+  under `backends/`, as
+  [arm-trustzone](arm-trustzone-design.md#a-nested-module) is, or a
+  repository of its own.
+- **One confidential-VM module** for TDX and SEV-SNP, which both reach
   quotes through configfs-tsm: one copy of the report client, but one module
   whose release waits on two kinds of hardware.
 
-Either way the configfs-tsm client is vendor-neutral. If the amd-sev proposal
-also uses it, the two settle where the one copy lives before either is coded.
+Either way the configfs-tsm client is vendor-neutral. If the
+[amd-sev proposal](amd-sev.md) also uses it, the two settle where the one
+copy lives before either is coded.
 
 ### Q2: rank
 
 - **Rank 10** (recommended), the value every confidential-VM backend
-  (intel-tdx, amd-sev) reports: above locked memory (0) and linux-secretmem's
-  proposed 1, with room for further software backends between. TDX and SEV
-  never run on one host, so the equal rank never ties in practice; the value
-  is agreed across the hardware proposals and the owner decides it once, as
-  the [detection scope fence](../backend-detection/architecture.md#scope-fence)
-  leaves to out-of-tree backends.
-- **Rank 2**, the next value above secretmem: simpler, but every later
-  software backend would have to sit above a hardware one or renumber it.
+  (intel-tdx, amd-sev) reports: above locked memory (0), linux-secretmem (1)
+  and arm-trustzone (2), with room for further software backends between.
+  TDX and SEV never run on one host, so the equal rank never ties in
+  practice. The value is agreed once across the hardware proposals, as the
+  [detection scope fence](../backend-detection/architecture.md#scope-fence)
+  leaves to each backend.
+- **Rank 3**, the next free value: simpler, but every later software backend
+  would have to sit above a hardware one or renumber it.
 
 ### Q3: the detection probe
 
@@ -283,7 +282,7 @@ also uses it, the two settle where the one copy lives before either is coded.
   is passed over with a `*TSMReportError` that says so: every environment the
   backend is selected in is attestable. It costs one round trip to the host's
   QGS per `Detect`. How `ctx` bounds a blocking `outblob` read is settled in
-  the implementing slice.
+  the implementation.
 - **TDREPORT and DEBUG bit only:** no host round trip, but it selects a TD
   that cannot attest, and the first `Attest` fails instead.
 - **CPUID or `/proc/cpuinfo`'s `tdx_guest` flag only:** cheapest, proves
@@ -298,8 +297,8 @@ also uses it, the two settle where the one copy lives before either is coded.
   same nonce with trailing zeros give one REPORTDATA; a relying party that
   cares sends 64 bytes, and the user doc will say so.
 - **SHA-512 of the nonce:** binds its length, but every verifier must know a
-  construction go-enclave designed, which standards first rules out where the
-  interface already takes the raw bytes.
+  construction go-enclave designed, where the interface already takes the raw
+  bytes.
 
 The amd-sev proposal faces the same 64-byte field. Recommended: one rule for
 every attesting backend, stated once in [Attestation](architecture.md#attestation)
@@ -310,17 +309,18 @@ with the first backend's code.
 - **The kernel's `provider` value, `tdx_guest`** (recommended): the kernel
   defines it as the name of `outblob`'s format, so the backend copies it and
   invents nothing, and a verifier that reads configfs-tsm already knows it.
-- **A name of ours**, such as `intel-tdx-quote`: matches the row's name, but
-  is a second name for a format that has one.
+- **A name of ours**, such as `intel-tdx-quote`: matches the backend's name,
+  but is a second name for a format that has one.
 
 ### Q6: where handles live inside the TD
 
 - **Memory enclaves from `enclave.NewMemory`** (recommended), as the sketch
   does: the exported API, every memory-enclave guarantee inside the TD, no
   widening of go-enclave's surface.
-- **linux-secretmem pages**, if that row lands: the guest kernel's direct map
-  would lose them too. Its proposed constructor is unexported, so this waits
-  on that row; the backend can then import through it with no seam change.
+- **linux-secretmem pages:** the guest kernel's direct map would lose them
+  too. The backend could import through `enclave.NewSecretMemory`, which
+  ships, with no seam change; it fails on guests whose kernel refuses
+  `memfd_secret`.
 
 ### Q7: `Sweeper`
 
@@ -348,15 +348,16 @@ with the first backend's code.
   test-only dependency (cgo or an external process), never linked into the
   backend.
 - **A third-party pure-Go verifier:** no cgo, but the test would certify
-  against an implementation that is not the specification's owner's.
+  against an implementation that is not the specification owner's.
 - **A remote verification service:** needs an account and the network in
   every run.
 
 ## Rejected alternatives
 
-- **A TDX simulator, emulator or mock `/dev/tdx_guest` for CI.** Ruled out by
-  the owner: a hardware backend is proven on the real part only.
-- **In this module.** The SPEC keeps hardware code out of go-enclave.
+- **A TDX simulator, emulator or mock `/dev/tdx_guest` for CI.** Only a real
+  TDX module and Quoting Enclave produce evidence a verifier accepts, so a
+  stand-in proves nothing about the evidence.
+- **In the root module.** The root module carries no hardware code.
 - **Intel's `libtdx_attest` through cgo, or a vsock link to QGS.** The kernel's
   configfs-tsm interface is the upstream path, needs no network setup in the
   TD, and keeps the module free of cgo.
@@ -383,9 +384,9 @@ written, not now.
 
 ## What it does not do
 
-No code in go-enclave and no change to its seam (a widened meaning of
+No code in the root module and no change to its seam (a widened meaning of
 `ErrInvalidNonce` aside, Q4's rule once decided), no host-side TDX (the
-backend runs inside a TD, never in the VMM), no SGX (row `intel-sgx`), no
-parsing or appraisal of quotes, no sealing or key derivation (a TD has no
+backend runs inside a TD, never in the VMM), no SGX (SPEC row `intel-sgx`),
+no parsing or appraisal of quotes, no sealing or key derivation (a TD has no
 TDX sealing key), no TD migration support, no protection against the guest
 kernel or code inside the process, and no simulator.

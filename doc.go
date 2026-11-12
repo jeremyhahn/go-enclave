@@ -33,9 +33,25 @@
 //
 // [Sealed] holds material encrypted at rest with AES-256-GCM and
 // decrypts it into a new memory enclave on [Sealed.Open]. A [Sealer]
-// protects the keys through a provider: the built-in [SoftwareProvider], or a
-// TPM, HSM or KMS provider implementing [KeyProtector] or [RootUnsealer] and
-// injected with [NewSealer] or [SetSealer]. Read [Mode] before choosing one.
+// protects the keys through a provider: the built-in [SoftwareProvider], the
+// TPM and TrustZone providers in the nested modules backends/tpm and
+// backends/armtrustzone, or any other provider implementing [KeyProtector] or
+// [RootUnsealer], injected with [NewSealer] or [SetSealer]. Read [Mode] before
+// choosing one.
+//
+// A [Backend] makes and holds the material behind a [Handle]. Locked memory
+// ([DefaultBackend]) is always registered; the program registers any other
+// with [Register] and finds it by name with [Lookup]. [Detect] probes every
+// registered backend that implements [Prober] and returns the highest-ranked
+// one this host can run, with locked memory as the floor, together with one
+// [ProbeResult] per backend saying why each other was passed over. Nothing
+// registers or probes at import.
+//
+// [NewSecretMemory] returns the linux-secretmem backend: memory enclaves whose
+// pages are memfd_secret(2) memory, which the kernel removes from its direct
+// map and refuses to ptrace and /proc/<pid>/mem. It ranks above locked memory,
+// and [Sealed.OpenIn] decrypts straight into it. Where memfd_secret is not
+// available it returns [ErrMemfdSecretUnavailable].
 //
 // [WipeAll] destroys every enclave the package still holds, including
 // in-process sealing keys. It belongs to the program that owns the process,
@@ -43,10 +59,9 @@
 //
 // The package supports Linux, Android, the BSDs, darwin, iOS, illumos,
 // Solaris, AIX and Windows; core-dump exclusion and other protections vary by
-// platform, and other GOOS values fail to compile. Tests run on Linux only; the
-// BSDs and Windows are build-only for v0.9.0. Design, invariants, error
-// semantics, the platform matrix and upgrade notes are in the [documentation
-// index].
+// platform, and other GOOS values fail to compile. Tests run on Linux only;
+// the other platforms are build-only. Design, invariants, error semantics,
+// the platform matrix and upgrade notes are in the [documentation index].
 //
 // [documentation index]: https://github.com/jeremyhahn/go-enclave/blob/main/docs/README.md
 package enclave
