@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"runtime"
 	"runtime/debug"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -287,6 +289,71 @@ func TestSweepBorrowed(t *testing.T) {
 			}
 			if hs[1].IsAlive() {
 				t.Fatal("borrowed handle alive after the borrow ended and Sweep ran")
+			}
+		})
+	}
+}
+
+// failingWipe fails its first Destroy with ErrReleasedWithoutWipe after
+// releasing the pages, as a denied release mprotect does; a later Destroy of
+// the released pages returns nil.
+type failingWipe struct {
+	enclave.ByteAccess
+	failed atomic.Bool
+}
+
+func (f *failingWipe) Destroy() error {
+	err := f.ByteAccess.Destroy()
+	if err == nil && f.failed.CompareAndSwap(false, true) {
+		return enclave.ErrReleasedWithoutWipe
+	}
+	return err
+}
+
+// TestSweepLeavesNoWorkers pins that bounded sweeps of a handle whose borrow
+// outlasts them leave no goroutine behind, and that the wipe failure of that
+// handle, once the borrow ends, reaches a caller instead of an abandoned
+// worker.
+func TestSweepLeavesNoWorkers(t *testing.T) {
+	for _, via := range []string{"Destroy", "Sweep"} {
+		t.Run(via, func(t *testing.T) {
+			b := newTestBackend()
+			h, err := b.Import(context.Background(), pattern(8), enclave.WithPurpose(enclave.PurposeMaterial))
+			if err != nil {
+				t.Fatalf("Import: %v", err)
+			}
+			hh := h.(*handle)
+			hh.mem = &failingWipe{ByteAccess: hh.mem}
+			release := borrow(t, h)
+			defer release()
+
+			before := runtime.NumGoroutine()
+			for range 20 {
+				ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
+				held, err := b.Sweep(ctx)
+				cancel()
+				if held != 1 || err != nil {
+					t.Fatalf("Sweep = %d, %v; want 1, nil", held, err)
+				}
+			}
+			if after := runtime.NumGoroutine(); after > before+2 {
+				t.Fatalf("goroutines grew from %d to %d over bounded sweeps", before, after)
+			}
+			if !h.IsAlive() {
+				t.Fatal("borrowed handle released under its reader")
+			}
+			release()
+			// Give an abandoned worker, if any, the chance to swallow the error.
+			time.Sleep(50 * time.Millisecond)
+
+			switch via {
+			case "Destroy":
+				err = h.Destroy()
+			case "Sweep":
+				_, err = b.Sweep(context.Background())
+			}
+			if !errors.Is(err, enclave.ErrReleasedWithoutWipe) {
+				t.Fatalf("%s after the borrow ended = %v, want ErrReleasedWithoutWipe", via, err)
 			}
 		})
 	}
