@@ -228,6 +228,7 @@ func TestListType(t *testing.T) {
 		want    []tpm2.TPMHandle
 		queries []query // the GetCapability properties and counts sent
 		wantErr bool
+		wantIs  error // the error listType must wrap; implies wantErr
 	}{
 		{
 			name:    "one_page",
@@ -276,10 +277,38 @@ func TestListType(t *testing.T) {
 			queries: []query{{uint32(tr), maxListedHandles}, {uint32(tr) + 4, maxListedHandles - 1}},
 		},
 		{
+			// A descending pair must not drop the lower handle: the
+			// listing is an ownership baseline.
 			name:    "out_of_order",
-			script:  [][]byte{handlesPage(false, tr+5, tr+2, tr+5, tr+7)},
-			want:    []tpm2.TPMHandle{tr + 5, tr + 7},
+			script:  [][]byte{handlesPage(false, tr+5, tr+2)},
 			queries: []query{{uint32(tr), maxListedHandles}},
+			wantIs:  errHandleOrder,
+		},
+		{
+			name:    "repeated_in_page",
+			script:  [][]byte{handlesPage(false, tr+5, tr+5, tr+7)},
+			queries: []query{{uint32(tr), maxListedHandles}},
+			wantIs:  errHandleOrder,
+		},
+		{
+			name:    "foreign_types_unordered",
+			script:  [][]byte{handlesPage(false, tr+2, 0x81000001, 0x02000000, tr+5)},
+			want:    []tpm2.TPMHandle{tr + 2, tr + 5},
+			queries: []query{{uint32(tr), maxListedHandles}},
+		},
+		{
+			name:    "overlapping_page",
+			script:  [][]byte{handlesPage(true, tr+1, tr+4), handlesPage(false, tr+4, tr+9)},
+			want:    []tpm2.TPMHandle{tr + 1, tr + 4, tr + 9},
+			queries: []query{{uint32(tr), maxListedHandles}, {uint32(tr) + 5, maxListedHandles - 2}},
+		},
+		{
+			// A later page naming a handle below its start that the
+			// earlier pages did not list contradicts them.
+			name:    "unlisted_below_start",
+			script:  [][]byte{handlesPage(true, tr+1, tr+4), handlesPage(false, tr+2, tr+9)},
+			queries: []query{{uint32(tr), maxListedHandles}, {uint32(tr) + 5, maxListedHandles - 2}},
+			wantIs:  errHandleOrder,
 		},
 		{
 			name:    "other_capability",
@@ -309,8 +338,15 @@ func TestListType(t *testing.T) {
 			}
 			d, rw, alloc := newScriptedDevice(t, tc.script...)
 			got, err := d.listType(context.Background(), tpm2.TPMHTTransient)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("listType = %x, %v; want error %v", got, err, tc.wantErr)
+			wantErr := tc.wantErr || tc.wantIs != nil
+			if (err != nil) != wantErr {
+				t.Fatalf("listType = %x, %v; want error %v", got, err, wantErr)
+			}
+			if tc.wantIs != nil && !errors.Is(err, tc.wantIs) {
+				t.Fatalf("listType error %v; want %v", err, tc.wantIs)
+			}
+			if err != nil && got != nil {
+				t.Fatalf("listType = %x with error %v; want nil", got, err)
 			}
 			if !tc.wantErr && !equalHandles(got, tc.want) {
 				t.Fatalf("listType = %x; want %x", got, tc.want)
@@ -329,6 +365,38 @@ func TestListType(t *testing.T) {
 				t.Fatal("listType left a response in the transport buffer")
 			}
 			checkCommandWiped(t, alloc)
+		})
+	}
+}
+
+// TestBeginBaselineKeepsHandles checks that the ownership baseline taken
+// on an unmanaged transport never silently loses a pre-existing handle:
+// recovery would treat a dropped handle as created by the call and flush it.
+func TestBeginBaselineKeepsHandles(t *testing.T) {
+	const tr = tpm2.TPMHandle(0x80000000)
+	for _, tc := range []struct {
+		name string
+		page []byte
+		want []tpm2.TPMHandle
+	}{
+		{name: "ascending", page: handlesPage(false, tr+2, tr+5), want: []tpm2.TPMHandle{tr + 2, tr + 5}},
+		{name: "out_of_order", page: handlesPage(false, tr+5, tr+2)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			page := append([]byte(nil), tc.page...)
+			binary.BigEndian.PutUint32(page[2:], uint32(len(page)))
+			d, _, _ := newScriptedDevice(t, page)
+			c := &call{p: &KeyProtector{dev: d, attempts: 1}, ctx: context.Background()}
+			err := c.begin()
+			if tc.want == nil {
+				if !errors.Is(err, errHandleOrder) || c.listed {
+					t.Fatalf("begin = %v with baseline %x (listed %v); want %v and no baseline", err, c.before, c.listed, errHandleOrder)
+				}
+				return
+			}
+			if err != nil || !c.listed || !equalHandles(c.before, tc.want) {
+				t.Fatalf("begin = %v with baseline %x (listed %v); want %x", err, c.before, c.listed, tc.want)
+			}
 		})
 	}
 }
