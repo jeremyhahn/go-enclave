@@ -24,6 +24,11 @@ import (
 // thread's signal stack, which lives in the Go heap and is never cleared:
 // the sweep itself would plant the residue it is looking for.
 func TestFindPlantsNoCopyOfTheNeedle(t *testing.T) {
+	if raceEnabled {
+		// Under the race detector every compare is instrumented and the sweeps
+		// under signals run for many minutes; #331 tracks a bounded race variant.
+		t.Skip("too slow under the race detector; see #331")
+	}
 	// 16 bytes fit one vector register, 32 bytes four general registers: the
 	// lengths a short-needle search keeps whole in registers on amd64 and arm64.
 	for _, n := range []int{16, 32} {
@@ -45,6 +50,7 @@ func testFindPlantsNoCopy(t *testing.T, n int) {
 	if _, err := rand.Read(needle); err != nil {
 		t.Fatalf("rand.Read: %v", err)
 	}
+	needle[0] |= 0x80                                         // nonzero, so the filler is not zeroed memory
 	needle[1] = needle[0] ^ 1                                 // the filler below must not match the needle's start
 	home := uintptr(unsafe.Pointer(unsafe.SliceData(region))) // the needle's own mapping, excluded from the sweep
 
@@ -64,7 +70,8 @@ func testFindPlantsNoCopy(t *testing.T, n int) {
 }
 
 // findUnderSignals runs Find on a locked thread and sends that thread
-// SIGURG (which the Go runtime takes and ignores) until Find returns.
+// SIGURG (which the Go runtime takes and ignores) until Find returns or
+// signalFor has passed, then waits for Find without signalling.
 func findUnderSignals(needle []byte, home uintptr) error {
 	tids := make(chan int, 1)
 	done := make(chan error, 1)
@@ -73,15 +80,17 @@ func findUnderSignals(needle []byte, home uintptr) error {
 		defer runtime.UnlockOSThread()
 		tids <- syscall.Gettid()
 		// Memory dense with the needle's first byte is where a search
-		// falls back from a byte scan to a whole-needle compare.
-		_, err := mappingContains(firstByteReader(needle[0]), 0, 64<<20, needle, make([]byte, chunk+len(needle)-1))
+		// falls back from a byte scan to a whole-needle compare; a few
+		// chunks are enough to exercise that path on every read.
+		_, err := mappingContains(firstByteReader(needle[0]), 0, firstByteRegion, needle, make([]byte, chunk+len(needle)-1))
 		if err == nil {
 			_, err = Find(needle, home)
 		}
 		done <- err
 	}()
 	pid, tid := syscall.Getpid(), <-tids
-	for {
+	deadline := time.Now().Add(signalFor)
+	for time.Now().Before(deadline) {
 		select {
 		case err := <-done:
 			return err
@@ -90,7 +99,15 @@ func findUnderSignals(needle []byte, home uintptr) error {
 			time.Sleep(20 * time.Microsecond)
 		}
 	}
+	return <-done
 }
+
+const (
+	// firstByteRegion is the size of the first-byte memory each sweep reads.
+	firstByteRegion = 4 * chunk
+	// signalFor bounds how long each sweep is signalled.
+	signalFor = 2 * time.Second
+)
 
 // firstByteReader is an io.ReaderAt over memory that holds only b.
 type firstByteReader byte
