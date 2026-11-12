@@ -1,7 +1,7 @@
 # Mac Secure Enclave backend — architecture (proposal)
 
 > **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-11-12
-> Conflicts with this document are defects. A future feature ([SPEC](../SPEC.md#features), row `mac-secure-enclave`), proposed for `planned` with this design: no code exists, and no code is written until the owner decides the [open questions](#open-questions); each answer then replaces its options here. The backend's own docs move to its module with its code.
+> Conflicts with this document are defects. A future feature ([SPEC](../SPEC.md#features), row `mac-secure-enclave`), proposed for `planned` with this design. A stub-only first slice exists at `backends/macse` ([what the first slice ships](#what-the-first-slice-ships)): its typed errors, its probe, and `New`, `Name` and `Rank` 2, with no Security framework binding, so on every platform `New` and the probe refuse with `ErrSecureEnclaveUnavailable`. That slice adopts the module location (Q1) and the rank (Q8); the other [open questions](#open-questions) wait for the owner, and no binding, handle or attestation code is written until they are decided; each answer then replaces its options here. The backend's own docs move to its module with its code.
 
 ## Problem
 
@@ -155,9 +155,35 @@ The proposal ([Q4](#q4-attestation)) uses that identity as the backend's
   is what the SPEC asks; a relying party that needs per-key proof needs
   [Q4](#q4-attestation)'s App Attest option.
 
+## What the first slice ships
+
+`backends/macse` is a nested module with its own `go.mod`, requiring the root
+module, and is built with the other backend modules. It provides:
+
+- the typed errors [Failure modes](#failure-modes) proposes,
+  `ErrSecureEnclaveUnavailable`, `ErrSecureEnclaveOperation`,
+  `ErrInvalidSignInput` and `*SecurityError` naming the failing step and its
+  `OSStatus`, and also `*PlatformError`;
+- the probe: create one transient key, make one signature, verify it in Go;
+- `New(ctx)`, which runs the same probe and builds the backend only if it
+  passes; `Name` (`mac-secure-enclave`); `Rank` 2; `Probe`.
+
+It refuses everything else. It has no Security framework binding yet, so on
+every platform, darwin included, `New` and `Probe` return
+`ErrSecureEnclaveUnavailable` and `Detect` keeps a lower-ranked backend. It has
+no `Generate`, no handles, no `Attester` and no `Sweeper`. Registering it is
+safe on any platform and changes nothing for a caller.
+
+Choices this slice adopted: the module location (Q1, a nested module, at
+`backends/macse`) and the rank (Q8, rank 2). Open for the owner: the binding
+(Q2), what a handle offers (Q3), attestation (Q4), the evidence shape (Q5),
+persistent keys (Q6) and the test hardware (Q7). The darwin binding follows
+those rulings.
+
 ## Shape proposed
 
-Recommended answers to the open questions are marked; none is decided.
+Recommended answers to the open questions are marked; Q1 and Q8 are adopted by
+[the first slice](#what-the-first-slice-ships), the rest are not decided.
 
 ```mermaid
 flowchart LR
@@ -170,7 +196,7 @@ flowchart LR
   se -->|"Attest: MDA identity signs the nonce"| ev[Evidence apple-mda-signature]
 ```
 
-- **A nested module** (Q1), `backends/macsecureenclave` in this repository, in
+- **A nested module** (Q1, adopted), `backends/macse` in this repository, in
   the shape of `backends/armtrustzone`: its own `go.mod`, requiring the root
   module, never the reverse; `main` registers it explicitly; nothing registers
   it at import.
@@ -193,7 +219,7 @@ flowchart LR
   bounded by the backend's configured timeout.
 - **`Sweep`** destroys every handle the backend made and returns the count it
   could not; transient keys leave nothing in the keychain.
-- **Rank 2** (Q8), the probe runs only from `Detect`, and the constructor
+- **Rank 2** (Q8, adopted), the probe runs only from `Detect`, and the constructor
   checks the same conditions, so a backend that cannot attest is never built.
 - It passes `backendtest` with `VerifyEvidence` set, on a physical Mac (Q7).
 - **darwin on arm64 and amd64 only.** On any other GOOS, or with cgo off, a
@@ -269,8 +295,8 @@ runs until the owner rules on it.
 
 ### Q1: where the module lives
 
-- **A nested module in this repository** (recommended),
-  `backends/macsecureenclave`, as `backends/armtrustzone` is: the SPEC's
+- **A nested module in this repository** (recommended; adopted by the first
+  slice), `backends/macse`, as `backends/armtrustzone` is: the SPEC's
   boundary keeps hardware code out of the root module, not out of the
   repository, and the precedent shares the root's release and CI.
 - **A repository of its own:** independent releases, but a second CI and
@@ -338,12 +364,12 @@ runs until the owner rules on it.
   owner names it, as a server was named for amd-sev. The Linux-only runtime
   ruling covers BSD and Windows; this row asks for macOS as a ruled
   exception for one module's job.
-- **Keep the row planned** until such a Mac exists: the design stands, no
-  code is written.
+- **Keep the row planned** until such a Mac exists: the design stands, and
+  the module stays the refusing stub of the first slice.
 
 ### Q8: rank
 
-- **Rank 2** (recommended), as `arm-trustzone` reports: above locked memory
+- **Rank 2** (recommended; adopted by the first slice), as `arm-trustzone` reports: above locked memory
   (0); linux-secretmem (1) never shares a host with it.
   The hardware rows' order among themselves is for the owner to rule once
   across the sibling proposals.
