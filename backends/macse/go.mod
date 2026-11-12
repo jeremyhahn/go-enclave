@@ -6,3 +6,5 @@ module github.com/jeremyhahn/go-enclave/backends/macse
 go 1.27.4
 
 require github.com/jeremyhahn/go-enclave v0.11.1-alpha
+
+require golang.org/x/sys v0.49.0 // indirect
