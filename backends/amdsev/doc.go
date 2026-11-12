@@ -20,6 +20,11 @@
 // both request one report over a fresh nonce, so a backend that cannot attest
 // is never built.
 //
+// The backend is also an [enclave.RootUnsealer]: [Backend.UnsealRoot] asks
+// the firmware, through /dev/sev-guest's SNP_GET_DERIVED_KEY, for a key from
+// the chip's VCEK bound to the guest's policy and launch measurement, so a
+// root sealed under it opens only for the same guest on the same chip.
+//
 // The package never verifies evidence: [ParseReport] reads the few fields
 // the probe checks, and the relying party's verifier checks the signature,
 // the certificate chain and its policy.

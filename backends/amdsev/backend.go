@@ -24,13 +24,14 @@ const rank = 2
 const aes256KeySize = 32
 
 var (
-	_ enclave.Importer   = (*Backend)(nil)
-	_ enclave.Attester   = (*Backend)(nil)
-	_ enclave.Confiner   = (*Backend)(nil)
-	_ enclave.Sweeper    = (*Backend)(nil)
-	_ enclave.Prober     = (*Backend)(nil)
-	_ enclave.ByteAccess = (*handle)(nil)
-	_ enclave.Freezer    = (*handle)(nil)
+	_ enclave.Importer     = (*Backend)(nil)
+	_ enclave.Attester     = (*Backend)(nil)
+	_ enclave.Confiner     = (*Backend)(nil)
+	_ enclave.Sweeper      = (*Backend)(nil)
+	_ enclave.Prober       = (*Backend)(nil)
+	_ enclave.RootUnsealer = (*Backend)(nil)
+	_ enclave.ByteAccess   = (*handle)(nil)
+	_ enclave.Freezer      = (*handle)(nil)
 )
 
 // Backend is the amd-sev backend. Build it with [New]; the zero value names,
@@ -93,6 +94,27 @@ func (*Backend) Attest(ctx context.Context, nonce []byte) (enclave.Evidence, err
 		return enclave.Evidence{}, reportError("report-data", ErrReportDataMismatch)
 	}
 	return enclave.Evidence{Format: EvidenceFormat, Data: out}, nil
+}
+
+// UnsealRoot implements [enclave.RootUnsealer]: it writes into dst, which
+// is [enclave.RootKeyBytes] long, the key SNP_GET_DERIVED_KEY derives from
+// this chip's VCEK, bound to the guest's policy and launch measurement. The
+// same guest image under the same policy on the same chip derives the same
+// root; another image, policy or chip does not, so material sealed under it
+// opens only there. Each call is one guest request and consumes nothing.
+//
+// A short dst is a [*KeySizeError]; no /dev/sev-guest (an SEV or SEV-ES
+// guest, or no guest) an [*SNPGuestError] matching [ErrSNPGuestUnavailable];
+// a refused request an [*SNPReportError] matching [ErrSNPReport] with a
+// [*FirmwareError] cause. A refused call writes nothing into dst.
+func (*Backend) UnsealRoot(ctx context.Context, dst []byte) error {
+	if err := ctxErr(ctx); err != nil {
+		return err
+	}
+	if len(dst) != enclave.RootKeyBytes {
+		return &KeySizeError{Got: len(dst)}
+	}
+	return deriveKey(ctx, sevGuestDevice, sealKeyRequest, dst)
 }
 
 // Import moves material into a memory enclave ([enclave.NewMemory]) in the
