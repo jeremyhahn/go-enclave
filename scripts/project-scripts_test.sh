@@ -275,11 +275,11 @@ check all 'rc_is 1' 'says "usage:"' no_calls
 
 run "$D/root" "$SH" "$xb" -- ./...
 what="cross-build: no target is a usage error"
-defect all 'rc_is 1' 'says "usage:"' no_calls
+check all 'rc_is 1' 'says "usage:"' no_calls
 
 run "$D/root" "$SH" "$xb" linux/amd64 --
 what="cross-build: no package is a usage error"
-defect all 'rc_is 1' 'says "usage:"' no_calls
+check all 'rc_is 1' 'says "usage:"' no_calls
 
 run "$D/root" CGO_ENABLED=1 "$SH" "$xb" linux/amd64 darwin/arm64 -- ./... ./cmd/x
 what="cross-build: builds, vets and links tests per target with cgo off, and removes its output"
