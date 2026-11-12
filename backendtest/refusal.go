@@ -134,10 +134,12 @@ func CheckRefusal(ctx context.Context, cfg RefusalConfig) error {
 		panicked, err := refusalProbe(ctx, cfg.Probe)
 		checkBudget("Probe")
 		aborted = ctx.Err()
+		// A panic is a finding whether or not ctx ended; anything else
+		// Probe returns after it ended is the abort.
 		switch {
-		case aborted != nil:
 		case panicked != nil:
 			fail(PropertyRefusalProbe, "Probe panicked: %v", panicked)
+		case aborted != nil:
 		case err == nil:
 			fail(PropertyRefusalProbe, "Probe returned nil on a host without the hardware")
 		default:
