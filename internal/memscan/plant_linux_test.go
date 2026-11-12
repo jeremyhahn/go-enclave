@@ -201,7 +201,7 @@ func sweepChild(mode string, n int) int {
 		fmt.Fprintf(os.Stderr, "rand.Read: %v\n", err)
 		return exitChildError
 	}
-	needle[1] = needle[0] ^ 1                                 // the filler below must not match the needle's start
+	sweepNeedleStart(needle)
 	home := uintptr(unsafe.Pointer(unsafe.SliceData(region))) // the needle's own mapping, excluded from the sweep
 
 	if mode == childStall {
@@ -247,6 +247,15 @@ func sweepChild(mode string, n int) int {
 		return exitResidue
 	}
 	return 0
+}
+
+// sweepNeedleStart fixes up the first two bytes of a random needle. The
+// first is never zero: zero bytes fill most of a process, and each one
+// would send Find to a whole-needle compare. The second differs from the
+// first, so memory dense with the first byte never matches the needle.
+func sweepNeedleStart(needle []byte) {
+	needle[0] = 1 + needle[0]%255
+	needle[1] = needle[0] ^ 1
 }
 
 // TestSweepUnderSignalsSendsTheMinimum holds the worker past the signal
