@@ -5,7 +5,9 @@ import (
 	"context"
 	"errors"
 	"runtime/debug"
+	"sync"
 	"testing"
+	"time"
 
 	enclave "github.com/jeremyhahn/go-enclave"
 )
@@ -202,6 +204,91 @@ func TestSweep(t *testing.T) {
 	}
 	if held, err := b.Sweep(context.Background()); held != 0 || err != nil {
 		t.Fatalf("second Sweep = %d, %v", held, err)
+	}
+}
+
+// borrow holds h's bytes inside WithBytes until the returned release runs.
+func borrow(t *testing.T, h enclave.Handle) (release func()) {
+	t.Helper()
+	in, out := make(chan struct{}), make(chan struct{})
+	go func() {
+		_ = h.(*handle).WithBytes(func([]byte) error {
+			close(in)
+			<-out
+			return nil
+		})
+	}()
+	<-in
+	var once sync.Once
+	return func() { once.Do(func() { close(out) }) }
+}
+
+// TestSweepBorrowed checks the Sweeper contract around a borrowed handle:
+// every unborrowed handle is wiped under a nil, canceled or expiring ctx, the
+// borrowed one is counted as held without an error, and Sweep returns
+// without waiting for the borrow to end.
+func TestSweepBorrowed(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		ctx  func() (context.Context, context.CancelFunc)
+	}{
+		{"nil", func() (context.Context, context.CancelFunc) { return nil, func() {} }},
+		{"canceled", func() (context.Context, context.CancelFunc) {
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			return ctx, cancel
+		}},
+		{"deadline", func() (context.Context, context.CancelFunc) {
+			return context.WithTimeout(context.Background(), 50*time.Millisecond)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := newTestBackend()
+			var hs []enclave.Handle
+			for range 4 {
+				h, err := b.Import(context.Background(), pattern(8), enclave.WithPurpose(enclave.PurposeMaterial))
+				if err != nil {
+					t.Fatalf("Import: %v", err)
+				}
+				hs = append(hs, h)
+			}
+			release := borrow(t, hs[1])
+			defer release()
+			ctx, cancel := tc.ctx()
+			defer cancel()
+
+			var held int
+			var err error
+			done := make(chan struct{})
+			go func() {
+				held, err = b.Sweep(ctx)
+				close(done)
+			}()
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				release()
+				t.Fatal("Sweep waited on a borrowed handle")
+			}
+			if held != 1 || err != nil {
+				t.Fatalf("Sweep = %d, %v; want 1, nil", held, err)
+			}
+			for i, h := range hs {
+				if i != 1 && h.IsAlive() {
+					t.Fatalf("unborrowed handle %d alive after Sweep", i)
+				}
+			}
+			if !hs[1].IsAlive() {
+				t.Fatal("borrowed handle released under its reader")
+			}
+			release()
+			if held, err := b.Sweep(context.Background()); held != 0 || err != nil {
+				t.Fatalf("Sweep after release = %d, %v", held, err)
+			}
+			if hs[1].IsAlive() {
+				t.Fatal("borrowed handle alive after the borrow ended and Sweep ran")
+			}
+		})
 	}
 }
 
