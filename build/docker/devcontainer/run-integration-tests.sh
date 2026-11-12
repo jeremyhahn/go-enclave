@@ -23,8 +23,9 @@ case $pkg in
   ''|*[!a-z0-9_-]*) echo "run-integration-tests: invalid package name" >&2; exit 2 ;;
 esac
 floor=${GO_ENCLAVE_IT_COVERAGE_FLOOR:?GO_ENCLAVE_IT_COVERAGE_FLOOR is required}
+# N or N.N...: digits, then at most one dot with digits on both sides.
 case $floor in
-  ''|*[!0-9.]*) echo "run-integration-tests: invalid coverage floor" >&2; exit 2 ;;
+  ''|.*|*.|*.*.*|*[!0-9.]*) echo "run-integration-tests: invalid coverage floor" >&2; exit 2 ;;
 esac
 coverpkg=${GO_ENCLAVE_IT_COVERPKG:?GO_ENCLAVE_IT_COVERPKG is required}
 flags=${GO_ENCLAVE_IT_TESTFLAGS:?GO_ENCLAVE_IT_TESTFLAGS is required}

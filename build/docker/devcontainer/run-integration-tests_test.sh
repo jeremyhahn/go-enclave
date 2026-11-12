@@ -154,8 +154,8 @@ for s in $shells; do
   refused "$s" "a negative floor" 'invalid coverage floor' GO_ENCLAVE_IT_COVERAGE_FLOOR=-1
   pkg_=nosuch
   refused "$s" "a missing suite directory" 'test/integration/nosuch does not exist'
-  for f in 1.2.3 . 1. .5; do
-    skip "$s: the floor '$f' is accepted and go test runs"
+  for f in 1.2.3 . 1. .5 1..2; do
+    refused "$s" "the floor '$f'" 'invalid coverage floor' GO_ENCLAVE_IT_COVERAGE_FLOOR="$f"
   done
 done
 
