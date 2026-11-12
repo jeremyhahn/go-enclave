@@ -139,9 +139,6 @@ func TestExecute_MalformedResponses(t *testing.T) {
 		{name: "validate_fails", rsp: frame(tagSessions, 0, good), validate: errValidate, want: errValidate},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if tc.name == "trailing_auth_area" {
-				t.Skip("defect: execute accepts bytes after the authorization area")
-			}
 			d, rw, alloc := newScriptedDevice(t, tc.rsp)
 			auth := &fakeAuth{validateErr: tc.validate}
 			got, err := d.execute(context.Background(), tpm2.TPMCCUnseal, object{handle: 0x80000001}, session{handle: 0x02000000, auth: auth}, []byte{0x42})
@@ -373,6 +370,10 @@ func FuzzExecuteResponse(f *testing.F) {
 			}
 			if n := binary.BigEndian.Uint32(rsp[rspHeaderSize:]); uint64(n) != uint64(len(got)) {
 				t.Fatalf("execute returned %d bytes of a %d-byte parameter area", len(got), n)
+			}
+			area := rsp[rspHeaderSize+4+len(got) : binary.BigEndian.Uint32(rsp[2:])]
+			if a, err := tpm2.Unmarshal[tpm2.TPMSAuthResponse](area); err != nil || len(tpm2.Marshal(*a)) != len(area) {
+				t.Fatalf("execute accepted the authorization area %x", area)
 			}
 		case got != nil:
 			t.Fatalf("execute returned %x with %v", got, err)
