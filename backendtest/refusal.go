@@ -64,6 +64,10 @@ func CheckRefusal(ctx context.Context, cfg RefusalConfig) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	// No check starts once ctx has ended, New included.
+	if err := ctx.Err(); err != nil {
+		return findingsOf([]error{&AbortedError{Cause: err}})
+	}
 	var findings []error
 	fail := func(property, format string, args ...any) {
 		findings = append(findings, &PropertyError{Property: property, Detail: fmt.Sprintf(format, args...)})
@@ -123,14 +127,15 @@ func CheckRefusal(ctx context.Context, cfg RefusalConfig) error {
 	checkBudget("New")
 	// An ended context aborts the check, as it does a TestBackend run: Probe
 	// is not called on it, and what Probe returns once it ends is no finding.
-	if err := ctx.Err(); cfg.Probe != nil && err != nil {
-		findings = append(findings, &AbortedError{Cause: err})
-	} else if cfg.Probe != nil {
+	// New takes no context, so its refusal is judged even if ctx ended
+	// during it; the abort is recorded whether or not there is a Probe.
+	aborted := ctx.Err()
+	if aborted == nil && cfg.Probe != nil {
 		panicked, err := refusalProbe(ctx, cfg.Probe)
 		checkBudget("Probe")
+		aborted = ctx.Err()
 		switch {
-		case ctx.Err() != nil:
-			findings = append(findings, &AbortedError{Cause: ctx.Err()})
+		case aborted != nil:
 		case panicked != nil:
 			fail(PropertyRefusalProbe, "Probe panicked: %v", panicked)
 		case err == nil:
@@ -138,6 +143,9 @@ func CheckRefusal(ctx context.Context, cfg RefusalConfig) error {
 		default:
 			judge("Probe", err)
 		}
+	}
+	if aborted != nil {
+		findings = append(findings, &AbortedError{Cause: aborted})
 	}
 
 	if after := enclave.BackendNames(); !slices.Equal(names, after) {
