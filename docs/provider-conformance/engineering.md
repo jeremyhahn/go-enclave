@@ -69,13 +69,17 @@ heuristic in places, so a pass is weaker than the contract:
   load is not detected; `go test -race` adds a data-race probe for state the
   provider touches from Go.
 - **The residue sweep** searches, at one moment, every readable mapping in
-  `/proc/self/maps` that can hold a runtime copy, for the **whole** 32-byte key,
-  excluding the needle's own mapping: anonymous mappings (named or not), every
+  `/proc/self/maps` that can hold a runtime copy, for the whole 32-byte key and
+  for each of its 16-byte halves, excluding the needle's own mapping: anonymous mappings (named or not), every
   writable mapping (private or shared, file-backed or `/dev/zero`), and memfd,
   `/dev/shm`, SysV and unlinked (`(deleted)`) mappings whatever their
   permissions. It skips unreadable mappings and read-only views of files still
   on disk (program text and rodata), stops scanning a mapping at the first read
-  error, and cannot see partial copies or copies in another form. It runs only
+  error. It cannot see a partial copy that holds neither half whole, or a copy
+  in another form (encoded, reversed, interleaved). A copy kept in a heap slice,
+  map value, `sync.Pool`, channel buffer, string, a parked goroutine's stack,
+  an anonymous private or shared mapping, or a second memory enclave is found;
+  `TestSuiteCatchesEachRetention` plants each of these. It runs only
   on Linux; a sweep that cannot run, or whose control shows it blind, returns
   `ErrNotMeasured` unless `SkipResidueSweep` accepted that.
 - **Context handling** is checked only for contexts that ended before the call;
