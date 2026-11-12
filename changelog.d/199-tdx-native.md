@@ -1,0 +1,3 @@
+### Added
+
+- **The `intel-tdx` backend's native interface, reached through `enclave.As`** (#199): `(*Backend).Report` returns the raw TDREPORT for 64 bytes of report data; `Measurements` reads MRTD, MRCONFIGID, MROWNER, MROWNERCONFIG and RTMR0 to RTMR3 from the kernel's measurement registers into a typed value, refusing a read that is not 48 bytes; `ExtendRTMR` extends one RTMR with a 48-byte digest, and refuses an index outside 0 to 3 with `ErrRTMRIndex` before any I/O. A register refusal is `*MeasurementRegisterError` naming the register; the backend never extends an RTMR on its own. Off linux/amd64 the methods refuse as the probe does.
