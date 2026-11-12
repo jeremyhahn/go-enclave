@@ -31,7 +31,7 @@ func pattern(n int) []byte {
 }
 
 func TestImportMaterial(t *testing.T) {
-	b := &Backend{}
+	b := newTestBackend()
 	material := pattern(48)
 	want := bytes.Clone(material)
 	h, err := b.Import(context.Background(), material, enclave.WithPurpose(enclave.PurposeMaterial))
@@ -64,7 +64,7 @@ func TestImportMaterial(t *testing.T) {
 }
 
 func TestImportAESKey(t *testing.T) {
-	b := &Backend{}
+	b := newTestBackend()
 	for _, p := range []enclave.Purpose{enclave.PurposeWrappingKey, enclave.PurposeDataKey} {
 		key := pattern(32)
 		h, err := b.Import(context.Background(), key,
@@ -109,7 +109,7 @@ func TestImportRefusals(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			b := &Backend{}
+			b := newTestBackend()
 			material := pattern(tc.n)
 			h, err := b.Import(tc.ctx, material, tc.opts...)
 			if h != nil || !tc.check(err) {
@@ -123,7 +123,7 @@ func TestImportRefusals(t *testing.T) {
 }
 
 func TestFreezeMakesReadOnly(t *testing.T) {
-	b := &Backend{}
+	b := newTestBackend()
 	h, err := b.Import(context.Background(), pattern(16), enclave.WithPurpose(enclave.PurposeMaterial))
 	if err != nil {
 		t.Fatalf("Import: %v", err)
@@ -148,7 +148,7 @@ func TestFreezeMakesReadOnly(t *testing.T) {
 }
 
 func TestDestroy(t *testing.T) {
-	b := &Backend{}
+	b := newTestBackend()
 	h, err := b.Import(context.Background(), pattern(16), enclave.WithPurpose(enclave.PurposeMaterial))
 	if err != nil {
 		t.Fatalf("Import: %v", err)
@@ -178,7 +178,7 @@ func TestDestroy(t *testing.T) {
 }
 
 func TestSweep(t *testing.T) {
-	b := &Backend{}
+	b := newTestBackend()
 	var hs []enclave.Handle
 	for range 3 {
 		h, err := b.Import(context.Background(), pattern(8), enclave.WithPurpose(enclave.PurposeMaterial))
@@ -206,7 +206,7 @@ func TestSweep(t *testing.T) {
 }
 
 func TestCapabilities(t *testing.T) {
-	var b enclave.Backend = &Backend{}
+	var b enclave.Backend = newTestBackend()
 	if _, ok := b.(enclave.Importer); !ok {
 		t.Fatal("not an Importer")
 	}

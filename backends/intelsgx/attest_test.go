@@ -12,7 +12,7 @@ import (
 )
 
 func TestAttestRefusesNonceLength(t *testing.T) {
-	b := &Backend{}
+	b := newTestBackend()
 	for _, n := range []int{0, reportDataSize + 1} {
 		ev, err := b.Attest(context.Background(), make([]byte, n))
 		if !errors.Is(err, enclave.ErrInvalidNonce) {
@@ -75,7 +75,7 @@ func TestAttestQuoteCarriesPaddedNonce(t *testing.T) {
 func TestAttestEndedContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := (&Backend{}).Attest(ctx, []byte{1}); !errors.Is(err, context.Canceled) {
+	if _, err := (newTestBackend()).Attest(ctx, []byte{1}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Attest(canceled) = %v, want context.Canceled", err)
 	}
 }
@@ -88,7 +88,7 @@ func TestAttestRefusesOutsideEnclave(t *testing.T) {
 		t.Skip("the stub's refusal is attest_other_test.go's")
 	}
 	skipInEnclave(t)
-	b := &Backend{}
+	b := newTestBackend()
 	var wg sync.WaitGroup
 	errs := make([]error, 8)
 	for i := range errs {
