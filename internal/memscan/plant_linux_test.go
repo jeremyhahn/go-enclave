@@ -223,7 +223,7 @@ func sweepChild(mode string, n int) int {
 		return exitChildError
 	}
 	for range 3 {
-		hits, aborted, err := sweepRound(needle, home, mode == childPause)
+		hits, aborted, err := sweepRound(needle, home, mode)
 		if aborted {
 			fmt.Fprintln(os.Stderr, "the parent could not deliver the round's signals")
 			return exitTooFewSignals
@@ -335,6 +335,20 @@ func TestSweepUnderSignalsFailsAPausedChild(t *testing.T) {
 	}
 }
 
+// TestSweepUnderSignalsFailsSignalsOutsideCompares runs a child that keeps
+// comparing through the normal counting path, but whose signals all land
+// between its compare passes: no signal interrupted a comparison, so the
+// round must count none and fail.
+func TestSweepUnderSignalsFailsSignalsOutsideCompares(t *testing.T) {
+	out, sent, _, err := runSweepChild(childOutside, 32, sweepDeadline)
+	if !errors.Is(err, errTooFewSignals) {
+		t.Fatalf("a round whose signals all landed between compare passes: want %v, got %v (signals %v)\n%s", errTooFewSignals, err, sent, out)
+	}
+	if len(sent) != 1 || sent[0] != 0 {
+		t.Fatalf("a round whose signals all landed between compare passes counted %v signal(s), want [0]", sent)
+	}
+}
+
 // TestSweepNeedleNeverStartsWithZero: a needle that starts with a zero
 // byte sends Find's search to a whole-needle compare at every zero byte of
 // the process, which under the race detector takes seconds per sweep and
@@ -375,7 +389,7 @@ func TestSweepUnderSignalsBoundsAStalledSweep(t *testing.T) {
 // compares memory dense with the needle's first byte, then runs
 // Find on that thread unless the parent gives up. Nothing here bounds
 // Find: the parent kills the child at its deadline.
-func sweepRound(needle []byte, home uintptr, pause bool) (hits []string, aborted bool, err error) {
+func sweepRound(needle []byte, home uintptr, mode string) (hits []string, aborted bool, err error) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	fmt.Printf("%s%d\n", roundTid, syscall.Gettid())
@@ -395,9 +409,16 @@ func sweepRound(needle []byte, home uintptr, pause bool) (hits []string, aborted
 		if _, cerr := mappingContains(firstByteReader(needle[0]), 0, denseFill, needle, buf); cerr != nil {
 			return nil, false, cerr
 		}
-		if pause {
+		if mode == childPause {
 			verdict, err = awaitVerdict(in)
 			break
+		}
+		if mode == childOutside {
+			// Only brackets that arrive while no pass runs may count.
+			if _, verdict, err = readParent(in); err != nil || verdict != 0 {
+				break
+			}
+			time.Sleep(2 * time.Millisecond)
 		}
 		var landed bool
 		landed, verdict, err = readParent(in)
@@ -523,6 +544,7 @@ const (
 	childSweep        = "sweep"               // three rounds under signals, then a check sweep
 	childStall        = "stall"               // stops itself while its sweep runs
 	childPause        = "pause"               // compares once, then stops comparing while signaled
+	childOutside      = "outside"             // compares, but every signal lands between passes
 	exitResidue       = 2                     // a sweep found the needle outside its mapping
 	exitTooFewSignals = 3                     // a round could not reach minSignals
 	exitChildError    = 4                     // the child could not run its sweep
