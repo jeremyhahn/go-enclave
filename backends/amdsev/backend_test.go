@@ -1,6 +1,7 @@
 package amdsev
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"testing"
@@ -45,10 +46,11 @@ func TestBackendIdentity(t *testing.T) {
 		t.Errorf("Backend is not a Prober of rank 2")
 	}
 	for name, ok := range map[string]bool{
-		"Importer": implements[enclave.Importer](b),
-		"Attester": implements[enclave.Attester](b),
-		"Confiner": implements[enclave.Confiner](b),
-		"Sweeper":  implements[enclave.Sweeper](b),
+		"Importer":     implements[enclave.Importer](b),
+		"Attester":     implements[enclave.Attester](b),
+		"Confiner":     implements[enclave.Confiner](b),
+		"Sweeper":      implements[enclave.Sweeper](b),
+		"RootUnsealer": implements[enclave.RootUnsealer](b),
 	} {
 		if !ok {
 			t.Errorf("Backend does not implement enclave.%s", name)
@@ -82,5 +84,34 @@ func TestAttestOutsideAnSNPGuest(t *testing.T) {
 	}
 	if !errors.Is(err, ErrSNPGuestUnavailable) || ev.Data != nil {
 		t.Errorf("Attest = %v, %d bytes; want ErrSNPGuestUnavailable and no evidence", err, len(ev.Data))
+	}
+}
+
+func TestUnsealRootRefusesBeforeAnyRequest(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	dst := make([]byte, enclave.RootKeyBytes)
+	if err := (&Backend{}).UnsealRoot(ctx, dst); !errors.Is(err, context.Canceled) {
+		t.Errorf("UnsealRoot(ended ctx) = %v, want context.Canceled", err)
+	}
+	var ke *KeySizeError
+	if err := (&Backend{}).UnsealRoot(context.Background(), make([]byte, 16)); !errors.As(err, &ke) || ke.Got != 16 {
+		t.Errorf("UnsealRoot(16 bytes) = %v, want a *KeySizeError", err)
+	}
+}
+
+// TestUnsealRootOutsideAnSNPGuest proves the refusal on a host with no
+// /dev/sev-guest; the in-guest pass is a later slice on an SNP guest.
+func TestUnsealRootOutsideAnSNPGuest(t *testing.T) {
+	dst := make([]byte, enclave.RootKeyBytes)
+	err := (&Backend{}).UnsealRoot(context.Background(), dst)
+	if err == nil {
+		t.Skip("this host is an SNP guest: the in-guest slice covers it")
+	}
+	if !errors.Is(err, ErrSNPGuestUnavailable) {
+		t.Errorf("UnsealRoot = %v, want ErrSNPGuestUnavailable", err)
+	}
+	if !bytes.Equal(dst, make([]byte, enclave.RootKeyBytes)) {
+		t.Errorf("a refused UnsealRoot wrote key material into dst")
 	}
 }
