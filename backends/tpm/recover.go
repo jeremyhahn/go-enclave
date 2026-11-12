@@ -135,17 +135,20 @@ func (d *tpmDevice) listType(ctx context.Context, ht tpm2.TPMHT) ([]tpm2.TPMHand
 		if err != nil {
 			return nil, err
 		}
+		// The TPM lists handles in ascending order from next: one of
+		// another type, below next or out of order is not taken, so a
+		// device repeating a page cannot list a handle twice.
 		n := len(hs)
 		for _, h := range got.Handle {
-			if uint32(h)>>24 == uint32(ht) && left > 0 {
+			if uint32(h)>>24 == uint32(ht) && uint32(h) >= next && left > 0 {
 				hs = append(hs, h)
+				next = uint32(h) + 1
 				left--
 			}
 		}
 		if !rsp.MoreData || len(hs) == n {
 			return hs, nil
 		}
-		next = uint32(hs[len(hs)-1]) + 1
 	}
 	return hs, nil
 }

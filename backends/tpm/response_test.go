@@ -301,9 +301,6 @@ func TestListType(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if tc.name == "repeated_page" || tc.name == "out_of_order" {
-				t.Skip("defect: listType keeps handles below the start it asked for, so a device repeating a page yields duplicates")
-			}
 			// The truncated list must still state its own size.
 			for i, rsp := range tc.script {
 				rsp = append([]byte(nil), rsp...)
