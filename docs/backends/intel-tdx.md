@@ -262,6 +262,11 @@ under the integration tag. go-enclave's own CI gains nothing.
 Either way the configfs-tsm client is vendor-neutral. If the amd-sev proposal
 also uses it, the two settle where the one copy lives before either is coded.
 
+Proposed answer (for owner sign-off): one module per row, because the ruled
+arm-trustzone design ([Decision 1](arm-trustzone-design.md#decision-1-where-the-backend-lives-ruled-a))
+already gives a hardware row a module and tags of its own, and amd-sev's Q1
+recommends the same, so no release waits on a second kind of hardware.
+
 ### Q2: rank
 
 - **Rank 10** (recommended), the value every confidential-VM backend
@@ -273,6 +278,10 @@ also uses it, the two settle where the one copy lives before either is coded.
   leaves to out-of-tree backends.
 - **Rank 2**, the next value above secretmem: simpler, but every later
   software backend would have to sit above a hardware one or renumber it.
+
+Proposed answer (for owner sign-off): none; left for the owner, because the
+rank is ruled once across the hardware proposals and they disagree: this one
+recommends 10, [amd-sev's Q3](amd-sev.md#q3-rank) recommends 2.
 
 ### Q3: the detection probe
 
@@ -288,6 +297,10 @@ also uses it, the two settle where the one copy lives before either is coded.
   that cannot attest, and the first `Attest` fails instead.
 - **CPUID or `/proc/cpuinfo`'s `tdx_guest` flag only:** cheapest, proves
   neither the driver nor the quote path.
+
+Proposed answer (for owner sign-off): TDREPORT, DEBUG bit and one quote,
+because it selects only a TD that can attest, the same rule amd-sev's
+[Q4](amd-sev.md#q4-the-detection-probe) recommends for its probe.
 
 ### Q4: how the nonce reaches REPORTDATA
 
@@ -305,6 +318,11 @@ The amd-sev proposal faces the same 64-byte field. Recommended: one rule for
 every attesting backend, stated once in [Attestation](architecture.md#attestation)
 with the first backend's code.
 
+Proposed answer (for owner sign-off): the nonce, zero-padded to 64 bytes,
+because it is what the kernel and Intel's verifiers already take and what
+amd-sev's [Q6](amd-sev.md#q6-evidence-shape) recommends, so one rule covers
+every attesting backend.
+
 ### Q5: the evidence format name
 
 - **The kernel's `provider` value, `tdx_guest`** (recommended): the kernel
@@ -312,6 +330,10 @@ with the first backend's code.
   invents nothing, and a verifier that reads configfs-tsm already knows it.
 - **A name of ours**, such as `intel-tdx-quote`: matches the row's name, but
   is a second name for a format that has one.
+
+Proposed answer (for owner sign-off): `tdx_guest`, because the kernel
+already names the format and standards first rules out inventing a second
+name for it.
 
 ### Q6: where handles live inside the TD
 
@@ -322,6 +344,11 @@ with the first backend's code.
   would lose them too. Its proposed constructor is unexported, so this waits
   on that row; the backend can then import through it with no seam change.
 
+Proposed answer (for owner sign-off): memory enclaves from
+`enclave.NewMemory`, because it needs only the exported API today and
+matches amd-sev's [Q5](amd-sev.md#q5-handle-memory), which leaves secretmem
+as a later change after both rows ship.
+
 ### Q7: `Sweeper`
 
 - **No `Sweeper`** (recommended): the handles wrap memory enclaves, which
@@ -330,6 +357,10 @@ with the first backend's code.
   note with the code.
 - **A `Sweeper`** that destroys every live handle it made: matches the table
   as written, at the cost of a second registry of the same handles.
+
+Proposed answer (for owner sign-off): no `Sweeper`, because `WipeAll`
+already sweeps the memory enclaves the handles wrap, and a second registry
+would only sweep the same pages twice.
 
 ### Q8: RTMR extension
 
@@ -341,6 +372,10 @@ with the first backend's code.
   that go-enclave selected it): a verifier would see it, but importing and
   constructing would change measured state no caller asked to change.
 
+Proposed answer (for owner sign-off): native only, because an irreversible
+RTMR extension is a process-wide decision for `main`, which the
+[SPEC boundaries](../SPEC.md#boundaries) keep out of a library.
+
 ### Q9: the verifier the tests use
 
 - **Intel's Quote Verification Library** (recommended), the reference
@@ -351,6 +386,11 @@ with the first backend's code.
   against an implementation that is not the specification's owner's.
 - **A remote verification service:** needs an account and the network in
   every run.
+
+Proposed answer (for owner sign-off): none; left for the owner, because this
+proposal recommends Intel's library while amd-sev's
+[Q9](amd-sev.md#q9-the-verifier-the-tests-use) recommends the portfolio's
+own verifier, and the two rows should follow one rule.
 
 ## Rejected alternatives
 
