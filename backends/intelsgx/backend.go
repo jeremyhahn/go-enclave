@@ -2,6 +2,7 @@ package intelsgx
 
 import (
 	"context"
+	"sync"
 
 	enclave "github.com/jeremyhahn/go-enclave"
 )
@@ -17,7 +18,10 @@ const rank = 2
 
 // Backend is the intel-sgx backend. It exists only inside a non-debug SGX
 // enclave that can quote: [New] refuses everywhere else.
-type Backend struct{}
+type Backend struct {
+	// mu serialises [Backend.Attest]'s request and check.
+	mu sync.Mutex
+}
 
 var (
 	_ enclave.Prober   = (*Backend)(nil)

@@ -1,0 +1,3 @@
+### Added
+
+- **The `intel-sgx` backend attests** (#193): `Backend.Attest(ctx, nonce)` returns `Evidence{Format: "sgx-quote"}`, the version 3 ECDSA quote as the DCAP Quote Library API defines it, whose `REPORT_DATA` is the nonce zero-padded to 64 bytes. A nonce empty or over 64 bytes is `ErrInvalidNonce` before any request; calls on one backend are serialised, and a quote that does not carry the padded nonce is refused with `ErrReportDataMismatch`. Outside an SGX enclave, and on every platform but linux/amd64, `Attest` refuses with an error matching `ErrSGXUnavailable` naming the failing step. Nothing changes for callers of the root module.
