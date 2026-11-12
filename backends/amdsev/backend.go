@@ -54,10 +54,18 @@ type Backend struct {
 // off Linux on amd64), or ctx.Err(); a backend that cannot attest is never
 // built. ctx bounds only waiting; a nil ctx never ends.
 func New(ctx context.Context) (*Backend, error) {
-	if err := probe(ctx, tsmReportRoot); err != nil {
+	r, err := probeReport(ctx, tsmReportRoot)
+	if err != nil {
 		return nil, err
 	}
-	return &Backend{guest: true, confined: true}, nil
+	return newBackend(r), nil
+}
+
+// newBackend is the Backend for the guest whose checked report is r: a
+// guest whose policy allows debug lets the host read and write its memory,
+// so it does not confine the process.
+func newBackend(r Report) *Backend {
+	return &Backend{guest: true, confined: !r.Debug()}
 }
 
 // Name returns "amd-sev".

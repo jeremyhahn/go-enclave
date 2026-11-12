@@ -33,25 +33,32 @@ func reportError(op string, err error) error { return &SNPReportError{Op: op, Ca
 // is an [*SNPGuestError] naming the step, ctx.Err() when ctx ended first, or
 // [ErrSNPGuestUnavailable] off Linux on amd64.
 func probe(ctx context.Context, root string) error {
+	_, err := probeReport(ctx, root)
+	return err
+}
+
+// probeReport is probe returning the report it checked, so New can read
+// the guest's policy from it.
+func probeReport(ctx context.Context, root string) (Report, error) {
 	if err := ctxErr(ctx); err != nil {
-		return err
+		return Report{}, err
 	}
 	nonce := make([]byte, ReportDataSize)
 	_, _ = rand.Read(nonce) // crypto/rand.Read never fails
 	out, err := requestReport(ctx, root, nonce, guestError)
 	if err != nil {
-		return err
+		return Report{}, err
 	}
 	r, err := ParseReport(out)
 	if err != nil {
 		var re *SNPReportError
 		if errors.As(err, &re) {
-			return guestError(re.Op, re.Cause)
+			return Report{}, guestError(re.Op, re.Cause)
 		}
-		return guestError("outblob", err)
+		return Report{}, guestError("outblob", err)
 	}
 	if !r.HasReportData(nonce) {
-		return guestError("report-data", ErrReportDataMismatch)
+		return Report{}, guestError("report-data", ErrReportDataMismatch)
 	}
-	return nil
+	return r, nil
 }
