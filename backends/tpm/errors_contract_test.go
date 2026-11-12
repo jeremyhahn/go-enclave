@@ -30,8 +30,6 @@ type errorRow struct {
 	as func(err error) bool
 	// prefix is the message prefix every value carries.
 	prefix string
-	// defect, when set, skips the zero-value check: a known defect.
-	defect string
 }
 
 func asType[T error](err error) bool {
@@ -125,9 +123,6 @@ func TestErrorContract_Types(t *testing.T) {
 				t.Fatalf("row %s holds a %s", name, got)
 			}
 			t.Run("zero", func(t *testing.T) {
-				if row.defect != "" {
-					t.Skip("defect: " + row.defect)
-				}
 				checkMessage(t, row.zero, row.prefix)
 				if row.wraps && errors.Unwrap(row.zero) != nil {
 					t.Errorf("zero %T unwraps to %v, want nil", row.zero, errors.Unwrap(row.zero))
@@ -162,8 +157,11 @@ func TestErrorContract_Types(t *testing.T) {
 			} else if !row.wraps && got != nil {
 				t.Errorf("Unwrap(%T) = %v, want nil", err, got)
 			}
-			if row.wraps && errors.Unwrap(row.populated(nil)) != nil {
-				t.Errorf("%T with a nil cause unwraps to non-nil", err)
+			if noCause := row.populated(nil); row.wraps {
+				checkMessage(t, noCause, row.prefix)
+				if errors.Unwrap(noCause) != nil {
+					t.Errorf("%T with a nil cause unwraps to non-nil", err)
+				}
 			}
 
 			checkNoMarker(t, err)
