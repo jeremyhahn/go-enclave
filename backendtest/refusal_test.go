@@ -165,6 +165,40 @@ func TestCheckRefusalCatches(t *testing.T) {
 			}
 			return nil, &hardwareError{step: "open"}
 		}), PropertyRefusalBudget},
+		{"budget restored by probe", func() RefusalConfig {
+			// New lowers the limit and Probe puts it back: the net change is
+			// nil, but New alone changed the budget.
+			var before int64
+			lower := budgetFault(alloc).New
+			cfg := withNew(func() (enclave.Backend, error) {
+				before = alloc.Limit()
+				return lower()
+			})
+			cfg.Probe = func(context.Context) error {
+				_, _ = alloc.ForceLimit(before)
+				return &hardwareError{step: "probe"}
+			}
+			return cfg
+		}(), PropertyRefusalBudget},
+		{"leak released by probe", func() RefusalConfig {
+			// New keeps a reservation and Probe releases it: a constructor
+			// that leaks when called alone.
+			var leaked interface{ Destroy() error }
+			cfg := withNew(func() (enclave.Backend, error) {
+				if b, err := alloc.NewSized(1); err == nil {
+					leaked = b
+				}
+				return nil, &hardwareError{step: "open"}
+			})
+			cfg.Probe = func(context.Context) error {
+				if leaked != nil {
+					_ = leaked.Destroy()
+					leaked = nil
+				}
+				return &hardwareError{step: "probe"}
+			}
+			return cfg
+		}(), PropertyRefusalBudget},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
