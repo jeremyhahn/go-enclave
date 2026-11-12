@@ -744,6 +744,12 @@ release-alpha:
 release-verify:
 	@sh scripts/release-verify.sh "$$TAG" "$$MAIN_REF"
 
+## release-tree-check: TAG=vX.Y.Z[-pre] REF=<published ref> — the published commit's tree is the tag's tree (offline)
+# See scripts/release-tree-check.sh. Resolves both trees in the local clone; writes nothing.
+.PHONY: release-tree-check
+release-tree-check:
+	@sh scripts/release-tree-check.sh "$$TAG" "$$REF"
+
 ## consumer-check: TAG=vX.Y.Z[-pre] — build and run a throwaway consumer of this module at TAG (GOWORK=off)
 # Module resolution comes from the environment (GOPRIVATE, insteadOf, proxy).
 .PHONY: consumer-check
