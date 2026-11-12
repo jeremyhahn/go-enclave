@@ -129,22 +129,21 @@ func TestResidueMatrix(t *testing.T) {
 	half := keyBytes / 2
 	tests := []struct {
 		name string
-		miss string // non-empty: the check misses this case today
 		keep func(t *testing.T) func(key []byte)
 	}{
-		{"package-level slice", "", func(*testing.T) func([]byte) {
+		{"package-level slice", func(*testing.T) func([]byte) {
 			return func(k []byte) { matrixSlice = append(matrixSlice, bytes.Clone(k)) }
 		}},
-		{"map value", "", func(*testing.T) func([]byte) {
+		{"map value", func(*testing.T) func([]byte) {
 			return func(k []byte) { matrixMap[len(matrixMap)] = bytes.Clone(k) }
 		}},
-		{"sync.Pool", "", func(*testing.T) func([]byte) {
+		{"sync.Pool", func(*testing.T) func([]byte) {
 			return func(k []byte) {
 				b := bytes.Clone(k)
 				matrixPool.Put(&b)
 			}
 		}},
-		{"buffered channel", "", func(*testing.T) func([]byte) {
+		{"buffered channel", func(*testing.T) func([]byte) {
 			return func(k []byte) {
 				var a [keyBytes]byte
 				copy(a[:], k)
@@ -154,24 +153,24 @@ func TestResidueMatrix(t *testing.T) {
 				}
 			}
 		}},
-		{"parked goroutine stack", "", func(t *testing.T) func([]byte) {
+		{"parked goroutine stack", func(t *testing.T) func([]byte) {
 			stop := make(chan struct{})
 			var parked sync.WaitGroup
 			t.Cleanup(func() { close(stop); parked.Wait() })
 			return func(k []byte) { parkOnStack(k, stop, &parked) }
 		}},
-		{"kept string conversion", "", func(*testing.T) func([]byte) {
+		{"kept string conversion", func(*testing.T) func([]byte) {
 			return func(k []byte) { matrixStrings = append(matrixStrings, string(k)) }
 		}},
-		{"anonymous private mmap", "", func(t *testing.T) func([]byte) {
+		{"anonymous private mmap", func(t *testing.T) func([]byte) {
 			region := anonMapping(t, unix.MAP_PRIVATE)
 			return func(k []byte) { copy(region, k) }
 		}},
-		{"anonymous shared mmap", "", func(t *testing.T) func([]byte) {
+		{"anonymous shared mmap", func(t *testing.T) func([]byte) {
 			region := anonMapping(t, unix.MAP_SHARED)
 			return func(k []byte) { copy(region, k) }
 		}},
-		{"undestroyed second memory enclave", "", func(t *testing.T) func([]byte) {
+		{"undestroyed second memory enclave", func(t *testing.T) func([]byte) {
 			var held []enclave.ByteAccess
 			t.Cleanup(func() {
 				for _, m := range held {
@@ -190,18 +189,15 @@ func TestResidueMatrix(t *testing.T) {
 				}
 			}
 		}},
-		{"first half of the key", "miss: the sweep looks only for the whole key", func(*testing.T) func([]byte) {
+		{"first half of the key", func(*testing.T) func([]byte) {
 			return func(k []byte) { matrixSlice = append(matrixSlice, bytes.Clone(k[:half])) }
 		}},
-		{"last half of the key", "miss: the sweep looks only for the whole key", func(*testing.T) func([]byte) {
+		{"last half of the key", func(*testing.T) func([]byte) {
 			return func(k []byte) { matrixSlice = append(matrixSlice, bytes.Clone(k[half:])) }
 		}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if tc.miss != "" {
-				t.Skip(tc.miss)
-			}
 			wantResidueFinding(t, &leakyProvider{inner: software(), keep: tc.keep(t)})
 		})
 	}
