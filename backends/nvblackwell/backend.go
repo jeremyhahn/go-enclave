@@ -21,8 +21,18 @@ var ErrNoInner = errors.New("nvblackwell: New needs the CPU TEE backend (intel-t
 // slices, as is the NVML half of [Probe]. It is no enclave.Sweeper: the
 // handles will be inner's, swept as inner's are.
 type Backend struct {
-	inner enclave.Prober
+	inner cpuTEE
 	rank  int
+}
+
+// cpuTEE is the whole of what New requires of inner: a backend that imports,
+// attests, probes and confines this process. Keeping inner whole lets Import
+// and Attest reach it without a type assertion.
+type cpuTEE interface {
+	enclave.Importer
+	enclave.Attester
+	enclave.Prober
+	enclave.Confiner
 }
 
 var (
@@ -66,7 +76,8 @@ func New(inner enclave.Backend) (*Backend, error) {
 	// Rank is inner's plus one, fixed here (the design's Q3, recommended):
 	// above the CVM alone, so Detect prefers the attestation that covers the
 	// GPUs when they are ready and falls back to inner by rank when not.
-	b := &Backend{inner: p, rank: p.Rank() + 1}
+	// The checks above prove inner a cpuTEE.
+	b := &Backend{inner: inner.(cpuTEE), rank: p.Rank() + 1}
 	if err := b.Probe(context.Background()); err != nil {
 		return nil, err
 	}
