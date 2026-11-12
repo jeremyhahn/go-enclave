@@ -35,10 +35,12 @@ go-enclave owns:
 - **Admission against a locked-memory budget**; no other project hand-rolls one
   ([budget](locked-memory-budget/architecture.md#component-boundaries)).
 - **The sealing envelope and the provider seam** (`KeyProtector`,
-  `RootUnsealer`), with one shipped provider, `SoftwareProvider`
-  ([sealing](sealing/architecture.md#component-boundaries)); the planned
-  providers (memory, TrustZone, secure element, TPM) and the named consumers
-  (go-xkms's `EnclaveBackend`, trusted-firmware) are the
+  `RootUnsealer`), with three shipped providers: memory (`SoftwareProvider`),
+  TPM (`backends/tpm`) and the TrustZone host side (`backends/armtrustzone`)
+  ([sealing](sealing/architecture.md#component-boundaries)); the TrustZone TA
+  side (pending in trusted-firmware), the secure-element provider (waiting on
+  [open questions 8-11](sealing/hardware-providers.md#open-questions)) and the
+  named consumers (go-xkms's `EnclaveBackend`, trusted-firmware) are the
   [keyprotector-providers](#features) row.
 - **The backend seam**: the `Backend`, `Handle` and capability interfaces that
   hardware backend modules implement

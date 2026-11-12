@@ -242,8 +242,9 @@ and ruling 225(3).
 Sealing is built on go-enclave's
 [locked memory](../memory-enclave/architecture.md#component-boundaries); no
 consumer hand-rolls locked-memory handling. Hardware and cloud crypto belongs to
-go-xkms, which is why this package ships only `SoftwareProvider` and injects the
-rest through the seam. `Sealer` is not the `SealingStrategy` seam of go-quicraft
+go-xkms, which is why the root package ships only `SoftwareProvider`; TPM and
+the TrustZone host side are the nested modules listed above, and the rest is
+injected through the seam. `Sealer` is not the `SealingStrategy` seam of go-quicraft
 and go-qrdb.
 
 ## Trust boundaries

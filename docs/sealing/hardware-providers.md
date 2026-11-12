@@ -17,9 +17,9 @@ backends and are not touched here.
 
 A `ModePerOperation` sealer hands every data key (DEK) to its provider's
 `Protect` and stores the blob it gets back
-([Sealed envelope](engineering.md#sealed-envelope)). Today the only shipped
-provider keeps its protect key in this process's locked memory, so a sealed
-value is no safer at rest than the process that sealed it. A TPM or a secure
+([Sealed envelope](engineering.md#sealed-envelope)). The memory provider
+(`SoftwareProvider`) keeps its protect key in this process's locked memory,
+so a sealed value is no safer at rest than the process that sealed it. A TPM or a secure
 element holds a key the process can use but never read; a provider over one
 makes a sealed value openable only on the device that sealed it.
 
