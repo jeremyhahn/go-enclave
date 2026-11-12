@@ -116,7 +116,7 @@ func TestRegistrySweepUnholdWakes(t *testing.T) {
 
 func TestRegistrySweepAdmitFreeSlot(t *testing.T) {
 	isolateSweepSlot(t)
-	if !admitSweep(nil) { //nolint:staticcheck // a nil ctx is a documented input
+	if !admitSweep(nil) {
 		t.Fatal("admitSweep(nil) on a free slot = false")
 	}
 	if len(sweepSlot) != 1 {
@@ -130,7 +130,7 @@ func TestRegistrySweepAdmitHeldSlotNilContext(t *testing.T) {
 	var hooked atomic.Bool
 	sweepAdmissionWaitForTest = func() { hooked.Store(true) }
 
-	if admitSweep(nil) { //nolint:staticcheck // a nil ctx is a documented input
+	if admitSweep(nil) {
 		t.Fatal("admitSweep(nil) on a held slot = true")
 	}
 	if hooked.Load() {
@@ -138,7 +138,7 @@ func TestRegistrySweepAdmitHeldSlotNilContext(t *testing.T) {
 	}
 }
 
-func TestRegistrySweepAdmitCancelledWhileWaiting(t *testing.T) {
+func TestRegistrySweepAdmitCanceledWhileWaiting(t *testing.T) {
 	isolateSweepSlot(t)
 	sweepSlot <- struct{}{}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -146,7 +146,7 @@ func TestRegistrySweepAdmitCancelledWhileWaiting(t *testing.T) {
 	sweepAdmissionWaitForTest = cancel
 
 	if admitSweep(ctx) {
-		t.Fatal("admitSweep with a context cancelled while waiting = true")
+		t.Fatal("admitSweep with a context canceled while waiting = true")
 	}
 	if len(sweepSlot) != 1 {
 		t.Fatal("admitSweep changed the held slot")
