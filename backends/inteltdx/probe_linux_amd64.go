@@ -45,18 +45,18 @@ func getReport(req *tdxReportReq) error {
 	rc, err := f.SyscallConn()
 	if err != nil {
 		_ = f.Close()
-		return &GuestDeviceError{Op: "get-report", Cause: err}
+		return &GuestDeviceError{Op: opGetReport, Cause: err}
 	}
 	var errno syscall.Errno
 	if err := rc.Control(func(fd uintptr) {
 		_, _, errno = unix.Syscall(unix.SYS_IOCTL, fd, tdxCmdGetReport0, uintptr(unsafe.Pointer(req))) //nolint:gosec // req is the ioctl's struct tdx_report_req
 	}); err != nil {
 		_ = f.Close()
-		return &GuestDeviceError{Op: "get-report", Cause: err}
+		return &GuestDeviceError{Op: opGetReport, Cause: err}
 	}
 	if errno != 0 {
 		_ = f.Close()
-		return &GuestDeviceError{Op: "get-report", Cause: os.NewSyscallError("ioctl", errno)}
+		return &GuestDeviceError{Op: opGetReport, Cause: os.NewSyscallError("ioctl", errno)}
 	}
 	if err := f.Close(); err != nil {
 		return &GuestDeviceError{Op: "close", Cause: err}
@@ -123,9 +123,9 @@ func tsmReport(reportData *[reportDataSize]byte) (quote []byte, err error) {
 	}
 	gen, err := os.ReadFile(filepath.Join(dir, "generation")) //nolint:gosec // under the report directory this call made
 	if err != nil {
-		return nil, &TSMReportError{Op: "generation", Cause: err}
+		return nil, &TSMReportError{Op: opGeneration, Cause: err}
 	}
-	if err = checkGeneration(gen, 1); err != nil {
+	if err = checkGeneration(gen); err != nil {
 		return nil, err
 	}
 	return q, nil

@@ -69,16 +69,26 @@ func checkProvider(raw []byte) error {
 	return nil
 }
 
+// The steps a typed error names in Op more than once.
+const (
+	opGetReport  = "get-report"
+	opGeneration = "generation"
+)
+
+// ownWrites is the generation a report directory reaches with this call's
+// one inblob write and no other writer.
+const ownWrites = 1
+
 // checkGeneration accepts a report directory whose generation attribute
-// counts exactly want writes: this call's own. A larger or smaller count is
+// counts exactly [ownWrites]: this call's own. A larger or smaller count is
 // [ErrTSMReportConflict]; text that is not a count is the parse error.
-func checkGeneration(raw []byte, want uint64) error {
+func checkGeneration(raw []byte) error {
 	got, err := strconv.ParseUint(strings.TrimSuffix(string(raw), "\n"), 10, 64)
 	if err != nil {
-		return &TSMReportError{Op: "generation", Cause: err}
+		return &TSMReportError{Op: opGeneration, Cause: err}
 	}
-	if got != want {
-		return &TSMReportError{Op: "generation", Cause: ErrTSMReportConflict}
+	if got != ownWrites {
+		return &TSMReportError{Op: opGeneration, Cause: ErrTSMReportConflict}
 	}
 	return nil
 }

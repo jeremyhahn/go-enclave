@@ -65,18 +65,18 @@ func TestCheckProvider(t *testing.T) {
 }
 
 func TestCheckGeneration(t *testing.T) {
-	if err := checkGeneration([]byte("1\n"), 1); err != nil {
-		t.Fatalf("checkGeneration(1, 1) = %v", err)
+	if err := checkGeneration([]byte("1\n")); err != nil {
+		t.Fatalf("checkGeneration(1) = %v", err)
 	}
 	for _, moved := range []string{"0\n", "2\n", "3"} {
-		err := checkGeneration([]byte(moved), 1)
+		err := checkGeneration([]byte(moved))
 		var te *TSMReportError
 		if !errors.As(err, &te) || te.Op != "generation" || !errors.Is(err, ErrTSMReportConflict) {
 			t.Fatalf("checkGeneration(%q) = %v, want ErrTSMReportConflict", moved, err)
 		}
 	}
 	for _, junk := range []string{"", "x\n", "-1\n"} {
-		err := checkGeneration([]byte(junk), 1)
+		err := checkGeneration([]byte(junk))
 		var te *TSMReportError
 		if !errors.As(err, &te) || te.Op != "generation" || errors.Is(err, ErrTSMReportConflict) {
 			t.Fatalf("checkGeneration(%q) = %v, want a parse failure at generation", junk, err)

@@ -54,7 +54,6 @@ func TestIdentity(t *testing.T) {
 
 func TestProbeMethodNilContext(t *testing.T) {
 	b := &Backend{}
-	//nolint:staticcheck // a nil ctx is in the Prober contract
 	if err := b.Probe(nil); err != nil && errors.Is(err, context.Canceled) {
 		t.Fatalf("Probe(nil) = %v: a nil ctx never ends", err)
 	}

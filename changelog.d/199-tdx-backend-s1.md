@@ -1,0 +1,3 @@
+### Added
+
+- **The `intel-tdx` backend's first slice, the nested module `github.com/jeremyhahn/go-enclave/backends/inteltdx`** (#199): pure Go over the TDX guest driver (`/dev/tdx_guest`) and configfs-tsm reports. `New` and `Probe` get a TDREPORT, refuse a TD launched with DEBUG (`ErrDebugTD`) and produce one quote, returning `*GuestDeviceError`, `*TSMReportError` or the context's error; off linux/amd64 a stub refuses with `*GuestDeviceError`. Name `intel-tdx`, rank 10, `ConfinesProcess` true. Nothing registers at import, and the root module does not change. Import, Attest and the in-hardware conformance run follow in later slices ([design](docs/backends/intel-tdx.md)).
