@@ -43,8 +43,8 @@ type DriverError struct {
 	Path string
 	// Op is the refused step: "open", "read", "parse" or "open-kernel-module".
 	Op string
-	// Cause is the refused call's *os.SyscallError wrapping its errno, or nil
-	// for "parse" and "open-kernel-module".
+	// Cause is the refused call's *os.SyscallError wrapping its errno, the
+	// parser's error for "parse", or nil for "open-kernel-module".
 	Cause error
 }
 
