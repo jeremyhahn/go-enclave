@@ -29,7 +29,7 @@ func TestAttestRefusesOffTD(t *testing.T) {
 	}
 }
 
-// Concurrent calls on one backend serialise; under -race this proves the
+// Concurrent calls on one backend serialize; under -race this proves the
 // lock covers the shared state. Off a TD every call refuses.
 func TestAttestConcurrent(t *testing.T) {
 	skipInTD(t)

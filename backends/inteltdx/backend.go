@@ -1,6 +1,9 @@
 package inteltdx
 
-import "context"
+import (
+	"context"
+	"sync"
+)
 
 // Name is the name the backend is registered under: the SPEC row's name.
 const Name = "intel-tdx"
@@ -15,9 +18,9 @@ const rank = 10
 // It is not a Sweeper (Q7, recommended): its handles will wrap memory
 // enclaves, which WipeAll's first phase sweeps already.
 type Backend struct {
-	// The field gives the struct a size, so two backends never share an
-	// address: a handle names its maker by identity.
-	_ byte
+	// mu serializes Attest. The field also gives the struct a size, so two
+	// backends never share an address: a handle names its maker by identity.
+	mu sync.Mutex
 }
 
 // New probes the host as [Backend.Probe] does and returns the backend when
