@@ -326,6 +326,23 @@ func TestSweepUnderSignalsFailsAPausedChild(t *testing.T) {
 	}
 }
 
+// TestSweepNeedleNeverStartsWithZero: a needle that starts with a zero
+// byte sends Find's search to a whole-needle compare at every zero byte of
+// the process, which under the race detector takes seconds per sweep and
+// ran the sweep child into its deadline.
+func TestSweepNeedleNeverStartsWithZero(t *testing.T) {
+	for b := range 256 {
+		needle := []byte{byte(b), 0, 0, 0}
+		sweepNeedleStart(needle)
+		if needle[0] == 0 {
+			t.Fatalf("a needle drawn with first byte %#x still starts with zero", b)
+		}
+		if needle[1] != needle[0]^1 {
+			t.Fatalf("needle[1] = %#x, want the first byte %#x with its low bit flipped", needle[1], needle[0])
+		}
+	}
+}
+
 // TestSweepUnderSignalsBoundsAStalledSweep stalls the sweep past its
 // deadline. The sweep must fail within the bound, wherever it is stuck.
 func TestSweepUnderSignalsBoundsAStalledSweep(t *testing.T) {
