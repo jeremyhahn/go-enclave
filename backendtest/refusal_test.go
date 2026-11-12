@@ -316,6 +316,22 @@ func TestCheckRefusalCancelled(t *testing.T) {
 			t.Fatalf("CheckRefusal = %v, want %v from %v", err, ErrAborted, context.Canceled)
 		}
 	})
+	t.Run("Probe panics after cancel", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		cfg := passingRefusal()
+		cfg.Probe = func(context.Context) error {
+			cancel()
+			panic("boom")
+		}
+		err := CheckRefusal(ctx, cfg)
+		if !errors.Is(err, ErrAborted) || !errors.Is(err, context.Canceled) {
+			t.Fatalf("CheckRefusal = %v, want %v from %v", err, ErrAborted, context.Canceled)
+		}
+		if !refusalProperty(err, PropertyRefusalProbe) {
+			t.Fatalf("CheckRefusal = %v, want a %s finding for the panic", err, PropertyRefusalProbe)
+		}
+	})
 	t.Run("during Probe", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
