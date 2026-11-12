@@ -38,6 +38,10 @@ var (
 // ranks and probes, so main may register one for Detect, but confines
 // nothing.
 type Backend struct {
+	// guest is set only by New, once the probe has seen an SNP guest: a
+	// Backend built any other way holds no key material.
+	guest bool
+	// confined is set only by New, for a guest whose policy forbids debug.
 	confined bool
 
 	mu      sync.Mutex
@@ -53,7 +57,7 @@ func New(ctx context.Context) (*Backend, error) {
 	if err := probe(ctx, tsmReportRoot); err != nil {
 		return nil, err
 	}
-	return &Backend{confined: true}, nil
+	return &Backend{guest: true, confined: true}, nil
 }
 
 // Name returns "amd-sev".
@@ -125,6 +129,10 @@ func (*Backend) UnsealRoot(ctx context.Context, dst []byte) error {
 // is a [*enclave.CapabilityError] naming [enclave.CapabilityImport], and a key
 // of another length [enclave.ErrInvalidImport].
 func (b *Backend) Import(ctx context.Context, material []byte, opts ...enclave.ImportOption) (enclave.Handle, error) {
+	if !b.guest {
+		clear(material)
+		return nil, guestError("new", nil)
+	}
 	spec, err := enclave.NewImportSpec(opts...)
 	if err != nil {
 		clear(material)
