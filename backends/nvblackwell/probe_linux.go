@@ -16,7 +16,10 @@ func probeHost() error {
 	if err != nil {
 		return &DriverError{Path: driverVersionPath, Op: op, Cause: err}
 	}
-	return checkDriverVersion(buf)
+	if err := checkDriverVersion(buf); err != nil {
+		return err
+	}
+	return probeNVML()
 }
 
 // readDriverVersion reads at most driverVersionMax bytes of the procfs entry.

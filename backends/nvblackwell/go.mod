@@ -7,6 +7,7 @@ module github.com/jeremyhahn/go-enclave/backends/nvblackwell
 go 1.27.4
 
 require (
+	github.com/NVIDIA/go-nvml v0.13.4-1
 	github.com/jeremyhahn/go-enclave v0.11.1-alpha
 	golang.org/x/sys v0.49.0
 )
