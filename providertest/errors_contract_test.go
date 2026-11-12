@@ -17,6 +17,7 @@ import (
 	"go/token"
 	"os"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -43,8 +44,6 @@ type contractRow struct {
 	as func(error) error
 	// causes is what Unwrap exposes, in order; nil when there is no cause.
 	causes []error
-	// skip names a defect the row exposes and the code does not yet fix.
-	skip string
 }
 
 func asType[T error](err error) error {
@@ -97,10 +96,7 @@ func wrappings(err error) map[string]error {
 func checkSentinels(t *testing.T, how string, err error, want []error) {
 	t.Helper()
 	for name, s := range contractSentinels {
-		wanted := false
-		for _, w := range want {
-			wanted = wanted || w == s
-		}
+		wanted := slices.Contains(want, s)
 		if got := errors.Is(err, s); got != wanted {
 			t.Errorf("%s: errors.Is(err, %s) = %v, want %v", how, name, got, wanted)
 		}
@@ -123,9 +119,6 @@ func unwrapped(err error) []error {
 func TestErrorContract(t *testing.T) {
 	for _, row := range contractRows() {
 		t.Run(row.name, func(t *testing.T) {
-			if row.skip != "" {
-				t.Skip(row.skip)
-			}
 			msg := row.err.Error()
 			if msg == "" || !strings.HasPrefix(msg, msgPrefix) {
 				t.Errorf("Error() = %q, want a non-empty message starting %q", msg, msgPrefix)
