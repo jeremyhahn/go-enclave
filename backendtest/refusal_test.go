@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"sync/atomic"
 	"testing"
 
@@ -145,9 +146,20 @@ func TestCheckRefusalCatches(t *testing.T) {
 			}
 			return nil, &hardwareError{step: "open"}
 		}), PropertyRefusalRegistration},
-		{"budget", withNew(func() (enclave.Backend, error) {
-			if alloc != nil {
-				_, _ = alloc.ForceLimit(alloc.Limit() + 1)
+		{"typed nil", withNew(func() (enclave.Backend, error) {
+			return (*refusalBackend)(nil), &hardwareError{step: "open"}
+		}), PropertyRefusalNew},
+		{"budget", budgetFault(alloc), PropertyRefusalBudget},
+		{"budget leak", withNew(func() (enclave.Backend, error) {
+			// A constructor that takes locked memory through the process
+			// allocator and keeps it when it refuses.
+			a, err := enclave.ProcessAllocator()
+			if err != nil {
+				return nil, &hardwareError{step: "open"}
+			}
+			leaked, err := a.NewSized(1)
+			if err == nil {
+				t.Cleanup(func() { _ = leaked.Destroy() })
 			}
 			return nil, &hardwareError{step: "open"}
 		}), PropertyRefusalBudget},
@@ -159,5 +171,32 @@ func TestCheckRefusalCatches(t *testing.T) {
 				t.Fatalf("CheckRefusal = %v, want a %s finding", err, c.property)
 			}
 		})
+	}
+}
+
+// budgetFault is a refusing constructor that moves alloc's limit, which
+// CheckRefusal must report as a budget change.
+func budgetFault(alloc enclave.Allocator) RefusalConfig {
+	return withNew(func() (enclave.Backend, error) {
+		_, _ = alloc.ForceLimit(alloc.Limit() + 1)
+		return nil, &hardwareError{step: "open"}
+	})
+}
+
+// TestCheckRefusalBudgetUnbounded runs the budget fault against an unbounded
+// budget, the default on a host whose locked-memory ceiling does not bind.
+func TestCheckRefusalBudgetUnbounded(t *testing.T) {
+	alloc, err := enclave.ProcessAllocator()
+	if err != nil || alloc == nil {
+		t.Fatalf("ProcessAllocator = %v, %v", alloc, err)
+	}
+	limit := alloc.Limit()
+	t.Cleanup(func() { _, _ = alloc.ForceLimit(limit) })
+	if _, err := alloc.ForceLimit(math.MaxInt64); err != nil {
+		t.Fatalf("ForceLimit(MaxInt64) = %v", err)
+	}
+	err = CheckRefusal(context.Background(), budgetFault(alloc))
+	if !refusalProperty(err, PropertyRefusalBudget) {
+		t.Fatalf("CheckRefusal = %v, want a %s finding", err, PropertyRefusalBudget)
 	}
 }
