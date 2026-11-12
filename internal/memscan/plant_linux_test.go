@@ -210,7 +210,7 @@ func sweepChild(mode string, n int) int {
 		return exitChildError
 	}
 	for range 3 {
-		hits, aborted, err := sweepRound(needle, home)
+		hits, aborted, err := sweepRound(needle, home, mode == childPause)
 		if aborted {
 			fmt.Fprintln(os.Stderr, "the parent could not deliver the round's signals")
 			return exitTooFewSignals
@@ -240,7 +240,9 @@ func sweepChild(mode string, n int) int {
 // window. A round counts only once the sweeping thread has taken at least
 // minSignals signals: a window that runs out first proves nothing.
 func TestSweepUnderSignalsSendsTheMinimum(t *testing.T) {
-	out, sent, code, err := runSweepChild(childSweep, 4, sweepDeadline)
+	// A 32-byte random needle: a short one can match unrelated memory and
+	// fail the round as residue rather than on its signal count.
+	out, sent, code, err := runSweepChild(childSweep, 32, sweepDeadline)
 	if err != nil {
 		t.Fatalf("%v\n%s", err, out)
 	}
@@ -295,6 +297,20 @@ func TestSignalRoundFailsAChildThatNeverCompares(t *testing.T) {
 	}
 }
 
+// TestSweepUnderSignalsFailsAPausedChild runs a child that compares once
+// and then stops comparing, as a thread descheduled after its first pass
+// would: every send still lands, but none interrupts a comparison, so its
+// round must fail with nothing counted.
+func TestSweepUnderSignalsFailsAPausedChild(t *testing.T) {
+	out, sent, _, err := runSweepChild(childPause, 32, sweepDeadline)
+	if !errors.Is(err, errTooFewSignals) {
+		t.Fatalf("a round whose child stopped comparing: want %v, got %v (signals %v)\n%s", errTooFewSignals, err, sent, out)
+	}
+	if len(sent) != 1 || sent[0] != 0 {
+		t.Fatalf("a round whose child stopped comparing counted %v signal(s), want [0]", sent)
+	}
+}
+
 // TestSweepUnderSignalsBoundsAStalledSweep stalls the sweep past its
 // deadline. The sweep must fail within the bound, wherever it is stuck.
 func TestSweepUnderSignalsBoundsAStalledSweep(t *testing.T) {
@@ -318,7 +334,7 @@ func TestSweepUnderSignalsBoundsAStalledSweep(t *testing.T) {
 // compares memory dense with the needle's first byte, then runs
 // Find on that thread unless the parent gives up. Nothing here bounds
 // Find: the parent kills the child at its deadline.
-func sweepRound(needle []byte, home uintptr) (hits []string, aborted bool, err error) {
+func sweepRound(needle []byte, home uintptr, pause bool) (hits []string, aborted bool, err error) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	fmt.Printf("%s%d\n", roundTid, syscall.Gettid())
@@ -340,6 +356,12 @@ func sweepRound(needle []byte, home uintptr) (hits []string, aborted bool, err e
 			// counts no signal it sent before this line.
 			fmt.Println(roundComparing)
 			announced = true
+			if pause {
+				if err := awaitVerdict(verdict); err != nil {
+					return nil, false, err
+				}
+				break
+			}
 		}
 		n, err := syscall.Read(0, verdict)
 		if errors.Is(err, syscall.EAGAIN) || errors.Is(err, syscall.EINTR) {
@@ -355,6 +377,23 @@ func sweepRound(needle []byte, home uintptr) (hits []string, aborted bool, err e
 	}
 	hits, err = Find(needle, home)
 	return hits, false, err
+}
+
+// awaitVerdict stands for a sweeping thread descheduled after its first
+// compare pass: it compares nothing more and polls for the parent's
+// verdict every millisecond.
+func awaitVerdict(verdict []byte) error {
+	for {
+		time.Sleep(time.Millisecond)
+		n, err := syscall.Read(0, verdict)
+		if errors.Is(err, syscall.EAGAIN) || errors.Is(err, syscall.EINTR) {
+			continue
+		}
+		if err != nil || n == 0 {
+			return fmt.Errorf("reading the parent's verdict: %d byte(s), %v", n, err)
+		}
+		return nil
+	}
 }
 
 // signalRound sends SIGURG to the child's sweeping thread every
@@ -419,6 +458,7 @@ const (
 	verdictAbort      = "a"                   // the parent's byte: too few signals, give up
 	childSweep        = "sweep"               // three rounds under signals, then a check sweep
 	childStall        = "stall"               // stops itself while its sweep runs
+	childPause        = "pause"               // compares once, then stops comparing while signaled
 	exitResidue       = 2                     // a sweep found the needle outside its mapping
 	exitTooFewSignals = 3                     // a round could not reach minSignals
 	exitChildError    = 4                     // the child could not run its sweep
