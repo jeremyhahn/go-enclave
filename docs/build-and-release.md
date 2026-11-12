@@ -39,6 +39,8 @@ make release-alpha|release-candidate|release VERSION=…
 Every job after Verify checks out the commit Verify resolved, never the moving
 tag. Publish needs every earlier job; it is skipped when the workflow runs on
 github.com, where a release is published by hand with the owner's approval.
+The published commit is then checked with
+`make release-tree-check TAG=… REF=<published ref>`: its tree must be the tag's.
 
 ## Cutting a release
 
@@ -94,6 +96,7 @@ step leaves the same bytes.
 | Target | Variables | What it does |
 |---|---|---|
 | `make release-verify` | `TAG`, optional `MAIN_REF` | The tag agrees with `VERSION` and `CHANGELOG.md`; with `MAIN_REF`, `HEAD` is an ancestor of it |
+| `make release-tree-check` | `TAG`, `REF` | Offline, in the local clone: the tree of the published commit `REF` is byte-identical to the tree of the release tag `TAG` (SPEC release criterion 8). Refuses, naming both trees, when they differ, when either does not resolve, or when `TAG` is not a release version. Writes nothing |
 | `make consumer-check` | `TAG` | In a fresh directory with a fresh module cache and `GOWORK=off`, `go get`s the module at the tag, asserts the build list selected that version, runs `go mod verify`, and builds and runs `scripts/testdata/consumer` |
 | `make release-publish` | `TAG`, `SHA`, `FORGE_*` (a write token) | Confirms the tag exists on the forge and names `SHA`, then creates the release or updates it in place, and reads it back. Gitea only: it refuses an `api.github.com` endpoint |
 
