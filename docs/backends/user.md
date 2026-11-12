@@ -1,12 +1,14 @@
 # Backends — user guide
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-31
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-11-12
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 A backend is what holds an enclave's material. Locked memory, the
-[memory enclave](../memory-enclave/user.md), is the default and the only one in
-this module; hardware backends (TEEs, secure elements, TPMs, GPU confidential
-computing) ship as their own modules. A sealer can keep its keys in a backend
+[memory enclave](../memory-enclave/user.md), is the default. This module also
+ships the [linux-secretmem](../linux-secretmem/user.md) backend
+(`enclave.NewSecretMemory`). Hardware backends ship as their own modules:
+[arm-trustzone](#arm-trustzone) today, with TEEs, secure elements and GPU
+confidential computing [proposed](#proposed-hardware-backends). A sealer can keep its keys in a backend
 (`WithBackend`) and `Sealed.OpenIn` can open into one; see
 [sealing](../sealing/user.md) ([architecture](architecture.md)).
 
@@ -86,8 +88,9 @@ Run the conformance suite from your backend's tests:
 `github.com/jeremyhahn/go-enclave/backends/armtrustzone` reaches OP-TEE on
 Arm through the Linux TEE driver (`/dev/tee0`), in pure Go
 ([design](arm-trustzone-design.md)). It needs Linux, an OP-TEE kernel driver
-and trusted-firmware's `go-enclave` trusted application; elsewhere `Connect`
-returns `*armtrustzone.PlatformError`. Its handles are byte-access memory
+and the trusted application whose interface the design describes
+([The TA interface](arm-trustzone-design.md#the-ta-interface)); elsewhere
+`Connect` returns `*armtrustzone.PlatformError`. Its handles are byte-access memory
 enclaves filled from the TEE's random number generator:
 
 ```go
@@ -99,8 +102,11 @@ defer b.Close()
 h, err := b.Random(ctx, 32) // 32 bytes from the secure world
 ```
 
-To register it, pass `armtrustzone.Connector{}` to `enclave.Register` and
-call its `Connect` after `Lookup`. A failure is the module's typed error:
+To register it by name without connecting, pass `armtrustzone.Connector{}` to
+`enclave.Register` and call its `Connect` after `Lookup`. `Connector` is no
+`Prober`, so `Detect` passes it over; for `Detect` to select the backend,
+register the connected `*armtrustzone.Backend`, which probes the TA and ranks
+2. A failure is the module's typed error:
 `*DeviceError` (the device or an ioctl failed; `Op` says which),
 `*SessionError` (the TA is missing or refused the session), `*InterfaceError`
 (the TA speaks another interface version), `*CommandError` and
@@ -125,10 +131,21 @@ if err != nil {
 }
 ```
 
-A blob opens only on the device and TA that sealed it. The trusted-firmware
-release this module pins does not have SEAL and UNSEAL yet; against it,
-`Connect` and `Random` work but the first seal fails with a `*CommandError`
-for command `0x3`.
+A blob opens only on the device and TA that sealed it. The TA release the
+test fixture pins (`v0.4.2-alpha`) does not have SEAL and UNSEAL yet; against
+a TA without them, `Connect` and `Random` work but the first seal fails with a
+`*CommandError` for command `0x3`.
+
+## Proposed hardware backends
+
+These are design proposals. No code exists for them yet:
+
+| Backend | Proposal |
+|---|---|
+| AMD SEV-SNP | [amd-sev.md](amd-sev.md) |
+| Intel TDX | [intel-tdx.md](intel-tdx.md) |
+| NXP i.MX 95 EdgeLock Enclave | [imx-edgelock-enclave.md](imx-edgelock-enclave.md) |
+| NVIDIA Blackwell confidential computing | [nvidia-blackwell.md](nvidia-blackwell.md) |
 
 ## Troubleshooting
 
@@ -138,7 +155,7 @@ for command `0x3`.
 | `*BackendExistsError` | The name is taken. Register each backend once, in `main`; `"locked-memory"` is always taken. |
 | `*BackendNotRegisteredError` | `Lookup` of a name nobody registered: the configuration names a backend `main` did not register. |
 | `*CapabilityError` | The handle or backend lacks what the operation needs, such as byte access to a secure element's key. Choose a backend that provides it; nothing falls back silently. |
-| `*armtrustzone.CommandError` with `Command` `0x3` (code `0xffff000a` or `0xffff0006`) from a seal | The trusted application has no SEAL command. Install a trusted-firmware `go-enclave` TA that has SEAL and UNSEAL. |
+| `*armtrustzone.CommandError` with `Command` `0x3` (code `0xffff000a` or `0xffff0006`) from a seal | The trusted application has no SEAL command. Install a TA release that has SEAL and UNSEAL. |
 | `enclave.ErrSealedAuthentication` from an open through the arm-trustzone `KeyProtector` | The blob was sealed by another device or TA, or was altered. It cannot be opened here; re-seal from source on this device. |
 
 ## Upgrading

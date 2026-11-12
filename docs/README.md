@@ -1,49 +1,79 @@
 # go-enclave documentation
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-15
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-11-12
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
-One folder per capability, each with these files: `architecture.md`
-(design, boundaries, rejected alternatives), `engineering.md` (exported
-surface, invariants, errors, tests), `api.md` (the Go API per capability)
-and `user.md` (task-oriented usage). There is no CLI: this is a library
-([interfaces](SPEC.md#interfaces)). A folder may also hold a design
-proposal beside them.
-Every feature of this repository is documented in this layout; there are no
-legacy documents to migrate. The generated API reference is on
-[pkg.go.dev](https://pkg.go.dev/github.com/jeremyhahn/go-enclave).
+What go-enclave is and every feature it has: [SPEC](SPEC.md). What is done
+and what comes next: [ROADMAP](../ROADMAP.md). The generated API reference is
+on [pkg.go.dev](https://pkg.go.dev/github.com/jeremyhahn/go-enclave).
 
-Platforms: tests run on Linux only. The BSDs and Windows are build-only:
-they compile, and no test runs on them
-([test status](memory-enclave/engineering.md#test-status)), by the owner's
-ruling on #188 ([runtime testing](memory-enclave/runtime-testing.md)).
+Each feature has one folder with four pages: `user.md` (task-oriented usage),
+`api.md` (the Go API), `architecture.md` (design, boundaries, rejected
+alternatives) and `engineering.md` (exported surface, invariants, errors,
+tests). A folder may also hold a design or a proposal beside them. There is
+no CLI: this is a library ([interfaces](SPEC.md#interfaces)).
 
-| Feature | What it covers |
+Platforms: tests run on Linux only. The BSDs and Windows are build-only: they
+compile and their test binaries link, and no test runs on them
+([test status](memory-enclave/engineering.md#test-status)).
+
+## Features
+
+| Feature | Pages | What it covers |
+|---|---|---|
+| memory-enclave | [user](memory-enclave/user.md) · [api](memory-enclave/api.md) · [architecture](memory-enclave/architecture.md) · [engineering](memory-enclave/engineering.md) | The memory enclave, held as a `ByteAccess`: constructors, borrowing, `Freeze` through `As`, `Destroy` and canary corruption, guard pages and canary, platform and core-dump matrix |
+| locked-memory-budget | [user](locked-memory-budget/user.md) · [api](locked-memory-budget/api.md) · [architecture](locked-memory-budget/architecture.md) · [engineering](locked-memory-budget/engineering.md) | `Allocator`, `RLIMIT_MEMLOCK` discovery, retuning, the process allocator, refunds for failed constructions |
+| sealing | [user](sealing/user.md) · [api](sealing/api.md) · [architecture](sealing/architecture.md) · [engineering](sealing/engineering.md) | `Sealed`, `Sealer` modes, the `KeyProtector`/`RootUnsealer` seam, contexts, `Openable`, FIPS, the key-schedule heap exposure and its erasure under `runtime/secret` |
+| keyprotector-providers | [hardware providers](sealing/hardware-providers.md) | The TPM 2.0 provider (`backends/tpm`) as shipped, and the outline of the secure-element (PKCS#11) provider with its open questions. Installing a hardware provider: [sealing user guide](sealing/user.md#install-a-hardware-provider) |
+| shutdown-sweep | [user](shutdown-sweep/user.md) · [api](shutdown-sweep/api.md) · [architecture](shutdown-sweep/architecture.md) · [engineering](shutdown-sweep/engineering.md) | `WipeAll(ctx)`: admission, waiting for borrows, termination, the count and `SweepError` |
+| provider-conformance | [user](provider-conformance/user.md) · [api](provider-conformance/api.md) · [architecture](provider-conformance/architecture.md) · [engineering](provider-conformance/engineering.md) | `providertest.TestProvider(ctx, cfg)` for `KeyProtector` and `RootUnsealer` authors |
+| backends | [user](backends/user.md) · [api](backends/api.md) · [architecture](backends/architecture.md) · [engineering](backends/engineering.md) | The backend seam: `Handle`, `Backend`, capabilities, the named registry, `As`, the sealing wiring (`WithBackend`, `OpenIn`, `SealFrom`) |
+| backend-conformance | [user](backend-conformance/user.md) · [api](backend-conformance/api.md) · [architecture](backend-conformance/architecture.md) · [engineering](backend-conformance/engineering.md) | `backendtest`: the conformance suite for `Backend` and `Handle` authors |
+| backend-detection | [user](backend-detection/user.md) · [api](backend-detection/api.md) · [architecture](backend-detection/architecture.md) · [engineering](backend-detection/engineering.md) | `Detect(ctx)`: the `Prober` rank and probe, selecting the most secure usable registered backend with locked memory as the floor, and why each other was passed over |
+| linux-secretmem | [user](linux-secretmem/user.md) · [api](linux-secretmem/api.md) · [architecture](linux-secretmem/architecture.md) · [engineering](linux-secretmem/engineering.md) | `NewSecretMemory`: a Linux-only backend of rank 1 on `memfd_secret(2)` memory, out of the kernel direct map; what it adds over the memory enclave, kernel requirements, its probe and failure modes. Also covers open-in-secretmem |
+| arm-trustzone | [design](backends/arm-trustzone-design.md) · [user](backends/user.md#arm-trustzone) · [engineering](backends/engineering.md#arm-trustzone) | The backend over OP-TEE in the nested module `backends/armtrustzone`, and its `KeyProtector` |
+
+### Nested modules
+
+Each is its own Go module and requires the root module, never the reverse.
+
+| Module | Docs |
 |---|---|
-| [memory-enclave](memory-enclave/user.md) | The memory enclave, held as a `ByteAccess`: constructors, borrowing, `Freeze` through `As`, `Destroy` and canary corruption, guard pages and canary, platform and core-dump matrix |
-| [locked-memory-budget](locked-memory-budget/user.md) | `Allocator`, `RLIMIT_MEMLOCK` discovery, retuning, the process allocator, refunds for failed constructions |
-| [sealing](sealing/user.md) | `Sealed`, `Sealer` modes, the `KeyProtector`/`RootUnsealer` seam, contexts, `Openable`, FIPS, the key-schedule heap exposure and its erasure under `runtime/secret` |
-| [shutdown-sweep](shutdown-sweep/user.md) | `WipeAll(ctx)`: admission, waiting for borrows, termination, the count and `SweepError` |
-| [provider-conformance](provider-conformance/user.md) | `providertest.TestProvider(ctx, cfg)` for TPM/HSM/KMS provider authors |
-| [backend-conformance](backend-conformance/user.md) | `backendtest`: the conformance suite for `Backend` and `Handle` authors |
-| [backends](backends/user.md) | The seam for hardware enclaves: `Handle`, `Backend`, capabilities, the named registry, `As`, the sealing wiring (`WithBackend`, `OpenIn`, `SealFrom`); beside them, the PROPOSED [arm-trustzone design](backends/arm-trustzone-design.md) |
-| [backend-detection](backend-detection/user.md) | `Detect(ctx)`: the `Prober` rank and probe, selecting the most secure usable registered backend with locked memory as the floor, and why each other was passed over |
-| [linux-secretmem](linux-secretmem/user.md) | `NewSecretMemory`: a Linux-only backend of rank 1 on `memfd_secret(2)` memory, out of the kernel direct map; what it adds over the memory enclave, kernel requirements, its probe and failure modes |
+| `github.com/jeremyhahn/go-enclave/backends/tpm` | [pkg.go.dev](https://pkg.go.dev/github.com/jeremyhahn/go-enclave/backends/tpm), [hardware providers](sealing/hardware-providers.md#tpm-provider) |
+| `github.com/jeremyhahn/go-enclave/backends/armtrustzone` | [pkg.go.dev](https://pkg.go.dev/github.com/jeremyhahn/go-enclave/backends/armtrustzone), [arm-trustzone design](backends/arm-trustzone-design.md) |
 
-How a change is built and gated, and how a signed release is cut, verified and
-published: [build and release](build-and-release.md).
+### Backend proposals
 
-The standards the code implements, copied and indexed by implementing symbol:
-[reference](reference/README.md).
+Designs for future backends. None is implemented; each is a starting point for
+its [ROADMAP](../ROADMAP.md#future) row.
+
+| Proposal | Backend |
+|---|---|
+| [amd-sev](backends/amd-sev.md) | AMD SEV-SNP confidential VMs |
+| [intel-tdx](backends/intel-tdx.md) | Intel TDX trust domains |
+| [imx-edgelock-enclave](backends/imx-edgelock-enclave.md) | NXP i.MX 95 EdgeLock Secure Enclave |
+| [nvidia-blackwell](backends/nvidia-blackwell.md) | NVIDIA Blackwell confidential computing |
+
+### Project
+
+| Page | What it covers |
+|---|---|
+| [build and release](build-and-release.md) | How a change is built and gated, and how a signed release is cut, verified and published |
+| [integration coverage](../test/integration/COVERAGE.md) | Which integration test covers which feature |
+| [reference](reference/README.md) | The standards the code implements, copied and indexed by implementing symbol |
 
 ## Upgrading
 
 This is the only place migration guidance is written; each feature's `user.md`
-and `api.md` link here. The module is pre-1.0 (`v0.y.z-alpha`): a breaking
-change lands in a MINOR bump under a `BREAKING` heading in
-[CHANGELOG.md](../CHANGELOG.md). Upgrade one release at a time.
+and `api.md` link here. The module is pre-1.0: a breaking change lands in a
+MINOR bump, and its [CHANGELOG.md](../CHANGELOG.md) entry is marked
+**BREAKING** and links here. Upgrade one release at a time. Each section
+describes its release under the names that release shipped.
 
-### v0.9.0 (from v0.8)
+Releases after v0.9.0-alpha need no source change. Check the minimum Go
+version in `go.mod`, which security releases of the toolchain raise.
+
+### v0.9.0-alpha (from v0.8.0-alpha)
 
 #### Renames
 
@@ -116,7 +146,7 @@ checks are unchanged.
   `ErrAllocatorNotConstructed` no longer reach callers. Calling a method on a
   nil interface panics, as for any Go interface.
 
-#### Locked memory
+#### Memory enclave
 
 **Importing the package no longer lowers `RLIMIT_CORE`; `HardenProcess` does.**
 A library changing a process-wide limit at import was the binary's
@@ -140,14 +170,16 @@ the new step, and its failure is a `*ProcessHardeningError` whose `Cause` is a
 `*CoreDumpLimitError` (`ErrCoreDumpLimitFailed`). A binary that wants only the
 core limit, not the non-dumpable flag, must now weigh both.
 
-**`Allocator` values share their state.** A copied value was a second,
-independent budget that could admit the same headroom twice. A copy now
-reaches the same budget, and `go vet` reports it. Build an `Allocator` with `NewAllocator` and pass the interface it
-returns.
-
 **`Destroy` of a writable enclave whose `mprotect` is refused returns `nil`**,
 not `ErrReleasedWithoutWipe`: its data was wiped before the `mprotect`, so
 nothing was released unwiped. Only a frozen enclave reports it.
+
+#### Locked-memory budget
+
+**`Allocator` values share their state.** A copied value was a second,
+independent budget that could admit the same headroom twice. A copy now
+reaches the same budget, and `go vet` reports it. Build an `Allocator` with
+`NewAllocator` and pass the interface it returns.
 
 #### Sealing
 
@@ -193,11 +225,9 @@ The cause- and name-carrying error types are defined types, no longer aliases
 of a generic one, so `go doc` shows their fields and methods. Struct literals,
 `errors.Is` and `errors.As` are unchanged.
 
-The sections below describe each release under the names it shipped.
+### v0.8.0-alpha (from v0.7.0-alpha)
 
-### v0.8.0-alpha (from v0.7)
-
-#### Locked memory
+#### Memory enclave
 
 **`EqualTo` returns `(bool, error)`; `EqualToErr` is gone.**
 
@@ -233,32 +263,7 @@ err := e.WithBytes(func(b []byte) error { return useString(string(b)) })
 e, err := enclave.NewMemoryEnclave([]byte(secret))
 ```
 
-#### Errors
-
-Every root sentinel and error type is declared in `errors.go`, and every
-`providertest` one in `providertest/errors.go`.
-
-- `LockedMemoryError.Cause` is an `error`, was `any`.
-- `ProcessHardeningError` matches the new `ErrProcessHardeningFailed`.
-- The cause-carrying types (`LockedMemoryError`, `UnwipedReleaseError`,
-  `LimitDiscoveryError`, `ProcessHardeningError` and the sealing types) are
-  aliases of one generic type with a `Cause error` field, rendering as the
-  sentinel's text, `": "` and the cause. Struct literals and `errors.As`
-  targets are unchanged.
-- Seal and open failures are `*SealError` and `*OpenError`, not `errors.Join`
-  composites. They match `ErrSealFailed` / `ErrOpenFailed` and unwrap to the
-  cause, so every `errors.Is` match on the sentinels, `ctx.Err()`,
-  `context.Cause` and the provider's error still holds. A sweep that meets a
-  failure reports `*SealerWipedError`, matching `ErrSealerWiped`. Code that
-  walked `Unwrap() []error` must use `errors.Is`/`errors.As`. A failure
-  together with an independent cleanup failure is still joined, so it matches
-  both.
-- `BudgetError` and `BudgetInUseError` messages read `<N> bytes requested`,
-  was `<N> requested`. Fields and matched sentinels are unchanged.
-- `providertest.AbortedError` renders as `ErrAborted`'s text followed by the
-  context's error; its `Err` field and matches are unchanged.
-
-#### Budget
+#### Locked-memory budget
 
 `LimitError` is renamed `BudgetInUseError`; code that matches the
 `ErrBudgetInUse` sentinel with `errors.Is` needs no change, and code using
@@ -319,9 +324,34 @@ blind control, a residue sweep that cannot run used to be logged and return
 unless `Config.SkipResidueSweep` is set with a reason. Every `providertest`
 error message now starts with `providertest:`.
 
-### v0.7.0-alpha (from v0.6)
+#### Errors
 
-#### Locked memory
+Every root sentinel and error type is declared in `errors.go`, and every
+`providertest` one in `providertest/errors.go`.
+
+- `LockedMemoryError.Cause` is an `error`, was `any`.
+- `ProcessHardeningError` matches the new `ErrProcessHardeningFailed`.
+- The cause-carrying types (`LockedMemoryError`, `UnwipedReleaseError`,
+  `LimitDiscoveryError`, `ProcessHardeningError` and the sealing types) are
+  aliases of one generic type with a `Cause error` field, rendering as the
+  sentinel's text, `": "` and the cause. Struct literals and `errors.As`
+  targets are unchanged.
+- Seal and open failures are `*SealError` and `*OpenError`, not `errors.Join`
+  composites. They match `ErrSealFailed` / `ErrOpenFailed` and unwrap to the
+  cause, so every `errors.Is` match on the sentinels, `ctx.Err()`,
+  `context.Cause` and the provider's error still holds. A sweep that meets a
+  failure reports `*SealerWipedError`, matching `ErrSealerWiped`. Code that
+  walked `Unwrap() []error` must use `errors.Is`/`errors.As`. A failure
+  together with an independent cleanup failure is still joined, so it matches
+  both.
+- `BudgetError` and `BudgetInUseError` messages read `<N> bytes requested`,
+  was `<N> requested`. Fields and matched sentinels are unchanged.
+- `providertest.AbortedError` renders as `ErrAborted`'s text followed by the
+  context's error; its `Err` field and matches are unchanged.
+
+### v0.7.0-alpha (from v0.6.2-alpha)
+
+#### Memory enclave
 
 **`Destroy` returns the release report; `DestroyErr` is gone.**
 
@@ -360,38 +390,11 @@ if err := enclave.CoreDumpsDisabled(); err != nil &&
 module depends only on `golang.org/x/sys`. Run `go mod tidy`. DragonFly now
 compiles, and illumos, Solaris and AIX are supported.
 
-#### Budget
+#### Locked-memory budget
 
 No source change. The budget API (`Allocator`, `SetAllocator`,
 `ProcessAllocator`) is unchanged; two neighbors changed: `WipeAll()` became
 `WipeAll(ctx)` and `OpenWith(a)` became `OpenWith(ctx, a)`.
-
-#### Shutdown sweep
-
-```go
-// v0.6
-n, err := enclave.WipeAll()
-if err != nil && errors.Is(err, enclave.ErrEnclaveCorrupted) { /* ... */ }
-
-// v0.7
-ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-defer cancel()
-n, err := enclave.WipeAll(ctx)
-var sweep *enclave.SweepError
-if errors.As(err, &sweep) && sweep.Corrupt > 0 { /* ... */ }
-```
-
-- `WipeAll` takes a context; it bounds every wait (for borrows, contended
-  locks, and admission behind another sweep). The fixed 200 µs × 8-pass backoff
-  is gone: borrows are now waited for until they end or `ctx` does.
-- Findings are a typed `*SweepError{Corrupt, Unwiped}`. `errors.Is` against
-  `ErrEnclaveCorrupted` and `ErrReleasedWithoutWipe` still works; `errors.As`
-  now exposes the counts.
-- New `ErrSweepInProgress` when the call was not admitted. Treat it as "nothing
-  swept", not as a finding.
-- Under `context.Background()` a sweep, and a second `Background` caller
-  queued behind it, now wait for the borrows they owe for as long as those
-  take. Give shutdown a deadline.
 
 #### Sealing
 
@@ -453,6 +456,33 @@ Behavior changes to check for:
   `ModePerOperation`, fail `NewSealer` with `ErrInvalidRotationLimit`.
 - A sweep that destroys only one call's working key reports
   `ErrEnclaveDestroyed`; `ErrSealerWiped` is for a dead hierarchy key.
+
+#### Shutdown sweep
+
+```go
+// v0.6
+n, err := enclave.WipeAll()
+if err != nil && errors.Is(err, enclave.ErrEnclaveCorrupted) { /* ... */ }
+
+// v0.7
+ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+defer cancel()
+n, err := enclave.WipeAll(ctx)
+var sweep *enclave.SweepError
+if errors.As(err, &sweep) && sweep.Corrupt > 0 { /* ... */ }
+```
+
+- `WipeAll` takes a context; it bounds every wait (for borrows, contended
+  locks, and admission behind another sweep). The fixed 200 µs × 8-pass backoff
+  is gone: borrows are now waited for until they end or `ctx` does.
+- Findings are a typed `*SweepError{Corrupt, Unwiped}`. `errors.Is` against
+  `ErrEnclaveCorrupted` and `ErrReleasedWithoutWipe` still works; `errors.As`
+  now exposes the counts.
+- New `ErrSweepInProgress` when the call was not admitted. Treat it as "nothing
+  swept", not as a finding.
+- Under `context.Background()` a sweep, and a second `Background` caller
+  queued behind it, now wait for the borrows they owe for as long as those
+  take. Give shutdown a deadline.
 
 #### Provider conformance
 

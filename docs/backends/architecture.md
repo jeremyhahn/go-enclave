@@ -1,6 +1,6 @@
 # Backends — architecture
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-14
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-11-12
 > The backend seam. The declarations in [backend.go](../../backend.go) and [errors.go](../../errors.go) are canonical; exact signatures are in [engineering.md](engineering.md#interface-signatures) and the conformance suite is [backend-conformance](../backend-conformance/architecture.md). Conflicts with this document are defects.
 
 ## Problem
@@ -106,6 +106,10 @@ classDiagram
   registry exists so configuration can select a backend by name. A name is a
   configuration label, not an instance identity
   ([registry semantics](#registry-semantics)).
+- **Detection.** `Detect(ctx)` probes every registered backend that
+  implements `Prober` and returns the highest-ranked one usable on this host,
+  or the locked-memory backend when none ranks above it
+  ([backend detection](../backend-detection/architecture.md)).
 - **Native interfaces** are reached by type assertion, or by `As(v, target)`
   when a backend or handle wraps another and exposes it through an
   `As(any) bool` method.
@@ -145,11 +149,22 @@ its `ByteAccess`.
 | `Confiner` | backend | no | yes, when this process runs inside the TEE | no: the process is outside the device |
 | `Prober` | backend | yes: rank 0, always usable | yes: ranks itself, probes for the TEE | yes: ranks itself, probes for the device |
 
-[^tpm]: the TPM backend is go-xkms's, out of tree; see [SPEC Boundaries](../SPEC.md#boundaries)
+[^tpm]: no TPM backend ships. The column says what one would provide. The
+    TPM support in this repository is a `KeyProtector` provider, the nested
+    module `backends/tpm` ([hardware providers](../sealing/hardware-providers.md#tpm-provider)).
 
-The [secretmem backend](../linux-secretmem/architecture.md) is locked memory in
-`memfd_secret(2)` pages: it provides what the locked-memory column does, except
-that its `Prober` ranks 1 and probes for `memfd_secret`.
+Two backends ship beside the locked-memory default:
+
+- The [secretmem backend](../linux-secretmem/architecture.md)
+  (`NewSecretMemory`, in this module) is locked memory in `memfd_secret(2)`
+  pages. It provides what the locked-memory column does, except that its
+  `Prober` ranks 1 and probes for `memfd_secret`.
+- The [arm-trustzone backend](arm-trustzone-design.md) (the nested module
+  `backends/armtrustzone`) reaches a trusted application in OP-TEE. Its
+  `Prober` ranks 2. Its handles are `ByteAccess` memory enclaves filled with
+  random bytes from the secure world by its native `Random`. It is no
+  `Importer`, so `OpenIn` and `WithBackend` refuse it with a
+  `*CapabilityError`. Its key sealing is a separate `KeyProtector`.
 
 ### Opaque operations
 
@@ -433,9 +448,9 @@ and open path changes.
   registry a reference, not ownership.
 - **Shared state.** Every handle's dynamic type is a pointer to shared state,
   so every copy of a `Handle` is the same enclave and one `Destroy` reaches
-  all. Handle structs carry a `noCopy` field, so `go vet`'s copylocks check
-  reports a dereferenced copy, in this module and in backend modules alike.
-  `backendtest` checks the pointer kind.
+  all. The memory enclave's internal type carries a `noCopy` field, so
+  `go vet`'s copylocks check reports a dereferenced copy; a backend module's
+  handle struct can do the same. `backendtest` checks the pointer kind.
 - **Destroy** is idempotent, safe for concurrent use, waits out in-flight
   borrows and device operations, and returns only typed errors. A nil error
   means the material is gone. After it: `IsAlive` is false, `Size` is 0,
@@ -529,7 +544,9 @@ sequenceDiagram
 A sketch of `go-enclave-tdx`: a backend for code running inside an Intel TDX
 trust domain. Guest memory is already private to the TD, so its handles are
 locked-memory enclaves; what it adds is attestation and confinement. It
-depends on go-enclave, never the reverse.
+depends on go-enclave, never the reverse. A backend can equally be a nested
+module in this repository, as `backends/armtrustzone` is; the dependency rule
+is the same. The [intel-tdx proposal](intel-tdx.md) develops this sketch.
 
 ```go
 package tdx // module github.com/jeremyhahn/go-enclave-tdx
@@ -640,15 +657,19 @@ errors and use are in [backend-conformance](../backend-conformance/architecture.
 | Interfaces, capabilities, `Evidence`, import intent (`Purpose`, `Algorithm`, `ImportSpec`, its options), registry, `As`, the locked-memory backend value | [backend.go](../../backend.go) |
 | Sentinels (`ErrInvalidImport`, `ErrInvalidNonce`, `ErrAEADAuthentication` among them), `BackendNotRegisteredError`, `BackendExistsError`, `CapabilityError`, `CleanupError` | [errors.go](../../errors.go) |
 | The memory enclave's `Backend()` | [enclave.go](../../enclave.go) |
+| `Detect`, `ProbeResult` | [detection.go](../../detection.go) |
+| The secretmem backend | [secretmem.go](../../secretmem.go), [secretmem_linux.go](../../secretmem_linux.go) |
 | Conformance suite | [backendtest](../../backendtest/doc.go) |
-| Hardware backends | their own modules, never this one |
+| Hardware backends and providers | nested modules under [backends/](../../backends), never the root module |
 
 go-enclave owns this seam (the `Backend`, `Handle` and capability interfaces)
 along with [locked memory](../memory-enclave/architecture.md#component-boundaries).
-Hardware and cloud crypto (TPM2, PKCS#11, cloud KMS) belongs to go-xkms, and a
-hardware backend module implements this seam rather than extending it. This
-module carries attestation evidence as `Evidence` and never parses or
-appraises it.
+Hardware support ships as nested modules, each with its own `go.mod` that
+requires the root module and never the reverse:
+[`backends/armtrustzone`](../../backends/armtrustzone) (a backend and a
+`KeyProtector`) and [`backends/tpm`](../../backends/tpm) (a `KeyProtector`).
+A hardware module implements this seam rather than extending it. This module
+carries attestation evidence as `Evidence` and never parses or appraises it.
 
 ## Rejected alternatives
 
@@ -677,7 +698,7 @@ appraises it.
 
 ## What it does not do
 
-No hardware backend, no hardware-specific code, and no new dependency in this
-module. The seam does not parse evidence, persist device material, or model a
+No hardware-specific code and no new dependency in the root module: hardware
+backends live in nested modules. The seam does not parse evidence, persist device material, or model a
 device's native operations (key agreement, context-taking signing); those are
 the backend module's own API, reached through `As`.
