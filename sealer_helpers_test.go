@@ -70,15 +70,15 @@ func TestSealerHelpersKeySchedulesCovered(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		erases   bool
-		state    sealerState
+		state    *sealerState
 		wantName string // "" means covered
 	}{
-		{name: "erasure available", erases: true, state: sealerState{mode: ModeRootKey}},
-		{name: "confining backend", state: sealerState{mode: ModeRootKey, backend: confinedBackend{confines: true}}},
-		{name: "non-confining backend", state: sealerState{mode: ModePerOperation, backend: confinedBackend{}}, wantName: "dek"},
-		{name: "root key without importer", state: sealerState{mode: ModeRootKey}, wantName: "wrapping-key"},
-		{name: "root key with importer", state: sealerState{mode: ModeRootKey, backend: bareBackend{}, importer: &fakeImporter{}}, wantName: "dek"},
-		{name: "per operation", state: sealerState{mode: ModePerOperation}, wantName: "dek"},
+		{name: "erasure available", erases: true, state: &sealerState{mode: ModeRootKey}},
+		{name: "confining backend", state: &sealerState{mode: ModeRootKey, backend: confinedBackend{confines: true}}},
+		{name: "non-confining backend", state: &sealerState{mode: ModePerOperation, backend: confinedBackend{}}, wantName: "dek"},
+		{name: "root key without importer", state: &sealerState{mode: ModeRootKey}, wantName: "wrapping-key"},
+		{name: "root key with importer", state: &sealerState{mode: ModeRootKey, backend: bareBackend{}, importer: &fakeImporter{}}, wantName: "dek"},
+		{name: "per operation", state: &sealerState{mode: ModePerOperation}, wantName: "dek"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			swapSeam(t, &erasesKeySchedules, tc.erases)
