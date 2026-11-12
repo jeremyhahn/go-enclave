@@ -1,0 +1,3 @@
+### Added
+
+- A new module, backends/amdsev, starts the amd-sev backend for programs that run inside an AMD SEV-SNP guest on Linux amd64. It requests the firmware's attestation report through the kernel's configfs-tsm interface. Its constructor and probe request one report over a fresh nonce, so a host that cannot attest gets a typed error naming the failing step (ErrSNPGuestUnavailable), and no backend is built. Attest returns the 1184-byte report as sev-snp-report evidence. Import keeps material in memory enclaves in the guest's encrypted memory, and Sweep destroys them. On other platforms the module compiles, and its constructor and probe return ErrSNPGuestUnavailable. Nothing registers it at import. The root module is unchanged.

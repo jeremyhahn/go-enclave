@@ -31,7 +31,7 @@ func requestReport(ctx context.Context, root string, data []byte, fail func(stri
 
 // readEntry runs the report request on a fresh entry.
 func readEntry(ctx context.Context, entry string, data []byte, fail func(string, error) error) ([]byte, error) {
-	provider, err := os.ReadFile(filepath.Join(entry, "provider"))
+	provider, err := readAttr(entry, "provider")
 	if err != nil {
 		return nil, guestError("provider", err)
 	}
@@ -44,18 +44,18 @@ func readEntry(ctx context.Context, entry string, data []byte, fail func(string,
 	if err := writeAttr(filepath.Join(entry, "inblob"), data); err != nil {
 		return nil, fail("inblob", err)
 	}
-	before, err := os.ReadFile(filepath.Join(entry, "generation"))
+	before, err := readAttr(entry, "generation")
 	if err != nil {
 		return nil, fail("generation", err)
 	}
 	if err := ctxErr(ctx); err != nil {
 		return nil, err
 	}
-	out, err := os.ReadFile(filepath.Join(entry, "outblob"))
+	out, err := readAttr(entry, "outblob")
 	if err != nil {
 		return nil, fail("outblob", err)
 	}
-	after, err := os.ReadFile(filepath.Join(entry, "generation"))
+	after, err := readAttr(entry, "generation")
 	if err != nil {
 		return nil, fail("generation", err)
 	}
@@ -68,7 +68,7 @@ func readEntry(ctx context.Context, entry string, data []byte, fail func(string,
 // writeAttr writes b to an existing configfs attribute in one write. A
 // binary attribute commits on close, so the close error is the write's.
 func writeAttr(path string, b []byte) error {
-	f, err := os.OpenFile(path, os.O_WRONLY, 0)
+	f, err := os.OpenFile(path, os.O_WRONLY, 0) //nolint:gosec // an attribute of this process's own configfs-tsm entry
 	if err != nil {
 		return err
 	}
@@ -77,4 +77,9 @@ func writeAttr(path string, b []byte) error {
 		return err
 	}
 	return f.Close()
+}
+
+// readAttr reads the attribute name of a configfs-tsm entry this process made.
+func readAttr(entry, name string) ([]byte, error) {
+	return os.ReadFile(filepath.Join(entry, name)) //nolint:gosec // entry is this process's own configfs-tsm entry, name a fixed attribute
 }
