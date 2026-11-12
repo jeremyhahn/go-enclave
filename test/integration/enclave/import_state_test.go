@@ -20,10 +20,11 @@ import (
 	"github.com/jeremyhahn/go-enclave/test/integration/internal/devcontainer"
 )
 
-// TestImport_ChangesNoProcessState pins, from the kernel's side, that linking
-// go-enclave into a process changes no process state until the consumer calls
-// it: the process stays dumpable, nothing is locked, RLIMIT_MEMLOCK is where
-// the devcontainer set it, and no secretmem area is mapped. RLIMIT_CORE has
+// TestMemoryEnclave_ImportChangesNoProcessState pins, from the kernel's side,
+// that linking go-enclave into a process changes no process state until the
+// consumer calls it: the process stays dumpable, nothing is locked,
+// RLIMIT_MEMLOCK is where the devcontainer set it, and no secretmem area is
+// mapped. RLIMIT_CORE has
 // its own test (TestMemoryEnclave_CoreDumpLimitUnchangedByImport).
 //
 // It runs in a fresh child so no earlier test in this binary has called
@@ -31,7 +32,7 @@ import (
 // childOpts{}, so applyChildLimits (TestMain) sets no RLIMIT_MEMLOCK: the
 // child inherits the parent's, which devcontainer.Refuse checked against
 // GO_ENCLAVE_IT_MEMLOCK_BYTES.
-func TestImport_ChangesNoProcessState(t *testing.T) {
+func TestMemoryEnclave_ImportChangesNoProcessState(t *testing.T) {
 	want, err := devcontainer.EnvInt64(devcontainer.EnvMemlockBytes)
 	if err != nil {
 		t.Fatal(err)
