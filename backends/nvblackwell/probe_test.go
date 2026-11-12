@@ -121,6 +121,6 @@ func TestProbeHonoursAnEndedContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if err := Probe(ctx); !errors.Is(err, context.Canceled) {
-		t.Errorf("Probe(cancelled) = %v, want context.Canceled", err)
+		t.Errorf("Probe(canceled ctx) = %v, want context.Canceled", err)
 	}
 }
