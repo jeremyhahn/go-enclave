@@ -165,10 +165,10 @@ func TestImportPassesInnersErrorsThrough(t *testing.T) {
 	cancel()
 	material := []byte("material")
 	if _, err := b.Import(ctx, material, enclave.WithPurpose(enclave.PurposeMaterial)); !errors.Is(err, context.Canceled) {
-		t.Errorf("Import(cancelled ctx) error = %v, want context.Canceled", err)
+		t.Errorf("Import(canceled ctx) error = %v, want context.Canceled", err)
 	}
 	if !bytes.Equal(material, make([]byte, len(material))) {
-		t.Errorf("Import(cancelled ctx) left the caller's slice unwiped")
+		t.Errorf("Import(canceled ctx) left the caller's slice unwiped")
 	}
 	if _, err := b.Import(context.Background(), []byte("material")); !errors.Is(err, enclave.ErrInvalidImport) {
 		t.Errorf("Import(no purpose) error = %v, want ErrInvalidImport", err)
