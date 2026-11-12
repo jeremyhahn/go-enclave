@@ -14,7 +14,7 @@ import (
 // Q3, recommended option).
 const attestationDir = "/dev/attestation"
 
-// attestationMu serialises the backend's writes to user_report_data and reads
+// attestationMu serializes the backend's writes to user_report_data and reads
 // of quote: the files are per process, so two writers in one process race.
 var attestationMu sync.Mutex
 
@@ -43,7 +43,7 @@ func probe(ctx context.Context) error {
 	}
 	report, err := os.ReadFile(attestationDir + "/report")
 	if err != nil {
-		return &SGXEnclaveError{Op: "report", Cause: err}
+		return &SGXEnclaveError{Op: opReport, Cause: err}
 	}
 	if err := checkReport(report); err != nil {
 		op := "report"
@@ -65,7 +65,7 @@ func probe(ctx context.Context) error {
 		return &SGXEnclaveError{Op: qerr.Op, Cause: qerr}
 	}
 	if err := checkQuote(quote, nonce); err != nil {
-		return &SGXEnclaveError{Op: "quote", Cause: err}
+		return &SGXEnclaveError{Op: opQuote, Cause: err}
 	}
 	return nil
 }
@@ -90,7 +90,7 @@ func quoteOver(reportData []byte) ([]byte, *SGXQuoteError) {
 	}
 	quote, err := os.ReadFile(attestationDir + "/quote")
 	if err != nil {
-		return nil, &SGXQuoteError{Op: "quote", Cause: err}
+		return nil, &SGXQuoteError{Op: opQuote, Cause: err}
 	}
 	return quote, nil
 }

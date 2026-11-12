@@ -1,0 +1,3 @@
+### Added
+
+- **The `intel-sgx` backend's module starts at `backends/intelsgx`** (#193): its own Go module, like `backends/armtrustzone`, with typed errors (`ErrSGXUnavailable`/`*SGXEnclaveError` for "not here", `ErrSGXQuote`/`*SGXQuoteError` for "here, and this request failed"), the detection probe the design recommends (DCAP attestation type, no DEBUG attribute, one version 3 ECDSA quote over a fresh nonce through Gramine's `/dev/attestation`), and `New`, which runs the same check. Outside an SGX enclave, and on every platform but linux/amd64, `New` and `Probe` refuse with an error naming the failing step. Attestation, import and sweep follow in later slices. Nothing changes for callers of the root module.

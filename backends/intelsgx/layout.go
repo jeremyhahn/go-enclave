@@ -5,6 +5,12 @@ import (
 	"encoding/binary"
 )
 
+// The names of the steps and structures the typed errors carry.
+const (
+	opReport = "report"
+	opQuote  = "quote"
+)
+
 // The documented layouts the backend reads. Nothing else in a report or a
 // quote is parsed: go-enclave never appraises evidence; the relying party's
 // verifier does.
@@ -38,7 +44,7 @@ const (
 // [*LayoutError] and one whose ATTRIBUTES set DEBUG with [ErrDebugEnclave].
 func checkReport(report []byte) error {
 	if len(report) < reportSize {
-		return &LayoutError{Structure: "report", Want: reportSize, Got: len(report)}
+		return &LayoutError{Structure: opReport, Want: reportSize, Got: len(report)}
 	}
 	if binary.LittleEndian.Uint64(report[attributesOffset:])&flagDebug != 0 {
 		return ErrDebugEnclave
@@ -51,12 +57,12 @@ func checkReport(report []byte) error {
 // nothing else (open question Q5, recommended option).
 func checkQuote(quote, reportData []byte) error {
 	if len(quote) < quoteMinSize {
-		return &SGXQuoteError{Op: "quote", Cause: &LayoutError{Structure: "quote", Want: quoteMinSize, Got: len(quote)}}
+		return &SGXQuoteError{Op: opQuote, Cause: &LayoutError{Structure: opQuote, Want: quoteMinSize, Got: len(quote)}}
 	}
 	version := binary.LittleEndian.Uint16(quote[0:])
 	keyType := binary.LittleEndian.Uint16(quote[2:])
 	if version != quoteVersion || keyType != keyTypeECDSAP256 {
-		return &SGXQuoteError{Op: "quote", Cause: &QuoteFormatError{Version: version, KeyType: keyType}}
+		return &SGXQuoteError{Op: opQuote, Cause: &QuoteFormatError{Version: version, KeyType: keyType}}
 	}
 	at := quoteHeaderSize + reportDataOffset
 	if subtle.ConstantTimeCompare(quote[at:at+reportDataSize], reportData) != 1 {

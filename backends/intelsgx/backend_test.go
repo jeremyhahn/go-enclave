@@ -19,7 +19,6 @@ func TestNewRefusesOutsideEnclave(t *testing.T) {
 	if !errors.As(err, &se) || se.Op == "" {
 		t.Fatalf("New = %v, want an SGXEnclaveError naming its step", err)
 	}
-	//nolint:staticcheck // SA1012: a nil ctx is documented as Background.
 	if _, err := New(nil); !errors.Is(err, ErrSGXUnavailable) {
 		t.Fatalf("New(nil) = %v, want ErrSGXUnavailable", err)
 	}
@@ -39,6 +38,6 @@ func TestBackendShape(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if err := b.Probe(ctx); !errors.Is(err, context.Canceled) {
-		t.Fatalf("Probe(cancelled) = %v, want context.Canceled", err)
+		t.Fatalf("Probe(canceled) = %v, want context.Canceled", err)
 	}
 }
