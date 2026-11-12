@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	enclave "github.com/jeremyhahn/go-enclave"
 )
@@ -47,6 +48,31 @@ func TestZeroBackendRefusesImport(t *testing.T) {
 		if c != 0 {
 			t.Fatalf("Import left material byte %d set", i)
 		}
+	}
+}
+
+// TestSweepHonoursContext: an ended context ends Sweep at once with its
+// error, and a nil context is the background context.
+func TestSweepHonoursContext(t *testing.T) {
+	var b Backend
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := b.Sweep(ctx)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("Sweep(cancelled) = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Sweep(cancelled) did not return within 1s")
+	}
+	//nolint:staticcheck // SA1012: a nil context is part of Sweep's contract.
+	if held, err := b.Sweep(nil); held != 0 || err != nil {
+		t.Errorf("Sweep(nil) = %d, %v, want 0, nil", held, err)
 	}
 }
 
