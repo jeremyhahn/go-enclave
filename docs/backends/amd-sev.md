@@ -279,6 +279,15 @@ to AMD's ARK proves the chip.
    VMPL0; the reports carry the guest kernel's VMPL, and a `privlevel` below
    the floor is refused.
 
+**Kit.** `scripts/amdsev-guest.sh snp|sev-es|plain` launches one guest of
+steps 2 and 6 from a pinned local OVMF build and a direct-boot kernel, initrd
+and command line (snp: `sev-snp-guest`, debug off, `kernel-hashes=on`; sev-es:
+`sev-guest` with the SEV-ES policy bit; plain: no SEV object), with no network
+device, and exits with the status the guest's init reports on the serial
+console; `--dry-run` prints the QEMU command. `scripts/amdsev-host-scan.sh
+<qemu-pid> <hex-needle>` is step 5's scan: exit 0 not found, 1 found, 2 on an
+error. Neither downloads anything.
+
 ### Host record
 
 The development host is an AMD EPYC 73F3 (Milan) server. Surveyed read-only
