@@ -2146,6 +2146,26 @@ func TestProcessAllocator_DiscoveryFailureInstallsNothing(t *testing.T) {
 	}
 }
 
+func TestInstalledAllocator_ReadsWithoutInstalling(t *testing.T) {
+	freshProcessAllocator(t)
+
+	if a, ok := InstalledAllocator(); ok || a != nil {
+		t.Fatalf("InstalledAllocator on an empty slot = %v, %v; want nil, false", a, ok)
+	}
+	// Reading did not install the default: the binary can still install its own.
+	mine, err := newBudgetAllocator(LockedSize(1))
+	if err != nil {
+		t.Fatalf("NewAllocator: %v", err)
+	}
+	if err := SetAllocator(mine); err != nil {
+		t.Fatalf("SetAllocator after InstalledAllocator: %v", err)
+	}
+	a, ok := InstalledAllocator()
+	if !ok || a != Allocator(mine) {
+		t.Fatalf("InstalledAllocator = %v, %v; want the installed allocator, true", a, ok)
+	}
+}
+
 func TestProcessAllocator_RetriesDiscoveryAfterAFailure(t *testing.T) {
 	freshProcessAllocator(t)
 
