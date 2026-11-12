@@ -19,7 +19,7 @@ var _ enclave.Attester = (*Backend)(nil)
 // (Q6, recommended option); the verifier compares it against the nonce it
 // issued and its length. A nonce empty or over 64 bytes is
 // [enclave.ErrInvalidNonce] before any request. Calls on one backend are
-// serialised by its lock, and the quote must carry the padded nonce: a quote
+// serialized by its lock, and the quote must carry the padded nonce: a quote
 // another writer in the process raced is [ErrReportDataMismatch], never
 // returned.
 //
