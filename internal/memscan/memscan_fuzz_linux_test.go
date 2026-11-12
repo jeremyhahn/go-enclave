@@ -99,12 +99,7 @@ func decodeLayout(layout []byte) []fuzzMapping {
 		if layout[5]&0x80 != 0 {
 			pad = " \t\t\t\t "
 		}
-		line := fmt.Sprintf("%x-%x %s 00000000 00:00 0", lo, hi, p.perms)
-		if path.path != "" {
-			line += pad + path.path
-		} else if pad != " " {
-			line += pad
-		}
+		line := fmt.Sprintf("%x-%x %s 00000000 00:00 0%s%s", lo, hi, p.perms, pad, path.path)
 		swept := p.readable && path.kind != pathKernel &&
 			(path.kind != pathFile || p.write)
 		out = append(out, fuzzMapping{line: line, lo: lo, hi: hi, swept: swept})
