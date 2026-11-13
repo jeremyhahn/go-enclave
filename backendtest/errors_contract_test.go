@@ -25,6 +25,7 @@ var packageSentinels = map[string]error{
 	"ErrNoEndpoint":          ErrNoEndpoint,
 	"ErrNoRegistration":      ErrNoRegistration,
 	"ErrUncheckedCapability": ErrUncheckedCapability,
+	"ErrBudgetNotMeasured":   ErrBudgetNotMeasured,
 }
 
 // errorContractRow is the contract of one exported error type.
@@ -120,6 +121,14 @@ func errorContractRows() []errorContractRow {
 			zeroIs: []string{"ErrUncheckedCapability"},
 			fullIs: []string{"ErrUncheckedCapability"},
 			as:     asType[*UncheckedCapabilityError],
+		},
+		{
+			name:   "BudgetNotMeasuredError",
+			zero:   &BudgetNotMeasuredError{},
+			full:   &BudgetNotMeasuredError{When: "before New"},
+			zeroIs: []string{"ErrBudgetNotMeasured"},
+			fullIs: []string{"ErrBudgetNotMeasured"},
+			as:     asType[*BudgetNotMeasuredError],
 		},
 	}
 }
