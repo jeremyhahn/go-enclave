@@ -236,68 +236,47 @@ config is refused.
 `make integration-test-arm-trustzone` runs the arm-trustzone conformance tests,
 `TestBackendConformance_OnOPTEE` and `TestKeyProtectorConformance_OnOPTEE` in
 `backends/armtrustzone/conformance_optee_test.go`, against the backend on
-OP-TEE ([#250](../../../../issues/250), [#206](../../../../issues/206)). The
-backend and its design are in
+OP-TEE. The backend and its design are in
 [arm-trustzone-design.md](../backends/arm-trustzone-design.md). The tests are
 built only with the `optee` tag, so no other run compiles them,
 `make integration-test-backend-conformance` included. The target compiles
 `backends/armtrustzone` with `go test -c -tags=optee` as a static linux/arm64
-test binary (`CGO_ENABLED=0`) in the toolchain image (`scripts/devcontainer.sh
-run`, as `make docker-run` does) into the checkout's ignored
+test binary (`CGO_ENABLED=0`) in the toolchain image
+(`scripts/in-toolchain-image.sh`) into the checkout's ignored
 `bin/optee/armtrustzone.test`. `scripts/optee-fixture.sh harness` then copies
 it into a fresh share directory and runs the pinned checkout's
-`make optee-run OPTEE_SHARE=<dir> OPTEE_GUEST_CMD=<binary>` on the host, the
-only step that runs there. The guest runs `TestBackendConformance_OnOPTEE`
+`make optee-run OPTEE_SHARE=<dir> OPTEE_GUEST_CMD=<binary>`, in the
+[prebuilt image](#fixture-image-contract) when `OPTEE_FIXTURE_IMAGE` is set
+and on the host otherwise. The guest runs `TestBackendConformance_OnOPTEE`
 and `TestKeyProtectorConformance_OnOPTEE` with `GO_ENCLAVE_OPTEE_ENDPOINT` set (default `/dev/tee0`, the guest's TEE
 device), and `optee-run`'s status, the binary's, is the target's. It refuses
 while `TRUSTED_FIRMWARE_TAG` is empty, and the script refuses a missing
 binary.
 
-- **Fixture.** trusted-firmware's `make optee-run`: an aarch64 QEMU virt
-  guest (qemu_v8) with the OP-TEE trusted application, which mounts
-  `OPTEE_SHARE` at `/mnt/host` and runs `OPTEE_GUEST_CMD` there. It is a CI
-  test fixture, not a Go import: `golang.org/x/sys` stays go-enclave's only
-  dependency. It is another process from the registry's point of view, so it
-  cannot register anything in the test binary's registry.
-- **Pin.** `scripts/tool-pins.sh` pins `TRUSTED_FIRMWARE_TAG=v0.4.2-alpha`
-  and `TRUSTED_FIRMWARE_COMMIT`, the commit the annotated tag peels to
-  (`e0ae83d062b4…`). The clone URL is the forge's, so the caller supplies it
-  as `TRUSTED_FIRMWARE_URL` (empty refuses); the commit, not the URL, is what
-  is trusted. The script clones the tag into `TRUSTED_FIRMWARE_CACHE/<tag>` (default
-  `~/.cache/go-enclave/trusted-firmware`, outside the tree, one directory per
-  tag) and refuses, with one line and a non-zero exit, a checkout whose
-  `HEAD` is not `TRUSTED_FIRMWARE_COMMIT` or whose tracked files are
-  modified: a moved tag is refused, never followed. The pin moves by an
-  ordinary PR that raises the tag and its commit together; a command-line
-  `TRUSTED_FIRMWARE_TAG` without its commit is refused the same way.
-- **Fixture check.** `make optee-fixture-check` (body:
-  `scripts/optee-fixture.sh check`) runs the pinned checkout's
-  `make integration-test-optee`: xtest, then the TA's version and rng
-  commands. It proves the fixture boots and the TA answers, with no
-  go-enclave code involved.
-- **Host.** Both targets run where QEMU runs, not in the devcontainer. One
-  fixture build is several GB and tens of minutes, cached by trusted-firmware
-  in its `OPTEE_CACHE` (default `~/.cache/trusted-firmware/optee`, one
-  directory per pin). It needs Python 3 with cryptography and pyelftools,
-  ninja, meson, glib, pixman and the OpenSSL headers; trusted-firmware
-  refuses with every missing package before it fetches anything. The share
-  path may hold no comma or space (`optee-run` refuses it), so set `TMPDIR`
-  if yours does.
-- **CI.** The `optee` job in `.github/workflows/ci.yml` runs
-  `make integration-test-arm-trustzone OPTEE_FIXTURE_IMAGE=<pin>` on the
-  GitHub-hosted runner `ubuntu-latest` with no module credential, because
-  every module is public (ruling 274(9)), full tier and every nightly, when the
-  changes job's `optee` output is true: a change under
-  `backends/armtrustzone/`, to `scripts/optee-fixture.sh`, to
-  `test/integration/enclave/main_optee_test.go`, or to a `TRUSTED_FIRMWARE_*`
-  or `OPTEE_FIXTURE_IMAGE` pin. The test binary is compiled in the toolchain
-  image as above; `scripts/optee-fixture.sh harness` then runs in the fixture
-  image (the [contract](#fixture-image-contract)) with
-  `OPTEE_FIXTURE_PREBUILT=1`, which uses the image's checkout and refuses to
-  clone, so the job never builds the stack (about 155 min cold). The commit
-  check applies to that checkout as to a clone. `OPTEE_FIXTURE_IMAGE` in
-  `scripts/tool-pins.sh` pins the image by its ghcr manifest digest, and the
-  job fails if the pin is emptied, never skips.
+- **Fixture.** An aarch64 QEMU virt guest (qemu_v8) running TF-A, OP-TEE OS
+  and Linux, with the trusted application (the tfw TA, UUID
+  `23751b49-3a76-4e49-b63c-e5853742fa1f`) and `tee-supplicant` started at
+  boot. Its `make optee-run` mounts `OPTEE_SHARE` at `/mnt/host` in the guest
+  and runs `OPTEE_GUEST_CMD` there. It is a test fixture, not a Go import, and
+  it runs in another process, so it cannot register anything in the test
+  binary's registry.
+- **Pin.** `scripts/tool-pins.sh` pins the fixture release as
+  `TRUSTED_FIRMWARE_TAG` and `TRUSTED_FIRMWARE_COMMIT`, the commit the tag
+  peels to. A checkout at any other commit, or with modified tracked files, is
+  refused: a moved tag is never followed. The tag and commit move together.
+- **Prebuilt image.** `OPTEE_FIXTURE_IMAGE`, also pinned in
+  `scripts/tool-pins.sh` by manifest digest, is a public image that holds the
+  pinned checkout with the stack already built (see the
+  [contract](#fixture-image-contract)). With it set, the harness runs inside
+  the image and never builds the stack. This is the route CI uses, and the
+  simplest one for a backend author.
+- **Building on the host.** With `OPTEE_FIXTURE_IMAGE` empty, the script clones
+  the pinned release from `TRUSTED_FIRMWARE_URL` (empty refuses) into
+  `TRUSTED_FIRMWARE_CACHE` and builds there. A build is several GB and tens of
+  minutes, and needs Python 3 with cryptography and pyelftools, ninja, meson,
+  glib, pixman and the OpenSSL headers. `make optee-fixture-check` boots that
+  fixture and runs its own xtest and TA checks, with no go-enclave code, to
+  prove the fixture works before the backend is tested on it.
 - **Registration.** The registry is per process. The test registers the
   backend in its own binary with `enclave.Register(Connector{})` and finds it
   with `enclave.Lookup`. The root's optee-tagged harness,
@@ -310,12 +289,13 @@ binary.
   for a fresh backend per check. The connected backend claims
   `CapabilityProbe`, behind the TA's version command (0x1). Its one handle case,
   `rng`, is `Random(ctx, 32)`: a `CapabilityBytes` handle filled by the TA's
-  rng command (0x2). Commands 0x3 and 0x4 (SEAL and UNSEAL) are named by the
-  `keyprotector-providers` SPEC row: `TestKeyProtectorConformance_OnOPTEE`
-  runs the provider suite (`providertest.TestProvider`, `ModePerOperation`)
-  against `(*Backend).KeyProtector()` on the same fixture. It skips, naming
-  trusted-firmware's SEAL as not yet in the pinned TA, only when SEAL answers
-  `TEE_ERROR_NOT_SUPPORTED` or `TEE_ERROR_BAD_PARAMETERS`.
+  rng command (0x2). `TestKeyProtectorConformance_OnOPTEE` runs the provider
+  suite (`providertest.TestProvider`, `ModePerOperation`) against
+  `(*Backend).KeyProtector()`, which uses the TA's SEAL and UNSEAL commands
+  (0x3 and 0x4), on the same fixture. It skips only when SEAL answers
+  `TEE_ERROR_NOT_SUPPORTED` or `TEE_ERROR_BAD_PARAMETERS`, which means the
+  pinned TA does not implement SEAL yet. `GO_ENCLAVE_OPTEE_SEAL=required`
+  turns that skip into a failure.
 - **Fails, never skips.** An empty `GO_ENCLAVE_OPTEE_ENDPOINT` is a
   `*backendtest.EndpointError` (`ErrNoEndpoint`). A failed registration or
   lookup, or a backend without `Connect`, fails the test. A skipped run would
@@ -324,46 +304,18 @@ binary.
 
 ### Fixture image contract
 
-`OPTEE_FIXTURE_IMAGE` is the OP-TEE fixture image (ruling 274(9)), published
-to `ghcr.io/jeremyhahn/go-enclave-optee-fixture` by the repository's
-`ghcr-optee-fixture.yml` workflow and pinned in `scripts/tool-pins.sh` by its
-manifest digest (`ghcr.io/<owner>/<name>@sha256:<64 hex>`). The package is
-public, so the GitHub-hosted optee job pulls it with no login or secret. The
-image is raised with the trusted-firmware pins by re-running that workflow and
-pinning the digest it prints. The optee job creates the container with
-`docker create`, `/src` as the working directory, the recipe's environment and
-`sh scripts/optee-fixture.sh harness` as the command, copies the checkout into
-`/src` with `docker cp`, owned by UID and GID 1000, and runs it with
-`docker start -a`. So `/src` is a writable copy, not a mount, and the image's
-default user must be UID 1000 (GID 1000), the owner of that copy and of the
-prebuilt checkout. The image holds:
+The image named by `OPTEE_FIXTURE_IMAGE` holds what `make optee-run` needs to
+boot without building:
 
-- **The checkout.** trusted-firmware cloned at `TRUSTED_FIRMWARE_TAG`, its
-  `HEAD` at `TRUSTED_FIRMWARE_COMMIT` (both pinned in `scripts/tool-pins.sh`),
-  at `/opt/go-enclave/trusted-firmware/<tag>` (the job's
-  `TRUSTED_FIRMWARE_CACHE`, `OPTEE_FIXTURE_CACHE` in the Makefile), with a
-  `.git` directory, no modified tracked files, and owned by UID and GID 1000,
-  so `git rev-parse` and `git status` run there.
-- **The built stack.** QEMU (`qemu-system-aarch64`, virt machine), TF-A,
-  OP-TEE OS 4.11.0 and the Linux guest, built by that checkout into its
-  `OPTEE_CACHE` (the default for the image's user, or `OPTEE_CACHE` set in
-  the image's environment), so `make optee-run` boots without building.
-- **tee-supplicant** in the guest, started at boot, with `/dev/tee0`
-  present.
-- **The tfw TA**, UUID `23751b49-3a76-4e49-b63c-e5853742fa1f`, built from
-  the checkout and installed where the guest's tee-supplicant loads it.
-- **The tools `make optee-run` needs:** `sh`, `git`, GNU `make`, `mktemp`,
-  and the [host](#the-arm-trustzone-harness) packages trusted-firmware checks
-  for (Python 3 with cryptography and pyelftools, ninja, meson, glib, pixman,
-  the OpenSSL headers), with a `TMPDIR` whose path holds no comma or space.
+- the fixture checkout at `/opt/go-enclave/trusted-firmware/<tag>`, at
+  `TRUSTED_FIRMWARE_COMMIT`, with its `.git` directory and no modified files;
+- the built stack (QEMU, TF-A, OP-TEE OS 4.11.0 and the Linux guest), with
+  `tee-supplicant` and the tfw TA installed in the guest;
+- the host tools the build checks for, and a default user of UID and GID 1000.
 
-A new trusted-firmware pin needs a new image: the image and the
-`TRUSTED_FIRMWARE_*` pins move in one PR.
-
-The image unpacks to 27.4 GB, more than a GitHub-hosted runner has free, so
-the optee job frees disk, moves Docker's data root to the runner's `/mnt`
-filesystem, and fails before the first pull when that root has less than the
-job's `NEED_GB` free.
+The harness copies the checkout into the container at `/src` rather than
+bind-mounting it, so the copy is owned by UID 1000. A new fixture pin needs a
+new image: the image and the `TRUSTED_FIRMWARE_*` pins move together.
 
 ## Observability
 
