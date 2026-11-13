@@ -1,13 +1,17 @@
 # Reference standards
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-31
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-11-12
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 Standards first: where a standard exists, go-enclave implements it as written
 and designs nothing in its place. Each standard the code implements is copied
-here; a draft is adopted at one pinned revision and watched
-(the handbook's `software/conventions/documentation.md` §9).
+here, so a reader can check the code against the exact text it follows. A
+draft would be adopted at one pinned revision and watched for changes;
 go-enclave implements no draft.
+
+The NIST publications are works of the US government. The RFCs are
+redistributed verbatim under the IETF Trust's legal provisions. The Linux
+header carries Linaro's BSD-2-Clause notice, which it keeps.
 
 | File | Title | Revision | Implemented by |
 |---|---|---|---|

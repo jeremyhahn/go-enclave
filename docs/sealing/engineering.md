@@ -162,19 +162,21 @@ sealer over a `SoftwareProvider` therefore carries no provider blob.
 
 ### Generic providers
 
-[Provider contract](#provider-contract) §4 ("Blob is opaque") still holds for
+[Provider contract](#provider-contract) item 4 ("Blob is opaque") still holds for
 every other provider. Contract v1 fixes only the envelope and the
 SoftwareProvider blob. A provider such as the OP-TEE TA implements
 SEAL/UNSEAL (0x3/0x4) against this section; go-enclave's side is the
 arm-trustzone backend's `KeyProtector`
-([design](../backends/arm-trustzone-design.md#keyprotector)), and the TA
-side is pending in trusted-firmware.
+([design](../backends/arm-trustzone-design.md#keyprotector)). The pinned
+OP-TEE trusted application does not implement SEAL yet
+([backend conformance](../backend-conformance/engineering.md#the-arm-trustzone-harness)).
 
 ### Versioning
 
-Contract v1 is the format as documented here; changing any byte of it is a
-format change and needs the owner's ruling. The owner's ruling OD-1(d) (#274)
-used that rule once, for the [envelope version](#envelope-version) alone.
+Contract v1 is the format as documented here. Changing any byte of it is a
+format change: it is a deliberate, reviewed decision, never a side effect,
+because envelopes sealed by an older build must still open. That has happened
+once, for the [envelope version](#envelope-version) alone.
 
 ## Envelope version
 
@@ -197,7 +199,7 @@ envelope](#sealed-envelope) and changes nothing else in contract v1.
   touched.
 - **No migration.** Nothing rewrites or upgrades an existing envelope.
 - If a serialized form is ever added, the version byte leads it; that form
-  needs its own owner ruling ([Configuration and
+  is a format change under [Versioning](#versioning) ([Configuration and
   persistence](#configuration-and-persistence)).
 
 ## Invariants

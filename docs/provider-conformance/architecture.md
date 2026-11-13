@@ -116,8 +116,9 @@ runs.
 | Residue sweep | [providertest/residue.go](../../providertest/residue.go); the `/proc/self/mem` scan it shares with the root package's tests is [internal/memscan](../../internal/memscan/memscan_linux.go) |
 
 The provider under test is the author's; the suite runs in the author's
-repository and test binary. Hardware and cloud providers belong to go-xkms; this
-suite is the check go-enclave ships to their authors
+repository and test binary. go-enclave's own TPM and TrustZone providers
+(`backends/tpm`, `backends/armtrustzone`) run it in their module's tests, and
+HSM and KMS providers written elsewhere run it the same way
 ([sealing](../sealing/architecture.md#component-boundaries)).
 
 ## Trust boundaries

@@ -7,21 +7,22 @@
 
 `main` registers the backends it links in ([backends](../backends/architecture.md)):
 a TEE, a secure element, locked memory. Which one a process should use
-depends on the host. The TEE module is linked, but the machine may not be
-a TDX guest, and the secure element may be unplugged. Today configuration
-names one with `Lookup`, so every deployment must know its host. Upstream
-wants the most secure backend this host can run, chosen by go-enclave, with
+depends on the host. The TEE module is linked, but the machine may lack
+the TEE, and the secure element may be unplugged. Without detection,
+configuration names one with `Lookup`, so every deployment must know its host.
+A deployment wants the most secure backend this host can run, chosen by go-enclave, with
 locked memory as the floor. The choice must also stay observable: an operator
 must see what was chosen and why each other backend was not.
 
-The owner's rulings fix three things:
+Three constraints follow from the rest of the design:
 
-- only registered backends are considered, and probing is each backend's own
-  code;
-- probing runs on an explicit call from `main`, and importing changes no
-  process state;
-- rank is a property each backend reports and go-enclave compares, not a table
-  in go-enclave.
+- Only registered backends are considered, and probing is each backend's own
+  code. `main` decides what is linked and trusted, and only a backend knows
+  how to find its device.
+- Probing runs on an explicit call from `main`, and importing changes no
+  process state. A library import must not touch devices or the registry.
+- Rank is a property each backend reports and go-enclave compares, not a table
+  in go-enclave. A table would have to name hardware this module does not ship.
 
 ## Shape chosen
 
@@ -79,8 +80,8 @@ backend breaks; the change is additive.
 ## Rejected alternatives
 
 - **A rank table in go-enclave.** It would name hardware this module does not
-  ship, and it would need a release for every new backend. The owner ruled
-  rank to be the backend's own property.
+  ship, and it would need a release for every new backend. Rank is the
+  backend's own property instead.
 - **Rank and probe as methods of `Backend`.** That would break every
   out-of-tree backend for a feature some never need, such as a backend chosen
   only by name. It would also contradict the capability design: a capability
@@ -88,7 +89,7 @@ backend breaks; the change is additive.
 - **Two capabilities, `Ranker` and `Prober`.** A rank with no probe cannot be
   selected safely, and a probe with no rank cannot be compared. Detection needs
   both, so they form one capability.
-- **Self-registration from `init`.** Ruled out: importing must change no
+- **Self-registration from `init`.** Rejected: importing must change no
   process state, and hidden registration is what [backends](../backends/architecture.md#rejected-alternatives)
   already rejects.
 - **Stop at the first usable backend in rank order.** It saves probes, but
@@ -123,8 +124,12 @@ as the backend wrote them, and the backend name in a `ProbeError` is quoted.
 
 ## Scope fence
 
-- No hardware backend is in this module, so detection selects locked memory on
-  every host this module tests on ([test status](../memory-enclave/engineering.md#test-status)).
+- The root module ships two backends: locked memory (rank 0) and
+  [linux-secretmem](../linux-secretmem/architecture.md) (rank 1), which `main`
+  registers itself. The `backends/armtrustzone` module ships a hardware
+  backend that reports rank 2. With no hardware backend registered, detection
+  selects linux-secretmem if `main` registered it and the host allows
+  `memfd_secret`, and locked memory otherwise.
 - Attestation is out of scope: `Detect` neither attests nor compares
   attestation, and selects by rank only. A deployment that needs hardware
   evidence checks what was selected for the

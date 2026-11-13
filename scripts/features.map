@@ -1,5 +1,5 @@
 # features.map — the feature mapping, read by scripts/features.sh, the Makefile
-# and build/ci/buildgates (local-software-factory §7).
+# and build/ci/buildgates.
 #
 # One line per feature (a directory docs/<feature>/), whitespace-separated:
 #

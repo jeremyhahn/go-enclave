@@ -52,7 +52,7 @@ SHELLCHECK_BIN_SHA256_LINUX_ARM64=127f13925eadd52c341bca0ebaf9ab0dbd78c6468f30a8
 TRUSTED_FIRMWARE_TAG=v0.4.2-alpha
 TRUSTED_FIRMWARE_COMMIT=e0ae83d062b45dccc0e4cf08c87bf6def80a946c
 # The OP-TEE QEMU fixture image the CI optee job runs the arm-trustzone harness
-# in (ruling 274(9)), holding the stack prebuilt at TRUSTED_FIRMWARE_COMMIT.
+# in, holding the stack prebuilt at TRUSTED_FIRMWARE_COMMIT.
 # Published to ghcr by the repository's ghcr-optee-fixture.yml workflow (tag
 # v0.4.2-alpha-optee-4.11.0, config sha256:38725a25…6bdb). The package is
 # public, so the GitHub-hosted job pulls it by manifest digest with no login.
