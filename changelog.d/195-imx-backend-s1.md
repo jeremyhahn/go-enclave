@@ -1,3 +1,0 @@
-### Added
-
-- **The `imx-edgelock-enclave` backend's first slice, the nested module `github.com/jeremyhahn/go-enclave/backends/imxele`** (#195): the typed errors of its failure modes (`TEEDeviceError`, `TEESessionError`, `ABIVersionError`, `TEECommandError`), a probe that opens `/dev/tee0`, checks `TEE_IOC_VERSION` for a GlobalPlatform client and closes it, and a constructor that runs the same check. Until trusted-imx95 publishes its trusted application's ABI the probe refuses at the session step, so the backend never probes usable; off Linux a stub refuses at the platform step ([design](docs/backends/imx-edgelock-enclave.md)). It requires the root at `v0.11.1-alpha`; the root module does not change.
