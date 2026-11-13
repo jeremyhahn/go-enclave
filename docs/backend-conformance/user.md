@@ -1,6 +1,6 @@
 # Backend conformance — user guide
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-14
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-11-12
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 Check that a backend you wrote honors the [backend seam](../backends/user.md)
@@ -56,6 +56,14 @@ implement:
 - **A case makes its handle one of two ways.** Set `New` for a handle the device
   makes itself (a generated key), or `Import` and `ImportSize` for a handle
   made by importing random material with the options you give. Not both.
+  Material from `New` should be random too: the residue sweep cannot tell one
+  repeated byte, such as a zeroed region, from the rest of the process.
+
+`ExampleTestBackend` in [`backendtest/example_test.go`](../../backendtest/example_test.go)
+is a complete run you can copy: it certifies the shipped locked-memory backend
+(`enclave.DefaultBackend()`), which claims only `CapabilityProbe` and makes its
+handles with a `New` case, and `go test ./backendtest/` runs it. It also shows
+on `pkg.go.dev` under `TestBackend`.
 
 ## Certify attestation
 
@@ -105,6 +113,6 @@ config that claims what the suite cannot exercise, and inside a
 |---|---|
 | `ErrInvalidConfig` (`*ConfigError`) | `Field` says which field is wrong: no `New`, no `Handles`, a case with an empty or duplicate name, a case setting both or neither of `New` and `Import`, a non-positive `ImportSize`, or a repeated capability. Fix the config. |
 | `ErrUncheckedCapability` | The suite cannot exercise a capability you declared: an unknown one, `CapabilityFreeze` without `CapabilityBytes`, `CapabilityImport` with no imported case, a signing key that is not ECDSA, RSA or Ed25519, a decryption key that is not RSA, a derived key it cannot compare, or an `Attester` without `VerifyEvidence`. `Reason` says which; add what it names or stop claiming the capability. |
-| `ErrNotMeasured` | The residue sweep could not run, or the material is under 16 bytes. Fix the host or set `SkipResidueSweep` with a reason. |
+| `ErrNotMeasured` | The residue sweep could not run, or the material is under 16 bytes or one repeated byte. Fix the host, give the case random material, or set `SkipResidueSweep` with a reason. |
 | `ErrAborted` | The context ended first. Give the run a longer deadline; findings reported with it are real. |
 | `*PropertyError` | The backend broke the seam. `Property` names the check and `Detail` says what was observed; the list is in [engineering.md](engineering.md#what-it-checks). |
