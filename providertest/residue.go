@@ -157,6 +157,31 @@ func checkNoResidueAfterUnprotect(r *report, cfg Config) {
 			"requires: %q. (Instrument: this same sweep found the material while the destination was alive, "+
 			"so it is not blind.)", len(after), after[0])
 	}
+	if len(after) == 0 {
+		// A provider that keeps only part of the key keeps half its strength
+		// for an attacker; each half is 128 random bits, so a match is no
+		// coincidence. The halves were inside the destination with the whole
+		// key, so the control above covers them too.
+		half := keyBytes / 2
+		for _, part := range []struct {
+			name     string
+			from, to int
+		}{{"first", 0, half}, {"last", half, keyBytes}} {
+			hits, err := sweepPartOutsideHome(needle, home, part.from, part.to)
+			if err != nil {
+				r.unmeasured(property, "residue sweep for the %s half of the key failed after its control "+
+					"succeeded: %v. Retention of part of the key is unmeasured", part.name, err)
+				return
+			}
+			if len(hits) > 0 {
+				r.fail(property, "the %s half of the protected key is byte-exact resident in %d mapping(s) "+
+					"outside the caller's own, with the caller's destination wiped and unmapped. The provider "+
+					"RETAINED part of the key, or materialized it and did not wipe it: %q", part.name, len(hits),
+					hits[0])
+				break
+			}
+		}
+	}
 	r.note("providertest: residue sweep ran — %d mapping(s) held the key while the destination was alive, "+
 		"%d after it was wiped and unmapped", len(control), len(after))
 }
@@ -167,10 +192,16 @@ var sweepProcess = memscan.Find
 // sweepOutsideHome returns the mappings, other than the one containing home,
 // in which the material held in probe is byte-exact resident.
 func sweepOutsideHome(probe enclave.ByteAccess, home uintptr) ([]string, error) {
+	return sweepPartOutsideHome(probe, home, 0, keyBytes)
+}
+
+// sweepPartOutsideHome sweeps for needle[from:to] alone, borrowed from the
+// probe's locked pages so the part searched for is no copy itself.
+func sweepPartOutsideHome(probe enclave.ByteAccess, home uintptr, from, to int) ([]string, error) {
 	var hits []string
 	var scanErr error
 	if err := probe.WithBytes(func(needle []byte) error {
-		hits, scanErr = sweepProcess(needle, home)
+		hits, scanErr = sweepProcess(needle[from:to], home)
 		return nil
 	}); err != nil {
 		return nil, &stepError{step: "borrowing the needle", err: err}
