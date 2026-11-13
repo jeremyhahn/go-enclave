@@ -4,7 +4,7 @@
 # Usage: scripts/amdsev-host-scan.sh <qemu-pid> <hex-needle>   (as root)
 #
 # Scans the readable ranges of /proc/<pid>/maps through /proc/<pid>/mem for
-# the needle the guest holds (docs/backends/amd-sev.md, "Test plan on the real
+# the needle the guest holds (docs/backends/confidential-vm.md, "Test plan on the real
 # hardware"): in an SNP guest it must not be found; in the plain KVM control it
 # must be. Exits 0 when the needle is not found, 1 when it is found, 2 on an
 # error. The scan is scripts/amdsev-hostscan, a small Go helper: the script

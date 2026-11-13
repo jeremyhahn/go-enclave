@@ -1,7 +1,7 @@
 // Package amdsev is the amd-sev backend: go-enclave inside an AMD SEV-SNP
 // guest, attested by the SNP firmware's ATTESTATION_REPORT through the Linux
 // configfs-tsm report interface (/sys/kernel/config/tsm/report, provider
-// sev_guest). docs/backends/amd-sev.md is its design.
+// sev_guest). docs/backends/confidential-vm.md is its design.
 //
 // It is a module of its own, out of the go-enclave tree's root module: it
 // depends on go-enclave and golang.org/x/sys, never the reverse, and nothing

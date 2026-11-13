@@ -3,7 +3,7 @@
 #
 # Usage: scripts/amdsev-guest.sh [--dry-run] [flags] snp|sev-es|plain
 #
-# Launches one QEMU/KVM guest on the SEV host (docs/backends/amd-sev.md, "Test
+# Launches one QEMU/KVM guest on the SEV host (docs/backends/confidential-vm.md, "Test
 # plan on the real hardware", steps 2, 5 and 6) and exits with the status of
 # the test binary the guest ran. QEMU drives KVM on the real CPU; nothing the
 # backend touches is emulated. The guest boots the pinned OVMF build and a

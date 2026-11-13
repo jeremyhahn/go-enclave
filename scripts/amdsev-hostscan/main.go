@@ -2,7 +2,7 @@
 
 // Command amdsev-hostscan scans another process's readable memory for a
 // needle: step 5 of the amd-sev test plan on the real hardware
-// (docs/backends/amd-sev.md), run on the host as root against the QEMU process
+// (docs/backends/confidential-vm.md), run on the host as root against the QEMU process
 // of a guest that holds the needle in a handle.
 //
 // Usage: amdsev-hostscan <pid> <hex-needle>
