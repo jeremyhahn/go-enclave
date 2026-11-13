@@ -626,7 +626,9 @@ type passState struct {
 // after that acknowledgement, and writes sendAfter after the signal. At
 // sendAfter it takes the state again, inside first. A signal counts only
 // when both show the thread in the same compare window: seq never moved
-// and inside was set at both looks. A window runs from the end of one
+// and inside was set at both looks, and only once a later look shows that
+// window closed, so a thread parked in a window, which the signal itself
+// wakes, never counts. A window runs from the end of one
 // buffer fill to the start of the next fill of the same search (see
 // markedReader), so the fills, the search's return, the buffer clear
 // before it and the pass loop's clock checks lie outside every window.
@@ -646,6 +648,8 @@ func readParent(st *passState, done chan<- error) {
 	acked, signaled := 0, 0
 	var open bool // the last sendBefore found the thread comparing
 	var at uint64 // in this pass
+	var held int  // signals that landed in window heldAt, not yet counted
+	var heldAt uint64
 	for {
 		n, err := syscall.Read(0, in)
 		if errors.Is(err, syscall.EINTR) {
@@ -657,6 +661,14 @@ func readParent(st *passState, done chan<- error) {
 			return
 		}
 		for _, b := range in[:n] {
+			// A held signal counts once its window has closed: the thread
+			// finished that compare and read on, or its search returned.
+			// A thread parked in its window never closes it.
+			if held > 0 && (st.seq.Load() != heldAt || !st.inside.Load()) {
+				signaled += held
+				held = 0
+				fmt.Printf("%s%d\n", roundSignaled, signaled)
+			}
 			switch b {
 			case sendBefore[0]:
 				at = st.seq.Load()
@@ -665,8 +677,8 @@ func readParent(st *passState, done chan<- error) {
 				fmt.Printf("%s%d\n", roundAck, acked)
 			case sendAfter[0]:
 				if open && st.inside.Load() && st.seq.Load() == at {
-					signaled++
-					fmt.Printf("%s%d\n", roundSignaled, signaled)
+					heldAt = at // any held signal is in this same window
+					held++
 				}
 				open = false
 			case sendIdle[0]:
