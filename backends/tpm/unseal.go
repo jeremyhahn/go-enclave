@@ -152,6 +152,10 @@ func (d *tpmDevice) execute(ctx context.Context, cc tpm2.TPMCC, h object, s sess
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", errMalformedResponse, err)
 	}
+	// One session, one authorization area: nothing may follow it.
+	if len(tpm2.Marshal(*rspAuth)) != len(rest)-int(n) {
+		return nil, errMalformedResponse
+	}
 	if err := s.auth.Validate(tpm2.TPMRCSuccess, cc, parms, names, 0, rspAuth); err != nil {
 		return nil, err
 	}
