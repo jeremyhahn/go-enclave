@@ -1,3 +1,4 @@
 ### Added
 
 - **sealing**: Runnable examples `ExampleNewSealed`, `ExampleNewSealedFrom`, `ExampleSealed_OpenIn` and `ExampleNewSealer` show sealing, a late open inside the borrow window, an open into an explicit backend and a sealer over an explicit `KeyProtector`, and `go test` checks each against its output without printing material.
+- **sealing**: Known-answer vectors for blob contract v1 in `testdata/contract-v1/`: fixed keys, salt, nonces and plaintext with the expected HKDF keys, wrapped-key blobs, AAD and sealed bytes for the SoftwareProvider blob, a ModeRootKey KEK and DEK blob, sealed values under envelope versions 1 and 2, and the blobs a reader must refuse. A test rebuilds every byte with a standard-library reference encoder written from `docs/sealing/engineering.md` and opens every vector through the package. A second implementer, such as a trusted application, can check its bytes against the same files. Nothing changes for Go callers.

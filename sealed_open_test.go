@@ -91,15 +91,15 @@ func (h *fakeOpaqueHandle) IsAlive() bool    { return !h.destroyed.Load() }
 func (h *fakeOpaqueHandle) Destroy() error   { h.destroyed.Store(true); return nil }
 func (h *fakeOpaqueHandle) Backend() Backend { return h.backend }
 
-// fakeImporter answers Import with do, after wiping the material.
-type fakeImporter struct {
+// openTestImporter answers Import with do, after wiping the material.
+type openTestImporter struct {
 	do   func(ctx context.Context, material []byte) (Handle, error)
 	seen []byte
 }
 
-func (f *fakeImporter) Name() string { return "fake-import" }
+func (f *openTestImporter) Name() string { return "fake-import" }
 
-func (f *fakeImporter) Import(ctx context.Context, material []byte, _ ...ImportOption) (Handle, error) {
+func (f *openTestImporter) Import(ctx context.Context, material []byte, _ ...ImportOption) (Handle, error) {
 	f.seen = append([]byte(nil), material...)
 	h, err := f.do(ctx, material)
 	clear(material)
@@ -192,7 +192,7 @@ func TestSealedOpenTargets_OpenAdmitted(t *testing.T) {
 }
 
 func TestSealedOpenTargets_OpenImportedDestroyed(t *testing.T) {
-	imp := &fakeImporter{do: func(context.Context, []byte) (Handle, error) {
+	imp := &openTestImporter{do: func(context.Context, []byte) (Handle, error) {
 		t.Error("Import called on a destroyed value")
 		return nil, nil
 	}}
@@ -217,7 +217,7 @@ func TestSealedOpenTargets_OpenImportedDestroyed(t *testing.T) {
 func TestSealedOpenTargets_OpenImportedImportFails(t *testing.T) {
 	v, _ := sealForOpenTest(t)
 	cause := errors.New("device refused")
-	imp := &fakeImporter{do: func(context.Context, []byte) (Handle, error) { return nil, cause }}
+	imp := &openTestImporter{do: func(context.Context, []byte) (Handle, error) { return nil, cause }}
 	h, err := v.openImported(t.Context(), imp)
 	if h != nil {
 		t.Error("openImported with a failing Import returned a handle")
@@ -231,17 +231,17 @@ func TestSealedOpenTargets_OpenImportedImportFails(t *testing.T) {
 	}
 }
 
-func TestSealedOpenTargets_OpenImportedContextCancelled(t *testing.T) {
+func TestSealedOpenTargets_OpenImportedContextCanceled(t *testing.T) {
 	v, _ := sealForOpenTest(t)
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	imp := &fakeImporter{do: func(ctx context.Context, _ []byte) (Handle, error) {
+	imp := &openTestImporter{do: func(ctx context.Context, _ []byte) (Handle, error) {
 		cancel()
 		return nil, ctx.Err()
 	}}
 	h, err := v.openImported(ctx, imp)
 	if h != nil {
-		t.Error("openImported under a cancelled ctx returned a handle")
+		t.Error("openImported under a canceled ctx returned a handle")
 	}
 	if !errors.Is(err, context.Canceled) {
 		t.Errorf("openImported error = %v, want context.Canceled", err)
@@ -250,7 +250,7 @@ func TestSealedOpenTargets_OpenImportedContextCancelled(t *testing.T) {
 
 func TestSealedOpenTargets_OpenImportedNilHandle(t *testing.T) {
 	v, _ := sealForOpenTest(t)
-	imp := &fakeImporter{do: func(context.Context, []byte) (Handle, error) { return nil, nil }}
+	imp := &openTestImporter{do: func(context.Context, []byte) (Handle, error) { return nil, nil }}
 	h, err := v.openImported(t.Context(), imp)
 	if h != nil {
 		t.Error("openImported returned a handle for a nil import")
@@ -264,7 +264,7 @@ func TestSealedOpenTargets_OpenImportedNilHandle(t *testing.T) {
 func TestSealedOpenTargets_OpenImportedNoByteAccess(t *testing.T) {
 	v, _ := sealForOpenTest(t)
 	opaque := &fakeOpaqueHandle{}
-	imp := &fakeImporter{do: func(context.Context, []byte) (Handle, error) { return opaque, nil }}
+	imp := &openTestImporter{do: func(context.Context, []byte) (Handle, error) { return opaque, nil }}
 	opaque.backend = imp
 	h, err := v.openImported(t.Context(), imp)
 	if h != nil {
@@ -283,7 +283,7 @@ func TestSealedOpenTargets_OpenImportedSealerDestroyedMeanwhile(t *testing.T) {
 	v, sealer := sealForOpenTest(t)
 	a := openTestAllocator(t)
 	var got Handle
-	imp := &fakeImporter{do: func(ctx context.Context, material []byte) (Handle, error) {
+	imp := &openTestImporter{do: func(ctx context.Context, material []byte) (Handle, error) {
 		h, err := a.Import(ctx, append([]byte(nil), material...))
 		got = h
 		go func() { _ = sealer.Destroy() }()
