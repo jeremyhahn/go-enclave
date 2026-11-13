@@ -1,6 +1,5 @@
-# go-enclave: locked-memory library. The Makefile is the contract (handbook
-# project-scaffold §4): CI calls these targets and carries no commands or flags
-# of its own, so a red CI reproduces with the same `make` line locally. It stays
+# go-enclave: locked-memory library. The Makefile is the contract: CI calls
+# these targets and carries no commands or flags of its own, so a red CI reproduces with the same `make` line locally. It stays
 # thin: the logic lives in scripts/, which share scripts/lib.sh.
 #
 # There is no binary and no protobuf: `proto` is a no-op, and docker-build /
@@ -112,7 +111,7 @@ COVERAGE_THRESHOLD := 90
 EXTERNAL_VARS := TAG SHA MAIN_REF REF VERSION TOOL_INSTALL COVERAGE_THRESHOLD
 $(call raw_bind,$(EXTERNAL_VARS))
 
-# CI VARIABLES (handbook devcontainer.md §6): ci.yml passes them, so they are
+# CI VARIABLES: ci.yml passes them, so they are
 # data from a workflow and raw-bound like EXTERNAL_VARS.
 ## MODULE_ENV_FILE=<file>: integration-test: the forge module variables; never read here or printed
 ## GO_BUILD_PROXY=<url>: docker-build: the Go module proxy the image build fetches through, passed as --build-arg when set (CI: the hosted runner's GOPROXY, unset, #293); default the Dockerfile's public proxy
@@ -151,11 +150,11 @@ PKGDIR_memscan      := ./internal/memscan
 # paths need the device).
 BACKEND_MODULES := backends/armtrustzone backends/tpm
 
-# FEATURE MAPPING (local-software-factory §7). A feature is a directory
+# FEATURE MAPPING. A feature is a directory
 # docs/<feature>/, mapped in scripts/features.map to its package, its
 # integration suite, the name prefix of its integration tests and its source
 # globs; scripts/features.sh <base> <tip> prints the features a change touches,
-# which the factory reads as FEATURES_CMD. Each feature runs as test-<feature>,
+# which tooling uses to pick the tests a change needs. Each feature runs as test-<feature>,
 # its package's test-<pkg>, and integration-test-<feature>, which runs only the
 # tests named with the feature's prefix. A new docs/<feature>/ is mapped there;
 # build/ci/buildgates fails until it is.
@@ -590,7 +589,7 @@ it-image:
 docker-run: docker-build
 	@sh scripts/devcontainer.sh run "$$CMD"
 
-## toolchain-image: Print the toolchain image's content-addressed tag (lane-verify's VERIFY_IMAGE)
+## toolchain-image: Print the toolchain image's content-addressed tag
 .PHONY: toolchain-image
 toolchain-image:
 	@sh scripts/devcontainer.sh tag
@@ -635,6 +634,12 @@ check-releasability: vet-buildgates
 .PHONY: check-changelog-assembly
 check-changelog-assembly: vet-buildgates
 	@$(call gates,-run '^TestChangelogAssemble')
+
+## changelog-check: each changelog.d/ fragment is named for a docs/SPEC.md feature and every queued entry keeps the entry form
+# Runs scripts/changelog-assemble.sh --check on the working tree; it changes nothing.
+.PHONY: changelog-check
+changelog-check:
+	@sh scripts/changelog-assemble.sh --check
 
 ## check-scripts: the release and tooling scripts, driven on scratch inputs
 # Drives the release and tooling scripts offline on scratch trees, a fake forge

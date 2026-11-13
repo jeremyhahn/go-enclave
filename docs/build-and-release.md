@@ -1,12 +1,17 @@
 # Build and release
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-15
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-11-12
 > Conflicts with this document are defects. For shipped behavior the Makefile, `scripts/` and `build/ci/` are canonical: fix this document to match them.
 
 How a change is built and gated, and how a signed release is cut, verified and
-published. The everyday targets (test, coverage, lint, cross-build, the
-devcontainer) are in [README development](../README.md#development); this page
-does not repeat them. `make help` lists every target.
+published. This page is for maintainers. The everyday targets (test, coverage,
+lint, cross-build, the devcontainer) are in
+[CONTRIBUTING.md](../CONTRIBUTING.md#make-targets); this page does not repeat
+them. `make help` lists every target.
+
+The project is developed on a primary forge and published to GitHub. The
+release tooling talks to the primary forge through a git remote named `dev`
+and through the forge's HTTP API; GitHub receives a copy of each release.
 
 ## Design
 
@@ -33,12 +38,12 @@ make release-alpha|release-candidate|release VERSION=…
             1. Verify    make release-verify; resolves the tag to its commit (build/ci/release-tag.sh)
             2. Gate      ci-lint, ci-build, ci-security trivy, ci-test test-fips, ci-integration
             3. Consumer  make consumer-check
-            4. Publish   make release-publish (Gitea only)
+            4. Publish   make release-publish (primary forge only)
 ```
 
 Every job after Verify checks out the commit Verify resolved, never the moving
 tag. Publish needs every earlier job; it is skipped when the workflow runs on
-github.com, where a release is published by hand with the owner's approval.
+github.com, where a maintainer publishes the release by hand.
 The published commit is then checked with
 `make release-tree-check TAG=… REF=<published ref>`: its tree must be the tag's.
 
@@ -46,11 +51,12 @@ The published commit is then checked with
 
 ### Prerequisites
 
-- A Gitea remote named `dev` (`git remote rename origin dev`).
-- `AGENT_GIT`, the commit-signing and release wrapper, set in `local.mk`
+- A git remote named `dev` that points at the primary forge
+  (`git remote rename origin dev`).
+- `AGENT_GIT`, the path of the commit-signing wrapper, set in `local.mk`
   (ignored by git and refused by the releasability gate if tracked). It has no
-  default: a release fails closed without it. It is maintainer tooling, never
-  needed to build or test.
+  default: a release fails closed without it. Only a release needs it, never
+  a build or a test.
 - `curl` and `jq`, to read the forge's combined commit status.
 - `FORGE_API_URL` (the API root, e.g. `https://git.example.com/api/v1`),
   `FORGE_REPOSITORY` (`owner/repo`) and `FORGE_TOKEN` (a read token).
@@ -98,14 +104,15 @@ step leaves the same bytes.
 | `make release-verify` | `TAG`, optional `MAIN_REF` | The tag agrees with `VERSION` and `CHANGELOG.md`; with `MAIN_REF`, `HEAD` is an ancestor of it |
 | `make release-tree-check` | `TAG`, `REF` | Offline, in the local clone: the tree of the published commit `REF` is byte-identical to the tree of the release tag `TAG` (SPEC release criterion 8). Refuses, naming both trees, when they differ, when either does not resolve, or when `TAG` is not a release version. Writes nothing |
 | `make consumer-check` | `TAG` | In a fresh directory with a fresh module cache and `GOWORK=off`, `go get`s the module at the tag, asserts the build list selected that version, runs `go mod verify`, and builds and runs `scripts/testdata/consumer` |
-| `make release-publish` | `TAG`, `SHA`, `FORGE_*` (a write token) | Confirms the tag exists on the forge and names `SHA`, then creates the release or updates it in place, and reads it back. Gitea only: it refuses an `api.github.com` endpoint |
+| `make release-publish` | `TAG`, `SHA`, `FORGE_*` (a write token) | Confirms the tag exists on the forge and names `SHA`, then creates the release or updates it in place, and reads it back. Primary forge only: it refuses an `api.github.com` endpoint |
 
 The release body is the tag's `CHANGELOG.md` section (`release-notes.sh`).
-`release-publish` never creates a tag (Gitea's create-release call would make
-one from the default branch) and never deletes anything, so a re-run converges.
-`consumer-check` clears `GOFLAGS` and sets no `GOPRIVATE`, `GONOSUMDB` or
-`GOINSECURE`: resolution is whatever the runner configured, which
-`build/ci/forge-resolution.sh` asserts on our runners.
+`release-publish` never creates a tag (the forge's create-release call would
+make one from the default branch) and never deletes anything, so a re-run
+converges. `consumer-check` clears `GOFLAGS` and sets no `GOPRIVATE`,
+`GONOSUMDB` or `GOINSECURE`: resolution is whatever the runner configured.
+On the primary forge's runners, `build/ci/forge-resolution.sh` first asserts
+that the runner configured it.
 
 ### Verifying a signed release
 
@@ -148,8 +155,7 @@ Which integration test covers which feature: [COVERAGE.md](../test/integration/C
 
 ## CI
 
-`ci.yml` follows the ci-template v1.34.1 shape. Every stage runs in the
-devcontainer's toolchain image, built from the commit under test: `make
+Every stage of `ci.yml` runs in the devcontainer's toolchain image, built from the commit under test: `make
 docker-build` builds it with the integration image, and the Lint and Lint
 Gates jobs build it alone with `make docker-build-toolchain`.
 No job installs Go or a tool on the runner. `scripts/in-toolchain-image.sh`
@@ -166,13 +172,16 @@ repository's volumes on that host exceed `CI_CACHE_MAX_GIB` (32).
 
 | Job | Tier | Runs |
 |---|---|---|
-| Preflight | PR | One job on `ubuntu-latest` and the first of every run: the schedule guard (it refuses a `workflow_dispatch` off `main` and a pull request from a `lane-ckpt/*` branch), the changed-files step that sets the docs-only, Lint Gates, TPM and OP-TEE path scopes, and the architecture gate (no go-objstore import outside the storage seam), on the runner's shell |
+| Preflight | PR | One job on `ubuntu-latest` and the first of every run: the schedule guard (it refuses a `workflow_dispatch` off `main` and a pull request from a reserved checkpoint branch), the changed-files step that sets the docs-only, Lint Gates, TPM and OP-TEE path scopes, and an import-boundary check that has nothing to enforce in this repository, on the runner's shell |
 | Lint | PR | One job on `ubuntu-latest`, beside the image job. It takes the toolchain image from the registry cache or builds it alone (`make docker-build-toolchain`), and each stage is a step in it: `make lint`; the `Releasability (private patterns)` search ([below](#releasability)); the static checks `make ci-lint` adds beside the Lint Gates job's (`tidy-check lint-runtimesecret lint-integration`); `make gosec`, off the full tier and not on a docs-only pull request, with no network; `make deps-check`, a lint-class gate on every event, with a network for the module proxy. A failed step does not stop the later ones. `deps-check` reports, and does not fail on, a module behind a latest release published under 7 days ago without a `// held: <reason>` comment |
 | Devcontainer image | PR | One job on `ubuntu-latest`. It builds the images (`make docker-build`), and each stage is a step in the toolchain image: `make build`; `make cross-build`; `make coverage`; `make test-runtimesecret`; then, on the full tier only, `make security` (gosec included) and `trivy image` on the integration image. A failed step does not stop the later ones. `security` and `trivy image` get a network for the vulnerability databases and the module proxy. The job skips on a docs-only pull request |
 | Lint Gates | PR | `make lint-gates` in the toolchain image on `ubuntu-latest`, beside the Lint job, so lint's wall time is the longer of the two. No `-k`: the first failing gate ends the step. It builds the toolchain image alone, and only when the Makefile defines the target; the gates get no network. On a pull request off the full tier it runs only when a changed file matches `LINT_GATES_PATTERN`. Here the pattern is `.`, which every path matches, so it runs on every pull request. A pattern that cannot be searched skips nothing |
 | FIPS | full | `make test-fips` in the toolchain image |
 | Integration | full | `make ci-integration` on `ubuntu-latest`: the user-namespace, default and FIPS strict suites, on one scanned integration image |
 | Soak | nightly | `make ci-integration` looped on `ubuntu-latest` for 30 minutes, each iteration its own compose project |
+| TPM swtpm Conformance | full | `make integration-test-tpm` on the runner host, with `swtpm` from the runner's package manager and Go from `setup-go`. On a pull request it runs only when a file under `backends/tpm/`, `scripts/swtpm-fixture.sh` or `ci.yml` changed |
+| OP-TEE | full | `make integration-test-arm-trustzone` in the OP-TEE fixture image pinned by digest in `scripts/tool-pins.sh`; it fails when the pin is empty. It runs only when an OP-TEE path changed |
+| Publish CI images | push to `main` | On the primary forge only: publishes the toolchain image to the CI image registry (`CI_IMAGE_NAMESPACE`) when the registry lacks its hash. It skips on github.com |
 
 The **PR tier** runs on every event. The **full tier** runs on every event
 but a pull request (a push to `main`, the nightly schedule, `workflow_dispatch`
@@ -200,20 +209,22 @@ so a merge never cancels the run of an earlier `main` commit.
 `make coverage` is the test stage: the race suite across the CPU matrix, failing
 when any package is below `COVERAGE_THRESHOLD` (90). `make security` includes
 `ci-security`'s scans. Nothing is uploaded to code scanning. The workflow passes
-the make variables of handbook devcontainer.md §6. `IT_IMAGE` is
+the make variables `MODULE_ENV_FILE`, `IT_IMAGE`, `IT_PROJECT` and
+`GO_BUILD_TAGS`. `IT_IMAGE` is
 `make -s it-image`, `go-enclave-ci-it:<hash>`: a hash of the build context
 (the commit's tree, the checkout's diff and every untracked file `.gitignore`
 does not exclude). Every job of one commit names the same image and builds it
 only when the runner's daemon lacks it; each job leases it, and
 `reap-stale-ci-stacks.sh` removes an old unleased one. The root module needs no
-module credential. The toolchain image also downloads each backend module's
-graph (`backends/armtrustzone` requires the private root), so `make
-docker-build` passes `GO_BUILD_PROXY`, when set, to `docker build` as the build
-argument naming the Go module proxy the image build fetches through; unset, the
-Dockerfile's public proxy applies. In CI every job runs on a GitHub-hosted
+module credential. The toolchain image also downloads each nested module's
+graph, which includes the root module at the tag its `go.mod` requires, so
+`make docker-build` passes `GO_BUILD_PROXY`, when set, to `docker build` as the
+build argument naming the Go module proxy the image build fetches through;
+unset, the Dockerfile's public proxy applies. Every CI job runs on an
 `ubuntu-latest` runner, which carries no `GOPROXY`: the image jobs pass the
 empty value as `GO_BUILD_PROXY="${GOPROXY:-}"`, so the image build uses the
-Dockerfile's default public proxy, which serves the public root module (#293); no proxy chain has a `direct` entry. `MODULE_ENV_FILE` serves
+Dockerfile's default public proxy. No proxy chain has a `direct` entry.
+`MODULE_ENV_FILE` serves
 `integration-test` only. `GO_BUILD_TAGS` must stay empty,
 because no package is gated by a tag; the Makefile refuses any other value.
 
@@ -318,8 +329,11 @@ rules.
 | `devcontainer.sh`, `integration-image.sh`, `integration-test.sh`, `userns-test.sh`, `lint-integration.sh` | The devcontainer images; the scanned integration image and suites; the user-namespace test; proof the `integration` tag selects the suite |
 | `release.sh`, `release-version-check.sh`, `release-check-tag.sh`, `changelog-assemble.sh`, `release-notes.sh` | Cutting a release ([above](#what-releasesh-refuses)) |
 | `release-verify.sh`, `consumer-check.sh`, `release-publish.sh` | The [post-tag targets](#post-tag-targets) |
-| `deps-latest.sh` | `make deps-latest`: bump internal dependencies to their latest tags, then tidy |
-| `in-toolchain-image.sh`, `reap-stale-ci-stacks.sh`, `trim-ci-caches.sh`, `assert-build-tags.sh` | CI only, from the ci-template: run a command in the toolchain image on a copy of the checkout; remove this repository's stale CI containers and compose stacks; bound this repository's CI cache volumes on the host; fail when a `GO_BUILD_TAGS` tag selects no file |
+| `deps-check.sh`, `deps-latest.sh` | `make deps-check`: fail on a module behind its latest release; `make deps-latest`: bump every direct `github.com/jeremyhahn/` dependency to its latest tag, then tidy |
+| `swtpm-fixture.sh` | `make integration-test-tpm`: a throwaway `swtpm` on loopback TCP for `backends/tpm`'s swtpm-tagged tests |
+| `optee-fixture.sh`, `optee-selected.sh` | `make optee-fixture-check` and `make integration-test-arm-trustzone`: the pinned trusted-firmware OP-TEE fixture; whether a change reaches it |
+| `ci-image-cache.sh`, `apk-index-sum.sh`, `in-toolchain-image_test.sh` | CI only: the toolchain image's registry cache; a checksum of the Alpine package indexes the integration image's tag hashes; the tests of `in-toolchain-image.sh` (`make check-in-toolchain-image`) |
+| `in-toolchain-image.sh`, `reap-stale-ci-stacks.sh`, `trim-ci-caches.sh`, `assert-build-tags.sh` | CI only, shared unchanged with other repositories that use the same CI layout: run a command in the toolchain image on a copy of the checkout; remove this repository's stale CI containers and compose stacks; bound this repository's CI cache volumes on the host; fail when a `GO_BUILD_TAGS` tag selects no file |
 
 `build/ci/` holds what only a workflow runs: `release-tag.sh`,
 `publish-release.sh`, `summary.sh`, `forge-resolution.sh` and
@@ -335,6 +349,6 @@ rules.
 | `tag … already exists on dev` | Versions only move forward; pick the next one |
 | `curl`/`jq is required` | Install it; `make check-scripts` needs `jq` too |
 | `FORGE_* is unset` or refused | Set all three; the token and URL are checked for characters a token or URL does not carry |
-| The unit suite fails at startup | `RLIMIT_MEMLOCK` or `/proc` is missing ([README](../README.md#development)) |
+| The unit suite fails at startup | `RLIMIT_MEMLOCK` or `/proc` is missing ([unit-test prerequisites](../CONTRIBUTING.md#unit-test-prerequisites)) |
 | `devcontainer: docker is required` | The devcontainer and integration targets need Docker; `make ci-fast` does not |
 | CI Gate fails on a skipped job | A PR-tier job was skipped, or a full- or nightly-tier job in a run that selected its tier |
