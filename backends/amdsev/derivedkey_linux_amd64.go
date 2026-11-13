@@ -46,37 +46,32 @@ func deriveKey(ctx context.Context, device string, r keyRequest, dst []byte) err
 
 	req := new([keyRequestSize]byte)
 	*req = r.encode()
-	resp := new([keyResponseSize]byte)
-	defer clear(resp[:])
 	var pin runtime.Pinner
 	pin.Pin(req)
-	pin.Pin(resp)
 	defer pin.Unpin()
-	g := guestRequest{
-		msgVersion: guestRequestVersion,
-		reqData:    uint64(uintptr(unsafe.Pointer(req))),  //nolint:gosec // G103: the driver reads the pinned request
-		respData:   uint64(uintptr(unsafe.Pointer(resp))), //nolint:gosec // G103: the driver writes the pinned response
-	}
 
 	conn, err := f.SyscallConn()
 	if err != nil {
 		return reportError("derived-key", err)
 	}
-	var errno unix.Errno
-	if err := conn.Control(func(fd uintptr) {
-		_, _, errno = unix.Syscall(unix.SYS_IOCTL, fd, snpGetDerivedKey,
-			uintptr(unsafe.Pointer(&g))) //nolint:gosec // G103: the ioctl's argument struct
-	}); err != nil {
-		return reportError("derived-key", err)
-	}
-	if errno != 0 {
-		return reportError("derived-key", firmwareError(g.exitInfo2, os.NewSyscallError("ioctl", errno)))
-	}
-	if err := ctxErr(ctx); err != nil {
-		return err
-	}
-	if err := decodeKeyResponse(resp, dst); err != nil {
-		return reportError("derived-key", err)
-	}
-	return nil
+	// The response, which carries the derived key, lands in locked memory
+	// outside the Go heap, so it needs no pin.
+	return receiveKey(dst, func(resp *[keyResponseSize]byte) error {
+		g := guestRequest{
+			msgVersion: guestRequestVersion,
+			reqData:    uint64(uintptr(unsafe.Pointer(req))),  //nolint:gosec // G103: the driver reads the pinned request
+			respData:   uint64(uintptr(unsafe.Pointer(resp))), //nolint:gosec // G103: the driver writes the locked response
+		}
+		var errno unix.Errno
+		if err := conn.Control(func(fd uintptr) {
+			_, _, errno = unix.Syscall(unix.SYS_IOCTL, fd, snpGetDerivedKey,
+				uintptr(unsafe.Pointer(&g))) //nolint:gosec // G103: the ioctl's argument struct
+		}); err != nil {
+			return reportError("derived-key", err)
+		}
+		if errno != 0 {
+			return reportError("derived-key", firmwareError(g.exitInfo2, os.NewSyscallError("ioctl", errno)))
+		}
+		return ctxErr(ctx)
+	})
 }

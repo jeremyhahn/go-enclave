@@ -1,6 +1,10 @@
 package amdsev
 
-import "encoding/binary"
+import (
+	"encoding/binary"
+
+	enclave "github.com/jeremyhahn/go-enclave"
+)
 
 // sevGuestDevice is the SNP guest device the sev-guest driver creates when
 // SNP is active. SEV and SEV-ES guests have none.
@@ -71,6 +75,44 @@ func decodeKeyResponse(resp *[keyResponseSize]byte, dst []byte) error {
 	}
 	copy(dst, resp[keyResponseKeyOffset:])
 	return nil
+}
+
+// newKeyResponse allocates the buffer the firmware writes MSG_KEY_RSP into:
+// the root module's locked memory, out of the Go heap, swap and core dumps.
+// A variable so a test can observe the allocation.
+var newKeyResponse = func() (enclave.ByteAccess, error) {
+	return enclave.NewMemorySized(keyResponseSize)
+}
+
+// receiveKey allocates the response in locked memory, has fill write the
+// firmware's response into it, and decodes the DERIVED_KEY into dst. The
+// response is wiped and released on every path; an error writes nothing
+// into dst.
+func receiveKey(dst []byte, fill func(resp *[keyResponseSize]byte) error) (err error) {
+	mem, err := newKeyResponse()
+	if err != nil {
+		return reportError("derived-key", err)
+	}
+	defer func() {
+		if derr := mem.Destroy(); derr != nil && err == nil {
+			clear(dst)
+			err = reportError("derived-key", derr)
+		}
+	}()
+	return mem.WithBytes(func(b []byte) error {
+		defer clear(b)
+		if len(b) != keyResponseSize {
+			return reportError("derived-key", enclave.ErrInvalidSize)
+		}
+		resp := (*[keyResponseSize]byte)(b)
+		if err := fill(resp); err != nil {
+			return err
+		}
+		if err := decodeKeyResponse(resp, dst); err != nil {
+			return reportError("derived-key", err)
+		}
+		return nil
+	})
 }
 
 // firmwareError splits the ioctl's exitinfo2 into the firmware's error word
