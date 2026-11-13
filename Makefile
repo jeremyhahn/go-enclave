@@ -662,12 +662,18 @@ check-in-toolchain-image:
 check-project-scripts:
 	@sh scripts/project-scripts_test.sh
 
-## lint-gates: the repository's own gates beside lint: check-buildgates, check-releasability, check-changelog-assembly, check-scripts, check-in-toolchain-image, check-project-scripts (CI's lint-gates job)
+## check-it-runner: build/docker/devcontainer/run-integration-tests.sh refuses bad input with 2 and gates the merged profile at the floor
+# A stub go on PATH and the real scripts/coverage-gate.sh; no Docker, no network.
+.PHONY: check-it-runner
+check-it-runner:
+	@sh build/docker/devcontainer/run-integration-tests_test.sh
+
+## lint-gates: the repository's own gates beside lint: check-buildgates, check-releasability, check-changelog-assembly, check-scripts, check-in-toolchain-image, check-project-scripts, check-it-runner (CI's lint-gates job)
 # ci.yml runs this as its own job, in parallel with `make lint`, so make lint
 # does not list it. tidy-check, lint-runtimesecret and lint-integration stay
 # in the image job.
 .PHONY: lint-gates
-lint-gates: check-buildgates check-releasability check-changelog-assembly check-scripts check-in-toolchain-image check-project-scripts
+lint-gates: check-buildgates check-releasability check-changelog-assembly check-scripts check-in-toolchain-image check-project-scripts check-it-runner
 	@echo "lint-gates completed successfully"
 
 # CI AGGREGATES. ci.yml and release.yml each call these, one per job, so a job
