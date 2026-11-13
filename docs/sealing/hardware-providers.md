@@ -1,24 +1,24 @@
 # Hardware KeyProtector providers — design
 
 > **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-11-10
-> Conflicts with this document are defects. The TPM provider ships in [`backends/tpm`](../../backends/tpm): the code is canonical for it, and this document is fixed to match. The secure-element provider is not shipped; its code slice implements the outline below once its open questions are answered.
+> Conflicts with this document are defects. The TPM provider ships in [`backends/tpm`](../../backends/tpm): the code is canonical for it, and this document is fixed to match. The secure-element provider is not shipped; it will implement the outline below once its open questions are answered.
 > The design of the TPM and secure-element providers behind the [`KeyProtector` seam](engineering.md#provider-contract). The TPM provider is shipped; the secure-element provider is an outline with its open questions.
 
 This is the design of the hardware providers of the `keyprotector-providers`
-row ([SPEC](../SPEC.md), #264). go-enclave owns the protected-memory
+row ([SPEC](../SPEC.md)). go-enclave owns the protected-memory
 primitives, the sealing envelope and the `KeyProtector` seam; four providers
 sit behind it: memory (`SoftwareProvider`, shipped), TrustZone (the OP-TEE
-TA's SEAL 0x3 and UNSEAL 0x4), secure element and TPM. The owner's ruling on
-the row admits TPM and secure element into go-enclave only as `KeyProtector`
-providers; go-xkms's TPM and PKCS#11 crypto backends stay key-operation
-backends and are not touched here.
+TA's SEAL 0x3 and UNSEAL 0x4), secure element and TPM. A TPM or secure
+element enters go-enclave only as a `KeyProtector` provider. go-enclave
+protects key material at rest; it does not sign, decrypt or perform other key
+operations with a device, which belong to a crypto library above it.
 
 ## Problem
 
 A `ModePerOperation` sealer hands every data key (DEK) to its provider's
 `Protect` and stores the blob it gets back
-([Sealed envelope](engineering.md#sealed-envelope)). Today the only shipped
-provider keeps its protect key in this process's locked memory, so a sealed
+([Sealed envelope](engineering.md#sealed-envelope)). `SoftwareProvider`
+keeps its protect key in this process's locked memory, so a sealed
 value is no safer at rest than the process that sealed it. A TPM or a secure
 element holds a key the process can use but never read; a provider over one
 makes a sealed value openable only on the device that sealed it.
@@ -26,7 +26,7 @@ makes a sealed value openable only on the device that sealed it.
 The [provider contract](engineering.md#provider-contract) is fixed and this
 design meets it unchanged. The blob is a
 [generic provider blob](engineering.md#generic-providers): opaque to
-go-enclave (contract §4), so its layout below is the provider's own and
+go-enclave (contract item 4), so its layout below is the provider's own and
 contract v1 gains no byte.
 
 ## TPM provider
@@ -37,7 +37,7 @@ The provider lives in its own Go module, `backends/tpm` (module path
 `github.com/jeremyhahn/go-enclave/backends/tpm`), as
 [`backends/armtrustzone`](../backends/arm-trustzone-design.md) does, so the
 root module gains no dependency. It depends on `github.com/google/go-tpm`
-(the `tpm2` package), at its latest release when the code slice starts. It
+(the `tpm2` package; v0.9.8 at this writing). It
 is a `KeyProtector` and a `HealthReporter`, and serves `ModePerOperation`
 only; it is not a `RootUnsealer`.
 
@@ -392,7 +392,7 @@ The interrupted call returns an error matching `ctx.Err()` either way.
 A PKCS#11 provider in its own module, `backends/pkcs11` (module path
 `github.com/jeremyhahn/go-enclave/backends/pkcs11`), so the root module
 gains no dependency. Nothing here is decided beyond the shape; the
-[open questions](#open-questions) gate the code slice.
+[open questions](#open-questions) must be answered before it is built.
 
 - **Key:** one AES-256 secret key in the token, `CKA_TOKEN`, `CKA_SENSITIVE`,
   `CKA_ENCRYPT` and `CKA_DECRYPT` true, `CKA_EXTRACTABLE` false, found by its
@@ -494,7 +494,7 @@ gains no dependency. Nothing here is decided beyond the shape; the
 8. **Secure element: cgo.** A PKCS#11 binding loads a C library: the common
    Go bindings need cgo, and go-enclave builds without it today. Options: a
    cgo binding in the nested module only; a pure-Go loader; or a separate
-   helper process. For the owner.
+   helper process. Open.
 
    Proposed answer (for owner sign-off): a pure-Go loader in the nested
    module `backends/pkcs11` only, so the provider builds with
@@ -506,7 +506,7 @@ gains no dependency. Nothing here is decided beyond the shape; the
    the nested module is the owner's taste.
 9. **Secure element: test fixture.** SoftHSM in a CI fixture job, as `swtpm`
    for the TPM, is the obvious choice; whether its GCM behaviour matches the
-   tokens the provider targets is not established. For the owner.
+   tokens the provider targets is not established. Open.
 
    Proposed answer (for owner sign-off): SoftHSM v2, at its latest release,
    in a CI fixture job that runs `providertest` (the residue sweep
