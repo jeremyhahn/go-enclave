@@ -1,6 +1,0 @@
-### Added
-
-- **arm-trustzone**: `KeyProtector.Unprotect` has a fuzz target, `FuzzKeyProtectorUnprotect`, that drives arbitrary blobs, key lengths and ended contexts through the client, shared-memory and driver path over the fake TEE. Only the untouched sealed blob opens; every other input fails with `enclave.ErrSealedAuthentication` and a zeroed key, and nothing is left open. ([#337](https://github.com/jeremyhahn/go-enclave/issues/337))
-- **arm-trustzone**: Tests cover `Backend.Close` over the fake TEE on both driver kinds, so a closed backend returns `ErrBackendClosed`, waits out a `Random` in flight and leaves no device, session or shared memory open. ([#347](https://github.com/jeremyhahn/go-enclave/issues/347))
-- **arm-trustzone**: Tests cover `Backend.Random` over the fake TEE on both driver kinds, chunk by chunk, so a TA error, an INVOKE ioctl error or a cancel on any chunk returns no handle and leaves no shared memory live. ([#347](https://github.com/jeremyhahn/go-enclave/issues/347))
-- **arm-trustzone**: every exported error type and sentinel of `backends/armtrustzone` is held to one contract table test (messages, `errors.Is`, `errors.As` through `%w` and `errors.Join`, `Unwrap`), with a completeness check that fails on any exported error without a row.
