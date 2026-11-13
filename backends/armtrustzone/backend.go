@@ -13,8 +13,8 @@ const Name = "arm-trustzone"
 // from the secure world, beyond the reach of this process's memory.
 const rank = 2
 
-// The trusted application's interface (trusted-firmware v0.4.2-alpha,
-// optee/ta/include/tfw_ta.h). Commands 0x3 and 0x4 are held and never called.
+// The trusted application's interface (tfw_ta.h). The backend calls GET_INFO
+// and GET_RANDOM; SEAL and UNSEAL are used by the KeyProtector in protector.go.
 const (
 	taUUID             = "23751b49-3a76-4e49-b63c-e5853742fa1f"
 	taCmdGetInfo       = 0x00000001 // TFW_TA_CMD_GET_INFO
