@@ -2097,7 +2097,7 @@ jobs:
     needs: [preflight, image]   # v1.34
     if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')) && !github.event.pull_request.draft && needs.preflight.outputs.verdict == 'run' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 120
     steps:
       # The path gate: selected only when the changes job's `optee` output
       # is true. Every later step tests the `run` output this step sets.
