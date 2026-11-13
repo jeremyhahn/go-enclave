@@ -157,7 +157,9 @@ type AEAD interface {
 // Attester is the capability of producing evidence of what holds the
 // material. A [Backend] that implements it attests the platform (a TDX quote,
 // an SEV-SNP report); a [Handle] that implements it attests that one key (a
-// TPM certification, a secure element's key attestation).
+// TPM certification, a secure element's key attestation); a standalone value
+// that is no backend attests the guest the program runs in (a confidential
+// VM's SEV-SNP report or TD quote, from backends/confidentialvm).
 type Attester interface {
 	// Attest returns evidence that binds nonce, which the caller chose and
 	// verifies in the evidence. nonce is 1 to 64 bytes; a caller with more
