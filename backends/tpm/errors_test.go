@@ -133,17 +133,6 @@ func TestErrors_Match(t *testing.T) {
 	}
 }
 
-// allSentinels is every sentinel an error of this package can match.
-var allSentinels = []error{
-	ErrUnsupportedPlatform,
-	ErrDeviceUnavailable,
-	ErrCommandFailed,
-	ErrKeySize,
-	ErrLockedMemory,
-	ErrClosed,
-	enclave.ErrSealedAuthentication,
-}
-
 // TestErrors_Contract pins each error type's exact text, the one sentinel
 // it matches, and that errors.As finds it through a %w wrap.
 func TestErrors_Contract(t *testing.T) {
@@ -203,7 +192,7 @@ func TestErrors_Contract(t *testing.T) {
 				t.Errorf("Error() = %q, want %q", got, c.text)
 			}
 			wrapped := fmt.Errorf("outer: %w", c.err)
-			for _, s := range allSentinels {
+			for _, s := range allSentinels() {
 				want := s == c.is
 				if got := errors.Is(c.err, s); got != want {
 					t.Errorf("errors.Is(err, %q) = %v, want %v", s, got, want)
