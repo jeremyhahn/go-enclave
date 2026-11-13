@@ -3,22 +3,12 @@ package armtrustzone
 import (
 	"context"
 	"errors"
-	"os"
 	"path/filepath"
 	"testing"
 	"unsafe"
 )
 
 // openFDs counts the file descriptors this process holds open.
-func openFDs(t *testing.T) int {
-	t.Helper()
-	ents, err := os.ReadDir("/proc/self/fd")
-	if err != nil {
-		t.Skipf("cannot list /proc/self/fd: %v", err)
-	}
-	return len(ents)
-}
-
 // infoTEE is the fake TEE with GET_INFO answering version and flags in
 // place of the interface the fake's TA reports.
 type infoTEE struct {

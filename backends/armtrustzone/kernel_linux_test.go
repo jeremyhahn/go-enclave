@@ -91,7 +91,7 @@ func TestKernelDriverOnDevNull(t *testing.T) {
 func TestKernelMmapRoundTrip(t *testing.T) {
 	fd, err := unix.MemfdCreate("armtrustzone-test", unix.MFD_CLOEXEC)
 	if err != nil {
-		t.Skipf("memfd_create: %v", err)
+		t.Fatalf("memfd_create: %v", err)
 	}
 	t.Cleanup(func() { _ = unix.Close(fd) })
 	size := os.Getpagesize()
