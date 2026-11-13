@@ -194,6 +194,11 @@ func TestFeatureMap_EveryIntegrationTestBelongsToExactlyOneFeature(t *testing.T)
 		}
 		rel, _ := filepath.Rel(suiteRoot, p)
 		suite := strings.SplitN(filepath.ToSlash(rel), "/", 2)[0]
+		if suite == "internal" {
+			// test/integration/internal holds the suites' shared helpers;
+			// their unit tests belong to no feature.
+			return nil
+		}
 		for _, m := range integrationTestFunc.FindAllStringSubmatch(string(body), -1) {
 			name := m[1]
 			if name == "TestMain" {
