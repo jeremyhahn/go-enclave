@@ -7,8 +7,8 @@
 // builds with CGO_ENABLED=0 into a static linux/arm64 binary. On other
 // platforms it compiles, and [Connect] returns a [PlatformError].
 //
-// [Connect] opens a session with the trusted application of
-// trusted-firmware v0.4.2-alpha and checks its interface with GET_INFO;
+// [Connect] opens a session with the trusted application
+// (interface version 1) and checks its interface with GET_INFO;
 // [Backend.Random] fills a handle with GET_RANDOM. Register a [Connector] with
 // [enclave.Register] to make the backend discoverable by name:
 //
@@ -16,5 +16,5 @@
 //	b, err := armtrustzone.Connect("/dev/tee0")
 //	h, err := b.Random(ctx, 32)
 //
-// The design and its rulings are docs/backends/arm-trustzone-design.md.
+// The design is docs/backends/arm-trustzone-design.md.
 package armtrustzone

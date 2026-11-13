@@ -6,7 +6,8 @@
 #        scripts/features.sh list
 #        scripts/features.sh field <feature> <unit-package|suite|test-prefix>
 #
-# The factory's FEATURES_CMD (local-software-factory §7). A feature is a
+# The <base> <tip> form lets a test runner run only the features a change
+# needs. A feature is a
 # directory docs/<feature>/, with a line in scripts/features.map (override with
 # FEATURES_MAP) that gives its unit package, its integration suite, the name
 # prefix of its integration tests and the globs of its source files. A change

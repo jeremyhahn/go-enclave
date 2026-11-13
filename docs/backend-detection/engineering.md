@@ -101,9 +101,9 @@ a nil allocator as rank-0 `Prober`s. `make test-backend-detection` runs them
 with the rest of the root package.
 
 `make integration-test-backend-detection` runs the `TestBackendDetection_`
-tests in `test/integration/enclave`. On the devcontainer's plain host,
-detection selects locked memory, and a memory enclave made afterwards reports that
-backend; this is the release criterion. With an absent higher-ranked device
+tests in `test/integration/enclave`. On a plain host with no other backend
+registered, detection selects locked memory, and a memory enclave made
+afterwards reports that backend; this is the release criterion. With an absent higher-ranked device
 and a backend that is no `Prober` registered, detection still falls back, and
 each result says why.
 

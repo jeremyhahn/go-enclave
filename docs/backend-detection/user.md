@@ -21,7 +21,7 @@ Register what you link in, then call `Detect` once from `main`. Nothing
 detects on import.
 
 ```go
-for _, b := range []enclave.Backend{tdxBackend, seBackend} { // hardware backend modules
+for _, b := range []enclave.Backend{teeBackend, seBackend} { // hardware backend modules
 	if err := enclave.Register(b); err != nil {
 		return err
 	}

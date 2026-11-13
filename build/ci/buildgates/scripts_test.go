@@ -176,8 +176,11 @@ func TestScriptsReleaseNotes_RealChangelog(t *testing.T) {
 	root := repoRoot(t)
 	changelog := readFile(t, filepath.Join(root, "CHANGELOG.md"))
 	headings := regexp.MustCompile(`(?m)^## \[(v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?)\][^\n]*\n`).FindAllStringSubmatchIndex(changelog, -1)
-	if len(headings) < 5 {
-		t.Fatalf("found %d released sections in CHANGELOG.md; the discovery is broken, not the file", len(headings))
+	// The file restarts at the first public release, so it may hold no
+	// released section yet. Guard the discovery instead: every "## [v" line
+	// must be found by the version pattern.
+	if want := strings.Count("\n"+changelog, "\n## [v"); len(headings) != want {
+		t.Fatalf("found %d released sections in CHANGELOG.md, want %d; the discovery is broken, not the file", len(headings), want)
 	}
 	for i, h := range headings {
 		version := changelog[h[2]:h[3]]

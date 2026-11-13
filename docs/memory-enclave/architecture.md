@@ -138,10 +138,11 @@ The per-process cost of each step, and what it does not bind, is in
 | Per-mapping core-dump and fork exclusion | [madvise_unix.go](../../madvise_unix.go), [madvise_linux.go](../../madvise_linux.go), [madvise_bsd.go](../../madvise_bsd.go), [madvise_openbsd.go](../../madvise_openbsd.go), [madvise_unsupported.go](../../madvise_unsupported.go) |
 | Shutdown ledger, the holder-counting locks the sweep waits on, and `settleRelease`, the one bookkeeping step after every release | [registry.go](../../registry.go) — see [shutdown-sweep](../shutdown-sweep/architecture.md) |
 
-go-enclave is a bottom-layer module: its only dependency is `golang.org/x/sys`,
-and consumers reach it only through the exported Go API of package `enclave`.
-It is the one owner of locked-memory handling: no other project holds its own
-mlock, guard-page or canary code. Process-wide lifecycle (`HardenProcess`,
+go-enclave is a bottom-layer module: the root module's only dependency is
+`golang.org/x/sys` (the nested provider modules under `backends/` have their
+own), and consumers reach it only through the exported Go API of package
+`enclave`. It is meant to be the one place a program handles locked memory, so
+a consumer needs no mlock, guard-page or canary code of its own. Process-wide lifecycle (`HardenProcess`,
 `WipeAll`) is the consuming binary's call, never a library's.
 
 ## Data flow
