@@ -17,7 +17,7 @@ import (
 
 const gib = 1024 * 1024 // KiB
 
-// fakeDocker answers the calls trim-ci-caches.sh makes:
+// trimFakeDocker answers the calls trim-ci-caches.sh makes:
 //   - volume ls: the lines of $FAKE_DOCKER/volumes;
 //   - run ... -v <vol>:/c:ro ...: du output from $FAKE_DOCKER/sizes
 //     ("<vol> <kib>" lines), nothing for a volume not listed;
@@ -25,7 +25,7 @@ const gib = 1024 * 1024 // KiB
 //   - volume rm <vol>: fails when <vol> is in $FAKE_DOCKER/unremovable.
 //
 // Every call's arguments are appended to $FAKE_DOCKER/log.
-const fakeDocker = `#!/bin/sh
+const trimFakeDocker = `#!/bin/sh
 d=$FAKE_DOCKER
 printf '%s\n' "$*" >> "$d/log"
 case $1 in
@@ -67,7 +67,7 @@ func newTrimWorld(t *testing.T, vols []trimVolume) *trimWorld {
 	t.Helper()
 	w := &trimWorld{dir: t.TempDir()}
 	bin := t.TempDir()
-	writeExecutable(t, filepath.Join(bin, "docker"), []byte(fakeDocker))
+	writeExecutable(t, filepath.Join(bin, "docker"), []byte(trimFakeDocker))
 	w.path = bin + string(os.PathListSeparator) + os.Getenv("PATH")
 	var ls, sizes, inuse, unremovable strings.Builder
 	for _, v := range vols {
