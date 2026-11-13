@@ -655,12 +655,19 @@ check-scripts: vet-buildgates
 check-in-toolchain-image:
 	@bash scripts/in-toolchain-image_test.sh
 
-## lint-gates: the repository's own gates beside lint: check-buildgates, check-releasability, check-changelog-assembly, check-scripts, check-in-toolchain-image (CI's lint-gates job)
+## check-project-scripts: swtpm-fixture, test-runtimesecret, cross-build, lint-integration and release-verify pass and fail as they should
+# Stub go, swtpm and swtpm_ioctl on PATH and a scratch git tree; no toolchain,
+# TPM, network or Docker.
+.PHONY: check-project-scripts
+check-project-scripts:
+	@sh scripts/project-scripts_test.sh
+
+## lint-gates: the repository's own gates beside lint: check-buildgates, check-releasability, check-changelog-assembly, check-scripts, check-in-toolchain-image, check-project-scripts (CI's lint-gates job)
 # ci.yml runs this as its own job, in parallel with `make lint`, so make lint
 # does not list it. tidy-check, lint-runtimesecret and lint-integration stay
 # in the image job.
 .PHONY: lint-gates
-lint-gates: check-buildgates check-releasability check-changelog-assembly check-scripts check-in-toolchain-image
+lint-gates: check-buildgates check-releasability check-changelog-assembly check-scripts check-in-toolchain-image check-project-scripts
 	@echo "lint-gates completed successfully"
 
 # CI AGGREGATES. ci.yml and release.yml each call these, one per job, so a job
