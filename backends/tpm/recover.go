@@ -172,8 +172,13 @@ func (d *tpmDevice) listType(ctx context.Context, ht tpm2.TPMHT) ([]tpm2.TPMHand
 			next = uint32(h) + 1
 			left--
 		}
-		if !rsp.MoreData || len(hs) == n {
+		if !rsp.MoreData {
 			return hs, nil
+		}
+		// More data with no new handle: returning hs would hand back
+		// an incomplete baseline, so the listing is refused.
+		if len(hs) == n {
+			return nil, fmt.Errorf("%w: no new handle from %#x with more data", errHandleOrder, start)
 		}
 	}
 	return hs, nil
