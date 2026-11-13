@@ -344,8 +344,7 @@ runs until the owner rules on it.
   in DER, then the signature in DER, each preceded by a 4-byte big-endian
   length; format name `apple-mda-signature`.
 - **An IETF RATS Conceptual Message Wrapper** (draft-ietf-rats-msg-wrap): one
-  standard wrapper, but a draft to pin and watch, as [amd-sev's Q6](amd-sev.md#q6-evidence-shape)
-  also weighs.
+  standard wrapper, but a draft to pin and watch.
 
 ### Q6: persistent keys
 

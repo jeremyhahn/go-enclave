@@ -11,7 +11,7 @@ decides the design's open questions.
 
 1. **Design proposal** (this slice, docs only).
    - `docs/backends/mac-secure-enclave.md`: the proposal, in the section
-     structure of `docs/backends/amd-sev.md`.
+     structure of `docs/backends/confidential-vm.md`.
    - `docs/SPEC.md`: row `mac-secure-enclave` `future` → `planned`, design link.
    - `ROADMAP.md`: the bullet moves from Future to Later with the design link.
    - `changelog.d/192-mac-secure-enclave-design.md`: an Added fragment.
