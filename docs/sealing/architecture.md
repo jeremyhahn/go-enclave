@@ -205,7 +205,7 @@ flowchart LR
 | `cipher.NewGCM` with caller-supplied nonces (and with it `GOEXPERIMENT=boringcrypto`) | FIPS 140-only mode refuses GCM with arbitrary IVs. `NewGCMWithRandomNonce` removes caller-managed nonces; random 96-bit nonces can still collide, so collision risk is bounded by per-key usage limits: at most 2^31 DEK wraps per KEK generation before rotation (`kekMessageLimit`, [hierarchy.go](../../hierarchy.go); `WithKEKRotationLimit` can only lower it), at most 2^31 KEK generations per sealer wrapping key (`maxKEKGenerations`; past it a seal fails with `ErrSealerExhausted`) — a key each sealer derives from the provider's root with HKDF-SHA256 under its own random salt, so sealers sharing a root, or restarts unsealing the same one, never share it — and 2^31 `Protect` calls per `SoftwareProvider` Protect key, itself HKDF-SHA256 of the root under its own info so it is never the root `UnsealRoot` exports (`softwareProtectLimit`, [provider_software.go](../../provider_software.go)), half of crypto/cipher's documented 2^32 bound. boringcrypto builds therefore cannot seal; Go's native FIPS 140-3 module is the supported route. |
 | XSalsa20-Poly1305 / ChaCha20-Poly1305 (no key schedule) | Not FIPS-approved. |
 | A hand-written AES whose schedule lives in locked memory | Unvalidated, unreviewed cryptography; a worse class of defect than the bounded heap exposure it removes. |
-| Shipping a `crypto.Decrypter` + signer composition | Out of scope for the bottom layer: device adapters belong with the layer that owns the devices, where they can be held to the conformance suite. Confidentiality-only providers (bare RSA-OAEP) do not satisfy the seam. |
+| Shipping a `crypto.Decrypter` + signer composition | A generic adapter cannot know a device's guarantees. Each device gets its own provider, in its own module under `backends/` or outside go-enclave, held to the conformance suite. Confidentiality-only providers (bare RSA-OAEP) do not satisfy the seam. |
 | Unmarshalling foreign sealed bytes | Would make an internal, unversioned, process-scoped format accidentally permanent. There is no constructor that accepts sealed bytes. |
 | Re-keying silently after a shutdown sweep | The next seal would succeed and old values would fail as `ErrSealedAuthentication`, presenting a lifecycle bug as an attack. The sealer fails closed with `ErrSealerWiped`. |
 | Sweeping `Sealed` values in `WipeAll` | They hold no locked pages; in `ModePerOperation` they remain legitimately openable. `Openable` reports the state instead. |
@@ -230,21 +230,20 @@ flowchart LR
 Three providers behind the `KeyProtector` seam ship in go-enclave: memory
 (`SoftwareProvider`), TPM ([`backends/tpm`](../../backends/tpm), its own
 module) and the TrustZone host side
-([`backends/armtrustzone`](../../backends/armtrustzone), whose OP-TEE TA
-side trusted-firmware implements). The secure-element provider is designed
+([`backends/armtrustzone`](../../backends/armtrustzone), whose other half is
+the OP-TEE trusted application). The TPM and TrustZone providers are nested
+modules, so the root package gains no dependency from them. The
+secure-element provider is designed
 ([hardware providers](hardware-providers.md#secure-element-provider-outline))
-and not yet built. HSM and KMS providers still come from higher layers and
-are injected through `NewSealer(WithKeyProtector(p))`,
+and not yet built. HSM and KMS providers come from outside go-enclave and are
+injected through `NewSealer(WithKeyProtector(p))`,
 `NewSealer(WithRootUnsealer(p))`, or `SetSealer`; the
-[keyprotector-providers](../SPEC.md#features) row names them, their consumers
-and ruling 225(3).
+[keyprotector-providers](../SPEC.md#features) row lists them.
 
 Sealing is built on go-enclave's
-[locked memory](../memory-enclave/architecture.md#component-boundaries); no
-consumer hand-rolls locked-memory handling. Hardware and cloud crypto belongs to
-go-xkms, which is why this package ships only `SoftwareProvider` and injects the
-rest through the seam. `Sealer` is not the `SealingStrategy` seam of go-quicraft
-and go-qrdb.
+[locked memory](../memory-enclave/architecture.md#component-boundaries), so a
+provider never handles locked memory itself. The root package ships only
+`SoftwareProvider` and takes every other provider through the seam.
 
 ## Trust boundaries
 
@@ -264,4 +263,5 @@ and go-qrdb.
 ## Scope fence
 
 No persistence or transport format; no `SealWith` (seals are unbudgeted); no
-device liveness probe; no hardware code; no boringcrypto support.
+device liveness probe; no hardware code in the root package (the TPM and
+TrustZone providers are nested modules); no boringcrypto support.
