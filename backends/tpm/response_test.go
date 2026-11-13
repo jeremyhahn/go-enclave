@@ -243,14 +243,18 @@ func TestListType(t *testing.T) {
 			queries: []query{{uint32(tr), maxListedHandles}},
 		},
 		{
+			// A page that adds no handle while the TPM reports more
+			// leaves the ownership baseline incomplete.
 			name:    "more_data_without_progress",
 			script:  [][]byte{handlesPage(true, 0x81000001)},
 			queries: []query{{uint32(tr), maxListedHandles}},
+			wantIs:  errHandleOrder,
 		},
 		{
 			name:    "more_data_empty",
 			script:  [][]byte{handlesPage(true)},
 			queries: []query{{uint32(tr), maxListedHandles}},
+			wantIs:  errHandleOrder,
 		},
 		{
 			name:    "next_page",
@@ -271,10 +275,24 @@ func TestListType(t *testing.T) {
 			queries: []query{{uint32(tr), maxListedHandles}, {uint32(tr) + 200, maxListedHandles - 200}},
 		},
 		{
+			// A repeated page adds no handle; with more data reported
+			// the listing would be returned incomplete.
 			name:    "repeated_page",
 			script:  [][]byte{handlesPage(true, tr+3)},
-			want:    []tpm2.TPMHandle{tr + 3},
 			queries: []query{{uint32(tr), maxListedHandles}, {uint32(tr) + 4, maxListedHandles - 1}},
+			wantIs:  errHandleOrder,
+		},
+		{
+			name:    "repeated_page_more_data",
+			script:  [][]byte{handlesPage(true, tr+1, tr+4), handlesPage(true, tr+1, tr+4)},
+			queries: []query{{uint32(tr), maxListedHandles}, {uint32(tr) + 5, maxListedHandles - 2}},
+			wantIs:  errHandleOrder,
+		},
+		{
+			name:    "repeated_page_last",
+			script:  [][]byte{handlesPage(true, tr+1, tr+4), handlesPage(false, tr+1, tr+4)},
+			want:    []tpm2.TPMHandle{tr + 1, tr + 4},
+			queries: []query{{uint32(tr), maxListedHandles}, {uint32(tr) + 5, maxListedHandles - 2}},
 		},
 		{
 			// A descending pair must not drop the lower handle: the
