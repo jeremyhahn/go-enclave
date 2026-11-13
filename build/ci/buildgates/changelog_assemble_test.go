@@ -390,3 +390,253 @@ func TestChangelogAssemble_GateAcceptsTheTreeAssemblyProduces(t *testing.T) {
 		})
 	}
 }
+
+// assembleRepo is the repository URL the footer fixtures link to.
+const assembleRepo = "https://github.com/o/r"
+
+// TestChangelogAssemble_FinalReleaseFoldsItsPreReleases pins rule 5's first
+// half: a final vX.Y.Z absorbs its own -alpha and -rc sections, keeps an entry
+// repeated verbatim once, places one feature's entries together, and drops the
+// folded versions from the footer. Older releases are untouched.
+func TestChangelogAssemble_FinalReleaseFoldsItsPreReleases(t *testing.T) {
+	changelog := assembleHeader + `
+## [v1.2.0-rc.1] - 2026-02-02
+
+### Fixed
+
+- **sealing**: Open refuses a truncated blob.
+
+### Added
+
+- **backends**: Lookup names the missing backend.
+
+## [v1.2.0-alpha] - 2026-02-01
+
+### Added
+
+- **sealing**: Sealed carries a version.
+- **backends**: Register refuses a duplicate name.
+
+## [v1.1.0] - 2026-01-01
+
+### Added
+
+- **sealing**: An older entry.
+
+[Unreleased]: ` + assembleRepo + `/compare/v1.2.0-rc.1...HEAD
+[v1.2.0-rc.1]: ` + assembleRepo + `/compare/v1.2.0-alpha...v1.2.0-rc.1
+[v1.2.0-alpha]: ` + assembleRepo + `/compare/v1.1.0...v1.2.0-alpha
+[v1.1.0]: ` + assembleRepo + `/compare/v1.0.0...v1.1.0
+`
+	dir := assembleTree(t, changelog, map[string]string{
+		"sealing.md": "### Added\n\n- **sealing**: Sealed carries a version.\n- **sealing**: OpenIn works on every backend.\n",
+	})
+	if out, ok := runAssemble(t, dir, "v1.2.0", "2026-03-01"); !ok {
+		t.Fatalf("assembly failed:\n%s", out)
+	}
+	want := assembleHeader + `
+## [v1.2.0] - 2026-03-01
+
+### Added
+
+- **sealing**: Sealed carries a version.
+- **sealing**: OpenIn works on every backend.
+- **backends**: Lookup names the missing backend.
+- **backends**: Register refuses a duplicate name.
+
+### Fixed
+
+- **sealing**: Open refuses a truncated blob.
+
+## [v1.1.0] - 2026-01-01
+
+### Added
+
+- **sealing**: An older entry.
+
+[Unreleased]: ` + assembleRepo + `/compare/v1.2.0...HEAD
+[v1.2.0]: ` + assembleRepo + `/compare/v1.1.0...v1.2.0
+[v1.1.0]: ` + assembleRepo + `/compare/v1.0.0...v1.1.0
+`
+	if got := readFile(t, filepath.Join(dir, "CHANGELOG.md")); got != want {
+		t.Fatalf("final release differs.\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
+// TestChangelogAssemble_FinalReleaseWithNothingNewStillFolds pins that a final
+// cut straight from its last candidate, with an empty queue, is not "nothing
+// to release": the candidates' entries become the final section.
+func TestChangelogAssemble_FinalReleaseWithNothingNewStillFolds(t *testing.T) {
+	dir := assembleTree(t, assembleHeader+"\n## [v0.9.9-rc.1] - 2026-01-01\n\n### Fixed\n\n- **sealing**: A fix.\n\n"+assemblePrevious, nil)
+	if out, ok := runAssemble(t, dir, "v0.9.9", assembleDate); !ok {
+		t.Fatalf("assembly failed:\n%s", out)
+	}
+	want := assembleHeader + "\n## [v0.9.9] - 2026-01-02\n\n### Fixed\n\n- **sealing**: A fix.\n\n" + assemblePrevious
+	if got := readFile(t, filepath.Join(dir, "CHANGELOG.md")); got != want {
+		t.Fatalf("final release differs.\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
+// TestChangelogAssemble_NewMajorCollapsesThePreviousOne pins rule 5's second
+// half: the final of a new major turns every section of an earlier major into
+// one vN.x summary listing its features, linked to the tag range.
+func TestChangelogAssemble_NewMajorCollapsesThePreviousOne(t *testing.T) {
+	changelog := assembleHeader + `
+### Changed
+
+- **BREAKING** backends: Register returns an error. See [Upgrading](docs/README.md#upgrading).
+
+## [v0.13.0] - 2026-04-01
+
+### Added
+
+- **backends**: Detect ranks backends.
+
+## [v0.12.0] - 2026-03-01
+
+### Added
+
+- **sealing**: The first public sealing.
+- **backends**: The registry.
+
+[Unreleased]: ` + assembleRepo + `/compare/v0.13.0...HEAD
+[v0.13.0]: ` + assembleRepo + `/compare/v0.12.0...v0.13.0
+[v0.12.0]: ` + assembleRepo + `/compare/v0.11.1-alpha...v0.12.0
+`
+	dir := assembleTree(t, changelog, nil)
+	if out, ok := runAssemble(t, dir, "v1.0.0", "2026-06-01"); !ok {
+		t.Fatalf("assembly failed:\n%s", out)
+	}
+	want := assembleHeader + `
+## [v1.0.0] - 2026-06-01
+
+### Changed
+
+- **BREAKING** backends: Register returns an error. See [Upgrading](docs/README.md#upgrading).
+
+## [v0.x]
+
+Every v0 release, by feature. Each tag's release notes keep its full text.
+
+- **backends**
+- **sealing**
+
+[Unreleased]: ` + assembleRepo + `/compare/v1.0.0...HEAD
+[v1.0.0]: ` + assembleRepo + `/compare/v0.13.0...v1.0.0
+[v0.x]: ` + assembleRepo + `/compare/v0.11.1-alpha...v0.13.0
+`
+	if got := readFile(t, filepath.Join(dir, "CHANGELOG.md")); got != want {
+		t.Fatalf("major release differs.\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
+// TestChangelogAssemble_FooterUnderUnreleasedStaysTheFooter pins the first
+// public release: with no released section yet, the link references follow
+// [Unreleased], and assembly must keep them at the end of the file rather
+// than fold them into the release as entries.
+func TestChangelogAssemble_FooterUnderUnreleasedStaysTheFooter(t *testing.T) {
+	changelog := assembleHeader + "\n### Added\n\n- **sealing**: Sealing.\n\n[Unreleased]: " + assembleRepo + "/compare/v0.11.1-alpha...HEAD\n"
+	dir := assembleTree(t, changelog, nil)
+	if out, ok := runAssemble(t, dir, "v0.12.0", assembleDate); !ok {
+		t.Fatalf("assembly failed:\n%s", out)
+	}
+	want := assembleHeader + "\n## [v0.12.0] - 2026-01-02\n\n### Added\n\n- **sealing**: Sealing.\n\n" +
+		"[Unreleased]: " + assembleRepo + "/compare/v0.12.0...HEAD\n" +
+		"[v0.12.0]: " + assembleRepo + "/compare/v0.11.1-alpha...v0.12.0\n"
+	if got := readFile(t, filepath.Join(dir, "CHANGELOG.md")); got != want {
+		t.Fatalf("first release differs.\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
+// TestChangelogAssemble_RefusesACollapseItCannotWrite pins that a major
+// collapse fails, changing nothing, rather than write a summary without its
+// features or its tag-range link.
+func TestChangelogAssemble_RefusesACollapseItCannotWrite(t *testing.T) {
+	old := "\n### Added\n\n- **sealing**: New.\n\n## [v0.2.0] - 2026-01-01\n\n### Added\n\n"
+	for _, tc := range []struct{ name, changelog, mention string }{
+		{"an entry with no feature", assembleHeader + old + "- A free-form entry.\n\n[Unreleased]: " + assembleRepo + "/compare/v0.2.0...HEAD\n", "names no feature"},
+		{"no [Unreleased] compare link", assembleHeader + old + "- **sealing**: Old.\n", "no `[Unreleased]"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := assembleTree(t, tc.changelog, nil)
+			out, ok := runAssemble(t, dir, "v1.0.0", assembleDate)
+			if ok {
+				t.Fatalf("assembly succeeded, want a refusal:\n%s", out)
+			}
+			if !strings.Contains(out, tc.mention) {
+				t.Errorf("refusal does not say %q:\n%s", tc.mention, out)
+			}
+			if got := readFile(t, filepath.Join(dir, "CHANGELOG.md")); got != tc.changelog {
+				t.Errorf("a refused assembly modified CHANGELOG.md:\n%s", got)
+			}
+		})
+	}
+}
+
+// checkSpec is a docs/SPEC.md with two Feature rows and a later table whose
+// first column is not a feature.
+const checkSpec = "# spec\n\n## Features\n\n| Feature | Status | Requirements | Detail |\n|---|---|---|---|\n" +
+	"| sealing | shipped | x | y |\n| backends | shipped | x | y |\n\n## Interfaces\n\n| Name | Kind |\n|---|---|\n| notafeature | x |\n"
+
+// TestChangelogAssemble_CheckEnforcesTheEntryForm pins rule 7: --check accepts
+// a queue in the entry form and names every fragment or entry that breaks it.
+func TestChangelogAssemble_CheckEnforcesTheEntryForm(t *testing.T) {
+	good := "### Added\n\n- **sealing**: Sealed carries a version. ([#274](https://github.com/o/r/issues/274))\n"
+	cases := []struct {
+		name      string
+		changelog string
+		fragments map[string]string
+		mention   string // "" when the check must pass
+	}{
+		{"a fragment in the form", assembleHeader, map[string]string{"sealing.md": good}, ""},
+		{"an empty queue", assembleHeader, nil, ""},
+		{"a breaking change in the form", assembleHeader, map[string]string{"backends.md": "### Changed\n\n- **BREAKING** backends: Register returns an error. See [Upgrading](docs/README.md#upgrading).\n"}, ""},
+		{"Unreleased in the form", assembleHeader + "\n### Fixed\n\n- **backends**: A fix.\n", nil, ""},
+		{"a name that is no feature", assembleHeader, map[string]string{"264-tpm.md": good}, `"264-tpm" is not a Feature`},
+		{"a name from another table", assembleHeader, map[string]string{"notafeature.md": good}, `"notafeature" is not a Feature`},
+		{"an entry for another feature", assembleHeader, map[string]string{"backends.md": good}, `names "sealing"`},
+		{"an entry with no feature", assembleHeader, map[string]string{"sealing.md": "### Added\n\n- A free-form entry.\n"}, "an entry has the form"},
+		{"an unknown subsection", assembleHeader, map[string]string{"sealing.md": "### Notes\n\n- **sealing**: X.\n"}, "not a Keep a Changelog subsection"},
+		{"a continuation line", assembleHeader, map[string]string{"sealing.md": "### Added\n\n- **sealing**: X.\n  more\n"}, "an entry is one line"},
+		{"three sentences", assembleHeader, map[string]string{"sealing.md": "### Added\n\n- **sealing**: One. Two. Three.\n"}, "at most two sentences"},
+		{"no closing period", assembleHeader, map[string]string{"sealing.md": "### Added\n\n- **sealing**: No period\n"}, "ends with a period"},
+		{"text outside a subsection", assembleHeader, map[string]string{"sealing.md": "- **sealing**: X.\n"}, "outside a ### subsection"},
+		{"an empty fragment", assembleHeader, map[string]string{"sealing.md": ""}, "holds no entry"},
+		{"a breaking change outside Changed", assembleHeader, map[string]string{"backends.md": "### Added\n\n- **BREAKING** backends: X. See [Upgrading](docs/README.md#upgrading).\n"}, "belongs under ### Changed"},
+		{"a breaking change with no migration link", assembleHeader, map[string]string{"backends.md": "### Changed\n\n- **BREAKING** backends: X.\n"}, "links its migration note"},
+		{"an unknown feature under Unreleased", assembleHeader + "\n### Added\n\n- **nope**: X.\n", nil, `"nope" is not a Feature`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := assembleTree(t, tc.changelog, tc.fragments)
+			if err := os.MkdirAll(filepath.Join(dir, "docs"), 0o755); err != nil {
+				t.Fatalf("mkdir: %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "docs", "SPEC.md"), []byte(checkSpec), 0o644); err != nil {
+				t.Fatalf("write SPEC.md: %v", err)
+			}
+			before := fragmentNames(t, dir)
+			out, ok := runAssemble(t, dir, "--check")
+			if ok != (tc.mention == "") {
+				t.Fatalf("check ok = %v, want %v:\n%s", ok, tc.mention == "", out)
+			}
+			if !strings.Contains(out, tc.mention) {
+				t.Errorf("check output does not say %q:\n%s", tc.mention, out)
+			}
+			if got := readFile(t, filepath.Join(dir, "CHANGELOG.md")); got != tc.changelog {
+				t.Errorf("--check modified CHANGELOG.md:\n%s", got)
+			}
+			if after := fragmentNames(t, dir); len(after) != len(before) {
+				t.Errorf("--check changed changelog.d/: %v -> %v", before, after)
+			}
+		})
+	}
+}
+
+// TestChangelogAssemble_CheckRealTree holds this repository's own queue to the
+// entry form against its own docs/SPEC.md.
+func TestChangelogAssemble_CheckRealTree(t *testing.T) {
+	if out, ok := runAssemble(t, repoRoot(t), "--check"); !ok {
+		t.Fatalf("this repository's changelog queue breaks the entry form:\n%s", out)
+	}
+}
