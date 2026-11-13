@@ -295,6 +295,11 @@ signs evidence that verifies to NXP's root.
 - **A secure-world daemon** on a Unix socket: a second normal-world process
   every request trusts, and one more component to attest.
 
+Proposed answer (for owner sign-off): the Linux TEE subsystem with the
+GlobalPlatform TEE Client API, because arm-trustzone's ruled design already
+speaks it in pure Go over `/dev/tee0`, so the client is shared and no
+device-specific ABI or cgo enters go-enclave.
+
 ### Q2: where the module lives
 
 - **A nested module in this repository, beside `backends/armtrustzone`**
@@ -307,6 +312,11 @@ signs evidence that verifies to NXP's root.
   cleanest separation, but the shared TEE client splits across repositories.
 - **The root package**: the root module carries no hardware code, and every
   consumer would link a device client.
+
+Proposed answer (for owner sign-off): its own Go module in this repository,
+beside arm-trustzone's backend, because the arm-trustzone ruling placed that
+backend in the nested module `backends/armtrustzone` on the same terms, and
+both keep the root module free of hardware code.
 
 ### Q3: rank
 
@@ -321,6 +331,11 @@ signs evidence that verifies to NXP's root.
 - **Below arm-trustzone**: only if the secure world kept the keys in its own
   memory rather than the ELE, which item 3 of the interface list excludes.
 
+Proposed answer (for owner sign-off): left to the owner, because the hardware
+rows' order among themselves is to be ruled once across the sibling proposals
+([amd-sev's Q3](amd-sev.md#q3-rank)); this proposal's recommendation, above
+arm-trustzone, stands as input to that ruling.
+
 ### Q4: the detection probe
 
 - **Recommended:** `Probe(ctx)` checks `ctx`, opens `/dev/tee0`, checks
@@ -333,6 +348,11 @@ signs evidence that verifies to NXP's root.
   the TA or speaks another ABI version.
 - **A full key round trip** (generate, sign, destroy): proves more but writes
   to the key store on every `Detect`; `backendtest` covers it instead.
+
+Proposed answer (for owner sign-off): the recommended probe (session open and
+version command, no key made), because it passes only a board that can serve
+requests, as amd-sev's recommended probe does with one report, while leaving
+the ELE's key store untouched.
 
 ### Q5: what `Import` holds
 
@@ -348,6 +368,10 @@ signs evidence that verifies to NXP's root.
   returning it on request: that is byte access across the boundary, which the
   secure-element class does not give.
 
+Proposed answer (for owner sign-off): wrapping and data keys only, as `AEAD`
+handles, because it keeps `NewSealer(…, WithBackend(b))` usable for the
+program while no key material ever crosses back out of the secure world.
+
 ### Q6: the evidence format
 
 - **An Entity Attestation Token** ([RFC 9711](https://www.rfc-editor.org/rfc/rfc9711))
@@ -361,6 +385,11 @@ signs evidence that verifies to NXP's root.
 - Either way go-enclave passes the bytes through unparsed. The choice is the
   secure world's; it is recorded here because verifiers depend on it.
 
+Proposed answer (for owner sign-off): an Entity Attestation Token (RFC 9711)
+emitted by trusted-imx95, because it is a published standard the verifier
+already parses, and like amd-sev's recommended evidence it passes through
+go-enclave unparsed in a format the seam names.
+
 ### Q7: device lifecycle at the probe
 
 - **The probe does not refuse an open lifecycle** (recommended): `Detect`
@@ -370,6 +399,10 @@ signs evidence that verifies to NXP's root.
 - **The probe refuses unless the lifecycle is closed**: safer by default, but
   a development board would fall back to locked memory with no way to test the
   backend, and it puts an appraisal decision in go-enclave.
+
+Proposed answer (for owner sign-off): the probe does not refuse an open
+lifecycle, because detection selects by rank and never attests, so appraisal
+stays with the relying party, as amd-sev leaves VMPL policy to its verifier.
 
 ## Rejected alternatives
 
