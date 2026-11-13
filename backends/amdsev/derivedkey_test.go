@@ -8,6 +8,8 @@ import (
 	"runtime"
 	"syscall"
 	"testing"
+
+	enclave "github.com/jeremyhahn/go-enclave"
 )
 
 func TestKeyRequestEncoding(t *testing.T) {
@@ -116,5 +118,69 @@ func TestDeriveKeyEndedContext(t *testing.T) {
 	cancel()
 	if err := deriveKey(ctx, sevGuestDevice, sealKeyRequest, make([]byte, derivedKeySize)); !errors.Is(err, context.Canceled) {
 		t.Errorf("deriveKey(ended ctx) = %v, want context.Canceled", err)
+	}
+}
+
+// wipeCheckedResponse is the locked response buffer receiveKey allocates,
+// recording whether it held only zeros when it was released.
+type wipeCheckedResponse struct {
+	enclave.ByteAccess
+	destroyed bool
+	wiped     bool
+}
+
+func (w *wipeCheckedResponse) Destroy() error {
+	if !w.destroyed {
+		w.destroyed = true
+		_ = w.WithBytes(func(b []byte) error {
+			w.wiped = bytes.Equal(b, make([]byte, len(b)))
+			return nil
+		})
+	}
+	return w.ByteAccess.Destroy()
+}
+
+// TestReceiveKeyWipesAndReleasesTheLockedResponse proves the firmware writes
+// its response into the root module's locked memory, not the Go heap, and
+// that a refused response is wiped and released and writes nothing to dst.
+func TestReceiveKeyWipesAndReleasesTheLockedResponse(t *testing.T) {
+	var got *wipeCheckedResponse
+	saved := newKeyResponse
+	t.Cleanup(func() { newKeyResponse = saved })
+	newKeyResponse = func() (enclave.ByteAccess, error) {
+		m, err := saved()
+		if err != nil {
+			return nil, err
+		}
+		got = &wipeCheckedResponse{ByteAccess: m}
+		return got, nil
+	}
+
+	dst := make([]byte, derivedKeySize)
+	err := receiveKey(dst, func(resp *[keyResponseSize]byte) error {
+		resp[0] = 0x16 // STATUS: INVALID_PARAM
+		for i := keyResponseKeyOffset; i < keyResponseSize; i++ {
+			resp[i] = 0xff
+		}
+		return nil
+	})
+	if errors.Is(err, enclave.ErrLockedMemoryUnavailable) {
+		t.Skip("no locked memory on this host")
+	}
+	var fe *FirmwareError
+	if !errors.As(err, &fe) || fe.Status != 0x16 {
+		t.Fatalf("receiveKey(status 0x16) = %v, want a *FirmwareError with Status 0x16", err)
+	}
+	if got == nil {
+		t.Fatal("receiveKey did not allocate its response in locked memory")
+	}
+	if !got.destroyed || got.IsAlive() {
+		t.Error("the locked response was not released")
+	}
+	if !got.wiped {
+		t.Error("the locked response was released holding the firmware's bytes")
+	}
+	if !bytes.Equal(dst, make([]byte, derivedKeySize)) {
+		t.Error("a refused response wrote key material into dst")
 	}
 }
