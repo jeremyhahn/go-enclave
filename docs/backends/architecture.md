@@ -6,7 +6,7 @@
 ## Problem
 
 go-enclave will hold material in hardware enclaves: TEEs (Intel SGX), secure
-elements and TPMs, and NVIDIA Blackwell confidential computing. A confidential
+elements and TPMs. A confidential
 VM (AMD SEV-SNP, Intel TDX) is not a backend: it protects every page of the
 guest alike, so its attestation and sealing are proposed apart from this seam
 ([confidential-vm](confidential-vm.md)). Locked, guarded, zeroized memory (the memory enclave) is the strategy
@@ -139,7 +139,7 @@ its `ByteAccess`.
 
 ### What each backend class provides
 
-| Capability | On | Locked memory | TEE memory (SGX, GPU CC) | Secure element, TPM[^tpm] |
+| Capability | On | Locked memory | TEE memory (SGX) | Secure element, TPM[^tpm] |
 |---|---|---|---|---|
 | `ByteAccess` | handle | yes | yes | no: material never leaves the device |
 | `Freezer` | handle | yes | where the platform can protect pages | no: read-only by nature |
@@ -420,7 +420,7 @@ Three things close that exposure, and a backend can supply two of them:
 | How | Mechanism | Reported by |
 |---|---|---|
 | **Erase** | `runtime/secret` erases the schedule at the next collection. | `KeyScheduleErasure()`, a property of the build. |
-| **Confine** | The process runs inside a TEE whose boundary includes its heap (TDX, SEV-SNP, a GPU CC VM, SGX under a library OS): a schedule left there is unreadable from outside. | The sealer's backend implements `Confiner` and `ConfinesProcess()` reports true (`CapabilityConfine`). |
+| **Confine** | The process runs inside a TEE whose boundary includes its heap (TDX, SEV-SNP, SGX under a library OS): a schedule left there is unreadable from outside. | The sealer's backend implements `Confiner` and `ConfinesProcess()` reports true (`CapabilityConfine`). |
 | **Offload** | The AEAD runs in the device: the key handle implements `AEAD` and its key never enters the process. | The handle's type (`CapabilityAEAD`). |
 
 `KeyScheduleErasure()` reports the build. `WithRequireKeyScheduleErasure()` is

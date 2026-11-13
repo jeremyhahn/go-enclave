@@ -7,8 +7,8 @@ A backend is what holds an enclave's material. Locked memory, the
 [memory enclave](../memory-enclave/user.md), is the default. This module also
 ships the [linux-secretmem](../linux-secretmem/user.md) backend
 (`enclave.NewSecretMemory`). Hardware backends ship as their own modules:
-[arm-trustzone](#arm-trustzone) today, with TEEs, secure elements and GPU
-confidential computing [proposed](#proposed-hardware-backends). A sealer can keep its keys in a backend
+[arm-trustzone](#arm-trustzone) today, with TEEs and secure elements
+[proposed](#proposed-hardware-backends). A sealer can keep its keys in a backend
 (`WithBackend`) and `Sealed.OpenIn` can open into one; see
 [sealing](../sealing/user.md) ([architecture](architecture.md)).
 
@@ -143,7 +143,6 @@ These are design proposals. No code exists for them yet:
 | Backend | Proposal |
 |---|---|
 | NXP i.MX 95 EdgeLock Enclave | [imx-edgelock-enclave.md](imx-edgelock-enclave.md) |
-| NVIDIA Blackwell confidential computing | [nvidia-blackwell.md](nvidia-blackwell.md) |
 
 A program in an AMD SEV-SNP or Intel TDX confidential VM keeps its usual
 backend: the VM already encrypts every page of the guest against the host.

@@ -17,7 +17,7 @@ import (
 )
 
 // The backend seam: what a hardware enclave module (a TEE, a secure element,
-// a TPM, GPU confidential computing) implements so its enclaves stand where a
+// a TPM) implements so its enclaves stand where a
 // memory enclave ([NewMemory]) stands. Locked memory is the default backend; every other
 // backend ships as its own module. The design is docs/backends/architecture.md.
 
@@ -304,8 +304,8 @@ type Sweeper interface {
 }
 
 // Confiner is the capability of a backend whose trust boundary holds this
-// whole process, such as a TEE the process runs inside (TDX, SEV-SNP, a GPU
-// confidential VM). Memory the process leaves on its heap, an AES key
+// whole process, such as a TEE the process runs inside (TDX,
+// SEV-SNP). Memory the process leaves on its heap, an AES key
 // schedule included, is then unreadable from outside the boundary.
 type Confiner interface {
 	Backend

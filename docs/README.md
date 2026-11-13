@@ -51,7 +51,6 @@ its [ROADMAP](../ROADMAP.md#future) row.
 |---|---|
 | [confidential-vm](backends/confidential-vm.md) | Attestation and, on SEV-SNP, a derived-key `KeyProtector` for a process in an AMD SEV-SNP or Intel TDX confidential VM. Not a backend |
 | [imx-edgelock-enclave](backends/imx-edgelock-enclave.md) | A backend on the NXP i.MX 95 EdgeLock Secure Enclave |
-| [nvidia-blackwell](backends/nvidia-blackwell.md) | A backend on NVIDIA Blackwell confidential computing, inside a confidential VM |
 
 ### Project
 
