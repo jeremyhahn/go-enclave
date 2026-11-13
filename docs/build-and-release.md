@@ -134,7 +134,8 @@ its own. Each target runs `vet-buildgates` first and selects tests by prefix.
 | `make check-changelog-assembly` | `^TestChangelogAssemble` | `changelog-assemble.sh` folds fragments into the shape `release-check-tag.sh` accepts |
 | `make check-scripts` | `^TestScripts` | The release, publish, tool-resolution, feature and devcontainer scripts and the Makefile entry points, driven on scratch inputs, refuse what they must; needs `jq` |
 | `make check-buildgates` | every other test | Actions pinned to commit SHAs and images to digests; least-privilege workflow permissions; checkouts that write do not persist credentials; publish waits on every gate; the CI Gate's tiers match the jobs; every source file, integration test and docs folder belongs to one feature in `scripts/features.map`; the toolchain image's Go matches `go.mod`; shipped source cites no issue numbers; the integration image is scanned before any suite runs on it |
-| `make lint-gates` | the four rows above | Runs `check-buildgates`, `check-releasability`, `check-changelog-assembly` and `check-scripts`: the repository's own gates beside lint. CI runs it as the Lint Gates job; `make lint` does not list it |
+| `make check-fuzz-runner` | `build/fuzz/fuzz_test.sh` | `make fuzz` finds every target in every module, honours `FUZZ`, `FUZZ_PKG` and `FUZZTIME`, and stops at the first failure naming its input; a stub `go`, offline |
+| `make lint-gates` | the rows above | Runs `check-buildgates`, `check-releasability`, `check-changelog-assembly`, `check-scripts`, `check-in-toolchain-image` and `check-fuzz-runner`: the repository's own gates beside lint. CI runs it as the Lint Gates job; `make lint` does not list it |
 | `make tidy-check` | — | `go.mod` and `go.sum` are tidy, in the root and in `build/ci/buildgates` |
 
 ### Aggregates
@@ -152,6 +153,27 @@ its own. Each target runs `vet-buildgates` first and selects tests by prefix.
 The `-runtimesecret` variants build with `GOEXPERIMENT=runtimesecret`
 ([key-schedule erasure](sealing/engineering.md#key-schedule-heap-exposure)).
 Which integration test covers which feature: [COVERAGE.md](../test/integration/COVERAGE.md).
+
+### Fuzzing
+
+`make test` only replays each fuzz target's seed corpus in `testdata/fuzz/`.
+`make fuzz` mutates inputs: `build/fuzz/fuzz.sh` lists every package of the
+root module and of each `BACKEND_MODULES` module, finds its `Fuzz` functions
+with `go test -list '^Fuzz'`, and fuzzes each target in turn, from its module,
+with `go test -run '^$' -fuzz '^Name$' -fuzztime "$FUZZTIME"`.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `FUZZTIME` | `30s` | How long each target fuzzes: a Go duration or an iteration count (`1000x`) |
+| `FUZZ` | all | Only the targets whose name matches this extended regexp (`make fuzz FUZZ=UnwrapKey`) |
+| `FUZZ_PKG` | all | Only the packages whose import path matches this extended regexp |
+
+It prints one line per target and stops at the first failure with go's output,
+the package, the target and the failing input under that package's
+`testdata/fuzz/`; commit that input with the fix, as a seed. Nothing to fuzz
+(no target, or none the selectors match) fails, and a bad variable is refused
+before go runs. No CI job runs it. `make check-fuzz-runner`, in `lint-gates`,
+drives the runner on a stub `go`.
 
 ## CI
 

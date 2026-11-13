@@ -232,7 +232,7 @@ lint-actions:
 	@sc=$(call tool,shellcheck,SHELLCHECK) && \
 	bin=$(call tool,actionlint,ACTIONLINT) && "$$bin" -shellcheck "$$sc"
 
-## lint-scripts: shellcheck (pinned) over scripts/*.sh, build/docker/devcontainer/*.sh and build/ci/*.sh
+## lint-scripts: shellcheck (pinned) over scripts/*.sh, build/docker/devcontainer/*.sh, build/fuzz/*.sh and build/ci/*.sh
 # The scripts are POSIX sh, and release.yml runs them with a write token. -x
 # follows the `. lib.sh` every script sources. build/ci/*.sh are the workflows'
 # scripts, and CI_BASH_SCRIPTS the ci-template's bash ones, taken unchanged
@@ -241,8 +241,8 @@ CI_BASH_SCRIPTS := scripts/apk-index-sum.sh scripts/ci-image-cache.sh scripts/in
 .PHONY: lint-scripts
 lint-scripts:
 	@sc=$(call tool,shellcheck,SHELLCHECK) && \
-	echo "shellcheck $(SHELLCHECK_VERSION) -x --shell=sh scripts/*.sh build/docker/devcontainer/*.sh; $(CI_BASH_SCRIPTS) build/ci/*.sh" && \
-	"$$sc" -x --source-path=SCRIPTDIR --shell=sh $(filter-out $(CI_BASH_SCRIPTS),$(sort $(wildcard scripts/*.sh))) build/docker/devcontainer/*.sh && \
+	echo "shellcheck $(SHELLCHECK_VERSION) -x --shell=sh scripts/*.sh build/docker/devcontainer/*.sh build/fuzz/*.sh; $(CI_BASH_SCRIPTS) build/ci/*.sh" && \
+	"$$sc" -x --source-path=SCRIPTDIR --shell=sh $(filter-out $(CI_BASH_SCRIPTS),$(sort $(wildcard scripts/*.sh))) build/docker/devcontainer/*.sh build/fuzz/*.sh && \
 	"$$sc" -x --source-path=SCRIPTDIR $(CI_BASH_SCRIPTS) build/ci/*.sh
 
 ## staticcheck: staticcheck (golangci-lint's, the one implementation, lint-go)
@@ -668,12 +668,31 @@ check-project-scripts:
 check-it-runner:
 	@sh build/docker/devcontainer/run-integration-tests_test.sh
 
-## lint-gates: the repository's own gates beside lint: check-buildgates, check-releasability, check-changelog-assembly, check-scripts, check-in-toolchain-image, check-project-scripts, check-it-runner (CI's lint-gates job)
+## fuzz: fuzz every Fuzz target of the root and each BACKEND_MODULES module for FUZZTIME, one at a time; stops at the first failure
+## FUZZTIME=<d>: fuzz: how long each target fuzzes, a Go duration or Nx (default 30s)
+## FUZZ=<regexp>: fuzz: only the targets whose name matches (extended regexp)
+## FUZZ_PKG=<regexp>: fuzz: only the packages whose import path matches (extended regexp)
+# Plain `go test` only replays the seed corpora in testdata/fuzz/; this mutates
+# inputs. A failing input is written under the package's testdata/fuzz/ and
+# named in the output: commit it with the fix, as a seed. No CI job runs this.
+FUZZTIME ?= 30s
+$(call raw_bind,FUZZ FUZZ_PKG FUZZTIME)
+.PHONY: fuzz
+fuzz:
+	@sh build/fuzz/fuzz.sh . $(BACKEND_MODULES)
+
+## check-fuzz-runner: build/fuzz/fuzz.sh finds, selects and fuzzes every target, and stops at the first failure
+# A stub go on PATH; no module is built and nothing is fuzzed.
+.PHONY: check-fuzz-runner
+check-fuzz-runner:
+	@sh build/fuzz/fuzz_test.sh
+
+## lint-gates: the repository's own gates beside lint: check-buildgates, check-releasability, check-changelog-assembly, check-scripts, check-in-toolchain-image, check-project-scripts, check-it-runner, check-fuzz-runner (CI's lint-gates job)
 # ci.yml runs this as its own job, in parallel with `make lint`, so make lint
 # does not list it. tidy-check, lint-runtimesecret and lint-integration stay
 # in the image job.
 .PHONY: lint-gates
-lint-gates: check-buildgates check-releasability check-changelog-assembly check-scripts check-in-toolchain-image check-project-scripts check-it-runner
+lint-gates: check-buildgates check-releasability check-changelog-assembly check-scripts check-in-toolchain-image check-project-scripts check-it-runner check-fuzz-runner
 	@echo "lint-gates completed successfully"
 
 # CI AGGREGATES. ci.yml and release.yml each call these, one per job, so a job
