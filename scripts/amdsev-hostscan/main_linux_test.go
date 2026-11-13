@@ -151,6 +151,51 @@ func TestHostScan_FindsANeedleAcrossAChunkBoundary(t *testing.T) {
 	}
 }
 
+// failOneMapping reads the target's memory but fails every read at the
+// first offset the scan asks for, so one mapping is unreadable and the rest
+// read as usual.
+type failOneMapping struct {
+	memFile
+	first int64
+	set   bool
+}
+
+func (f *failOneMapping) ReadAt(p []byte, off int64) (int, error) {
+	if !f.set {
+		f.first, f.set = off, true
+	}
+	if off == f.first {
+		return 0, syscall.EIO
+	}
+	return f.memFile.ReadAt(p, off)
+}
+
+// TestHostScan_AnUnreadableMappingIsAnIncompleteScan proves a scan that
+// could not read one mapping is an error, exit 2, never "not found".
+func TestHostScan_AnUnreadableMappingIsAnIncompleteScan(t *testing.T) {
+	needle := freshHex(t, 32)
+	pid := holder(t, needle)
+	saved := openMem
+	t.Cleanup(func() { openMem = saved })
+	openMem = func(name string) (memFile, error) {
+		m, err := saved(name)
+		if err != nil {
+			return nil, err
+		}
+		return &failOneMapping{memFile: m}, nil
+	}
+	raw, err := hex.DecodeString(freshHex(t, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := scan(pid, raw, new(bytes.Buffer)); err == nil {
+		t.Error("scan with an unreadable mapping returned no error")
+	}
+	if rc, out := scanStatus(t, pid, freshHex(t, 32)); rc != 2 || strings.Contains(out, "not found") {
+		t.Fatalf("scan with an unreadable mapping = %d, want 2 (incomplete):\n%s", rc, out)
+	}
+}
+
 // scripts/amdsev-host-scan.sh passes the helper's status through: 1 found,
 // 0 not found, and 2 for its own refusals.
 func TestHostScan_ScriptPassesTheStatusThrough(t *testing.T) {
