@@ -7,4 +7,5 @@
 ### Fixed
 
 - **provider-conformance**: `providertest`'s residue sweep now also searches for each half of the key, so a provider that keeps only the first or the last 16 bytes of a recovered key is reported; it looked only for the whole key before (#348).
+- **provider-conformance**: the residue sweep no longer reports itself not measured when the runtime unmaps a mapping between reading `/proc/self/maps` and reading that mapping: it lists the mappings again, up to three times, and still fails closed on a mapping that stays unreadable.
 - **provider-conformance**: `providertest.FindingsError` with no findings renders `providertest: no findings` instead of an empty message (#368).

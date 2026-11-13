@@ -52,16 +52,38 @@ func Find(needle []byte, home uintptr) ([]string, error) {
 	if len(needle) == 0 {
 		return nil, errEmptyNeedle
 	}
-	maps, err := os.ReadFile("/proc/self/maps")
-	if err != nil {
-		return nil, err
-	}
 	mem, err := os.Open("/proc/self/mem")
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = mem.Close() }()
-	return find(string(maps), mem, needle, home, make([]byte, chunk+len(needle)-1))
+	readMaps := func() (string, error) {
+		maps, err := os.ReadFile("/proc/self/maps")
+		return string(maps), err
+	}
+	return sweep(readMaps, mem, needle, home, make([]byte, chunk+len(needle)-1))
+}
+
+// sweepAttempts bounds how many maps listings one sweep reads.
+const sweepAttempts = 3
+
+// sweep runs find over a fresh maps listing. A mapping the runtime unmaps
+// between the listing and its read fails that read; it held nothing then, so
+// sweep lists the mappings again and reads what is there. A mapping that is
+// still unreadable after sweepAttempts listings fails the sweep closed.
+func sweep(readMaps func() (string, error), mem io.ReaderAt, needle []byte, home uintptr, buf []byte) ([]string, error) {
+	var err error
+	for range sweepAttempts {
+		var maps string
+		if maps, err = readMaps(); err != nil {
+			return nil, err
+		}
+		var hits []string
+		if hits, err = find(maps, mem, needle, home, buf); !errors.Is(err, ErrUnreadableMapping) {
+			return hits, err
+		}
+	}
+	return nil, err
 }
 
 // find is Find over a maps listing and the memory it describes, reading
