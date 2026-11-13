@@ -168,8 +168,8 @@ dragonfly) and Windows are **build-only**: `make cross-build` compiles and vets
 them and links their test binaries, and nothing executes, so their rows above describe what the code does,
 not behavior a test has observed. darwin, iOS, illumos, Solaris, AIX and Android are likewise
 compiled, not run (iOS is not in the matrix; it builds through the darwin
-files). Tests run on Linux only, by the owner's ruling on #188:
-[runtime testing](runtime-testing.md).
+files). Runtime testing on the BSDs and Windows is not planned; those
+platforms stay build-only.
 
 **Why `MADV_DONTFORK`, not `MADV_WIPEONFORK`.** Both keep the material out of a
 forked child. `WIPEONFORK` leaves the range mapped and zero-filled in the child,
