@@ -1,3 +1,0 @@
-### Changed
-
-- CI follows ci-template v1.34.1. The `Changed files`, `Schedule guard` and `Architecture Gates` jobs are one `Preflight` job, which keeps the TPM and OP-TEE path scopes, and CI Gate checks it in their place. The `Releasability (private patterns)` step reads the secret as `class<TAB>regex` lines, refuses a malformed line by number and honours the `lab-string-ok: <reason>` waiver. No Go module proxy chain in the image build or the toolchain stages has a `direct` entry. `scripts/ci-image-cache.sh` is v2: the image namespace is the repository variable `CI_IMAGE_NAMESPACE`. Runners are unchanged. Nothing changes for Go callers.
