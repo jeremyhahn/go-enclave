@@ -10,8 +10,8 @@
 // It reads every readable mapping in /proc/<pid>/maps through /proc/<pid>/mem,
 // the scan internal/memscan does in-process, and exits 0 when the needle is
 // not found, 1 when it is (naming each mapping that holds it), and 2 on an
-// error, including when no mapping could be read. A mapping the kernel refuses
-// to read is named on stderr and skipped. scripts/amdsev-host-scan.sh builds
+// error, including when a readable mapping could not be read: that scan is
+// incomplete, never "not found". scripts/amdsev-host-scan.sh builds
 // and runs it.
 package main
 
@@ -56,7 +56,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if err != nil || len(needle) == 0 {
 		return fail("the needle is not a non-empty even-length hex string")
 	}
-	hits, err := scan(pid, needle, stderr)
+	hits, err := scan(pid, needle)
 	if err != nil {
 		return fail("pid %d: %v", pid, err)
 	}
@@ -70,16 +70,28 @@ func run(args []string, stdout, stderr io.Writer) int {
 	return 1
 }
 
+// memFile is the target's /proc/<pid>/mem as the scan reads it.
+type memFile interface {
+	io.ReaderAt
+	io.Closer
+}
+
+// openMem opens the target's memory; a variable so a test can make one
+// mapping unreadable.
+var openMem = func(name string) (memFile, error) {
+	return os.Open(name) //nolint:gosec // /proc/<pid>/mem, pid a parsed integer
+}
+
 // scan returns the /proc/<pid>/maps lines of the readable mappings that hold
-// needle. A mapping it cannot read is named on stderr; it fails when it could
-// read none.
-func scan(pid int, needle []byte, stderr io.Writer) ([]string, error) {
+// needle. It fails, naming the mapping, when it cannot read one of them, and
+// when it could read none.
+func scan(pid int, needle []byte) ([]string, error) {
 	dir := "/proc/" + strconv.Itoa(pid)
 	maps, err := os.ReadFile(dir + "/maps") //nolint:gosec // /proc/<pid>, pid a parsed integer
 	if err != nil {
 		return nil, err
 	}
-	mem, err := os.Open(dir + "/mem") //nolint:gosec // /proc/<pid>, pid a parsed integer
+	mem, err := openMem(dir + "/mem")
 	if err != nil {
 		return nil, err
 	}
@@ -94,8 +106,9 @@ func scan(pid int, needle []byte, stderr io.Writer) ([]string, error) {
 		}
 		found, err := contains(mem, lo, hi, needle, buf)
 		if err != nil {
-			_, _ = fmt.Fprintf(stderr, "amdsev-hostscan: skipped %s: %v\n", strings.TrimSpace(line), err)
-			continue
+			// A mapping the scan could not read may hold the needle: the
+			// scan is incomplete, never "not found".
+			return nil, fmt.Errorf("incomplete scan: %s: %w", strings.TrimSpace(line), err)
 		}
 		read++
 		if found {

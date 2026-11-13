@@ -188,7 +188,7 @@ func TestHostScan_AnUnreadableMappingIsAnIncompleteScan(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := scan(pid, raw, new(bytes.Buffer)); err == nil {
+	if _, err := scan(pid, raw); err == nil {
 		t.Error("scan with an unreadable mapping returned no error")
 	}
 	if rc, out := scanStatus(t, pid, freshHex(t, 32)); rc != 2 || strings.Contains(out, "not found") {
