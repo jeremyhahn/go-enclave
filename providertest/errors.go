@@ -74,7 +74,8 @@ type FindingsError struct {
 	Findings []error
 }
 
-// Error renders each finding on its own line.
+// Error renders each finding on its own line, or "providertest: no findings"
+// when there is nothing to render.
 func (e *FindingsError) Error() string {
 	msg := ""
 	for i, f := range e.Findings {
@@ -84,6 +85,9 @@ func (e *FindingsError) Error() string {
 		if f != nil {
 			msg += f.Error()
 		}
+	}
+	if msg == "" {
+		return "providertest: no findings"
 	}
 	return msg
 }

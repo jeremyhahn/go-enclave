@@ -88,6 +88,7 @@ func TestParseMapsHeader(t *testing.T) {
 		{name: "no range separator", line: "7f0c00000000 rw-p", wantOK: false},
 		{name: "not hexadecimal", line: "zzzz-7f0c00021000 rw-p", wantOK: false},
 		{name: "high bound not hexadecimal", line: "7f0c00000000-zzzz rw-p", wantOK: false},
+		{name: "low bound above high bound", line: "7f0c00021000-7f0c00000000 rw-p", wantOK: false},
 		{name: "no fields", line: "7f0c00000000-7f0c00021000", wantOK: false},
 	}
 	for _, tc := range tests {
