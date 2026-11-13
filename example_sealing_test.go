@@ -152,7 +152,12 @@ func ExampleSealed_OpenIn() {
 func ExampleNewSealer() {
 	ctx := context.Background()
 
-	sealer, err := enclave.NewSealer(enclave.WithKeyProtector(enclave.NewSoftwareProvider()))
+	// The sealer never destroys a provider it was given: the caller owns it,
+	// and releases its locked keys once the sealer is done with them.
+	provider := enclave.NewSoftwareProvider()
+	defer provider.Destroy()
+
+	sealer, err := enclave.NewSealer(enclave.WithKeyProtector(provider))
 	if err != nil {
 		fmt.Println("new sealer:", err)
 		return
