@@ -61,8 +61,9 @@ A call waiting for the provider when `Close` starts, and a call after
 
 Every call creates the parent with `TPM2_CreatePrimary` under the owner
 hierarchy and flushes it with `TPM2_FlushContext` before it returns. The
-parent is an ECC P-256 storage key in the shape of the TCG "EK and SRK"
-profile's storage template:
+parent is an ECC P-256 storage key in the shape of the storage template of
+the [TCG EK Credential Profile](../reference/TCG_EK_Credential_Profile_for_TPM_Family_2_0_Level_0_Version_2_7_Pub.pdf)
+2.7, §5.3.4 Template L-2 (see [TCG TPM 2.0](../reference/README.md#tcg-tpm-20)):
 
 | Field | Value |
 | --- | --- |
@@ -489,8 +490,9 @@ gains no dependency. Nothing here is decided beyond the shape; the
    every format-one code on `TPM2_Load`'s parameters 1 and 2, and checks the
    public area against the template before device work.
 7. **Departure: sealed object attributes.** The row's attribute set is kept;
-   the design adds that `sensitiveDataOrigin` must stay clear, which TPM 2.0
-   Part 3 (`TPM2_Create`) requires when the caller supplies the sealed data.
+   the design adds that `sensitiveDataOrigin` must stay clear, which
+   [TPM 2.0 Part 3](../reference/TCG_TPM2_r1p59_Part3_Commands_pub.pdf)
+   (`TPM2_Create`) requires when the caller supplies the sealed data.
 8. **Secure element: cgo.** A PKCS#11 binding loads a C library: the common
    Go bindings need cgo, and go-enclave builds without it today. Options: a
    cgo binding in the nested module only; a pure-Go loader; or a separate
