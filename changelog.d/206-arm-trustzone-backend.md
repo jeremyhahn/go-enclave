@@ -1,3 +1,0 @@
-### Added
-
-- **The `arm-trustzone` backend, the nested module `github.com/jeremyhahn/go-enclave/backends/armtrustzone`** (#206): pure Go over the Linux TEE driver (`/dev/tee0`), it opens a session to trusted-firmware's OP-TEE TA, probes it with GET_INFO and fills byte-access memory enclaves from GET_RANDOM, with typed errors for every failure and a typed refusal off Linux ([backends](docs/backends/engineering.md#arm-trustzone)). It requires the root at `v0.11.0-alpha`; the root module does not change. An `optee`-tagged conformance test runs `backendtest` against it; the harness wiring follows in a later slice.

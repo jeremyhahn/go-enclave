@@ -1,6 +1,6 @@
 # Backends — API
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-14
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-11-12
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Transports
@@ -16,6 +16,8 @@ a peer choose where the process keeps its keys.
 | Select a backend by name | `enclave.Lookup(name) (enclave.Backend, error)` | N/A |
 | List registered backends | `enclave.BackendNames() []string` | N/A |
 | The default backend | `enclave.DefaultBackend()`, named `enclave.LockedMemoryBackendName` | N/A |
+| The secretmem backend | `enclave.NewSecretMemory(a) (enclave.Backend, error)`, named `enclave.SecretMemoryBackendName`: see [linux-secretmem/api.md](../linux-secretmem/api.md) | N/A |
+| Select the most secure usable backend | `enclave.Detect(ctx) (enclave.Backend, []enclave.ProbeResult)`: see [backend-detection/api.md](../backend-detection/api.md) | N/A |
 | Use a handle | `h.Size()`, `h.IsAlive()`, `h.Destroy() error`, `h.Backend()` | N/A |
 | Where a handle's material is held | `h.Backend().Name()` | N/A |
 | Hold a sealer's keys in a backend | `enclave.WithBackend(b)`: see [sealing/api.md](../sealing/api.md) | N/A |

@@ -10,19 +10,19 @@ import (
 
 // Tests for the Makefile and scripts fixes of #136 (T3b).
 
-func TestChangelogAssemble_FoldsFragmentsInIssueOrder(t *testing.T) {
+func TestChangelogAssemble_FoldsFragmentsInNameOrder(t *testing.T) {
 	dir := assembleTree(t, assembleHeader+"\n"+assemblePrevious, map[string]string{
-		"100-c.md": "### Added\n\n- FRAG-100\n",
-		"9-a.md":   "### Added\n\n- FRAG-9\n",
-		"20-b.md":  "### Added\n\n- FRAG-20\n",
+		"sealing.md":        "### Added\n\n- FRAG-SEALING\n",
+		"backends.md":       "### Added\n\n- FRAG-BACKENDS\n",
+		"memory-enclave.md": "### Added\n\n- FRAG-MEMORY\n",
 	})
 	if out, ok := runAssemble(t, dir); !ok {
 		t.Fatalf("assembly failed:\n%s", out)
 	}
 	got := readFile(t, filepath.Join(dir, "CHANGELOG.md"))
-	i9, i20, i100 := strings.Index(got, "FRAG-9"), strings.Index(got, "FRAG-20"), strings.Index(got, "FRAG-100")
-	if i9 < 0 || i20 < 0 || i100 < 0 || i9 > i20 || i20 > i100 {
-		t.Fatalf("fragments are not folded in numeric issue order (9, 20, 100):\n%s", got)
+	ib, im, is := strings.Index(got, "FRAG-BACKENDS"), strings.Index(got, "FRAG-MEMORY"), strings.Index(got, "FRAG-SEALING")
+	if ib < 0 || im < 0 || is < 0 || ib > im || im > is {
+		t.Fatalf("fragments are not folded in file-name order (backends, memory-enclave, sealing):\n%s", got)
 	}
 }
 
