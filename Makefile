@@ -96,19 +96,19 @@ COVERAGE_THRESHOLD := 90
 
 # VALUES FROM OUTSIDE ARE DATA, NEVER SHELL OR MAKE SOURCE.
 #
-# TAG/SHA/MAIN_REF come from a pushed tag (git allows v`id`), VERSION from a
-# maintainer, the rest from a workflow or command line. $(TAG) in a recipe is
-# pasted into shell source before any validator runs, and a command-line
-# variable is recursively expanded on export, so $(shell ...) in it runs inside
-# make. raw_bind stores each unexpanded and exports it; recipes read only
-# "$$TAG" and the scripts validate the whole string. Never write $(TAG),
-# $(SHA), $(MAIN_REF), $(VERSION), $(TOOL_INSTALL) or $(COVERAGE_THRESHOLD) in
-# a recipe.
+# TAG/SHA/MAIN_REF/REF come from a pushed tag or ref (git allows v`id`),
+# VERSION from a maintainer, the rest from a workflow or command line. $(TAG)
+# in a recipe is pasted into shell source before any validator runs, and a
+# command-line variable is recursively expanded on export, so $(shell ...) in
+# it runs inside make. raw_bind stores each unexpanded and exports it; recipes
+# read only "$$TAG" and the scripts validate the whole string. Never write
+# $(TAG), $(SHA), $(MAIN_REF), $(REF), $(VERSION), $(TOOL_INSTALL) or
+# $(COVERAGE_THRESHOLD) in a recipe.
 #
 # Paths are raw-bound the same way. Only operator flag lists (TESTFLAGS,
 # GOSEC_FLAGS, TRIVY_FS_FLAGS, INTEGRATION_TESTFLAGS, CROSS_TARGETS) and
 # constants defined here are spliced into recipes.
-EXTERNAL_VARS := TAG SHA MAIN_REF VERSION TOOL_INSTALL COVERAGE_THRESHOLD
+EXTERNAL_VARS := TAG SHA MAIN_REF REF VERSION TOOL_INSTALL COVERAGE_THRESHOLD
 $(call raw_bind,$(EXTERNAL_VARS))
 
 # CI VARIABLES: ci.yml passes them, so they are
@@ -148,7 +148,7 @@ PKGDIR_memscan      := ./internal/memscan
 # build/ci/buildgates. coverage runs their unit tests too, with -race, after
 # the root packages; the floor measures the root packages only (their device
 # paths need the device).
-BACKEND_MODULES := backends/armtrustzone backends/tpm
+BACKEND_MODULES := backends/armtrustzone backends/imxele backends/tpm
 
 # FEATURE MAPPING. A feature is a directory
 # docs/<feature>/, mapped in scripts/features.map to its package, its
@@ -748,6 +748,12 @@ release-alpha:
 .PHONY: release-verify
 release-verify:
 	@sh scripts/release-verify.sh "$$TAG" "$$MAIN_REF"
+
+## release-tree-check: TAG=vX.Y.Z[-pre] REF=<published ref> — the published commit's tree is the tag's tree (offline)
+# See scripts/release-tree-check.sh. Resolves both trees in the local clone; writes nothing.
+.PHONY: release-tree-check
+release-tree-check:
+	@sh scripts/release-tree-check.sh "$$TAG" "$$REF"
 
 ## consumer-check: TAG=vX.Y.Z[-pre] — build and run a throwaway consumer of this module at TAG (GOWORK=off)
 # Module resolution comes from the environment (GOPRIVATE, insteadOf, proxy).
