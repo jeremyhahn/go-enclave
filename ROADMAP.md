@@ -49,7 +49,6 @@ None.
 - **intel-sgx** — the process-enclave backend on Intel SGX implementing the backend seam — [#193](../../issues/193) — blocked: needs SGX hardware to test on (Xeon Scalable, Ice Lake-SP or newer, with Flexible Launch Control)
 - **confidential-vm** — not a backend: an `Attester` for a process in an AMD SEV-SNP or Intel TDX confidential VM, through configfs-tsm, and an SEV-SNP derived-key `KeyProtector`; [proposal](docs/backends/confidential-vm.md) — [#194](../../issues/194) — open
 - **imx-edgelock-enclave** — a backend on the NXP i.MX 95 EdgeLock Secure Enclave implementing the backend seam; [proposal](docs/backends/imx-edgelock-enclave.md) — [#195](../../issues/195) — open
-- **nvidia-blackwell** — a backend on NVIDIA Blackwell confidential computing implementing the backend seam, inside a confidential VM; depends on confidential-vm; [proposal](docs/backends/nvidia-blackwell.md) — [#200](../../issues/200) — open
 
 ## Dependencies
 
