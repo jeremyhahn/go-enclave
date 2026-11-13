@@ -66,12 +66,11 @@ func TestSweepHonoursContext(t *testing.T) {
 	select {
 	case err := <-done:
 		if !errors.Is(err, context.Canceled) {
-			t.Errorf("Sweep(cancelled) = %v, want context.Canceled", err)
+			t.Errorf("Sweep(canceled) = %v, want context.Canceled", err)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("Sweep(cancelled) did not return within 1s")
+		t.Fatal("Sweep(canceled) did not return within 1s")
 	}
-	//nolint:staticcheck // SA1012: a nil context is part of Sweep's contract.
 	if held, err := b.Sweep(nil); held != 0 || err != nil {
 		t.Errorf("Sweep(nil) = %d, %v, want 0, nil", held, err)
 	}
