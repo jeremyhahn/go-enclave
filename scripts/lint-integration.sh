@@ -11,6 +11,8 @@ set -eu
 . "${0%/*}/lib.sh"
 
 go=${GOCMD:-go}
+# With no package there is nothing to prove: a usage error, not a pass.
+[ $# -gt 0 ] || die "usage: $0 <package>..."
 for p in "$@"; do
   with=$("$go" list -tags=integration -f '{{len .TestGoFiles}}{{len .XTestGoFiles}}' "./test/integration/$p")
   without=$("$go" list -e -f '{{len .TestGoFiles}}{{len .XTestGoFiles}}' "./test/integration/$p" 2>/dev/null) || true

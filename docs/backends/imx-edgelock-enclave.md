@@ -1,6 +1,6 @@
 # i.MX EdgeLock Enclave backend — architecture (proposal)
 
-> **Status: REFERENCE** · Scope: go-enclave · Last verified: 2026-11-12
+> **Status: REFERENCE** · Scope: go-enclave · Last verified: 2026-11-13
 > Proposal — not implemented. A design for the future backend in [SPEC](../SPEC.md#features) row `imx-edgelock-enclave`. No code exists, and every identifier here is a proposal, not an API you can call. The [open questions](#open-questions) mark a recommended answer; none is decided.
 
 ## Problem
@@ -333,7 +333,7 @@ both keep the root module free of hardware code.
 
 Proposed answer (for owner sign-off): left to the owner, because the hardware
 rows' order among themselves is to be ruled once across the sibling proposals
-([amd-sev's Q3](amd-sev.md#q3-rank)); this proposal's recommendation, above
+(amd-sev's Q3, in the amd-sev proposal); this proposal's recommendation, above
 arm-trustzone, stands as input to that ruling.
 
 ### Q4: the detection probe

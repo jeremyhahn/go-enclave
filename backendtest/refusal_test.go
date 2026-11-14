@@ -1,0 +1,421 @@
+package backendtest
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"math"
+	"os"
+	"os/exec"
+	"sync/atomic"
+	"testing"
+
+	enclave "github.com/jeremyhahn/go-enclave"
+)
+
+// errNoHardware is the typed unavailable error of the refusal fakes.
+var errNoHardware = errors.New("fake: the hardware is absent")
+
+// hardwareError is a fake module's typed refusal: it names the failing step.
+type hardwareError struct{ step string }
+
+func (e *hardwareError) Error() string        { return "fake: " + e.step + ": no hardware" }
+func (e *hardwareError) Is(target error) bool { return target == errNoHardware }
+
+// stepOf is the fakes' RefusalConfig.Step.
+func stepOf(err error) (string, bool) {
+	var he *hardwareError
+	if !errors.As(err, &he) {
+		return "", false
+	}
+	return he.step, true
+}
+
+// refusalBackend is the backend a faulty fake registers or returns.
+type refusalBackend struct{}
+
+// namedRefusalBackend is a refusalBackend under a caller-chosen name, so a
+// test can register a fresh name on every run of the test binary.
+type namedRefusalBackend struct {
+	refusalBackend
+	name string
+}
+
+func (b namedRefusalBackend) Name() string { return b.name }
+
+// registerRuns numbers the registers case's registrations across runs.
+var registerRuns atomic.Int64
+
+func (refusalBackend) Name() string                    { return "refusal-fake" }
+func (refusalBackend) Rank() int                       { return 2 }
+func (refusalBackend) Probe(ctx context.Context) error { return &hardwareError{step: "probe"} }
+func (refusalBackend) String() string                  { return "refusal-fake" }
+func (refusalBackend) GoString() string                { return "refusalBackend{}" }
+func refuseNew() (enclave.Backend, error)              { return nil, &hardwareError{step: "open"} }
+func refuseProbe(ctx context.Context) error            { return &hardwareError{step: "open"} }
+func passingRefusal() RefusalConfig {
+	return RefusalConfig{New: refuseNew, Probe: refuseProbe, Step: stepOf}
+}
+func withNew(f func() (enclave.Backend, error)) RefusalConfig {
+	cfg := passingRefusal()
+	cfg.New = f
+	return cfg
+}
+
+// refusalProperty reports whether err is a FindingsError holding a
+// PropertyError for property.
+func refusalProperty(err error, property string) bool {
+	var fe *FindingsError
+	if !errors.As(err, &fe) {
+		return false
+	}
+	for _, f := range fe.Findings {
+		var pe *PropertyError
+		if errors.As(f, &pe) && pe.Property == property {
+			return true
+		}
+	}
+	return false
+}
+
+// TestCheckRefusalPasses pins that a module that refuses cleanly, in New and
+// in Probe, has no findings.
+func TestCheckRefusalPasses(t *testing.T) {
+	if err := CheckRefusal(context.Background(), passingRefusal()); err != nil {
+		t.Fatalf("CheckRefusal(clean refusal) = %v, want nil", err)
+	}
+	cfg := passingRefusal()
+	cfg.Probe = nil
+	if err := CheckRefusal(nil, cfg); err != nil {
+		t.Fatalf("CheckRefusal(clean refusal, no Probe) = %v, want nil", err)
+	}
+}
+
+// TestCheckRefusalConfig pins that a configuration without New or Step is
+// refused before anything runs.
+func TestCheckRefusalConfig(t *testing.T) {
+	for name, cfg := range map[string]RefusalConfig{
+		"no New":  {Step: stepOf},
+		"no Step": {New: refuseNew},
+	} {
+		if err := CheckRefusal(context.Background(), cfg); !errors.Is(err, ErrInvalidConfig) {
+			t.Errorf("%s: CheckRefusal = %v, want ErrInvalidConfig", name, err)
+		}
+	}
+}
+
+// TestCheckRefusalCatches pins that each faulty module is caught under the
+// property it breaks.
+func TestCheckRefusalCatches(t *testing.T) {
+	registered := false
+	alloc, err := enclave.ProcessAllocator()
+	if err != nil || alloc == nil {
+		t.Fatalf("ProcessAllocator = %v, %v", alloc, err)
+	}
+	limit := alloc.Limit()
+	t.Cleanup(func() { _, _ = alloc.ForceLimit(limit) })
+	cases := []struct {
+		name     string
+		cfg      RefusalConfig
+		property string
+	}{
+		{"constructs", withNew(func() (enclave.Backend, error) { return refusalBackend{}, nil }), PropertyRefusalNew},
+		{"backend with error", withNew(func() (enclave.Backend, error) {
+			return refusalBackend{}, &hardwareError{step: "open"}
+		}), PropertyRefusalNew},
+		{"untyped", withNew(func() (enclave.Backend, error) { return nil, errors.New("no device") }), PropertyRefusalTyped},
+		{"no step", withNew(func() (enclave.Backend, error) { return nil, &hardwareError{} }), PropertyRefusalStep},
+		{"panics", withNew(func() (enclave.Backend, error) { panic("boom") }), PropertyRefusalNew},
+		{"probe accepts", func() RefusalConfig {
+			cfg := passingRefusal()
+			cfg.Probe = func(context.Context) error { return nil }
+			return cfg
+		}(), PropertyRefusalProbe},
+		{"probe untyped", func() RefusalConfig {
+			cfg := passingRefusal()
+			cfg.Probe = func(context.Context) error { return errors.New("no device") }
+			return cfg
+		}(), PropertyRefusalTyped},
+		{"registers", withNew(func() (enclave.Backend, error) {
+			if !registered {
+				registered = true
+				// The registry is process-wide and has no unregister, so each
+				// run (-count, -cpu) registers a name no earlier run took.
+				name := fmt.Sprintf("refusal-fake-%d", registerRuns.Add(1))
+				if err := enclave.Register(namedRefusalBackend{name: name}); err != nil {
+					t.Errorf("Register(%q) = %v", name, err)
+				}
+			}
+			return nil, &hardwareError{step: "open"}
+		}), PropertyRefusalRegistration},
+		{"typed nil", withNew(func() (enclave.Backend, error) {
+			return (*refusalBackend)(nil), &hardwareError{step: "open"}
+		}), PropertyRefusalNew},
+		{"budget", budgetFault(alloc), PropertyRefusalBudget},
+		{"budget leak", withNew(func() (enclave.Backend, error) {
+			// A constructor that takes locked memory through the process
+			// allocator and keeps it when it refuses.
+			a, err := enclave.ProcessAllocator()
+			if err != nil {
+				return nil, &hardwareError{step: "open"}
+			}
+			leaked, err := a.NewSized(1)
+			if err == nil {
+				t.Cleanup(func() { _ = leaked.Destroy() })
+			}
+			return nil, &hardwareError{step: "open"}
+		}), PropertyRefusalBudget},
+		{"budget restored by probe", func() RefusalConfig {
+			// New lowers the limit and Probe puts it back: the net change is
+			// nil, but New alone changed the budget.
+			var before int64
+			lower := budgetFault(alloc).New
+			cfg := withNew(func() (enclave.Backend, error) {
+				before = alloc.Limit()
+				return lower()
+			})
+			cfg.Probe = func(context.Context) error {
+				_, _ = alloc.ForceLimit(before)
+				return &hardwareError{step: "probe"}
+			}
+			return cfg
+		}(), PropertyRefusalBudget},
+		{"probe moves budget", func() RefusalConfig {
+			// New refuses cleanly; Probe alone moves the limit.
+			cfg := passingRefusal()
+			lower := budgetFault(alloc).New
+			cfg.Probe = func(context.Context) error {
+				_, _ = lower()
+				return &hardwareError{step: "probe"}
+			}
+			return cfg
+		}(), PropertyRefusalBudget},
+		{"probe leaks", func() RefusalConfig {
+			// New refuses cleanly; Probe keeps a reservation it takes.
+			cfg := passingRefusal()
+			cfg.Probe = func(context.Context) error {
+				if b, err := alloc.NewSized(1); err == nil {
+					t.Cleanup(func() { _ = b.Destroy() })
+				}
+				return &hardwareError{step: "probe"}
+			}
+			return cfg
+		}(), PropertyRefusalBudget},
+		{"leak released by probe", func() RefusalConfig {
+			// New keeps a reservation and Probe releases it: a constructor
+			// that leaks when called alone.
+			var leaked interface{ Destroy() error }
+			cfg := withNew(func() (enclave.Backend, error) {
+				if b, err := alloc.NewSized(1); err == nil {
+					leaked = b
+				}
+				return nil, &hardwareError{step: "open"}
+			})
+			cfg.Probe = func(context.Context) error {
+				if leaked != nil {
+					_ = leaked.Destroy()
+					leaked = nil
+				}
+				return &hardwareError{step: "probe"}
+			}
+			return cfg
+		}(), PropertyRefusalBudget},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := CheckRefusal(context.Background(), c.cfg)
+			if !refusalProperty(err, c.property) {
+				t.Fatalf("CheckRefusal = %v, want a %s finding", err, c.property)
+			}
+		})
+	}
+}
+
+// budgetFault is a refusing constructor that moves alloc's limit, which
+// CheckRefusal must report as a budget change.
+func budgetFault(alloc enclave.Allocator) RefusalConfig {
+	return withNew(func() (enclave.Backend, error) {
+		// Lower an unbounded limit instead: MaxInt64+1 would wrap negative
+		// and ForceLimit would refuse it, moving nothing.
+		limit := alloc.Limit()
+		if limit < math.MaxInt64 {
+			limit++
+		} else {
+			limit--
+		}
+		_, _ = alloc.ForceLimit(limit)
+		return nil, &hardwareError{step: "open"}
+	})
+}
+
+// TestCheckRefusalBudgetUnbounded runs the budget fault against an unbounded
+// budget, the default on a host whose locked-memory ceiling does not bind.
+func TestCheckRefusalBudgetUnbounded(t *testing.T) {
+	alloc, err := enclave.ProcessAllocator()
+	if err != nil || alloc == nil {
+		t.Fatalf("ProcessAllocator = %v, %v", alloc, err)
+	}
+	limit := alloc.Limit()
+	t.Cleanup(func() { _, _ = alloc.ForceLimit(limit) })
+	if _, err := alloc.ForceLimit(math.MaxInt64); err != nil {
+		t.Fatalf("ForceLimit(MaxInt64) = %v", err)
+	}
+	err = CheckRefusal(context.Background(), budgetFault(alloc))
+	if !refusalProperty(err, PropertyRefusalBudget) {
+		t.Fatalf("CheckRefusal = %v, want a %s finding", err, PropertyRefusalBudget)
+	}
+}
+
+// unreadableAllocator stands in for an installed allocator whose budget
+// cannot be read: a nil *unreadableAllocator inside the interface.
+type unreadableAllocator struct{ enclave.Allocator }
+
+// TestCheckRefusalBudgetNotMeasured: a baseline budget that cannot be read
+// fails the check closed instead of skipping the budget property.
+func TestCheckRefusalBudgetNotMeasured(t *testing.T) {
+	prev := installedAllocator
+	t.Cleanup(func() { installedAllocator = prev })
+	installedAllocator = func() (enclave.Allocator, bool) {
+		return (*unreadableAllocator)(nil), true
+	}
+	err := CheckRefusal(context.Background(), passingRefusal())
+	if !errors.Is(err, ErrBudgetNotMeasured) {
+		t.Fatalf("CheckRefusal = %v, want %v", err, ErrBudgetNotMeasured)
+	}
+}
+
+// TestCheckRefusalCancelled: an ended context aborts the check; it is not a
+// finding against the backend's Probe.
+func TestCheckRefusalCancelled(t *testing.T) {
+	t.Run("before Probe", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		var called atomic.Bool
+		cfg := passingRefusal()
+		cfg.Probe = func(ctx context.Context) error {
+			called.Store(true)
+			return ctx.Err()
+		}
+		err := CheckRefusal(ctx, cfg)
+		if !errors.Is(err, ErrAborted) || !errors.Is(err, context.Canceled) {
+			t.Fatalf("CheckRefusal = %v, want %v from %v", err, ErrAborted, context.Canceled)
+		}
+		if called.Load() {
+			t.Fatal("Probe ran on a context that had already ended")
+		}
+		if refusalProperty(err, PropertyRefusalTyped) || refusalProperty(err, PropertyRefusalProbe) {
+			t.Fatalf("CheckRefusal = %v, want no finding against Probe", err)
+		}
+	})
+	t.Run("before New without Probe", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		var called atomic.Bool
+		cfg := withNew(func() (enclave.Backend, error) {
+			called.Store(true)
+			return nil, &hardwareError{step: "open"}
+		})
+		cfg.Probe = nil
+		err := CheckRefusal(ctx, cfg)
+		if !errors.Is(err, ErrAborted) || !errors.Is(err, context.Canceled) {
+			t.Fatalf("CheckRefusal = %v, want %v from %v", err, ErrAborted, context.Canceled)
+		}
+		if called.Load() {
+			t.Fatal("New ran on a context that had already ended")
+		}
+	})
+	t.Run("during New without Probe", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		cfg := withNew(func() (enclave.Backend, error) {
+			cancel()
+			return nil, &hardwareError{step: "open"}
+		})
+		cfg.Probe = nil
+		err := CheckRefusal(ctx, cfg)
+		if !errors.Is(err, ErrAborted) || !errors.Is(err, context.Canceled) {
+			t.Fatalf("CheckRefusal = %v, want %v from %v", err, ErrAborted, context.Canceled)
+		}
+	})
+	t.Run("Probe panics after cancel", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		cfg := passingRefusal()
+		cfg.Probe = func(context.Context) error {
+			cancel()
+			panic("boom")
+		}
+		err := CheckRefusal(ctx, cfg)
+		if !errors.Is(err, ErrAborted) || !errors.Is(err, context.Canceled) {
+			t.Fatalf("CheckRefusal = %v, want %v from %v", err, ErrAborted, context.Canceled)
+		}
+		if !refusalProperty(err, PropertyRefusalProbe) {
+			t.Fatalf("CheckRefusal = %v, want a %s finding for the panic", err, PropertyRefusalProbe)
+		}
+	})
+	t.Run("during Probe", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		cfg := passingRefusal()
+		cfg.Probe = func(ctx context.Context) error {
+			cancel()
+			return ctx.Err()
+		}
+		err := CheckRefusal(ctx, cfg)
+		if !errors.Is(err, ErrAborted) || !errors.Is(err, context.Canceled) {
+			t.Fatalf("CheckRefusal = %v, want %v from %v", err, ErrAborted, context.Canceled)
+		}
+		if refusalProperty(err, PropertyRefusalTyped) || refusalProperty(err, PropertyRefusalProbe) {
+			t.Fatalf("CheckRefusal = %v, want no finding against Probe", err)
+		}
+	})
+}
+
+// refusalChildEnv selects the mode of a re-executed test binary. The process
+// allocator is a once-per-process slot, so what CheckRefusal leaves in it is
+// only visible in a process where nothing has touched it yet.
+const refusalChildEnv = "BACKENDTEST_REFUSAL_CHILD"
+
+// TestCheckRefusalAllocatorUntouched: CheckRefusal neither installs the
+// process allocator itself nor hides a New that installs it.
+func TestCheckRefusalAllocatorUntouched(t *testing.T) {
+	for _, mode := range []string{"installs", "leaves"} {
+		t.Run(mode, func(t *testing.T) {
+			cmd := exec.Command(os.Args[0], "-test.run=^TestRefusalChild$", "-test.count=1")
+			cmd.Env = append(os.Environ(), refusalChildEnv+"="+mode)
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("child %s: %v\n%s", mode, err, out)
+			}
+		})
+	}
+}
+
+// TestRefusalChild runs only when TestCheckRefusalAllocatorUntouched
+// re-executes the test binary.
+func TestRefusalChild(t *testing.T) {
+	switch mode := os.Getenv(refusalChildEnv); mode {
+	case "":
+		t.Skip("runs only in a re-executed test binary")
+	case "installs":
+		err := CheckRefusal(context.Background(), withNew(func() (enclave.Backend, error) {
+			_, _ = enclave.ProcessAllocator()
+			return nil, &hardwareError{step: "open"}
+		}))
+		if !refusalProperty(err, PropertyRefusalBudget) {
+			t.Fatalf("CheckRefusal = %v, want a %s finding for a New that installs the allocator", err, PropertyRefusalBudget)
+		}
+	case "leaves":
+		if err := CheckRefusal(context.Background(), passingRefusal()); err != nil {
+			t.Fatalf("CheckRefusal = %v, want nil", err)
+		}
+		a, err := enclave.NewAllocator(1 << 20)
+		if err != nil {
+			t.Fatalf("NewAllocator = %v", err)
+		}
+		if err := enclave.SetAllocator(a); err != nil {
+			t.Fatalf("SetAllocator after CheckRefusal = %v, want nil", err)
+		}
+	default:
+		t.Fatalf("unknown %s mode %q", refusalChildEnv, mode)
+	}
+}

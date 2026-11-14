@@ -17,7 +17,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"github.com/jeremyhahn/go-enclave/test/integration/internal/devcontainer"
+	"github.com/jeremyhahn/go-enclave/test/internal/devcontainer"
 )
 
 // TestMemoryEnclave_ImportChangesNoProcessState pins, from the kernel's side,

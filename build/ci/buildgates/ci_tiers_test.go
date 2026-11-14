@@ -143,7 +143,8 @@ var lintGatesTargets = []string{"lint-gates", "check-buildgates", "check-releasa
 // absent (DS-2281): Gitea maps every label add and remove to it, so each label
 // change started a run that canceled the PR's run in progress. A `ci:full`
 // label takes effect on the PR's next push or update-branch.
-var ciPullRequestTypes = []string{"opened", "synchronize", "reopened"}
+// `ready_for_review` runs CI when a draft is marked ready.
+var ciPullRequestTypes = []string{"opened", "synchronize", "reopened", "ready_for_review"}
 
 var (
 	// gateCheckLine is one tagged result in the gate script:
@@ -746,7 +747,7 @@ func TestCIGateTiers_RefusesWhatItMustRefuse(t *testing.T) {
 		{"gate NIGHTLY flag differs", "          NIGHTLY: " + nightlyTierIf, "          NIGHTLY: ${{ github.event_name == 'schedule' }}"},
 		{"gate drops check()", gateCheckFunc, "chk() {"},
 		{"workflow CI_FULL_TIER differs", "  CI_FULL_TIER: " + fullTierIf, "  CI_FULL_TIER: ${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full') }}"},
-		{"labeled type added back", "types: [opened, synchronize, reopened]", "types: [opened, synchronize, reopened, labeled]"},
+		{"labeled type added back", "types: [opened, synchronize, reopened, ready_for_review]", "types: [opened, synchronize, reopened, ready_for_review, labeled]"},
 		{"gate on a self-hosted label", "    name: CI Gate\n    runs-on: " + ciGateRunner + "\n", "    name: CI Gate\n    runs-on: ci-gate\n"},
 		{"deps-check back on the full tier", "env.TOOLCHAIN_IMAGE != '' }}\n        env:\n          IN_IMAGE_NETWORK: bridge\n        run: scripts/in-toolchain-image.sh \"$TOOLCHAIN_IMAGE\" make deps-check\n", "env.TOOLCHAIN_IMAGE != '' && env.CI_FULL_TIER == 'true' }}\n        env:\n          IN_IMAGE_NETWORK: bridge\n        run: scripts/in-toolchain-image.sh \"$TOOLCHAIN_IMAGE\" make deps-check\n"},
 		{"gate uses an action", "      - name: Fail closed on any non-success\n", "      - uses: actions/checkout@abc # v7\n      - name: Fail closed on any non-success\n"},
