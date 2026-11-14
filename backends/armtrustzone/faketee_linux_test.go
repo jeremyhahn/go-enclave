@@ -95,7 +95,7 @@ var _ teeDriver = (*fakeTEE)(nil)
 // newFakeTEE returns a fake TEE whose driver claims TEE_GEN_CAP_REG_MEM when
 // regMem is set. When the test ends it fails the test for any fault the fake
 // saw, and for any device fd, session or shared memory still open.
-func newFakeTEE(t *testing.T, regMem bool) *fakeTEE {
+func newFakeTEE(t testing.TB, regMem bool) *fakeTEE {
 	t.Helper()
 	key := make([]byte, 32)
 	if _, err := rand.Read(key); err != nil {
