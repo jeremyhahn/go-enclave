@@ -1,6 +1,7 @@
 ### Changed
 
 - **build-and-release**: update `golang.org/x/sys` to v0.50.0 in every module that requires it.
+- **build-and-release**: CI (ci-template v1.35.3) and the code review (code-review v5.10.12) start when a draft pull request is marked ready (`ready_for_review`), so a PR leaves draft with a real gate and no empty commit; a buildgates test pins both triggers.
 
 ### Added
 
