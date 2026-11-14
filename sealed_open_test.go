@@ -290,7 +290,7 @@ func TestSealedOpenTargets_OpenImportedSealerDestroyedMeanwhile(t *testing.T) {
 		deadline := time.Now().Add(5 * time.Second)
 		for sealer.usable() == nil {
 			if time.Now().After(deadline) {
-				t.Skip("the sealer's Destroy waits for the open's pin; this path is unreachable here")
+				t.Fatal("the sealer did not become unusable within 5s of Destroy while the open was in flight")
 			}
 			time.Sleep(time.Millisecond)
 		}
