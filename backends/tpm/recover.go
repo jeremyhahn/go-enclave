@@ -3,6 +3,7 @@ package tpm
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"time"
 
@@ -118,6 +119,12 @@ func (d *tpmDevice) handles(ctx context.Context) ([]tpm2.TPMHandle, error) {
 }
 
 // listType lists the handles of one type, following MoreData.
+// errHandleOrder reports a handle listing that is not in the ascending
+// order the TPM defines. Such a listing cannot serve as an ownership
+// baseline: dropping a handle from it would let recovery flush an object
+// the call did not create.
+var errHandleOrder = errors.New("tpm: handle listing out of order")
+
 func (d *tpmDevice) listType(ctx context.Context, ht tpm2.TPMHT) ([]tpm2.TPMHandle, error) {
 	defer d.t.wipe()
 	var hs []tpm2.TPMHandle
@@ -135,17 +142,44 @@ func (d *tpmDevice) listType(ctx context.Context, ht tpm2.TPMHT) ([]tpm2.TPMHand
 		if err != nil {
 			return nil, err
 		}
-		n := len(hs)
+		// The TPM lists handles in strictly ascending order from next.
+		// Handles of another type are not taken. A page out of order is
+		// refused rather than trimmed: the listing is an ownership
+		// baseline, and a dropped handle would later read as created by
+		// the call. A handle below next is taken as a repeat only if an
+		// earlier page listed it, so a device repeating a page cannot
+		// list a handle twice.
+		n, start := len(hs), next
+		var prev tpm2.TPMHandle
 		for _, h := range got.Handle {
-			if uint32(h)>>24 == uint32(ht) && left > 0 {
-				hs = append(hs, h)
-				left--
+			if uint32(h)>>24 != uint32(ht) {
+				continue
 			}
+			if left == 0 {
+				break
+			}
+			if prev != 0 && h <= prev {
+				return nil, fmt.Errorf("%w: %#x after %#x", errHandleOrder, uint32(h), uint32(prev))
+			}
+			prev = h
+			if uint32(h) < start {
+				if !slices.Contains(hs[:n], h) {
+					return nil, fmt.Errorf("%w: %#x below %#x not listed before", errHandleOrder, uint32(h), start)
+				}
+				continue
+			}
+			hs = append(hs, h)
+			next = uint32(h) + 1
+			left--
 		}
-		if !rsp.MoreData || len(hs) == n {
+		if !rsp.MoreData {
 			return hs, nil
 		}
-		next = uint32(hs[len(hs)-1]) + 1
+		// More data with no new handle: returning hs would hand back
+		// an incomplete baseline, so the listing is refused.
+		if len(hs) == n {
+			return nil, fmt.Errorf("%w: no new handle from %#x with more data", errHandleOrder, start)
+		}
 	}
 	return hs, nil
 }
