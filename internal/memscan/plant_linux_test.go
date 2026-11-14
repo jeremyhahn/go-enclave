@@ -666,10 +666,17 @@ func sweepRound(needle []byte, home uintptr, mode string) (hits []string, aborte
 		case childBusy:
 			// Running and busy in marked passes, but never comparing:
 			// each fill opens a window that closes at once, as one does
-			// after a search. None may count.
+			// after a search. None may count. SIGURG stays blocked from
+			// the fill to the close: a signal taken there would preempt
+			// the thread inside its open window, which the parent cannot
+			// tell from a compare.
 			r := markedReader{b: needle[0], st: &st, flag: true, hi: denseSpan}
-			_, _ = r.ReadAt(buf[:denseFill], 0)
-			st.inside.Store(false)
+			if err := withUrgBlocked(func() {
+				_, _ = r.ReadAt(buf[:denseFill], 0)
+				st.inside.Store(false)
+			}); err != nil {
+				return nil, false, err
+			}
 		case childOutside:
 			// The pass compares with the flag clear and the sleep after it
 			// takes most signals: none of them may count.
@@ -914,6 +921,26 @@ func urgDelivered(pid, tid int) bool {
 		}
 		time.Sleep(runPoll)
 	}
+}
+
+// withUrgBlocked runs f on the calling thread, which must be locked to
+// its goroutine, with SIGURG blocked. No SIGURG is taken while f runs, so
+// none lands in f and none preempts it there; one sent meanwhile stays
+// pending until f returns.
+func withUrgBlocked(f func()) error {
+	const sigBlock, sigSetmask = 0, 2
+	set := uint64(1) << (uint(syscall.SIGURG) - 1)
+	var old uint64
+	if _, _, e := syscall.RawSyscall6(syscall.SYS_RT_SIGPROCMASK, sigBlock,
+		uintptr(unsafe.Pointer(&set)), uintptr(unsafe.Pointer(&old)), 8, 0, 0); e != 0 {
+		return fmt.Errorf("rt_sigprocmask: %w", e)
+	}
+	defer func() {
+		_, _, _ = syscall.RawSyscall6(syscall.SYS_RT_SIGPROCMASK, sigSetmask,
+			uintptr(unsafe.Pointer(&old)), 0, 8, 0, 0)
+	}()
+	f()
+	return nil
 }
 
 // requireRunEvidence fails a test whose rounds need run evidence the
