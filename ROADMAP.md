@@ -28,7 +28,8 @@ What it owns and never does: [SPEC purpose](docs/SPEC.md#purpose) and [SPEC boun
 - **backend-detection** — `Detect`, on an explicit call from `main`, selects the most secure of the registered backends by the rank each reports, the memory enclave when nothing else is usable — [#190](../../issues/190) — done
 - **enclave-interface** — the one public interface callers consume; constructors return it — [#138](../../issues/138) — done
 - **linux-secretmem** — a Linux-only software backend on `memfd_secret(2)`, ranked above the memory enclave and below every hardware backend — [#261](../../issues/261) — done
-- **open-in-secretmem** — `Sealed.OpenIn` decrypts straight into a linux-secretmem handle's pages, with no scratch enclave or import — [#263](../../issues/263) — done\n
+- **open-in-secretmem** — `Sealed.OpenIn` decrypts straight into a linux-secretmem handle's pages, with no scratch enclave or import — [#263](../../issues/263) — done
+
 ## Now
 
 - **public-release** — the first public release: a release candidate through its tag workflow and staging, then `make release`, published to GitHub with a tree byte-identical to the tag's — [release criteria](docs/SPEC.md#release-criteria) — open
