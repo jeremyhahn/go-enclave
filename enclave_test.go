@@ -256,6 +256,83 @@ func TestMemory_StringRedacts(t *testing.T) {
 	}
 }
 
+// TestMemory_FormatRedacts formats a live and a destroyed enclave with every
+// common verb, alone and as a struct field: none prints the material.
+func TestMemory_FormatRedacts(t *testing.T) {
+	const secret = "do-not-print-me"
+	live, err := newMemory([]byte(secret))
+	if err != nil {
+		t.Fatalf("NewMemory: %v", err)
+	}
+	defer live.Destroy()
+
+	dead, err := newMemory([]byte(secret))
+	if err != nil {
+		t.Fatalf("NewMemory: %v", err)
+	}
+	if err := dead.Destroy(); err != nil {
+		t.Fatalf("Destroy: %v", err)
+	}
+
+	if got := live.GoString(); got != "Memory(redacted)" {
+		t.Errorf("GoString = %q, want Memory(redacted)", got)
+	}
+	if got := dead.GoString(); got != "Memory(destroyed)" {
+		t.Errorf("GoString after Destroy = %q, want Memory(destroyed)", got)
+	}
+
+	for _, tc := range []struct {
+		name  string
+		value any
+		want  string
+	}{
+		{"live", live, "Memory(redacted)"},
+		{"destroyed", dead, "Memory(destroyed)"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assertFormatRedacts(t, tc.value, []byte(secret), tc.want)
+		})
+	}
+}
+
+// assertFormatRedacts formats v with %v, %s, %+v, %#v, %q and %x, and as a
+// struct field, and fails if any output carries material or its hex form, or
+// is not the redacted form want.
+func assertFormatRedacts(t *testing.T, v any, material []byte, want string) {
+	t.Helper()
+	type holder struct{ Key any }
+	h := holder{Key: v}
+
+	for _, tc := range []struct {
+		name  string
+		got   string
+		exact string // "" when the output only has to contain want
+	}{
+		{"%v", fmt.Sprintf("%v", v), want},
+		{"%s", fmt.Sprintf("%s", v), want},
+		{"%+v", fmt.Sprintf("%+v", v), want},
+		{"%#v", fmt.Sprintf("%#v", v), want},
+		{"%q", fmt.Sprintf("%q", v), fmt.Sprintf("%q", want)},
+		{"%x", fmt.Sprintf("%x", v), fmt.Sprintf("%x", want)},
+		{"field %v", fmt.Sprintf("%v", h), "{" + want + "}"},
+		{"field %+v", fmt.Sprintf("%+v", h), "{Key:" + want + "}"},
+		{"field %#v", fmt.Sprintf("%#v", h), ""},
+	} {
+		if strings.Contains(tc.got, string(material)) {
+			t.Errorf("%s leaked the material: %q", tc.name, tc.got)
+		}
+		if strings.Contains(tc.got, fmt.Sprintf("%x", material)) {
+			t.Errorf("%s leaked the material in hex: %q", tc.name, tc.got)
+		}
+		if tc.exact != "" && tc.got != tc.exact {
+			t.Errorf("%s = %q, want %q", tc.name, tc.got, tc.exact)
+		}
+		if tc.exact == "" && !strings.Contains(tc.got, want) {
+			t.Errorf("%s = %q, want it to contain %q", tc.name, tc.got, want)
+		}
+	}
+}
+
 func TestMemory_ConcurrentAccess(t *testing.T) {
 	e, err := newMemory([]byte("concurrent"))
 	if err != nil {

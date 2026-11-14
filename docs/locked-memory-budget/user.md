@@ -34,6 +34,9 @@ ceiling for locked memory taken outside the budget (unbudgeted constructors,
 If you install nothing, the default budget equals the discovered ceiling, or is
 unbounded when no ceiling binds. It leaves no headroom.
 
+The compiled form, with the library side below:
+[`SetAllocator`](https://pkg.go.dev/github.com/jeremyhahn/go-enclave#example-SetAllocator).
+
 ## Size it in pages
 
 Every enclave costs at least one page. Size with `LockedSize`:
@@ -41,6 +44,8 @@ Every enclave costs at least one page. Size with `LockedSize`:
 ```go
 budget, err := enclave.NewAllocator(100 * enclave.LockedSize(32)) // 100 small credentials = 100 pages
 ```
+
+Runnable form: [`NewAllocator`](https://pkg.go.dev/github.com/jeremyhahn/go-enclave#example-NewAllocator).
 
 ## Derive a budget from the host
 

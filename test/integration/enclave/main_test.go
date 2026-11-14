@@ -26,7 +26,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/jeremyhahn/go-enclave/test/integration/internal/devcontainer"
+	"github.com/jeremyhahn/go-enclave/test/internal/devcontainer"
 )
 
 func TestMain(m *testing.M) {
