@@ -197,7 +197,7 @@ func newFakeTPMDevice(t *testing.T, encryptIn bool) (*fakeTPM, *tpmDevice, sessi
 	alloc := newAllocator()
 	secret, err := alloc.alloc(32)
 	if err != nil {
-		t.Skipf("locked memory is unavailable: %v", err)
+		t.Fatalf("locked memory is unavailable: %v", err)
 	}
 	if _, err := rand.Read(secret); err != nil {
 		t.Fatal(err)
@@ -230,12 +230,12 @@ func residentCopies(t *testing.T, needle []byte) []string {
 	t.Helper()
 	maps, err := os.Open("/proc/self/maps")
 	if err != nil {
-		t.Skipf("no /proc/self/maps: %v", err)
+		t.Fatalf("no /proc/self/maps: %v", err)
 	}
 	defer func() { _ = maps.Close() }()
 	mem, err := os.Open("/proc/self/mem")
 	if err != nil {
-		t.Skipf("no /proc/self/mem: %v", err)
+		t.Fatalf("no /proc/self/mem: %v", err)
 	}
 	defer func() { _ = mem.Close() }()
 	buf, err := unix.Mmap(-1, 0, 1<<20, unix.PROT_READ|unix.PROT_WRITE, unix.MAP_ANON|unix.MAP_PRIVATE)

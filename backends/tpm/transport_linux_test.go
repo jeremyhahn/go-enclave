@@ -244,7 +244,7 @@ func TestLockedAllocator_Free(t *testing.T) {
 		t.Helper()
 		b, err := a.alloc(n)
 		if err != nil {
-			t.Skipf("alloc(%d): %v (locked memory unavailable)", n, err)
+			t.Fatalf("alloc(%d): %v (locked memory unavailable)", n, err)
 		}
 		return b
 	}
