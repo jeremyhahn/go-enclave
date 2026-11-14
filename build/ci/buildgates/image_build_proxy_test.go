@@ -27,9 +27,24 @@ const (
 	toolchainBuildMakeCall = `make docker-build-toolchain GO_BUILD_PROXY="${GOPROXY:-}"`
 )
 
-// hostedRunner is the one runner label every job in hostedWorkflows takes;
-// the self-hosted pools serve only the code review.
+// hostedRunner is the runner label every job in hostedWorkflows takes, but
+// for the jobs in trustedPoolJobs, which may take trustedPoolRunner instead.
 const hostedRunner = "ubuntu-latest"
+
+// trustedPoolRunner is the one self-hosted form a job may take: the
+// self-hosted pool for a push to main, a schedule run and a same-repository
+// pull request, and hostedRunner for every other event, a fork pull request
+// included, so code from a fork never runs on the pool.
+const trustedPoolRunner = `${{ ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","linux","x64","bigdisk-docker"]') || 'ubuntu-latest' }}`
+
+// trustedPoolJobs are the only jobs that may take trustedPoolRunner.
+var trustedPoolJobs = map[string]bool{"lint": true, "lint-gates": true}
+
+// runnerAllowed reports whether job name may run on runsOn: hostedRunner for
+// every job, trustedPoolRunner, exactly, for a job in trustedPoolJobs.
+func runnerAllowed(name string, runsOn any) bool {
+	return runsOn == hostedRunner || (trustedPoolJobs[name] && runsOn == trustedPoolRunner)
+}
 
 // goEnvSet matches a workflow line that sets one of the module variables, as
 // an env: key or a shell assignment or export.
@@ -40,7 +55,8 @@ var imageBuildWorkflows = []string{".github/workflows/ci.yml", ".github/workflow
 var hostedWorkflows = []string{".github/workflows/ci.yml", ".github/workflows/release.yml"}
 
 // hostedRunnerViolations lists every job in one workflow whose runs-on is
-// not the GitHub-hosted runner.
+// neither the GitHub-hosted runner nor, for a job in trustedPoolJobs,
+// trustedPoolRunner.
 func hostedRunnerViolations(src []byte) ([]string, error) {
 	var wf proxyWorkflow
 	if err := yaml.Unmarshal(src, &wf); err != nil {
@@ -48,7 +64,7 @@ func hostedRunnerViolations(src []byte) ([]string, error) {
 	}
 	var bad []string
 	for name, job := range wf.Jobs {
-		if job.RunsOn != hostedRunner {
+		if !runnerAllowed(name, job.RunsOn) {
 			bad = append(bad, fmt.Sprintf("job %s: runs-on %v, want %s", name, job.RunsOn, hostedRunner))
 		}
 	}
@@ -106,6 +122,82 @@ func TestEveryJobRunsOnAHostedRunner_RefusesWhatItMustRefuse(t *testing.T) {
 	}
 }
 
+// TestEveryJobRunsOnAHostedRunner_TrustedPool pins the one self-hosted form
+// the check accepts: trustedPoolRunner, on lint and lint-gates only.
+func TestEveryJobRunsOnAHostedRunner_TrustedPool(t *testing.T) {
+	workflow := func(lint, lintGates, image any) []byte {
+		src, err := yaml.Marshal(map[string]any{"jobs": map[string]any{
+			"lint":       map[string]any{"runs-on": lint},
+			"lint-gates": map[string]any{"runs-on": lintGates},
+			"image":      map[string]any{"runs-on": image},
+		}})
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		return src
+	}
+	noPR := strings.Replace(trustedPoolRunner, " || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)", "", 1)
+	anyPR := strings.Replace(trustedPoolRunner, " && github.event.pull_request.head.repo.full_name == github.repository", "", 1)
+	noFallback := strings.Replace(trustedPoolRunner, " || 'ubuntu-latest'", "", 1)
+	for _, tc := range []struct {
+		name                   string
+		lint, lintGates, image any
+		want                   []string
+	}{
+		{"lint and lint-gates on the pool", trustedPoolRunner, trustedPoolRunner, hostedRunner, nil},
+		{"lint alone on the pool", trustedPoolRunner, hostedRunner, hostedRunner, nil},
+		{"another job on the pool", trustedPoolRunner, trustedPoolRunner, trustedPoolRunner, []string{"job image:"}},
+		{"bare self-hosted label", "self-hosted", hostedRunner, hostedRunner, []string{"job lint:"}},
+		{"self-hosted label list", []any{"self-hosted", "linux", "x64", "bigdisk-docker"}, hostedRunner, hostedRunner, []string{"job lint:"}},
+		{"fork pull requests on the pool", hostedRunner, anyPR, hostedRunner, []string{"job lint-gates:"}},
+		{"pull requests off the pool", noPR, hostedRunner, hostedRunner, []string{"job lint:"}},
+		{"no hosted fallback", hostedRunner, noFallback, hostedRunner, []string{"job lint-gates:"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bad, err := hostedRunnerViolations(workflow(tc.lint, tc.lintGates, tc.image))
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			if len(bad) != len(tc.want) {
+				t.Fatalf("violations %q, want %d starting %q", bad, len(tc.want), tc.want)
+			}
+			for i, w := range tc.want {
+				if !strings.HasPrefix(bad[i], w) {
+					t.Errorf("violation %q, want it to start %q", bad[i], w)
+				}
+			}
+		})
+	}
+	for _, name := range []string{"lint", "lint-gates", "image", "ci-gate"} {
+		if got := runnerAllowed(name, trustedPoolRunner); got != trustedPoolJobs[name] {
+			t.Errorf("runnerAllowed(%s, trustedPoolRunner) = %v, want %v", name, got, trustedPoolJobs[name])
+		}
+	}
+}
+
+// TestTrustedPoolJobsTakeThePool holds ci.yml's lint and lint-gates jobs to
+// trustedPoolRunner, so the gate's accepted form and the workflow agree.
+func TestTrustedPoolJobsTakeThePool(t *testing.T) {
+	src, err := os.ReadFile(filepath.Join(repoRoot(t), ".github/workflows/ci.yml"))
+	if err != nil {
+		t.Fatalf("read ci.yml: %v", err)
+	}
+	var wf proxyWorkflow
+	if err := yaml.Unmarshal(src, &wf); err != nil {
+		t.Fatalf("parse ci.yml: %v", err)
+	}
+	for name := range trustedPoolJobs {
+		job, ok := wf.Jobs[name]
+		if !ok {
+			t.Errorf("ci.yml has no job %s", name)
+			continue
+		}
+		if job.RunsOn != trustedPoolRunner {
+			t.Errorf("job %s: runs-on %v, want %s", name, job.RunsOn, trustedPoolRunner)
+		}
+	}
+}
+
 type proxyWorkflow struct {
 	Jobs map[string]struct {
 		RunsOn any `yaml:"runs-on"`
@@ -154,7 +246,7 @@ func imageBuildProxyViolations(src []byte) ([]string, error) {
 				continue
 			}
 			builds++
-			if job.RunsOn != imageBuildRunner {
+			if !runnerAllowed(name, job.RunsOn) {
 				bad = append(bad, fmt.Sprintf("job %s: builds the image on runs-on %v, want %s", name, job.RunsOn, imageBuildRunner))
 			}
 			for _, line := range strings.Split(st.Run, "\n") {
