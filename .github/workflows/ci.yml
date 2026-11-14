@@ -55,8 +55,11 @@
 # value. RELEASABILITY_TEST keeps the repository's own test, which checks
 # generic shapes only.
 # CUSTOMIZE (go-enclave, #277): v1.30 and v1.31 are adopted with go-enclave's
-# runners and image build unchanged. Every job runs on ubuntu-latest; no job
-# takes the template's self-hosted labels. Each image build passes the
+# runners and image build unchanged. Every job runs on ubuntu-latest except
+# lint and lint-gates, which run on the self-hosted pool (self-hosted, linux,
+# x64, bigdisk-docker) for a push to main, a schedule run and a same-repository
+# PR, and on ubuntu-latest for a fork PR; no other job takes a self-hosted
+# label. Each image build passes the
 # inherited GOPROXY as GO_BUILD_PROXY and stages no forge credential, so the
 # module-cache probe of v1.29.4 and v1.29.5 below is not carried.
 # publish-images keeps the template's condition and skips on github.com.
@@ -597,7 +600,8 @@
 # newer than the template's v6.1.0 pin (d23441a48e516b6c34aea4fa41551a30e30af803);
 # the repository never moves a pin back.
 #
-# CUSTOMIZE (go-enclave): CI Gate runs on ubuntu-latest like every job (#293)
+# CUSTOMIZE (go-enclave): CI Gate runs on ubuntu-latest like every job but
+# lint and lint-gates, which take the self-hosted pool on trusted events,
 # and checks its tiers with the template's check() function, one check line
 # per job in needs, the fips, tpm-swtpm and optee jobs included (#277).
 # CUSTOMIZE (go-enclave, ruling 274(9), #206 comment 179925): the optee job
@@ -1000,7 +1004,8 @@ jobs:
   # CUSTOMIZE (go-enclave, #277): the template's server_url condition is kept
   # as written, so the job skips on github.com, where go-enclave lives and
   # scripts/ci-image-cache.sh has no registry to publish to. A skipped job
-  # takes no runner; runs-on is ubuntu-latest like every job (#293), and the
+  # takes no runner; runs-on is ubuntu-latest like every job but lint and
+  # lint-gates, and the
   # build takes GO_BUILD_PROXY and no forge credential, as the image job does.
   publish-images:
     name: Publish CI images
@@ -1033,7 +1038,7 @@ jobs:
   # runs once per event. It runs on a docs-only PR, as lint did.
   lint:
     name: Lint [lint, gosec, deps-check, build tags]
-    runs-on: ubuntu-latest
+    runs-on: ${{ ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","linux","x64","bigdisk-docker"]') || 'ubuntu-latest' }}
     needs: preflight   # v1.34
     if: ${{ !github.event.pull_request.draft && needs.preflight.outputs.verdict == 'run' }}
     timeout-minutes: 30       # CUSTOMIZE: ceil(1.5 x this job's 72-hour p95), ci-standard.md §12
@@ -1055,7 +1060,9 @@ jobs:
           done
 
       # A GitHub-hosted runner has about 14 GB free; the image build needs more.
+      # The self-hosted pool has the disk, so the step runs on a hosted runner only.
       - name: Free disk for the image build
+        if: runner.environment == 'github-hosted'
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
           df -h /
@@ -1269,8 +1276,11 @@ jobs:
   # check-public-literals` report path and line only (ci-standard.md §5,
   # Company Agent m605 item 8).
   #
-  # Runners: every job, CI Gate included, runs on ubuntu-latest. A job that
-  # builds an image first frees disk on the runner for the image build.
+  # Runners: every job, CI Gate included, runs on ubuntu-latest, except lint
+  # and lint-gates: they run on the self-hosted pool for a push to main, a
+  # schedule run and a same-repository PR, and on ubuntu-latest for a fork
+  # PR. A job that builds an image on a GitHub-hosted runner first frees disk
+  # for the image build.
   #
   # v1.30: lint, the build-tag assertion, the releasability test and
   # deps-check moved to the lint job. This job runs build, make coverage and,
@@ -1536,7 +1546,7 @@ jobs:
   # and the job; the gates after it run on the next push.
   lint-gates:
     name: Lint Gates [toolchain image]
-    runs-on: ubuntu-latest
+    runs-on: ${{ ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","linux","x64","bigdisk-docker"]') || 'ubuntu-latest' }}
     needs: preflight     # v1.29.3; v1.30; v1.34
     # v1.26: never on a draft. v1.29.3: on a schedule run, only on the
     # schedule guard's `run`. v1.30: only on `run` on every event, and on a PR
@@ -1562,7 +1572,9 @@ jobs:
           done
 
       # A GitHub-hosted runner has about 14 GB free; the image build needs more.
+      # The self-hosted pool has the disk, so the step runs on a hosted runner only.
       - name: Free disk for the image build
+        if: runner.environment == 'github-hosted'
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
           df -h /
@@ -2186,7 +2198,7 @@ jobs:
   # BOTH the needs list and the results check — a gate that can pass vacuously
   # is worse than no gate. Do not use join(needs.*.result); it evaluates empty
   # on Gitea and reports success while jobs fail.
-  # Runs on ubuntu-latest like every job (#293). trivy and fips are in nightly.yml
+  # Runs on ubuntu-latest like every job but lint and lint-gates. trivy and fips are in nightly.yml
   # (v1.9, devops.md §8a: the alpha regime).
   #
   # CUSTOMIZE (go-enclave): the fips job stays here, tagged full, and has its
