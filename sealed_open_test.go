@@ -345,11 +345,11 @@ func TestSealedOpenTargets_OpenableSnapshot(t *testing.T) {
 }
 
 func TestSealedOpenTargets_SecretMemoryAllocRegion(t *testing.T) {
-	if _, err := (&secretMemory{}).allocRegion(16); !errors.Is(err, ErrNilAllocator) {
-		t.Errorf("allocRegion with a nil allocator = %v, want ErrNilAllocator", err)
+	if r, err := (&secretMemory{}).allocRegion(16); r != nil || !errors.Is(err, ErrNilAllocator) {
+		t.Errorf("allocRegion with a nil allocator = %v, %v; want nil, ErrNilAllocator", r, err)
 	}
-	if _, err := (&secretMemory{allocator: &budgetAllocator{}}).allocRegion(16); !errors.Is(err, ErrAllocatorNotConstructed) {
-		t.Errorf("allocRegion with an unconstructed allocator = %v, want ErrAllocatorNotConstructed", err)
+	if r, err := (&secretMemory{allocator: &budgetAllocator{}}).allocRegion(16); r != nil || !errors.Is(err, ErrAllocatorNotConstructed) {
+		t.Errorf("allocRegion with an unconstructed allocator = %v, %v; want nil, ErrAllocatorNotConstructed", r, err)
 	}
 }
 
