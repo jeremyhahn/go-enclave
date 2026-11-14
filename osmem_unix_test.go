@@ -187,7 +187,7 @@ func TestOSMemLockUnlock(t *testing.T) {
 	}
 	cur := uint64(rl.Cur) //nolint:unconvert // Cur is int64 on the BSDs
 	if cur != uint64(unix.RLIM_INFINITY) && cur < uint64(2*os.Getpagesize()) {
-		t.Skipf("RLIMIT_MEMLOCK %d is too small to lock a page", cur)
+		t.Fatalf("RLIMIT_MEMLOCK %d is too small to lock two pages; the test host must allow it", cur)
 	}
 
 	b := mapPage(t)
