@@ -66,7 +66,10 @@ type Config struct {
 type HandleCase struct {
 	// Name is unique among the cases and names the case in every failure.
 	Name string
-	// New returns a live handle of b, such as a key the device generates.
+	// New returns a live handle of b, such as a key the device generates. A
+	// ByteAccess handle's material should be random: the residue sweep cannot
+	// tell one repeated byte from the rest of the process and leaves it
+	// unmeasured.
 	New func(ctx context.Context, b enclave.Backend) (enclave.Handle, error)
 	// Import, for an Importer, is the option set the suite imports ImportSize
 	// random bytes with; the case then also checks the purpose's handle contract.

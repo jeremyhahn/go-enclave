@@ -18,19 +18,28 @@
 #   GO_ENCLAVE_IT_PROFILE_OUT      optional: write the merged profile here
 set -eu
 
-pkg=${1:?usage: run-integration-tests.sh <package>}
+# Every refusal exits 2. (${VAR:?} would leave the status to the shell:
+# 2 in dash, 1 in bash as sh.)
+refuse() { echo "run-integration-tests: $*" >&2; exit 2; }
+required() { eval "[ -n \"\${$1:-}\" ]" || refuse "$1 is required"; }
+pkg=${1-}
+[ -n "$pkg" ] || refuse "usage: run-integration-tests.sh <package>"
 case $pkg in
-  ''|*[!a-z0-9_-]*) echo "run-integration-tests: invalid package name" >&2; exit 2 ;;
+  *[!a-z0-9_-]*) refuse "invalid package name" ;;
 esac
-floor=${GO_ENCLAVE_IT_COVERAGE_FLOOR:?GO_ENCLAVE_IT_COVERAGE_FLOOR is required}
+required GO_ENCLAVE_IT_COVERAGE_FLOOR
+required GO_ENCLAVE_IT_COVERPKG
+required GO_ENCLAVE_IT_TESTFLAGS
+floor=$GO_ENCLAVE_IT_COVERAGE_FLOOR
+# N or N.N...: digits, then at most one dot with digits on both sides.
 case $floor in
-  ''|*[!0-9.]*) echo "run-integration-tests: invalid coverage floor" >&2; exit 2 ;;
+  ''|.*|*.|*.*.*|*[!0-9.]*) refuse "invalid coverage floor" ;;
 esac
-coverpkg=${GO_ENCLAVE_IT_COVERPKG:?GO_ENCLAVE_IT_COVERPKG is required}
-flags=${GO_ENCLAVE_IT_TESTFLAGS:?GO_ENCLAVE_IT_TESTFLAGS is required}
+coverpkg=$GO_ENCLAVE_IT_COVERPKG
+flags=$GO_ENCLAVE_IT_TESTFLAGS
 
 dir=test/integration/$pkg
-[ -d "$dir" ] || { echo "run-integration-tests: $dir does not exist" >&2; exit 2; }
+[ -d "$dir" ] || refuse "$dir does not exist"
 
 covdir=$(mktemp -d /tmp/covdata.XXXXXX)
 trap 'rm -rf "$covdir"' EXIT

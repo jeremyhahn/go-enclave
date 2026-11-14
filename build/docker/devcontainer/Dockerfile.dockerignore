@@ -28,6 +28,7 @@
 !providertest/*.go
 !internal/**/*.go
 !test/integration/**/*.go
+!test/internal/**/*.go
 !build/docker/devcontainer/run-integration-tests.sh
 !scripts/coverage-gate.sh
 # The root package's *_test.go files stay admitted (!*.go above): the `userns`
@@ -35,8 +36,9 @@
 # (memlock_userns_linux_test.go, -tags=userns) from this image, and it uses
 # helpers from the root package's other test files. Without them the package has
 # no test files and `go test` runs nothing. build/ci/buildgates pins this.
-# The unit tests of backendtest, providertest and internal/ are not part of any suite here.
+# The unit tests of backendtest, providertest, internal/ and test/internal/ are not part of any suite here.
 backendtest/*_test.go
 providertest/*_test.go
 internal/**/*_test.go
+test/internal/**/*_test.go
 !test/integration/**/*_test.go

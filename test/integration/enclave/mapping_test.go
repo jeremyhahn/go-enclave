@@ -23,7 +23,7 @@ import (
 
 	enclave "github.com/jeremyhahn/go-enclave"
 
-	"github.com/jeremyhahn/go-enclave/test/integration/internal/devcontainer"
+	"github.com/jeremyhahn/go-enclave/test/internal/devcontainer"
 )
 
 // What every enclave's pages look like to the kernel (locked, undumpable,

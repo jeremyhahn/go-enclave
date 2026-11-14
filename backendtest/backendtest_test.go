@@ -406,6 +406,38 @@ func residueConfig(flt faults) Config {
 	return cfg
 }
 
+// TestBackendConformance_UniformMaterialUnmeasured pins that a handle whose
+// material is one repeated byte, such as a fresh zeroed region, leaves the
+// residue sweep unmeasured: such bytes are everywhere in a process, so a sweep
+// that finds them after the end proves nothing about the backend.
+func TestBackendConformance_UniformMaterialUnmeasured(t *testing.T) {
+	cfg := Config{
+		New:                 func() (enclave.Backend, error) { return enclave.DefaultBackend(), nil },
+		BackendCapabilities: []enclave.Capability{enclave.CapabilityProbe},
+		Handles: []HandleCase{{
+			Name: "zeroed",
+			New: func(context.Context, enclave.Backend) (enclave.Handle, error) {
+				return enclave.NewMemorySized(32)
+			},
+			Capabilities: []enclave.Capability{enclave.CapabilityBytes, enclave.CapabilityFreeze},
+		}},
+		Logf: t.Logf,
+	}
+	err := TestBackend(context.Background(), cfg)
+	if !errors.Is(err, ErrNotMeasured) {
+		t.Fatalf("TestBackend with zeroed material = %v, want ErrNotMeasured", err)
+	}
+	var fe *FindingsError
+	if errors.As(err, &fe) {
+		for _, f := range fe.Findings {
+			var pe *PropertyError
+			if errors.As(f, &pe) {
+				t.Errorf("zeroed material failed a property: %v", pe)
+			}
+		}
+	}
+}
+
 // hasProperty reports whether err holds a PropertyError for property.
 func hasProperty(err error, property string) bool {
 	var fe *FindingsError
