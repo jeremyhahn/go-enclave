@@ -25,11 +25,16 @@ set -eu
 
 # shellcheck disable=SC2016 # a Go template, not a shell expansion
 list_files() {
-	go list ${1:+-tags "$1"} -f '{{$p := .ImportPath}}{{range .GoFiles}}{{$p}}/{{.}}
+	# A failed go list is not an empty file set: stop rather than compare.
+	out=$(go list ${1:+-tags "$1"} -f '{{$p := .ImportPath}}{{range .GoFiles}}{{$p}}/{{.}}
 {{end}}{{range .CgoFiles}}{{$p}}/{{.}}
 {{end}}{{range .TestGoFiles}}{{$p}}/{{.}}
 {{end}}{{range .XTestGoFiles}}{{$p}}/{{.}}
-{{end}}' ./... 2>/dev/null | sort -u
+{{end}}' ./... 2>/dev/null) || {
+		echo "::error::go list${1:+ -tags '$1'} failed: the selected files cannot be compared." >&2
+		return 1
+	}
+	printf '%s\n' "$out" | sort -u
 }
 
 bare=$(list_files "")
@@ -44,8 +49,9 @@ if [ "$full" = "$bare" ]; then
 fi
 for t in $GO_BUILD_TAGS; do
 	# shellcheck disable=SC2086 # word-split on purpose: one tag per line
-	rest=$(printf '%s\n' $GO_BUILD_TAGS | grep -vx -- "$t" | tr '\n' ' ')
-	if [ "$(list_files "$rest")" = "$full" ]; then
+	rest=$(printf '%s\n' $GO_BUILD_TAGS | grep -vxF -- "$t" | tr '\n' ' ')
+	dropped=$(list_files "$rest")
+	if [ "$dropped" = "$full" ]; then
 		echo "::error::build tag '$t' selects nothing: removing it from GO_BUILD_TAGS changes no file. Misspelled, or it should be removed."
 		rc=1
 	fi

@@ -203,3 +203,82 @@ func TestMemoryEnclave_RanksAndProbesAsTheDefault(t *testing.T) {
 		}
 	}
 }
+
+// ctxProber is a Prober whose Probe reports the context's error.
+type ctxProber struct {
+	name string
+	rank int
+}
+
+func (p *ctxProber) Name() string                    { return p.name }
+func (p *ctxProber) Rank() int                       { return p.rank }
+func (p *ctxProber) Probe(ctx context.Context) error { return ctx.Err() }
+
+func TestDetect_ABackendWithoutProbeIsNeverSelected(t *testing.T) {
+	registerForTest(t, &fakeBackend{name: "test-detect-noprobe"})
+	got, results := Detect(context.Background())
+	if got != DefaultBackend() {
+		t.Fatalf("Detect selected %q, want the default", got.Name())
+	}
+	r := resultFor(t, results, "test-detect-noprobe")
+	if r.Rank != 0 {
+		t.Fatalf("Rank = %d, want 0 for a backend that is no Prober", r.Rank)
+	}
+	var capErr *CapabilityError
+	if !errors.As(r.Err, &capErr) {
+		t.Fatalf("Err = %v, want a *CapabilityError", r.Err)
+	}
+	if capErr.Capability != CapabilityProbe || capErr.Backend != "test-detect-noprobe" {
+		t.Fatalf("CapabilityError = %+v, want CapabilityProbe for test-detect-noprobe", capErr)
+	}
+}
+
+func TestDetect_AUsableBackendAtOrBelowTheDefaultRankIsNotSelected(t *testing.T) {
+	for _, rank := range []int{-1, lockedMemoryRank} {
+		t.Run(strconv.Itoa(rank), func(t *testing.T) {
+			name := "test-detect-rank-" + strconv.Itoa(rank)
+			registerForTest(t, &fakeProber{name: name, rank: rank})
+			got, results := Detect(context.Background())
+			if got != DefaultBackend() {
+				t.Fatalf("Detect selected %q, want the default", got.Name())
+			}
+			if r := resultFor(t, results, name); r.Err != nil || r.Rank != rank {
+				t.Fatalf("result = %+v, want usable at rank %d", r, rank)
+			}
+		})
+	}
+}
+
+func TestDetect_ACanceledContextReachesTheProbe(t *testing.T) {
+	registerForTest(t, &ctxProber{name: "test-detect-ctx", rank: 90})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	got, results := Detect(ctx)
+	if got.Name() == "test-detect-ctx" {
+		t.Fatal("Detect selected a backend whose probe was canceled")
+	}
+	r := resultFor(t, results, "test-detect-ctx")
+	if !errors.Is(r.Err, context.Canceled) {
+		t.Fatalf("Err = %v, want context.Canceled", r.Err)
+	}
+	var probeErr *ProbeError
+	if !errors.As(r.Err, &probeErr) || probeErr.Backend != "test-detect-ctx" {
+		t.Fatalf("Err = %v, want a *ProbeError for test-detect-ctx", r.Err)
+	}
+}
+
+func TestDetect_AFailedHighRankedProbeIsListedWithItsRank(t *testing.T) {
+	registerForTest(t, &fakeProber{name: "test-detect-failhigh", rank: 1000, err: errNoDevice})
+	got, results := Detect(context.Background())
+	if got.Name() == "test-detect-failhigh" {
+		t.Fatal("Detect selected a backend whose probe failed")
+	}
+	r := resultFor(t, results, "test-detect-failhigh")
+	if r.Rank != 1000 {
+		t.Fatalf("Rank = %d, want 1000 as the Prober reported", r.Rank)
+	}
+	var probeErr *ProbeError
+	if !errors.As(r.Err, &probeErr) || !errors.Is(r.Err, errNoDevice) {
+		t.Fatalf("Err = %v, want a *ProbeError carrying errNoDevice", r.Err)
+	}
+}

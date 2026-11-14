@@ -3,7 +3,8 @@
 #
 # Usage: TOOLS_DIR=/abs/path scripts/clean-tools.sh   (from the repository root)
 #
-# Refuses a relative TOOLS_DIR, or one resolving to /, the checkout or $HOME.
+# Refuses a relative TOOLS_DIR, or one resolving to /, the checkout or $HOME
+# (itself resolved, so a symlinked HOME is still caught).
 set -eu
 # shellcheck source=lib.sh
 . "${0%/*}/lib.sh"
@@ -16,8 +17,10 @@ esac
 if [ -d "$tools" ]; then
   real=$(cd -P -- "$tools" && pwd)
   repo=$(pwd -P)
+  home=${HOME:-/}
+  if [ -d "$home" ]; then home=$(cd -P -- "$home" && pwd); fi
   case $real in
-    /|"$repo"|"${HOME:-/}") die "TOOLS_DIR resolves to $real; refusing to delete it" ;;
+    /|"$repo"|"$home") die "TOOLS_DIR resolves to $real; refusing to delete it" ;;
   esac
 fi
 rm -rf -- "$tools"

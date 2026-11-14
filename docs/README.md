@@ -68,8 +68,74 @@ MINOR bump, and its [CHANGELOG.md](../CHANGELOG.md) entry is marked
 **BREAKING** and links here. Upgrade one release at a time. Each section
 describes its release under the names that release shipped.
 
-Releases after v0.9.0-alpha need no source change. Check the minimum Go
-version in `go.mod`, which security releases of the toolchain raise.
+### Unreleased (from v0.11)
+
+#### Go version
+
+**Build with Go 1.27.4 or later.** The `go` line of `go.mod` is `1.27.4`
+(was `1.27.3`), for GO-2026-6859 in the go1.27.3 standard library, and
+[README.md](../README.md#install) states the same minimum. The nested backend modules below carry the same
+line.
+
+#### Sealed envelope version 2
+
+**Nothing to change.** Every new seal writes envelope
+[version 2](sealing/engineering.md#envelope-version), which binds the version
+byte into the AAD; a contract v1 envelope (version 0) still opens unchanged,
+and nothing rewrites one. An envelope of any other version is refused with the
+new `ErrUnknownSealedVersion` before any key is touched or anything is
+decrypted.
+
+A version 2 envelope never reaches an older release. A `Sealed` exists only in
+the memory of the process that sealed it: there is no serialized form and no
+constructor for sealed bytes, and a `Sealed` opens only through the `Sealer`
+that sealed it ([configuration and
+persistence](sealing/engineering.md#configuration-and-persistence)). A
+deployment that runs this release beside v0.11 therefore needs no upgrade
+order: no process can hand its envelopes to another, whatever the release.
+
+#### Backend modules
+
+Two backends ship as nested modules of this repository, each with its own
+`go.mod`. The root module requires neither, so a caller that wants one
+requires it by its own module path; it requires the root at `v0.11.1-alpha`
+or later and Go 1.27.4.
+
+| Module | What it gives | Docs |
+|---|---|---|
+| `github.com/jeremyhahn/go-enclave/backends/armtrustzone` | the `arm-trustzone` backend over OP-TEE (`Connect`, `Connector`), and a TrustZone `KeyProtector` from `(*Backend).KeyProtector()` | [backends](backends/user.md#arm-trustzone) |
+| `github.com/jeremyhahn/go-enclave/backends/tpm` | a TPM 2.0 `enclave.KeyProtector` for Linux, `tpm.Open("")` on `/dev/tpmrm0` | [install a hardware provider](sealing/user.md#install-a-hardware-provider) |
+
+A caller that uses neither has nothing to change: the root module's
+dependencies are still `golang.org/x/sys` alone.
+
+### v0.11.1-alpha (from v0.11.0)
+
+**Nothing to change.** The tag is on the v0.11.0-alpha release commit, so
+the root module's code is that of v0.11.0-alpha. The nested `arm-trustzone`
+and `tpm` modules, which ship after it, require the root at this tag.
+
+### v0.11.0-alpha (from v0.10)
+
+**Nothing to change.** Every caller-visible change is an addition:
+
+- `enclave.NewSecretMemory(a)`, the linux-secretmem backend of rank 1 on
+  `memfd_secret(2)` memory. Nothing registers it on import; `main` does
+  ([linux-secretmem](linux-secretmem/user.md)).
+- `Sealed.OpenIn` into that backend decrypts straight into its pages. A
+  refused `memfd_secret` is an `ErrOpenFailed` carrying the
+  `*MemfdSecretError` (`ErrMemfdSecretUnavailable`), with no fallback to
+  locked memory. `OpenIn` into every other backend is as before.
+- `backendtest` gains `ErrNoEndpoint` and `EndpointError`, and
+  `ErrNoRegistration` and `RegistrationError`, for a harness to report a
+  missing endpoint or registration.
+
+### v0.10.0-alpha (from v0.9)
+
+**Build with Go 1.27.3 or later**, for GO-2026-6809 (crypto/x509). Nothing
+else changes for Go callers: every other entry of the release is CI, tooling,
+documentation or a `providertest` fix that makes a nondeterministic root
+fail on "DIFFERENT roots" rather than on unwritten bytes.
 
 ### v0.9.0-alpha (from v0.8.0-alpha)
 

@@ -324,8 +324,7 @@ func dockerignoreAdmits(t *testing.T, name string) bool {
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		negated := strings.HasPrefix(line, "!")
-		pattern := strings.Split(strings.TrimPrefix(line, "!"), "/")
+		negated, pattern := dockerignorePattern(line)
 		for n := 1; n <= len(segs); n++ {
 			ok, err := matchSegments(pattern, segs[:n])
 			if err != nil {
@@ -338,6 +337,19 @@ func dockerignoreAdmits(t *testing.T, name string) bool {
 		}
 	}
 	return admitted
+}
+
+// dockerignorePattern parses one non-comment dockerignore line as Docker does:
+// a leading ! negates, the rest is cleaned (so a leading ./ and a trailing /
+// change nothing), a leading / is dropped, and the result is split into
+// segments.
+func dockerignorePattern(line string) (negated bool, pattern []string) {
+	negated = strings.HasPrefix(line, "!")
+	p := path.Clean(strings.TrimPrefix(line, "!"))
+	if len(p) > 1 && p[0] == '/' {
+		p = p[1:]
+	}
+	return negated, strings.Split(p, "/")
 }
 
 // matchSegments matches a split dockerignore pattern against a split path:

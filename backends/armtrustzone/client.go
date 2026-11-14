@@ -40,11 +40,12 @@ func parseUUID(text string) (teecUUID, error) {
 	if len(text) != 36 || text[8] != '-' || text[13] != '-' || text[18] != '-' || text[23] != '-' {
 		return teecUUID{}, &UUIDError{Text: text}
 	}
-	j := 0
-	for i := 0; i < len(text); {
-		if text[i] == '-' {
+	// Read the 16 digit pairs at their fixed offsets, so a dash in a
+	// digit position is refused rather than skipped.
+	i := 0
+	for j := range octets {
+		if i == 8 || i == 13 || i == 18 || i == 23 {
 			i++
-			continue
 		}
 		hi, ok1 := hexDigit(text[i])
 		lo, ok2 := hexDigit(text[i+1])
@@ -52,7 +53,7 @@ func parseUUID(text string) (teecUUID, error) {
 			return teecUUID{}, &UUIDError{Text: text}
 		}
 		octets[j] = hi<<4 | lo
-		i, j = i+2, j+1
+		i += 2
 	}
 	return teecUUID{
 		TimeLow:          uint32(octets[0])<<24 | uint32(octets[1])<<16 | uint32(octets[2])<<8 | uint32(octets[3]),

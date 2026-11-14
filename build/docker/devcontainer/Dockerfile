@@ -264,6 +264,7 @@ COPY --chown=root:root backendtest/ backendtest/
 COPY --chown=root:root providertest/ providertest/
 COPY --chown=root:root internal/ internal/
 COPY --chown=root:root test/integration/ test/integration/
+COPY --chown=root:root test/internal/ test/internal/
 COPY --chown=root:root scripts/lib.sh scripts/coverage-gate.sh scripts/
 COPY --chown=root:root build/docker/devcontainer/run-integration-tests.sh build/docker/devcontainer/
 

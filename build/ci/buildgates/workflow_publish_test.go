@@ -58,15 +58,27 @@ func jobIsWriteCapable(job map[string]any) bool {
 }
 
 // writeCheckoutViolations returns each checkout in a write-capable job that does
-// not set persist-credentials to false.
+// not set persist-credentials to false. A job without its own permissions
+// block is judged by the workflow-level block it inherits.
 func writeCheckoutViolations(src []byte) ([]string, error) {
 	jobs, err := workflowJobs(src)
 	if err != nil {
 		return nil, err
 	}
+	// A job with no permissions block runs with the workflow's.
+	var top struct {
+		Permissions any `yaml:"permissions"`
+	}
+	if err := yaml.Unmarshal(src, &top); err != nil {
+		return nil, err
+	}
 	var bad []string
 	for name, job := range jobs {
-		if !jobIsWriteCapable(job) {
+		effective := job
+		if _, own := job["permissions"]; !own {
+			effective = map[string]any{"permissions": top.Permissions}
+		}
+		if !jobIsWriteCapable(effective) {
 			continue
 		}
 		for i, step := range jobSteps(job) {

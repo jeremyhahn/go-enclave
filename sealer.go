@@ -469,7 +469,7 @@ func (s *envelopeSealer) Mode() Mode {
 // [ErrSealerDestroyed] once Destroy ran, and [ErrSealerNotConstructed] for a
 // zero Sealer, which has no provider.
 func (s *envelopeSealer) usable() error {
-	if s.sealerState == nil {
+	if s == nil || s.sealerState == nil {
 		return ErrSealerNotConstructed
 	}
 	s.mu.RLock()

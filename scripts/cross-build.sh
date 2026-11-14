@@ -20,7 +20,8 @@ while [ $# -gt 0 ] && [ "$1" != -- ]; do
   targets="$targets $1"
   shift
 done
-[ $# -gt 0 ] || die "usage: $0 <goos/goarch>... -- <package>..."
+# With no target or no package there is nothing to check: a usage error, not a pass.
+[ $# -gt 1 ] && [ -n "$targets" ] || die "usage: $0 <goos/goarch>... -- <package>..."
 shift
 
 # go test -c writes one binary per package into a directory -o names.

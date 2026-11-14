@@ -629,8 +629,9 @@ on:
     # `CI / *` contexts, CI Gate included. An action outside `types` matches
     # nothing: no run, no status. The cost: adding `ci:full` waits for the
     # PR's next push or update-branch, or takes effect through
-    # `workflow_dispatch`.
-    types: [opened, synchronize, reopened]
+    # `workflow_dispatch`. v1.35.3: `ready_for_review`, so a draft marked
+    # ready runs CI.
+    types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:                    # re-fire a whole workflow; also the
                                         # only retry when a run was never
                                         # created (see v1.3 correction above)

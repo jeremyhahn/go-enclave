@@ -38,6 +38,8 @@ func wipeAtExit() {
 }
 ```
 
+Runnable form: [`WipeAll`](https://pkg.go.dev/github.com/jeremyhahn/go-enclave#example-WipeAll).
+
 Order matters: stop the goroutines that read or create enclaves **before** the
 sweep. An enclave still being read is waited for until the deadline and then
 left mapped; one created during the sweep may be returned to its creator

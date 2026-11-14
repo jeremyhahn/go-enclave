@@ -12,7 +12,9 @@
 // caller's buffer, the material is readable in the borrow window and comparable
 // with EqualTo, Destroy releases it, and a destroyed enclave returns
 // ErrEnclaveDestroyed. It then seals the marker through a typed provider option
-// and opens it again. The value is a fixed, non-secret marker.
+// and opens it again. The value is a fixed, non-secret marker. Last, it runs
+// the provider-author suite, providertest.TestProvider, against the software
+// provider, so the SDK a provider author imports works from outside too.
 package main
 
 import (
@@ -23,6 +25,7 @@ import (
 	"os"
 
 	enclave "github.com/jeremyhahn/go-enclave"
+	"github.com/jeremyhahn/go-enclave/providertest"
 )
 
 func main() {
@@ -37,7 +40,10 @@ func run() error {
 	if err := lifecycle(); err != nil {
 		return err
 	}
-	return sealing()
+	if err := sealing(); err != nil {
+		return err
+	}
+	return conformance()
 }
 
 func lifecycle() error {
@@ -117,6 +123,26 @@ func sealing() error {
 	}
 	if err := v.Destroy(); err != nil {
 		return fmt.Errorf("Sealed.Destroy: %w", err)
+	}
+	return nil
+}
+
+// conformance runs the provider-author suite, providertest.TestProvider,
+// against the software provider in both sealing modes, so the SDK a provider
+// author imports is built and run from outside the repository too.
+func conformance() error {
+	err := providertest.TestProvider(context.Background(), providertest.Config{
+		New:   func() (any, error) { return enclave.NewSoftwareProvider(), nil },
+		Modes: []enclave.Mode{enclave.ModeRootKey, enclave.ModePerOperation},
+		// The residue sweep needs Linux and locked memory, which the host
+		// running this check may not grant, and it is the slow part of the
+		// suite. providertest's own tests measure it against this provider;
+		// this check proves the provider-author surface builds and runs from
+		// a published module.
+		SkipResidueSweep: "measured by providertest's own tests; this check covers the published SDK surface",
+	})
+	if err != nil {
+		return fmt.Errorf("providertest.TestProvider(software provider): %w", err)
 	}
 	return nil
 }

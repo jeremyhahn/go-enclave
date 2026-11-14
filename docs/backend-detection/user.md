@@ -38,7 +38,8 @@ sealer, err := enclave.NewSealer(enclave.WithBackend(backend), enclave.WithKeyPr
 
 `ctx` reaches every backend's probe, so bound it with a deadline when a probe
 may wait on a device. With only locked memory registered, `Detect` returns
-`enclave.DefaultBackend()`.
+`enclave.DefaultBackend()`. Runnable form, with nothing registered:
+[`Detect`](https://pkg.go.dev/github.com/jeremyhahn/go-enclave#example-Detect).
 
 ## Require a hardware backend
 

@@ -1,0 +1,31 @@
+{
+  "comment": "Blob contract v1, SoftwareProvider blob (kind 3, generation 0) and a sealed value under it. docs/sealing/engineering.md.",
+  "vectors": [
+    {
+      "name": "software-provider-envelope-v1",
+      "root_key": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "dek": "606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f",
+      "blob_nonce": "a0a1a2a3a4a5a6a7a8a9aaab",
+      "envelope_version": 0,
+      "plaintext": "676f2d656e636c61766520636f6e7472616374207631206b6e6f776e2d616e7377657220706c61696e74657874",
+      "sealed_nonce": "c0c1c2c3c4c5c6c7c8c9cacb",
+      "derived_key": "34fa2413a4450d4a32d616331a56da86983296315446ded711014d3d234d261d",
+      "blob": "010300000000a0a1a2a3a4a5a6a7a8a9aaab8904759447718b18aa1649fe0240b7793ce1f3c6085a0519096a591993c0e571dba8c4e12dbbdc0f86bdc840cfdccf1e",
+      "aad": "010300000000a0a1a2a3a4a5a6a7a8a9aaab8904759447718b18aa1649fe0240b7793ce1f3c6085a0519096a591993c0e571dba8c4e12dbbdc0f86bdc840cfdccf1e",
+      "sealed": "c0c1c2c3c4c5c6c7c8c9cacb864fbdb27b70b78219893861e0b76c67e75e7673ae80e99d471d3c07ccd9b3c51b05b38dd0be4a1aacd8a351994c841e55feda7b847621ac232ebcf5f9"
+    },
+    {
+      "name": "software-provider-envelope-v2",
+      "root_key": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "dek": "606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f",
+      "blob_nonce": "a0a1a2a3a4a5a6a7a8a9aaab",
+      "envelope_version": 2,
+      "plaintext": "676f2d656e636c61766520636f6e7472616374207631206b6e6f776e2d616e7377657220706c61696e74657874",
+      "sealed_nonce": "c0c1c2c3c4c5c6c7c8c9cacb",
+      "derived_key": "34fa2413a4450d4a32d616331a56da86983296315446ded711014d3d234d261d",
+      "blob": "010300000000a0a1a2a3a4a5a6a7a8a9aaab8904759447718b18aa1649fe0240b7793ce1f3c6085a0519096a591993c0e571dba8c4e12dbbdc0f86bdc840cfdccf1e",
+      "aad": "02010300000000a0a1a2a3a4a5a6a7a8a9aaab8904759447718b18aa1649fe0240b7793ce1f3c6085a0519096a591993c0e571dba8c4e12dbbdc0f86bdc840cfdccf1e",
+      "sealed": "c0c1c2c3c4c5c6c7c8c9cacb864fbdb27b70b78219893861e0b76c67e75e7673ae80e99d471d3c07ccd9b3c51b05b38dd0be4a1aacd8a351997eeda99321decf5616ed01c9a0eab549"
+    }
+  ]
+}

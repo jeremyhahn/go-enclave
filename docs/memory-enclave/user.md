@@ -36,6 +36,9 @@ If you must keep your buffer (you do not own it), use
 `NewMemoryCopy(src)` and wipe `src` yourself as soon as you can — the
 heap copy is outside every protection this package gives.
 
+Runnable forms: [`NewMemory`](https://pkg.go.dev/github.com/jeremyhahn/go-enclave#example-NewMemory)
+and [`NewMemoryCopy`](https://pkg.go.dev/github.com/jeremyhahn/go-enclave#example-NewMemoryCopy).
+
 ## Generate material in place
 
 Material that is about to be created should never touch the heap:
@@ -67,7 +70,8 @@ if err := f.Freeze(); err != nil {
 ```
 
 Finish the fill before sharing the enclave with other goroutines; two borrows
-writing at once is a data race.
+writing at once is a data race. Runnable form:
+[`NewMemorySized`](https://pkg.go.dev/github.com/jeremyhahn/go-enclave#example-NewMemorySized).
 
 ## Read and compare
 
@@ -100,6 +104,8 @@ if err := e.Destroy(); err != nil {
 	}
 }
 ```
+
+Runnable form: [`Handle` (Destroy)](https://pkg.go.dev/github.com/jeremyhahn/go-enclave#example-Handle-destroy).
 
 `Destroy` returns an error matching `ErrEnclaveCorrupted` if the guard canary
 was overwritten, after wiping the material and releasing the pages. Treat it as

@@ -1,0 +1,93 @@
+{
+  "comment": "Blobs a contract v1 reader refuses with ErrSealedAuthentication: base vector's blob changed by mutation; header changes carry a valid tag.",
+  "refusals": [
+    {
+      "name": "software-provider-envelope-v2-header-version-2",
+      "file": "software-provider.json",
+      "base": "software-provider-envelope-v2",
+      "mutation": "header-version-2",
+      "blob": "020300000000a0a1a2a3a4a5a6a7a8a9aaab8904759447718b18aa1649fe0240b7793ce1f3c6085a0519096a591993c0e57170abcd1dd5962dedacca8d5aecc0233b",
+      "expect": "ErrSealedAuthentication"
+    },
+    {
+      "name": "software-provider-envelope-v2-kind-1",
+      "file": "software-provider.json",
+      "base": "software-provider-envelope-v2",
+      "mutation": "kind-1",
+      "blob": "010100000000a0a1a2a3a4a5a6a7a8a9aaab8904759447718b18aa1649fe0240b7793ce1f3c6085a0519096a591993c0e5714e6939107aebeaaec571923923e127a9",
+      "expect": "ErrSealedAuthentication"
+    },
+    {
+      "name": "software-provider-envelope-v2-generation-not-held",
+      "file": "software-provider.json",
+      "base": "software-provider-envelope-v2",
+      "mutation": "generation-not-held",
+      "blob": "010300000005a0a1a2a3a4a5a6a7a8a9aaab8904759447718b18aa1649fe0240b7793ce1f3c6085a0519096a591993c0e571e93af04807d8d91583b5be52e9a256d1",
+      "expect": "ErrSealedAuthentication"
+    },
+    {
+      "name": "software-provider-envelope-v2-flip-last-tag-byte",
+      "file": "software-provider.json",
+      "base": "software-provider-envelope-v2",
+      "mutation": "flip-last-tag-byte",
+      "blob": "010300000000a0a1a2a3a4a5a6a7a8a9aaab8904759447718b18aa1649fe0240b7793ce1f3c6085a0519096a591993c0e571dba8c4e12dbbdc0f86bdc840cfdccf1f",
+      "expect": "ErrSealedAuthentication"
+    },
+    {
+      "name": "software-provider-envelope-v2-truncate-to-5-bytes",
+      "file": "software-provider.json",
+      "base": "software-provider-envelope-v2",
+      "mutation": "truncate-to-5-bytes",
+      "blob": "0103000000",
+      "expect": "ErrSealedAuthentication"
+    },
+    {
+      "name": "root-key-envelope-v2-header-version-2",
+      "file": "root-key.json",
+      "base": "root-key-envelope-v2",
+      "mutation": "header-version-2",
+      "blob": "020100000102a0a1a2a3a4a5a6a7a8a9aaabb7ee645c868efa4a11062b95e5d15e999f6687b4981af35a9aa594e195bf0087231c73829c7d9609658b1ec8ddb9ea88",
+      "expect": "ErrSealedAuthentication"
+    },
+    {
+      "name": "root-key-envelope-v2-kind-2",
+      "file": "root-key.json",
+      "base": "root-key-envelope-v2",
+      "mutation": "kind-2",
+      "blob": "010200000102a0a1a2a3a4a5a6a7a8a9aaabb7ee645c868efa4a11062b95e5d15e999f6687b4981af35a9aa594e195bf0087387af159f3f0420729585b4201aacb5b",
+      "expect": "ErrSealedAuthentication"
+    },
+    {
+      "name": "root-key-envelope-v2-kind-3",
+      "file": "root-key.json",
+      "base": "root-key-envelope-v2",
+      "mutation": "kind-3",
+      "blob": "010300000102a0a1a2a3a4a5a6a7a8a9aaabb7ee645c868efa4a11062b95e5d15e999f6687b4981af35a9aa594e195bf008751f45d8b684e878ea5105d87bda2cdbd",
+      "expect": "ErrSealedAuthentication"
+    },
+    {
+      "name": "root-key-envelope-v2-generation-not-held",
+      "file": "root-key.json",
+      "base": "root-key-envelope-v2",
+      "mutation": "generation-not-held",
+      "blob": "010100000107a0a1a2a3a4a5a6a7a8a9aaabb7ee645c868efa4a11062b95e5d15e999f6687b4981af35a9aa594e195bf0087fb47408bec87130548c583a378dadda2",
+      "expect": "ErrSealedAuthentication"
+    },
+    {
+      "name": "root-key-envelope-v2-flip-last-tag-byte",
+      "file": "root-key.json",
+      "base": "root-key-envelope-v2",
+      "mutation": "flip-last-tag-byte",
+      "blob": "010100000102a0a1a2a3a4a5a6a7a8a9aaabb7ee645c868efa4a11062b95e5d15e999f6687b4981af35a9aa594e195bf008782e9042e5f330c9dbd80500cc5b2c070",
+      "expect": "ErrSealedAuthentication"
+    },
+    {
+      "name": "root-key-envelope-v2-truncate-to-5-bytes",
+      "file": "root-key.json",
+      "base": "root-key-envelope-v2",
+      "mutation": "truncate-to-5-bytes",
+      "blob": "0101000001",
+      "expect": "ErrSealedAuthentication"
+    }
+  ]
+}
