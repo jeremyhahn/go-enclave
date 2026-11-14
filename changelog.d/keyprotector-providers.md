@@ -7,3 +7,4 @@
 
 - **keyprotector-providers**: `backends/tpm`: a response to an authorized command with bytes after its authorization area is now refused as malformed instead of accepted (#346).
 - **keyprotector-providers**: `backends/tpm`: listing the device's handles takes each handle once, in ascending order, so a device that repeats a page can no longer list the same handle many times over (#346).
+- **keyprotector-providers**: `backends/tpm`: `DeviceError.Error()` and `CommandError.Error()` no longer panic on a value with a nil `Err`; the message keeps its `tpm: ` prefix and omits the cause (#371).
