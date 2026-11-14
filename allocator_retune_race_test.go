@@ -191,11 +191,14 @@ func TestAllocator_RetuneRace_AdmissionsDestroysAndTransfers(t *testing.T) {
 
 	waitBounded(t, &wg, 60*time.Second, "retune race")
 
-	// The race may or may not refuse an admission; force one on each side so
-	// the refusal path is always exercised, and leave the limit as it was.
+	// Every racing attempt may legitimately be refused, so a correct
+	// allocator need not admit, refuse, lower or transfer during the race.
+	// With every enclave destroyed, a quiet phase does each once, leaving
+	// each limit as it was.
 	for _, s := range sides {
 		forceRetuneRaceRefusal(t, s.a, &counts)
 	}
+	forceRetuneRaceTransfers(t, sides[0].a, sides[1].a, &counts)
 
 	for name, n := range map[string]int64{
 		"admission": counts.admitted.Load(), "refusal": counts.refused.Load(),
@@ -219,15 +222,21 @@ func TestAllocator_RetuneRace_AdmissionsDestroysAndTransfers(t *testing.T) {
 	}
 }
 
-// forceRetuneRaceRefusal lowers a's limit to one page, fills it with a
+// forceRetuneRaceRefusal raises a's limit by a page, lowers it to one page
+// (a SetLimit lowering that cannot be refused), fills it with a
 // one-page enclave, checks that a second admission is refused with a
 // *BudgetError, and restores the limit. a must have no live enclaves.
 func forceRetuneRaceRefusal(t *testing.T, a *budgetAllocator, counts *retuneRaceCounts) {
 	t.Helper()
 	old := a.Limit()
+	// Raise by a page first, so the lowering to one page always lowers.
+	if err := a.SetLimit(old + pageSize); err != nil {
+		t.Fatalf("SetLimit(%d) raise err = %v", old+pageSize, err)
+	}
 	if err := a.SetLimit(pageSize); err != nil {
 		t.Fatalf("SetLimit(%d) err = %v", pageSize, err)
 	}
+	counts.lowerings.Add(1)
 	defer func() {
 		if err := a.SetLimit(old); err != nil {
 			t.Errorf("SetLimit(%d) restore err = %v", old, err)
@@ -237,6 +246,7 @@ func forceRetuneRaceRefusal(t *testing.T, a *budgetAllocator, counts *retuneRace
 	if err != nil {
 		t.Fatalf("admitSized into an empty one-page budget err = %v", err)
 	}
+	counts.admitted.Add(1)
 	defer held.Destroy()
 	e, err := a.admitData(material())
 	if err == nil {
@@ -248,4 +258,16 @@ func forceRetuneRaceRefusal(t *testing.T, a *budgetAllocator, counts *retuneRace
 		t.Fatalf("refused admission err = %v, want a *BudgetError", err)
 	}
 	counts.refused.Add(1)
+}
+
+// forceRetuneRaceTransfers moves one page from a to b and back. Both must have
+// no live enclaves and a limit of at least one page, so neither is refused.
+func forceRetuneRaceTransfers(t *testing.T, a, b *budgetAllocator, counts *retuneRaceCounts) {
+	t.Helper()
+	for _, p := range [][2]*budgetAllocator{{a, b}, {b, a}} {
+		if err := p[0].TransferTo(p[1], pageSize); err != nil {
+			t.Fatalf("TransferTo(%d) with an empty budget err = %v", pageSize, err)
+		}
+		counts.transfers.Add(1)
+	}
 }
