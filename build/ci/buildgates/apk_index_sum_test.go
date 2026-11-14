@@ -65,7 +65,7 @@ func (r apkRun) images(t *testing.T) []string {
 func runApkIndexSum(t *testing.T, dir, fixture string, env map[string]string, args ...string) apkRun {
 	t.Helper()
 	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skip("bash not installed")
+		t.Fatalf("bash is required to run scripts/apk-index-sum.sh: %v", err)
 	}
 	bin := t.TempDir()
 	writeExecutable(t, filepath.Join(bin, "docker"), []byte(fakeDockerScript))
