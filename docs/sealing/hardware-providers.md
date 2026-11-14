@@ -1,6 +1,6 @@
 # Hardware KeyProtector providers — design
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-11-10
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-11-14
 > Conflicts with this document are defects. The TPM provider ships in [`backends/tpm`](../../backends/tpm): the code is canonical for it, and this document is fixed to match. The secure-element provider is not shipped; it will implement the outline below once its open questions are answered.
 > The design of the TPM and secure-element providers behind the [`KeyProtector` seam](engineering.md#provider-contract). The TPM provider is shipped; the secure-element provider is an outline with its open questions.
 
@@ -75,8 +75,19 @@ the [TCG EK Credential Profile](../reference/TCG_EK_Credential_Profile_for_TPM_F
 | unique.x | SHA-256 of the label `go-enclave v1 TPM KeyProtector` (32 bytes) |
 | unique.y | 32 zero bytes |
 
-The only departure from the standard storage template is `unique.x`, which
-carries the label (see [Associated data](#associated-data)). A primary key is
+It departs from Template L-2 in its authorization and in `unique.x`:
+
+| Field | Template L-2 | `storageTemplate` |
+| --- | --- | --- |
+| `userWithAuth` | clear: use needs a policy session | set: the hierarchy's empty auth value authorizes use |
+| `adminWithPolicy` | set | clear |
+| `noDA` | clear | set: a failed authorization never counts toward dictionary-attack lockout |
+| authPolicy | the profile's policy digest | empty |
+| unique.x | the profile's value | the label (see [Associated data](#associated-data)) |
+
+The provider authorizes the parent with its empty auth value and no policy
+session, which Template L-2's policy-only authorization does not allow, so a
+key derived from Template L-2 itself is not the parent. A primary key is
 derived from the hierarchy's seed and its template, so the same template
 yields the same parent on every call, in every process and across reboots.
 No persistent handle is written: the provider changes no TPM state and needs

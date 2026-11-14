@@ -1,6 +1,6 @@
 # Reference standards
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-11-12
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-11-14
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 Standards first: where a standard exists, go-enclave implements it as written
@@ -25,7 +25,7 @@ header carries Linaro's BSD-2-Clause notice, which it keeps.
 | [TCG_TPM2_r1p59_Part1_Architecture_pub.pdf](TCG_TPM2_r1p59_Part1_Architecture_pub.pdf) | Trusted Platform Module Library, Part 1: Architecture | Family 2.0, Level 00, Revision 01.59, November 2019 (see [TCG TPM 2.0](#tcg-tpm-20)); sha256 `18e393ef8f61d4c5deebb578cc4220b025fdaff2c28a7e3264f16e37796c3d9b` | `tpm`: the salted, parameter-encrypted session in `startSession` ([protector.go](../../backends/tpm/protector.go)) and the `KDFa` and CFB parameter encryption it relies on |
 | [TCG_TPM2_r1p59_Part2_Structures_pub.pdf](TCG_TPM2_r1p59_Part2_Structures_pub.pdf) | Trusted Platform Module Library, Part 2: Structures | Family 2.0, Level 00, Revision 01.59, November 2019; sha256 `95b27445c8a3302bffaf0eed0e729f228698d0296a91161f51320fbe4d7c5121` | `tpm`: `TPMT_PUBLIC` in `parentTemplate`, `storageTemplate` ([blob.go](../../backends/tpm/blob.go)); the format-one response codes the error mapping reads |
 | [TCG_TPM2_r1p59_Part3_Commands_pub.pdf](TCG_TPM2_r1p59_Part3_Commands_pub.pdf) | Trusted Platform Module Library, Part 3: Commands | Family 2.0, Level 00, Revision 01.59, November 2019; sha256 `d2e5e7187574d383b00ff966c33b30a96e3f5165cbfae20a4d094e5794f3b9bb` | `tpm`: `TPM2_Create` in `create` and `TPM2_Unseal` in `unseal` ([unseal.go](../../backends/tpm/unseal.go)), marshaled by the provider; `TPM2_CreatePrimary`, `TPM2_StartAuthSession`, `TPM2_Load`, `TPM2_FlushContext` in `createPrimary`, `startSession`, `load`, `flush` ([protector.go](../../backends/tpm/protector.go)) |
-| [TCG_EK_Credential_Profile_for_TPM_Family_2_0_Level_0_Version_2_7_Pub.pdf](TCG_EK_Credential_Profile_for_TPM_Family_2_0_Level_0_Version_2_7_Pub.pdf) | TCG EK Credential Profile for TPM Family 2.0; Level 0 | Version 2.7, March 16, 2026 (see [TCG TPM 2.0](#tcg-tpm-20)); sha256 `b021106be50d5f391064ef702ca5f98249b614a90f2672931f45b79b2f441c2f` | `tpm`: the parent's template in `parentTemplate` and `storageTemplate` ([blob.go](../../backends/tpm/blob.go)), §5.3.4 Template L-2: ECC NIST P256 (Storage), with `unique.x` set from the label |
+| [TCG_EK_Credential_Profile_for_TPM_Family_2_0_Level_0_Version_2_7_Pub.pdf](TCG_EK_Credential_Profile_for_TPM_Family_2_0_Level_0_Version_2_7_Pub.pdf) | TCG EK Credential Profile for TPM Family 2.0; Level 0 | Version 2.7, March 16, 2026 (see [TCG TPM 2.0](#tcg-tpm-20)); sha256 `b021106be50d5f391064ef702ca5f98249b614a90f2672931f45b79b2f441c2f` | `tpm`: the parent's template in `parentTemplate` and `storageTemplate` ([blob.go](../../backends/tpm/blob.go)), §5.3.4 Template L-2: ECC NIST P256 (Storage), except that `userWithAuth` and `noDA` are set, `adminWithPolicy` is clear, `authPolicy` is empty and `unique.x` is set from the label ([hardware-providers.md](../sealing/hardware-providers.md#parent)) |
 
 ## TCG TPM 2.0
 
