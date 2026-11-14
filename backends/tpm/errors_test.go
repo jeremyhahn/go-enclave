@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"testing"
 
 	"github.com/google/go-tpm/tpm2"
@@ -128,6 +129,134 @@ func TestErrors_Match(t *testing.T) {
 	for _, c := range cases {
 		if !errors.Is(c.err, c.target) || c.err.Error() == "" {
 			t.Errorf("%T does not match %v", c.err, c.target)
+		}
+	}
+}
+
+// TestErrors_Contract pins each error type's exact text, the one sentinel
+// it matches, and that errors.As finds it through a %w wrap.
+func TestErrors_Contract(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		text string
+		is   error
+		as   func(error) bool
+	}{
+		{
+			name: "PlatformError",
+			err:  &PlatformError{GOOS: "plan9"},
+			text: `tpm: the TPM provider is not available on this platform: "plan9"`,
+			is:   ErrUnsupportedPlatform,
+			as:   func(err error) bool { var e *PlatformError; return errors.As(err, &e) && e.GOOS == "plan9" },
+		},
+		{
+			name: "DeviceError",
+			err:  &DeviceError{Path: "/dev/tpmrm0", Op: "open", Err: os.ErrNotExist},
+			text: `tpm: the TPM device is unavailable: open "/dev/tpmrm0": file does not exist`,
+			is:   ErrDeviceUnavailable,
+			as:   func(err error) bool { var e *DeviceError; return errors.As(err, &e) && e.Op == "open" },
+		},
+		{
+			name: "CommandError",
+			err:  &CommandError{Command: "TPM2_Create", Err: os.ErrNotExist},
+			text: "tpm: a TPM command failed: TPM2_Create: file does not exist",
+			is:   ErrCommandFailed,
+			as:   func(err error) bool { var e *CommandError; return errors.As(err, &e) && e.Command == "TPM2_Create" },
+		},
+		{
+			name: "KeySizeError",
+			err:  &KeySizeError{Len: 129},
+			text: "tpm: a sealed key must be 1 to 128 bytes: got 129",
+			is:   ErrKeySize,
+			as:   func(err error) bool { var e *KeySizeError; return errors.As(err, &e) && e.Len == 129 },
+		},
+		{
+			name: "authError",
+			err:  &authError{reason: "TPM2_Unseal refused the blob", err: os.ErrNotExist},
+			text: enclave.ErrSealedAuthentication.Error() + ": tpm: TPM2_Unseal refused the blob: file does not exist",
+			is:   enclave.ErrSealedAuthentication,
+			as:   func(err error) bool { var e *authError; return errors.As(err, &e) && e.reason != "" },
+		},
+		{
+			name: "authError without cause",
+			err:  &authError{reason: "x"},
+			text: enclave.ErrSealedAuthentication.Error() + ": tpm: x",
+			is:   enclave.ErrSealedAuthentication,
+			as:   func(err error) bool { var e *authError; return errors.As(err, &e) && e.err == nil },
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := c.err.Error(); got != c.text {
+				t.Errorf("Error() = %q, want %q", got, c.text)
+			}
+			wrapped := fmt.Errorf("outer: %w", c.err)
+			for _, s := range allSentinels() {
+				want := s == c.is
+				if got := errors.Is(c.err, s); got != want {
+					t.Errorf("errors.Is(err, %q) = %v, want %v", s, got, want)
+				}
+				if got := errors.Is(wrapped, s); got != want {
+					t.Errorf("errors.Is(wrapped, %q) = %v, want %v", s, got, want)
+				}
+			}
+			if !c.as(wrapped) {
+				t.Errorf("errors.As through %%w does not find %T", c.err)
+			}
+		})
+	}
+}
+
+// TestErrors_Unwrap checks that each wrapping type returns its cause and
+// that errors.Is reaches the cause through it.
+func TestErrors_Unwrap(t *testing.T) {
+	cases := []struct {
+		name  string
+		err   interface{ Unwrap() error }
+		cause error
+	}{
+		{"DeviceError", &DeviceError{Path: "/dev/tpmrm0", Op: "read", Err: os.ErrNotExist}, os.ErrNotExist},
+		{"CommandError", &CommandError{Command: "TPM2_Load", Err: os.ErrNotExist}, os.ErrNotExist},
+		{"authError", &authError{reason: "x", err: os.ErrNotExist}, os.ErrNotExist},
+		{"authError without cause", &authError{reason: "x"}, nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := c.err.Unwrap(); got != c.cause { //nolint:errorlint // identity is the contract
+				t.Errorf("Unwrap() = %v, want %v", got, c.cause)
+			}
+			err, ok := c.err.(error)
+			if !ok {
+				t.Fatalf("%T is not an error", c.err)
+			}
+			wantIs := c.cause != nil
+			if got := errors.Is(fmt.Errorf("outer: %w", err), os.ErrNotExist); got != wantIs {
+				t.Errorf("errors.Is(wrapped, os.ErrNotExist) = %v, want %v", got, wantIs)
+			}
+		})
+	}
+}
+
+// TestCommand_String names every command constant and an out-of-range value.
+func TestCommand_String(t *testing.T) {
+	cases := []struct {
+		cmd  command
+		want string
+	}{
+		{cmdCreatePrimary, "TPM2_CreatePrimary"},
+		{cmdStartAuthSession, "TPM2_StartAuthSession"},
+		{cmdCreate, "TPM2_Create"},
+		{cmdLoad, "TPM2_Load"},
+		{cmdUnseal, "TPM2_Unseal"},
+		{cmdFlushContext, "TPM2_FlushContext"},
+		{0, "command(0)"},
+		{cmdFlushContext + 1, "command(7)"},
+		{255, "command(255)"},
+	}
+	for _, c := range cases {
+		if got := c.cmd.String(); got != c.want {
+			t.Errorf("command(%d).String() = %q, want %q", uint8(c.cmd), got, c.want)
 		}
 	}
 }
