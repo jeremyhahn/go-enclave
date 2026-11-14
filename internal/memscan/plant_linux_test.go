@@ -448,7 +448,7 @@ func TestUrgDeliveredNeedsTheSignalTaken(t *testing.T) {
 	defer runtime.UnlockOSThread()
 	pid, tid := os.Getpid(), syscall.Gettid()
 	if urgPending(pid, tid) {
-		t.Skip("SIGURG is already pending on this thread, or /proc gives no SigPnd")
+		t.Fatal("SIGURG is already pending on this locked thread, or /proc gives no SigPnd: the delivery check cannot start clean")
 	}
 	const sigBlock, sigSetmask = 0, 2
 	set := uint64(1) << (uint(syscall.SIGURG) - 1)
@@ -819,12 +819,12 @@ func urgDelivered(pid, tid int) bool {
 	}
 }
 
-// requireRunEvidence skips a test whose rounds need run evidence the
+// requireRunEvidence fails a test whose rounds need run evidence the
 // kernel does not give: without schedstat no signal could count.
 func requireRunEvidence(t *testing.T) {
 	t.Helper()
 	if _, _, err := threadRun(os.Getpid(), syscall.Gettid()); err != nil {
-		t.Skipf("a signal counts only with evidence its thread was running, and this kernel gives none: %v", err)
+		t.Fatalf("a signal counts only with evidence its thread was running, and this kernel gives none (schedstat): %v", err)
 	}
 }
 
