@@ -151,7 +151,7 @@ func checkNoResidueAfterUnprotect(r *report, cfg Config) {
 		return
 	}
 	if len(after) > 0 {
-		r.fail(property, "the protected key is byte-exact resident in %d mapping(s) outside the caller's "+
+		r.fail(property, "the protected key, or a half of it, is byte-exact resident in %d mapping(s) outside the caller's "+
 			"own — with the caller's destination wiped and unmapped, so every legitimate copy is gone. The "+
 			"provider RETAINED a copy of the key, or materialized one and did not wipe it, which the seam "+
 			"requires: %q. (Instrument: this same sweep found the material while the destination was alive, "+
@@ -165,17 +165,44 @@ func checkNoResidueAfterUnprotect(r *report, cfg Config) {
 var sweepProcess = memscan.Find
 
 // sweepOutsideHome returns the mappings, other than the one containing home,
-// in which the material held in probe is byte-exact resident.
+// in which the material held in probe, or either half of it, is byte-exact
+// resident.
 func sweepOutsideHome(probe enclave.ByteAccess, home uintptr) ([]string, error) {
 	var hits []string
 	var scanErr error
 	if err := probe.WithBytes(func(needle []byte) error {
-		hits, scanErr = sweepProcess(needle, home)
+		hits, scanErr = sweepForKeyOrHalf(needle, home)
 		return nil
 	}); err != nil {
 		return nil, &stepError{step: "borrowing the needle", err: err}
 	}
 	return hits, scanErr
+}
+
+// sweepForKeyOrHalf sweeps for the whole needle and then for each half of
+// it, so a provider that keeps only part of the key is found as long as the
+// part holds either half whole. It returns each mapping once.
+func sweepForKeyOrHalf(needle []byte, home uintptr) ([]string, error) {
+	half := len(needle) / 2
+	probes := [][]byte{needle}
+	if half > 0 {
+		probes = append(probes, needle[:half], needle[half:])
+	}
+	var hits []string
+	seen := map[string]bool{}
+	for _, p := range probes {
+		found, err := sweepProcess(p, home)
+		if err != nil {
+			return nil, err
+		}
+		for _, m := range found {
+			if !seen[m] {
+				seen[m] = true
+				hits = append(hits, m)
+			}
+		}
+	}
+	return hits, nil
 }
 
 // equalBytes is written out so borrowed slices are never passed to code this
