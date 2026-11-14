@@ -365,6 +365,56 @@ func TestSignalRoundFailsAChildThatNeverCompares(t *testing.T) {
 	}
 }
 
+// A round ends on its send budget, not on the clock: a child that never
+// counts a signal fails after maxSends sends however long ctx still runs,
+// so a slow runner sends as many signals as a fast one before the verdict.
+func TestSignalRoundEndsOnItsSendBudget(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	sends := 0
+	sent, ok := signalRound(ctx, func() int { return 0 }, func() error { sends++; return nil })
+	if ok || sent != 0 {
+		t.Fatalf("a round that counted nothing returned (%d, %v), want (0, false)", sent, ok)
+	}
+	if ctx.Err() != nil {
+		t.Fatalf("the round ran until its context ended after %d sends; its budget is %d", sends, maxSends)
+	}
+	if sends != maxSends {
+		t.Fatalf("the round made %d sends, want its budget of %d", sends, maxSends)
+	}
+}
+
+// While a send is in flight, between its sendBefore and its sendAfter or
+// sendIdle, the next read of a marked search keeps the compare window
+// open: seq stays and inside stays set, so the window outlasts the
+// parent's round trip however slow the runner. Once the send is judged the
+// next read closes it, and a read at hi ends the search with no window.
+func TestMarkedReaderHoldsTheWindowWhileASendIsInFlight(t *testing.T) {
+	var st passState
+	r := markedReader{b: 0xa5, st: &st, flag: true, hi: denseSpan}
+	buf := make([]byte, denseFill+31)
+	if n, err := r.ReadAt(buf, 0); n != len(buf) || err != nil || !st.inside.Load() {
+		t.Fatalf("the first read: (%d, %v), inside %v; want a full read that opens a window", n, err, st.inside.Load())
+	}
+	at := st.seq.Load()
+	st.flight.Store(true)
+	for i := range 3 * denseSpan / denseFill { // past hi: the window must not close
+		if _, err := r.ReadAt(buf, int64(i+1)*denseFill); err != nil {
+			t.Fatalf("read %d with a send in flight: %v", i, err)
+		}
+		if st.seq.Load() != at || !st.inside.Load() {
+			t.Fatalf("read %d with a send in flight closed the window (seq %d, want %d; inside %v)", i, st.seq.Load(), at, st.inside.Load())
+		}
+	}
+	st.flight.Store(false)
+	if _, err := r.ReadAt(buf, denseFill); err != nil || st.seq.Load() == at || !st.inside.Load() {
+		t.Fatalf("the read after the send was judged: err %v, seq %d (was %d), inside %v; want a new window", err, st.seq.Load(), at, st.inside.Load())
+	}
+	if n, err := r.ReadAt(buf, denseSpan); n != 0 || !errors.Is(err, io.EOF) || st.inside.Load() {
+		t.Fatalf("a read at hi: (%d, %v), inside %v; want (0, EOF) and no window", n, err, st.inside.Load())
+	}
+}
+
 // TestSweepUnderSignalsFailsAPausedChild runs a child that compares once
 // and then stops comparing, as a thread descheduled after its first pass
 // would: it compares before its round's signals and never after, so its
@@ -617,6 +667,7 @@ func sweepRound(needle []byte, home uintptr, mode string) (hits []string, aborte
 type passState struct {
 	seq     atomic.Uint64
 	inside  atomic.Bool
+	flight  atomic.Bool
 	verdict atomic.Uint32
 }
 
@@ -834,6 +885,7 @@ const (
 	denseFill      = chunk                  // memory dense with the needle's first byte, per scan of a pass
 	denseSpan      = 16 * denseFill         // the region one search of a pass reads, a buffer at a time
 	minSignals     = 50                     // a round counts only after this many
+	maxSends       = 4 * minSignals         // a round fails once it has sent this many short of minSignals
 	signalPhase    = 50 * time.Millisecond  // of signals to the sweeping thread per round
 	signalInterval = 200 * time.Microsecond // between signals to the sweeping thread
 	ackWait        = 5 * time.Second        // for the child to take the pass state at a sendBefore
