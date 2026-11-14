@@ -1,6 +1,6 @@
 # go-enclave documentation
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-11-12
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-11-13
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 What go-enclave is and every feature it has: [SPEC](SPEC.md). What is done
@@ -24,14 +24,14 @@ compile and their test binaries link, and no test runs on them
 | memory-enclave | [user](memory-enclave/user.md) · [api](memory-enclave/api.md) · [architecture](memory-enclave/architecture.md) · [engineering](memory-enclave/engineering.md) | The memory enclave, held as a `ByteAccess`: constructors, borrowing, `Freeze` through `As`, `Destroy` and canary corruption, guard pages and canary, platform and core-dump matrix |
 | locked-memory-budget | [user](locked-memory-budget/user.md) · [api](locked-memory-budget/api.md) · [architecture](locked-memory-budget/architecture.md) · [engineering](locked-memory-budget/engineering.md) | `Allocator`, `RLIMIT_MEMLOCK` discovery, retuning, the process allocator, refunds for failed constructions |
 | sealing | [user](sealing/user.md) · [api](sealing/api.md) · [architecture](sealing/architecture.md) · [engineering](sealing/engineering.md) | `Sealed`, `Sealer` modes, the `KeyProtector`/`RootUnsealer` seam, contexts, `Openable`, FIPS, the key-schedule heap exposure and its erasure under `runtime/secret` |
-| keyprotector-providers | [hardware providers](sealing/hardware-providers.md) | The TPM 2.0 provider (`backends/tpm`) as shipped, and the outline of the secure-element (PKCS#11) provider with its open questions. Installing a hardware provider: [sealing user guide](sealing/user.md#install-a-hardware-provider) |
+| keyprotector-providers | [hardware providers](sealing/hardware-providers.md) | The TPM 2.0 provider (`backends/tpm`) as shipped, now to move to go-xkms ([key-operation API removal](SPEC.md#key-operation-api-removal)), and the earlier secure-element (PKCS#11) outline, out of scope. Installing a hardware provider: [sealing user guide](sealing/user.md#install-a-hardware-provider) |
 | shutdown-sweep | [user](shutdown-sweep/user.md) · [api](shutdown-sweep/api.md) · [architecture](shutdown-sweep/architecture.md) · [engineering](shutdown-sweep/engineering.md) | `WipeAll(ctx)`: admission, waiting for borrows, termination, the count and `SweepError` |
 | provider-conformance | [user](provider-conformance/user.md) · [api](provider-conformance/api.md) · [architecture](provider-conformance/architecture.md) · [engineering](provider-conformance/engineering.md) | `providertest.TestProvider(ctx, cfg)` for `KeyProtector` and `RootUnsealer` authors |
 | backends | [user](backends/user.md) · [api](backends/api.md) · [architecture](backends/architecture.md) · [engineering](backends/engineering.md) | The backend seam: `Handle`, `Backend`, capabilities, the named registry, `As`, the sealing wiring (`WithBackend`, `OpenIn`, `SealFrom`) |
 | backend-conformance | [user](backend-conformance/user.md) · [api](backend-conformance/api.md) · [architecture](backend-conformance/architecture.md) · [engineering](backend-conformance/engineering.md) | `backendtest`: the conformance suite for `Backend` and `Handle` authors |
 | backend-detection | [user](backend-detection/user.md) · [api](backend-detection/api.md) · [architecture](backend-detection/architecture.md) · [engineering](backend-detection/engineering.md) | `Detect(ctx)`: the `Prober` rank and probe, selecting the most secure usable registered backend with locked memory as the floor, and why each other was passed over |
 | linux-secretmem | [user](linux-secretmem/user.md) · [api](linux-secretmem/api.md) · [architecture](linux-secretmem/architecture.md) · [engineering](linux-secretmem/engineering.md) | `NewSecretMemory`: a Linux-only backend of rank 1 on `memfd_secret(2)` memory, out of the kernel direct map; what it adds over the memory enclave, kernel requirements, its probe and failure modes. Also covers open-in-secretmem |
-| arm-trustzone | [design](backends/arm-trustzone-design.md) · [user](backends/user.md#arm-trustzone) · [engineering](backends/engineering.md#arm-trustzone) | The backend over OP-TEE in the nested module `backends/armtrustzone`, and its `KeyProtector` |
+| arm-trustzone | [design](backends/arm-trustzone-design.md) · [user](backends/user.md#arm-trustzone) · [engineering](backends/engineering.md#arm-trustzone) | The secure-world memory backend over OP-TEE in the nested module `backends/armtrustzone`, the only hardware backend, and its `KeyProtector` (to move to go-xkms) |
 
 ### Nested modules
 
@@ -42,10 +42,13 @@ Each is its own Go module and requires the root module, never the reverse.
 | `github.com/jeremyhahn/go-enclave/backends/tpm` | [pkg.go.dev](https://pkg.go.dev/github.com/jeremyhahn/go-enclave/backends/tpm), [hardware providers](sealing/hardware-providers.md#tpm-provider) |
 | `github.com/jeremyhahn/go-enclave/backends/armtrustzone` | [pkg.go.dev](https://pkg.go.dev/github.com/jeremyhahn/go-enclave/backends/armtrustzone), [arm-trustzone design](backends/arm-trustzone-design.md) |
 
-### Backend proposals
+### Withdrawn proposals
 
-Designs for future features. None is implemented; each is a starting point for
-its [ROADMAP](../ROADMAP.md#future) row.
+Designs for features the [SPEC scope](SPEC.md#scope) has since removed: their
+platforms hold keys or attest, which belong to go-xkms, or run the process
+inside the protected environment, which the
+[confiner](../ROADMAP.md#future) row now covers. Kept for reference; none is
+implemented.
 
 | Proposal | What it covers |
 |---|---|
@@ -69,6 +72,16 @@ MINOR bump, and its [CHANGELOG.md](../CHANGELOG.md) entry is marked
 describes its release under the names that release shipped.
 
 ### Unreleased (from v0.11)
+
+#### Key-operation API removal (planned)
+
+**Nothing to change yet.** The key-operation API is to be removed from
+go-enclave: the hardware `KeyProtector` providers (`backends/tpm` and
+`(*armtrustzone.Backend).KeyProtector`) and attestation (`Attester`,
+`Evidence`). Keys, key operations and attestation belong to
+[go-xkms](https://github.com/jeremyhahn/go-xkms), and callers of these APIs
+move there ([SPEC scope](SPEC.md#scope)). This release changes no code; the
+release that removes each API adds its migration steps here.
 
 #### Go version
 
