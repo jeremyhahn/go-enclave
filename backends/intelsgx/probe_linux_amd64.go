@@ -10,8 +10,28 @@ import (
 
 // attestationDir is Gramine's attestation pseudo-filesystem, present inside
 // the enclave only. The backend reaches SGX through it alone (open question
-// Q3, recommended option).
-const attestationDir = "/dev/attestation"
+// Q3, recommended option). It is a variable, with writeReportData and
+// readQuote, only so the package's tests can stand in for the pseudo-files.
+var attestationDir = "/dev/attestation"
+
+// writeReportData writes the report data to Gramine's user_report_data
+// pseudo-file. O_WRONLY without O_CREATE: the pseudo-file exists in an
+// enclave, and nothing is ever created outside one.
+var writeReportData = func(name string, data []byte) error {
+	f, err := os.OpenFile(name, os.O_WRONLY, 0)
+	if err != nil {
+		return err
+	}
+	_, err = f.Write(data)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	return err
+}
+
+// readQuote reads the quote pseudo-file, which Gramine fills over the report
+// data last written.
+var readQuote = os.ReadFile
 
 // attestationMu serializes the backend's writes to user_report_data and reads
 // of quote: the files are per process, so two writers in one process race.
@@ -104,22 +124,22 @@ func quoteOver(ctx context.Context, reportData []byte) ([]byte, error) {
 		return nil, err
 	}
 	defer unlockAttestation()
-	// O_WRONLY without O_CREATE: the pseudo-file exists in an enclave, and
-	// nothing is ever created outside one.
-	f, err := os.OpenFile(attestationDir+"/user_report_data", os.O_WRONLY, 0)
-	if err != nil {
+	if err := writeReportData(attestationDir+"/user_report_data", reportData); err != nil {
 		return nil, &SGXQuoteError{Op: "user_report_data", Cause: err}
 	}
-	_, err = f.Write(reportData)
-	if cerr := f.Close(); err == nil {
-		err = cerr
+	// The pseudo-file I/O cannot be interrupted, so cancellation is checked
+	// between the operations and after the last: a context that ended during
+	// the write starts no quote request, and one that ended during the read
+	// returns ctx.Err() and not the quote.
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
-	if err != nil {
-		return nil, &SGXQuoteError{Op: "user_report_data", Cause: err}
-	}
-	quote, err := os.ReadFile(attestationDir + "/quote")
+	quote, err := readQuote(attestationDir + "/quote")
 	if err != nil {
 		return nil, &SGXQuoteError{Op: opQuote, Cause: err}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	return quote, nil
 }
