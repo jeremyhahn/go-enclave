@@ -10,11 +10,13 @@ package memscan
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"io"
 	"math"
 	"os"
 	"strings"
+	"syscall"
 )
 
 // Supported reports that this platform can sweep its own address space.
@@ -40,8 +42,9 @@ var (
 //
 // It fails closed: a swept mapping it cannot read returns an
 // *UnreadableMappingError (ErrUnreadableMapping), and a sweep that read nothing
-// returns ErrEmptySweep. Only the kernel's own [vvar] and [vsyscall] regions
-// are excused. Callers must not discard these errors.
+// returns ErrEmptySweep. Only the kernel's own [vvar] and [vsyscall] regions,
+// and guard pages that /proc/self/pagemap reports as guard regions, are
+// excused. Callers must not discard these errors.
 //
 // It needs an unfiltered /proc that lets a process read its own
 // /proc/self/maps and /proc/self/mem; a caller fails rather than skips without
@@ -61,7 +64,14 @@ func Find(needle []byte, home uintptr) ([]string, error) {
 		return nil, err
 	}
 	defer func() { _ = mem.Close() }()
-	return find(string(maps), mem, needle, home, make([]byte, chunk+len(needle)-1))
+	proc := procMem{mem: mem, pageSize: uintptr(os.Getpagesize())}
+	if pagemap, err := os.Open("/proc/self/pagemap"); err != nil {
+		proc.pagemapErr = err
+	} else {
+		defer func() { _ = pagemap.Close() }()
+		proc.pagemap = pagemap
+	}
+	return find(string(maps), proc, needle, home, make([]byte, chunk+len(needle)-1))
 }
 
 // find is Find over a maps listing and the memory it describes, reading
@@ -70,8 +80,9 @@ func Find(needle []byte, home uintptr) ([]string, error) {
 //
 // It fails closed. A swept mapping that cannot be read in full returns an
 // *UnreadableMappingError (ErrUnreadableMapping), and a sweep that read no
-// mapping returns ErrEmptySweep, so neither can pass as a clean result. The one
-// excuse is a kernelMapping, which holds no process data. A home mapping is
+// mapping returns ErrEmptySweep, so neither can pass as a clean result. The
+// excuses are a kernelMapping and a guard page inside a mapping (see
+// skipGuard), neither of which holds process data. A home mapping is
 // excluded without being read, and does not count as read.
 func find(maps string, mem io.ReaderAt, needle []byte, home uintptr, buf []byte) ([]string, error) {
 	var hits []string
@@ -124,7 +135,8 @@ func kernelMapping(path string) bool {
 // mappingContains reports whether the region [lo, hi) of mem contains needle,
 // reading it through the caller's scratch buffer. A region it could not read
 // in full, because a read failed or made no progress, is an error rather than
-// a miss; a match found before the failure is still a match.
+// a miss; a match found before the failure is still a match. The one failure
+// it steps over is a kernel guard region (see skipGuard).
 //
 // It wipes buf before returning. Otherwise buf carries a copy of the needle
 // into the scan of a later mapping, possibly the one buf lives in, and the
@@ -157,7 +169,14 @@ func mappingContains(mem io.ReaderAt, lo, hi uintptr, needle, buf []byte) (bool,
 			return false, nil
 		}
 		if rerr != nil {
-			return false, rerr
+			// A guard page holds no data and can hold no needle, so the
+			// scan restarts after it with no overlap.
+			end, err := skipGuard(mem, off+uintptr(read), rerr)
+			if err != nil {
+				return false, err
+			}
+			off = end
+			continue
 		}
 		if read <= overlap {
 			return false, errNoProgress
@@ -165,6 +184,72 @@ func mappingContains(mem io.ReaderAt, lo, hi uintptr, needle, buf []byte) (bool,
 		off += uintptr(read - overlap)
 	}
 	return false, nil
+}
+
+// pmGuardRegion is PM_GUARD_REGION, bit 58 of a /proc/self/pagemap entry: the
+// page is a guard region installed with madvise(MADV_GUARD_INSTALL) (Linux
+// 6.15 and later report it). A guard page has no backing page and holds no
+// data; a read of it through /proc/self/mem fails with EIO.
+const pmGuardRegion = 1 << 58
+
+// guardPages is a memory reader that can say whether a page is a guard
+// region. procMem is the one Find uses.
+type guardPages interface {
+	io.ReaderAt
+	// guardRegion reports whether the page holding addr is a guard region,
+	// and the address where that page ends.
+	guardRegion(addr uintptr) (end uintptr, guard bool, err error)
+}
+
+// procMem reads /proc/self/mem and looks up pages in /proc/self/pagemap. A
+// pagemap that could not be opened is kept as pagemapErr, so the sweep fails
+// only if it meets a page it must ask about.
+type procMem struct {
+	mem        io.ReaderAt
+	pagemap    io.ReaderAt
+	pagemapErr error
+	pageSize   uintptr
+}
+
+func (p procMem) ReadAt(b []byte, off int64) (int, error) { return p.mem.ReadAt(b, off) }
+
+// guardRegion reads the 64-bit, native-endian pagemap entry of the page
+// holding addr, at offset (addr / page size) * 8.
+func (p procMem) guardRegion(addr uintptr) (uintptr, bool, error) {
+	if p.pagemapErr != nil {
+		return 0, false, p.pagemapErr
+	}
+	page := addr / p.pageSize
+	var entry [8]byte
+	if _, err := p.pagemap.ReadAt(entry[:], int64(page)*8); err != nil { //nolint:gosec // page is addr/pageSize, far below math.MaxInt64/8
+		return 0, false, err
+	}
+	return (page + 1) * p.pageSize, binary.NativeEndian.Uint64(entry[:])&pmGuardRegion != 0, nil
+}
+
+// skipGuard decides whether a read that failed at addr with rerr may step
+// over the page holding addr, and returns where that page ends. Only EIO on
+// a page the pagemap marks PM_GUARD_REGION qualifies: any other error, a
+// reader with no pagemap, a pagemap that cannot be read, or an entry without
+// the bit returns the read failure (joined with the pagemap's, if any), so
+// the sweep stays fail-closed.
+//
+// The failing page is the one at addr because ReadAt reports the bytes it
+// read before the failure: /proc/self/mem copies page by page and stops at
+// the first page it cannot read, and os.File.ReadAt returns that count.
+func skipGuard(mem io.ReaderAt, addr uintptr, rerr error) (uintptr, error) {
+	g, ok := mem.(guardPages)
+	if !ok || !errors.Is(rerr, syscall.EIO) {
+		return 0, rerr
+	}
+	end, guard, err := g.guardRegion(addr)
+	if err != nil {
+		return 0, errors.Join(rerr, err)
+	}
+	if !guard || end <= addr {
+		return 0, rerr
+	}
+	return end, nil
 }
 
 // contains reports whether hay holds needle without ever holding more than
