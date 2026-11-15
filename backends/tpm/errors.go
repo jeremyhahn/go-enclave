@@ -43,11 +43,7 @@ type DeviceError struct {
 
 // Error implements error.
 func (e *DeviceError) Error() string {
-	s := ErrDeviceUnavailable.Error() + ": " + e.Op + " " + strconv.Quote(e.Path)
-	if e.Err != nil {
-		s += ": " + e.Err.Error()
-	}
-	return s
+	return ErrDeviceUnavailable.Error() + ": " + e.Op + " " + strconv.Quote(e.Path) + ": " + e.Err.Error()
 }
 
 // Is reports whether target is [ErrDeviceUnavailable].
@@ -72,11 +68,7 @@ type CommandError struct {
 
 // Error implements error.
 func (e *CommandError) Error() string {
-	s := ErrCommandFailed.Error() + ": " + e.Command
-	if e.Err != nil {
-		s += ": " + e.Err.Error()
-	}
-	return s
+	return ErrCommandFailed.Error() + ": " + e.Command + ": " + e.Err.Error()
 }
 
 // Is reports whether target is [ErrCommandFailed].
