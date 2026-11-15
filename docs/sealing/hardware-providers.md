@@ -401,10 +401,13 @@ The interrupted call returns an error matching `ctx.Err()` either way.
 
 ## Secure-element provider (outline)
 
-A PKCS#11 provider in its own module, `backends/pkcs11` (module path
-`github.com/jeremyhahn/go-enclave/backends/pkcs11`), so the root module
-gains no dependency. Nothing here is decided beyond the shape; the
-[open questions](#open-questions) must be answered before it is built.
+A PKCS#11 provider, proposed for
+[go-xkms](https://github.com/jeremyhahn/go-xkms), not go-enclave: keys on a
+secure element belong to go-xkms only ([SPEC scope](../SPEC.md#scope)), and
+go-enclave ships no hardware key-protector provider. go-enclave gains no
+module, dependency or code for it. Nothing here is decided beyond the shape;
+the [open questions](#open-questions) must be answered before go-xkms builds
+it.
 
 - **Key:** one AES-256 secret key in the token, `CKA_TOKEN`, `CKA_SENSITIVE`,
   `CKA_ENCRYPT` and `CKA_DECRYPT` true, `CKA_EXTRACTABLE` false, found by its
@@ -505,18 +508,16 @@ gains no dependency. Nothing here is decided beyond the shape; the
    [TPM 2.0 Part 3](../reference/TCG_TPM2_r1p59_Part3_Commands_pub.pdf)
    (`TPM2_Create`) requires when the caller supplies the sealed data.
 8. **Secure element: cgo.** A PKCS#11 binding loads a C library: the common
-   Go bindings need cgo, and go-enclave builds without it today. Options: a
-   cgo binding in the nested module only; a pure-Go loader; or a separate
-   helper process. Open.
+   Go bindings need cgo. Options: a cgo binding confined to the provider's
+   module; a pure-Go loader; or a separate helper process. Open.
 
-   Proposed answer (for owner sign-off): a pure-Go loader in the nested
-   module `backends/pkcs11` only, so the provider builds with
-   `CGO_ENABLED=0` as `backends/armtrustzone` does and the root module
-   gains nothing; a helper process is rejected because the key would cross
-   an IPC boundary the provider does not control, and a cgo binding would
-   bring a C toolchain into the static and cross builds. Whether a
-   third-party pure-Go loader dependency is preferable to cgo confined to
-   the nested module is the owner's taste.
+   Proposed answer (for owner sign-off): a pure-Go loader in go-xkms, in
+   the provider's own package, so the provider builds with `CGO_ENABLED=0`
+   and go-enclave gains nothing; a helper process is rejected because the
+   key would cross an IPC boundary the provider does not control, and a cgo
+   binding would bring a C toolchain into the static and cross builds.
+   Whether a third-party pure-Go loader dependency is preferable to cgo
+   confined to that package is the owner's taste.
 9. **Secure element: test fixture.** SoftHSM in a CI fixture job, as `swtpm`
    for the TPM, is the obvious choice; whether its GCM behaviour matches the
    tokens the provider targets is not established. Open.
