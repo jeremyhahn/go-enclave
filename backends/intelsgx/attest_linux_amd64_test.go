@@ -29,6 +29,9 @@ func fakeAttestation(t *testing.T) string {
 	oldDir, oldWrite, oldRead := attestationDir, writeReportData, readQuote
 	t.Cleanup(func() { attestationDir, writeReportData, readQuote = oldDir, oldWrite, oldRead })
 	attestationDir = dir
+	writeReportData = func(data []byte) error {
+		return os.WriteFile(filepath.Join(dir, "user_report_data"), data, 0o600)
+	}
 	readQuote = func(string) ([]byte, error) {
 		rd, err := os.ReadFile(filepath.Join(dir, "user_report_data"))
 		if err != nil {
@@ -114,8 +117,8 @@ func TestAttestEndedDuringReportDataWriteRequestsNoQuote(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	write := writeReportData
-	writeReportData = func(name string, data []byte) error {
-		err := write(name, data)
+	writeReportData = func(data []byte) error {
+		err := write(data)
 		cancel()
 		return err
 	}
@@ -166,5 +169,11 @@ func TestAttestWritesPaddedNonceAsReportData(t *testing.T) {
 	}
 	if !bytes.Equal(got, want) {
 		t.Fatalf("user_report_data = %x, want %x", got, want)
+	}
+}
+
+func TestUserReportDataPathIsInAttestationDir(t *testing.T) {
+	if want := attestationDir + "/user_report_data"; userReportDataPath != want {
+		t.Fatalf("userReportDataPath = %q, want %q", userReportDataPath, want)
 	}
 }

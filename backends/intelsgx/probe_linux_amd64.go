@@ -14,11 +14,15 @@ import (
 // readQuote, only so the package's tests can stand in for the pseudo-files.
 var attestationDir = "/dev/attestation"
 
+// userReportDataPath is Gramine's user_report_data pseudo-file. The real
+// writer opens this constant and nothing else.
+const userReportDataPath = "/dev/attestation/user_report_data"
+
 // writeReportData writes the report data to Gramine's user_report_data
 // pseudo-file. O_WRONLY without O_CREATE: the pseudo-file exists in an
 // enclave, and nothing is ever created outside one.
-var writeReportData = func(name string, data []byte) error {
-	f, err := os.OpenFile(name, os.O_WRONLY, 0)
+var writeReportData = func(data []byte) error {
+	f, err := os.OpenFile(userReportDataPath, os.O_WRONLY, 0)
 	if err != nil {
 		return err
 	}
@@ -124,7 +128,7 @@ func quoteOver(ctx context.Context, reportData []byte) ([]byte, error) {
 		return nil, err
 	}
 	defer unlockAttestation()
-	if err := writeReportData(attestationDir+"/user_report_data", reportData); err != nil {
+	if err := writeReportData(reportData); err != nil {
 		return nil, &SGXQuoteError{Op: "user_report_data", Cause: err}
 	}
 	// The pseudo-file I/O cannot be interrupted, so cancellation is checked
