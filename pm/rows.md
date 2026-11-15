@@ -19,4 +19,4 @@ One SPEC row = one row issue = one branch `row/<issue>-<row>` = one lane session
 | intel-sgx | #193 | future | 0 | #353 |
 | confidential-vm | #194 | future | 1 | #352, #354 |
 
-Rows with no open work: `backends`, `enclave-interface`, `open-in-secretmem`, `imx-edgelock-enclave`.
+Rows with no open work: `backends`, `enclave-interface`, `open-in-secretmem`.
