@@ -1,0 +1,50 @@
+# Plan: shell tests for five gate scripts (#349)
+
+## Objective
+
+`scripts/swtpm-fixture.sh`, `scripts/test-runtimesecret.sh`,
+`scripts/cross-build.sh`, `scripts/lint-integration.sh` and
+`scripts/release-verify.sh` decide whether a gate passes, and nothing tests
+them. One POSIX sh test, `scripts/project-scripts_test.sh`, drives each on
+stub tools on a temporary PATH (and release-verify on a scratch git tree),
+run by `make check-project-scripts`, which `make lint-gates` runs.
+
+## Slices
+
+1. Test commit: `scripts/project-scripts_test.sh` and the Makefile target.
+   Per script:
+   - swtpm-fixture: bad, out-of-range and equal ports refused before swtpm
+     starts; missing swtpm or swtpm_ioctl; outside the repository root; the
+     exact swtpm, swtpm_ioctl poll and `go test` calls (default and custom
+     ports); a failing suite keeps its status; no answer in 30 polls; swtpm
+     exiting early; TERM during the suite. Every run that starts swtpm
+     leaves no swtpm process and no state directory.
+   - test-runtimesecret: toolchain resolved with GOEXPERIMENT unset; the six
+     selection checks with GOEXPERIMENT=runtimesecret and CGO_ENABLED=0; the
+     suite and proof calls; wrong selection on either side; failing
+     `go env`, suite and proof.
+   - cross-build: usage errors; build, vet and `test -c` per target with
+     CGO_ENABLED=0 whatever the caller sets; failure stops at the failing
+     target; the temporary output directory is removed.
+   - lint-integration: usage error; both `go list` calls per package; no
+     test files with the tag; a list failure with the tag; test files
+     without the tag.
+   - release-verify: usage and empty tag; unsafe MAIN_REF values; a tag that
+     agrees; HEAD on MAIN_REF; a tag that disagrees with VERSION; a ref that
+     names no commit; HEAD not on the ref.
+   Cases that expose a defect print `SKIP defect:` until fixed.
+2. Fix commits, one per defect, each turning its case on:
+   - cross-build passes with no target or no package (nothing is checked);
+   - lint-integration passes with no package.
+3. Changelog fragment `changelog.d/349-script-shell-tests.md`.
+
+## Where this plan lives
+
+`docs/plan-349.md`, not `docs/plans/349.md`: build/ci/buildgates requires
+every directory under docs/ other than reference/ to be a feature in
+scripts/features.map, and this change does not touch buildgates.
+
+## Out of scope
+
+`build/ci/buildgates` and the ci-template scripts in `CI_BASH_SCRIPTS`; the
+real swtpm suite (`make integration-test-tpm`) and the real toolchain runs.

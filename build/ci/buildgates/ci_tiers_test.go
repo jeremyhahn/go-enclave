@@ -143,7 +143,8 @@ var lintGatesTargets = []string{"lint-gates", "check-buildgates", "check-releasa
 // absent (DS-2281): Gitea maps every label add and remove to it, so each label
 // change started a run that canceled the PR's run in progress. A `ci:full`
 // label takes effect on the PR's next push or update-branch.
-var ciPullRequestTypes = []string{"opened", "synchronize", "reopened"}
+// `ready_for_review` runs CI when a draft is marked ready.
+var ciPullRequestTypes = []string{"opened", "synchronize", "reopened", "ready_for_review"}
 
 var (
 	// gateCheckLine is one tagged result in the gate script:
@@ -693,8 +694,10 @@ func TestCIGateTiers_RefusesWhatItMustRefuse(t *testing.T) {
 	// lintHead is the lint job's head: a PR-tier job that needs the preflight
 	// job for its guard (v1.34; the arch-gates job before), and lintIf its if.
 	const lintIf = "    if: " + guardedPRJobIf + "\n"
-	const lintHead = "    name: Lint [lint, gosec, deps-check, build tags]\n    runs-on: ubuntu-latest\n    needs: preflight   # v1.34\n" + lintIf
-	const lintNeeds = "    name: Lint [lint, gosec, deps-check, build tags]\n    runs-on: ubuntu-latest\n    needs: preflight   # v1.34\n"
+	// lintRunsOn is the lint job's runs-on line: the trusted pool.
+	const lintRunsOn = "    runs-on: " + trustedPoolRunner + "\n"
+	const lintHead = "    name: Lint [lint, gosec, deps-check, build tags]\n" + lintRunsOn + "    needs: preflight   # v1.34\n" + lintIf
+	const lintNeeds = "    name: Lint [lint, gosec, deps-check, build tags]\n" + lintRunsOn + "    needs: preflight   # v1.34\n"
 	const nightlyIf = "    if: ${{ (" + termNightly + ") && " + termRun + " }}\n"
 	const scopedIf = " && " + termScoped + " }}\n"
 	for _, tc := range []struct{ name, old, new string }{
@@ -727,7 +730,7 @@ func TestCIGateTiers_RefusesWhatItMustRefuse(t *testing.T) {
 		{"fips without the guard in needs", "    name: FIPS\n    needs: preflight   # v1.34\n", "    name: FIPS\n"},
 		{"swtpm without the guard in needs", fullIf + "    needs: preflight   # v1.34\n", fullIf + "    needs: lint\n"},
 		{"optee guarded through the image job only", "    needs: [preflight, image]   # v1.34\n", "    needs: [image]\n"},
-		{"lint without the guard in needs", lintHead, "    name: Lint [lint, gosec, deps-check, build tags]\n    runs-on: ubuntu-latest\n" + lintIf},
+		{"lint without the guard in needs", lintHead, "    name: Lint [lint, gosec, deps-check, build tags]\n" + lintRunsOn + lintIf},
 		{"lint runs a refused dispatch", lintHead, lintNeeds + "    if: " + draftIf + "\n"},
 		{"gate does not fail on a draft", gateDraftCheck, `[ "${DRAFT}" = never ]`},
 		{"gate DRAFT flag differs", "          DRAFT: " + gateDraftEnv, "          DRAFT: ${{ github.event.pull_request.draft == false }}"},
@@ -740,13 +743,13 @@ func TestCIGateTiers_RefusesWhatItMustRefuse(t *testing.T) {
 		{"full job with a looser if", fullIf, "    if: github.event_name == 'push' || github.event_name == 'pull_request'\n"},
 		{"nightly job without its if", nightlyIf, ""},
 		{"nightly job on the full tier's if", nightlyIf, fullIf},
-		{"pr job needs a full job", lintNeeds, "    name: Lint [lint, gosec, deps-check, build tags]\n    runs-on: ubuntu-latest\n    needs: [preflight, fips]\n"},
-		{"pr job needs a nightly job", lintNeeds, "    name: Lint [lint, gosec, deps-check, build tags]\n    runs-on: ubuntu-latest\n    needs: [preflight, soak]\n"},
+		{"pr job needs a full job", lintNeeds, "    name: Lint [lint, gosec, deps-check, build tags]\n" + lintRunsOn + "    needs: [preflight, fips]\n"},
+		{"pr job needs a nightly job", lintNeeds, "    name: Lint [lint, gosec, deps-check, build tags]\n" + lintRunsOn + "    needs: [preflight, soak]\n"},
 		{"gate FULL_TIER flag differs", "          FULL_TIER: " + fullTierEnv, "          FULL_TIER: ${{ github.event_name == 'push' }}"},
 		{"gate NIGHTLY flag differs", "          NIGHTLY: " + nightlyTierIf, "          NIGHTLY: ${{ github.event_name == 'schedule' }}"},
 		{"gate drops check()", gateCheckFunc, "chk() {"},
 		{"workflow CI_FULL_TIER differs", "  CI_FULL_TIER: " + fullTierIf, "  CI_FULL_TIER: ${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full') }}"},
-		{"labeled type added back", "types: [opened, synchronize, reopened]", "types: [opened, synchronize, reopened, labeled]"},
+		{"labeled type added back", "types: [opened, synchronize, reopened, ready_for_review]", "types: [opened, synchronize, reopened, ready_for_review, labeled]"},
 		{"gate on a self-hosted label", "    name: CI Gate\n    runs-on: " + ciGateRunner + "\n", "    name: CI Gate\n    runs-on: ci-gate\n"},
 		{"deps-check back on the full tier", "env.TOOLCHAIN_IMAGE != '' }}\n        env:\n          IN_IMAGE_NETWORK: bridge\n        run: scripts/in-toolchain-image.sh \"$TOOLCHAIN_IMAGE\" make deps-check\n", "env.TOOLCHAIN_IMAGE != '' && env.CI_FULL_TIER == 'true' }}\n        env:\n          IN_IMAGE_NETWORK: bridge\n        run: scripts/in-toolchain-image.sh \"$TOOLCHAIN_IMAGE\" make deps-check\n"},
 		{"gate uses an action", "      - name: Fail closed on any non-success\n", "      - uses: actions/checkout@abc # v7\n      - name: Fail closed on any non-success\n"},

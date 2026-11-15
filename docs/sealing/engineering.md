@@ -63,7 +63,9 @@
 ## Blob contract v1
 
 This section is normative. It fixes the bytes the code writes today; it adds
-no field to them.
+no field to them. The known-answer vectors in
+[`testdata/contract-v1`](../../testdata/contract-v1/) pin these bytes, for
+this package and for a second implementer (see [Test strategy](#test-strategy)).
 
 ### Sealed envelope
 
@@ -545,6 +547,11 @@ process-lifetime `Sealer` (an AST guard test keeps it that way).
 
 - Unit and race tests for seal/open, rotation, context shapes, `Openable`,
   installation and the init slot (`make test`, `make coverage`).
+- Known-answer vectors in
+  [`testdata/contract-v1`](../../testdata/contract-v1/) pin [blob contract
+  v1](#blob-contract-v1): `contract_v1_test.go` rebuilds every byte with a
+  standard-library reference encoder written from this document and opens
+  every vector, and every refusal, through the package's own paths.
 - Linux tests sweep the process's readable anonymous mappings for complete
   copies of known plaintext at chosen moments, as evidence that the tested
   executions left plaintext only in locked pages. It is evidence, not proof:

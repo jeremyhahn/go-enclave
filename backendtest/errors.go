@@ -60,6 +60,26 @@ func (e *AbortedError) Is(target error) bool { return target == ErrAborted }
 // Unwrap returns the cause.
 func (e *AbortedError) Unwrap() error { return e.Cause }
 
+// ErrBudgetNotMeasured matches the error [CheckRefusal] returns when it cannot
+// read the process allocator's budget. The budget property was not verified,
+// so the check fails closed instead of passing it unchecked.
+var ErrBudgetNotMeasured = errors.New("backendtest: locked-memory budget not measured")
+
+// BudgetNotMeasuredError is the concrete error behind [ErrBudgetNotMeasured].
+// When names the snapshot that could not be read: "before New" or "after the
+// refusal".
+type BudgetNotMeasuredError struct {
+	When string
+}
+
+// Error renders as "backendtest: locked-memory budget not measured <When>".
+func (e *BudgetNotMeasuredError) Error() string {
+	return ErrBudgetNotMeasured.Error() + " " + e.When
+}
+
+// Is reports whether target is [ErrBudgetNotMeasured].
+func (e *BudgetNotMeasuredError) Is(target error) bool { return target == ErrBudgetNotMeasured }
+
 // FindingsError is what [TestBackend] returns when its run found anything:
 // every [*PropertyError], [*NotMeasuredError], [*UncheckedCapabilityError] and
 // [*AbortedError] of the run, in the order they were found. errors.Is and
@@ -72,6 +92,9 @@ type FindingsError struct {
 
 // Error renders each finding on its own line.
 func (e *FindingsError) Error() string {
+	if len(e.Findings) == 0 {
+		return "backendtest: no findings"
+	}
 	msg := ""
 	for i, f := range e.Findings {
 		if i > 0 {

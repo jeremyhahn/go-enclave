@@ -102,6 +102,7 @@ func checkCaseResidue(r *report, property string, cfg Config, hc HandleCase, who
 	}
 	defer release(r, "needle", needle)
 	var home uintptr
+	uniform := false
 	if err := needle.WithBytes(func(n []byte) error {
 		var aerr error
 		if home, aerr = memscan.Addr(n); aerr != nil {
@@ -109,10 +110,18 @@ func checkCaseResidue(r *report, property string, cfg Config, hc HandleCase, who
 		}
 		return ba.WithBytes(func(m []byte) error {
 			copy(n, m)
+			uniform = isUniform(n)
 			return nil
 		})
 	}); err != nil {
 		r.fail(property, "%s: copying the material into the needle: %v", who, err)
+		return
+	}
+	// One repeated byte, such as a fresh zeroed region, is everywhere in a
+	// process: a sweep that finds it after the end would prove nothing.
+	if uniform {
+		r.unmeasured(property, "%s: residue sweep not run: the material is one repeated byte, which a sweep cannot "+
+			"tell from the rest of the process; give the case random material", who)
 		return
 	}
 
@@ -143,6 +152,16 @@ func checkCaseResidue(r *report, property string, cfg Config, hc HandleCase, who
 			"%s wipes every copy; this same sweep found the material while the handle was alive, so it is not blind",
 			who, len(after), how, after[0], how)
 	}
+}
+
+// isUniform reports whether b is one byte repeated.
+func isUniform(b []byte) bool {
+	for _, c := range b {
+		if c != b[0] {
+			return false
+		}
+	}
+	return true
 }
 
 // residueHandle makes hc's handle without leaving a copy of its material

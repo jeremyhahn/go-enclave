@@ -11,6 +11,7 @@ package enclave
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"testing"
 )
 
@@ -202,5 +203,211 @@ func TestParseBlobHeader_RefusesMalformedFrames(t *testing.T) {
 	}
 	if _, _, err := parseBlobHeader(nil); !errors.Is(err, ErrSealedAuthentication) {
 		t.Errorf("parseBlobHeader(nil) = %v, want ErrSealedAuthentication", err)
+	}
+}
+
+// keywrapTestKey is a device AEAD whose Seal and Open are scripted by the
+// test. The embedded Handle is nil: the on-device paths never call it.
+type keywrapTestKey struct {
+	Handle
+	nonceSize int
+	seal      func(dst, nonce, plaintext []byte) ([]byte, error)
+	open      func(dst, nonce, ciphertext []byte) ([]byte, error)
+}
+
+func (k *keywrapTestKey) NonceSize() int { return k.nonceSize }
+func (k *keywrapTestKey) Overhead() int  { return 16 }
+
+func (k *keywrapTestKey) Seal(dst, nonce, plaintext, _ []byte) ([]byte, error) {
+	return k.seal(dst, nonce, plaintext)
+}
+
+func (k *keywrapTestKey) Open(dst, nonce, ciphertext, _ []byte) ([]byte, error) {
+	return k.open(dst, nonce, ciphertext)
+}
+
+var errKeywrapTestDevice = errors.New("keywrap test: device failure")
+
+func TestKeywrapDeviceFailure_MapsErrors(t *testing.T) {
+	wrappedAuth := fmt.Errorf("device: %w", ErrAEADAuthentication)
+	wrappedDestroyed := fmt.Errorf("device: %w", ErrEnclaveDestroyed)
+	cases := map[string]struct {
+		err      error
+		want     []error
+		identity bool // the very error comes back
+		sealErr  bool // a *SealError comes back
+	}{
+		"authentication":         {err: ErrAEADAuthentication, want: []error{ErrSealedAuthentication}},
+		"wrapped authentication": {err: wrappedAuth, want: []error{ErrSealedAuthentication}},
+		"destroyed":              {err: ErrEnclaveDestroyed, want: []error{ErrEnclaveDestroyed}, identity: true},
+		"wrapped destroyed":      {err: wrappedDestroyed, want: []error{ErrEnclaveDestroyed}, identity: true},
+		"other device failure":   {err: errKeywrapTestDevice, want: []error{errKeywrapTestDevice, ErrSealFailed}, sealErr: true},
+		"wrapped other failure":  {err: fmt.Errorf("io: %w", errKeywrapTestDevice), want: []error{errKeywrapTestDevice, ErrSealFailed}, sealErr: true},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			got := deviceFailure[SealError](c.err)
+			for _, w := range c.want {
+				if !errors.Is(got, w) {
+					t.Errorf("deviceFailure(%v) = %v, want errors.Is %v", c.err, got, w)
+				}
+			}
+			if c.identity && got != c.err {
+				t.Errorf("deviceFailure(%v) = %v, want the error itself", c.err, got)
+			}
+			var se *SealError
+			if errors.As(got, &se) != c.sealErr {
+				t.Errorf("deviceFailure(%v) = %T, want *SealError %v", c.err, got, c.sealErr)
+			}
+		})
+	}
+
+	got := deviceFailure[OpenError](errKeywrapTestDevice)
+	var oe *OpenError
+	if !errors.As(got, &oe) || !errors.Is(got, errKeywrapTestDevice) || !errors.Is(got, ErrOpenFailed) {
+		t.Errorf("deviceFailure[OpenError] = %v, want an *OpenError carrying the cause", got)
+	}
+}
+
+func TestKeywrapDeviceSeal_RandomSourceFails(t *testing.T) {
+	errRand := errors.New("keywrap test: no entropy")
+	swapSeam(t, &randRead, func([]byte) (int, error) { return 0, errRand })
+	k := &keywrapTestKey{nonceSize: 12, seal: func(dst, _, _ []byte) ([]byte, error) {
+		t.Fatal("Seal ran after the random source failed")
+		return dst, nil
+	}}
+	got, err := sealOnDevice(k, []byte("secret"), nil)
+	var se *SealError
+	if !errors.As(err, &se) || !errors.Is(err, errRand) || !errors.Is(err, ErrSealFailed) {
+		t.Fatalf("sealOnDevice = %v, want a *SealError carrying the random-source failure", err)
+	}
+	if got != nil {
+		t.Fatalf("sealOnDevice returned %x with an error", got)
+	}
+}
+
+func TestKeywrapDeviceSeal_DeviceFailureMapped(t *testing.T) {
+	for name, c := range map[string]struct {
+		err  error
+		want error
+	}{
+		"authentication": {ErrAEADAuthentication, ErrSealedAuthentication},
+		"destroyed":      {ErrEnclaveDestroyed, ErrEnclaveDestroyed},
+		"other":          {errKeywrapTestDevice, ErrSealFailed},
+	} {
+		t.Run(name, func(t *testing.T) {
+			k := &keywrapTestKey{nonceSize: 12, seal: func([]byte, []byte, []byte) ([]byte, error) {
+				return nil, c.err
+			}}
+			got, err := sealOnDevice(k, []byte("secret"), nil)
+			if !errors.Is(err, c.want) || got != nil {
+				t.Fatalf("sealOnDevice = %x, %v; want nil, %v", got, err, c.want)
+			}
+		})
+	}
+}
+
+func TestKeywrapDeviceSeal_PrefixesNonce(t *testing.T) {
+	k := &keywrapTestKey{nonceSize: 12, seal: func(dst, nonce, plaintext []byte) ([]byte, error) {
+		if len(nonce) != 12 || &nonce[0] != &dst[0] {
+			t.Errorf("nonce is not the head of dst")
+		}
+		return append(dst, plaintext...), nil
+	}}
+	got, err := sealOnDevice(k, []byte("secret"), nil)
+	if err != nil || len(got) != 12+len("secret") {
+		t.Fatalf("sealOnDevice = %x, %v", got, err)
+	}
+
+	k = &keywrapTestKey{seal: func(dst, nonce, plaintext []byte) ([]byte, error) {
+		if nonce != nil {
+			t.Errorf("nonce = %x for a cipher without one, want nil", nonce)
+		}
+		return append(dst, plaintext...), nil
+	}}
+	if got, err := sealOnDevice(k, []byte("secret"), nil); err != nil || string(got) != "secret" {
+		t.Fatalf("sealOnDevice without a nonce = %q, %v", got, err)
+	}
+}
+
+func TestKeywrapDeviceOpen_EdgePaths(t *testing.T) {
+	const ns, n = 12, 8
+	sealed := append(bytes.Repeat([]byte{0xA5}, ns), make([]byte, n+16)...)
+	marked := func() []byte { return bytes.Repeat([]byte{0x5A}, n) }
+	unreached := func(t *testing.T) func(dst, nonce, ciphertext []byte) ([]byte, error) {
+		return func(dst, _, _ []byte) ([]byte, error) {
+			t.Error("Open ran on a refused input")
+			return dst, nil
+		}
+	}
+
+	for name, c := range map[string]struct {
+		sealed []byte
+		dst    []byte
+	}{
+		"shorter than nonce": {sealed[:ns-1], marked()},
+		"nonce only":         {sealed[:ns], marked()},
+		"empty dst":          {sealed, nil},
+	} {
+		t.Run(name, func(t *testing.T) {
+			k := &keywrapTestKey{nonceSize: ns, open: unreached(t)}
+			want := bytes.Clone(c.dst)
+			if err := openOnDeviceInto(k, c.sealed, nil, c.dst); !errors.Is(err, ErrSealedAuthentication) {
+				t.Fatalf("openOnDeviceInto = %v, want ErrSealedAuthentication", err)
+			}
+			if !bytes.Equal(c.dst, want) {
+				t.Fatalf("dst = %x, want it untouched", c.dst)
+			}
+		})
+	}
+
+	var escaped []byte
+	for name, c := range map[string]struct {
+		open func(dst, nonce, ciphertext []byte) ([]byte, error)
+		want error
+	}{
+		"open fails": {
+			open: func(dst, _, _ []byte) ([]byte, error) {
+				_ = append(dst, marked()...)
+				return nil, errKeywrapTestDevice
+			},
+			want: ErrOpenFailed,
+		},
+		"other buffer": {
+			open: func([]byte, []byte, []byte) ([]byte, error) {
+				escaped = marked()
+				return escaped, nil
+			},
+			want: ErrPlaintextEscaped,
+		},
+		"short result": {
+			open: func(dst, _, _ []byte) ([]byte, error) { return append(dst, marked()[:n-1]...), nil },
+			want: ErrSealedAuthentication,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			k := &keywrapTestKey{nonceSize: ns, open: c.open}
+			dst := marked()
+			if err := openOnDeviceInto(k, sealed, nil, dst); !errors.Is(err, c.want) {
+				t.Fatalf("openOnDeviceInto = %v, want %v", err, c.want)
+			}
+			if !bytes.Equal(dst, make([]byte, n)) {
+				t.Fatalf("dst = %x after the refusal, want zeros", dst)
+			}
+		})
+	}
+	if !bytes.Equal(escaped, make([]byte, n)) {
+		t.Error("the buffer returned outside dst was not wiped")
+	}
+
+	k := &keywrapTestKey{nonceSize: ns, open: func(dst, nonce, ciphertext []byte) ([]byte, error) {
+		if !bytes.Equal(nonce, sealed[:ns]) || len(ciphertext) != n+16 {
+			t.Errorf("Open got nonce %x and %d ciphertext bytes", nonce, len(ciphertext))
+		}
+		return append(dst, marked()...), nil
+	}}
+	dst := make([]byte, n)
+	if err := openOnDeviceInto(k, sealed, nil, dst); err != nil || !bytes.Equal(dst, marked()) {
+		t.Fatalf("openOnDeviceInto = %v, dst %x", err, dst)
 	}
 }

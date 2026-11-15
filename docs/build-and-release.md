@@ -1,6 +1,6 @@
 # Build and release
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-11-12
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-11-13
 > Conflicts with this document are defects. For shipped behavior the Makefile, `scripts/` and `build/ci/` are canonical: fix this document to match them.
 
 How a change is built and gated, and how a signed release is cut, verified and
@@ -103,7 +103,7 @@ step leaves the same bytes.
 |---|---|---|
 | `make release-verify` | `TAG`, optional `MAIN_REF` | The tag agrees with `VERSION` and `CHANGELOG.md`; with `MAIN_REF`, `HEAD` is an ancestor of it |
 | `make release-tree-check` | `TAG`, `REF` | Offline, in the local clone: the tree of the published commit `REF` is byte-identical to the tree of the release tag `TAG` (SPEC release criterion 8). Refuses, naming both trees, when they differ, when either does not resolve, or when `TAG` is not a release version. Writes nothing |
-| `make consumer-check` | `TAG` | In a fresh directory with a fresh module cache and `GOWORK=off`, `go get`s the module at the tag, asserts the build list selected that version, runs `go mod verify`, and builds and runs `scripts/testdata/consumer` |
+| `make consumer-check` | `TAG` | In a fresh directory with a fresh module cache and `GOWORK=off`, `go get`s the module at the tag, asserts the build list selected that version, runs `go mod verify`, and builds and runs `scripts/testdata/consumer`, which also runs `providertest.TestProvider` against the software provider |
 | `make release-publish` | `TAG`, `SHA`, `FORGE_*` (a write token) | Confirms the tag exists on the forge and names `SHA`, then creates the release or updates it in place, and reads it back. Primary forge only: it refuses an `api.github.com` endpoint |
 
 The release body is the tag's `CHANGELOG.md` section (`release-notes.sh`).
@@ -133,8 +133,11 @@ its own. Each target runs `vet-buildgates` first and selects tests by prefix.
 | `make check-releasability` | `^TestReleasability` | No tracked file names private hosts, addresses or workstation paths ([below](#releasability)) |
 | `make check-changelog-assembly` | `^TestChangelogAssemble` | `changelog-assemble.sh` folds fragments into the shape `release-check-tag.sh` accepts |
 | `make check-scripts` | `^TestScripts` | The release, publish, tool-resolution, feature and devcontainer scripts and the Makefile entry points, driven on scratch inputs, refuse what they must; needs `jq` |
-| `make check-buildgates` | every other test | Actions pinned to commit SHAs and images to digests; least-privilege workflow permissions; checkouts that write do not persist credentials; publish waits on every gate; the CI Gate's tiers match the jobs; every source file, integration test and docs folder belongs to one feature in `scripts/features.map`; the toolchain image's Go matches `go.mod`; shipped source cites no issue numbers; the integration image is scanned before any suite runs on it |
-| `make lint-gates` | the four rows above | Runs `check-buildgates`, `check-releasability`, `check-changelog-assembly` and `check-scripts`: the repository's own gates beside lint. CI runs it as the Lint Gates job; `make lint` does not list it |
+| `make check-buildgates` | every other test | Actions pinned to commit SHAs and images to digests; least-privilege workflow permissions; checkouts that write do not persist credentials; publish waits on every gate; the CI Gate's tiers match the jobs; every source file, integration test and docs folder belongs to one feature in `scripts/features.map`; the toolchain image's Go matches `go.mod`; shipped source cites no issue numbers; the integration image is scanned before any suite runs on it; every relative Markdown link resolves |
+| `make check-project-scripts` | `scripts/project-scripts_test.sh` | `swtpm-fixture.sh`, `test-runtimesecret.sh`, `cross-build.sh`, `lint-integration.sh` and `release-verify.sh` refuse bad input, make exactly their calls and report every failure; stub tools on PATH, offline |
+| `make check-it-runner` | `build/docker/devcontainer/run-integration-tests_test.sh` | The integration runner refuses bad input with status 2 and fails a merged profile below the floor or missing a cover package; a stub `go`, offline |
+| `make check-fuzz-runner` | `build/fuzz/fuzz_test.sh` | `make fuzz` finds every target in every module, honours `FUZZ`, `FUZZ_PKG` and `FUZZTIME`, and stops at the first failure naming its input; a stub `go`, offline |
+| `make lint-gates` | the rows above | Runs `check-buildgates`, `check-releasability`, `check-changelog-assembly`, `check-scripts`, `check-in-toolchain-image`, `check-project-scripts`, `check-it-runner` and `check-fuzz-runner`: the repository's own gates beside lint. CI runs it as the Lint Gates job; `make lint` does not list it |
 | `make tidy-check` | — | `go.mod` and `go.sum` are tidy, in the root and in `build/ci/buildgates` |
 
 ### Aggregates
@@ -152,6 +155,27 @@ its own. Each target runs `vet-buildgates` first and selects tests by prefix.
 The `-runtimesecret` variants build with `GOEXPERIMENT=runtimesecret`
 ([key-schedule erasure](sealing/engineering.md#key-schedule-heap-exposure)).
 Which integration test covers which feature: [COVERAGE.md](../test/integration/COVERAGE.md).
+
+### Fuzzing
+
+`make test` only replays each fuzz target's seed corpus in `testdata/fuzz/`.
+`make fuzz` mutates inputs: `build/fuzz/fuzz.sh` lists every package of the
+root module and of each `BACKEND_MODULES` module, finds its `Fuzz` functions
+with `go test -list '^Fuzz'`, and fuzzes each target in turn, from its module,
+with `go test -run '^$' -fuzz '^Name$' -fuzztime "$FUZZTIME"`.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `FUZZTIME` | `30s` | How long each target fuzzes: a Go duration or an iteration count (`1000x`) |
+| `FUZZ` | all | Only the targets whose name matches this extended regexp (`make fuzz FUZZ=UnwrapKey`) |
+| `FUZZ_PKG` | all | Only the packages whose import path matches this extended regexp |
+
+It prints one line per target and stops at the first failure with go's output,
+the package, the target and the failing input under that package's
+`testdata/fuzz/`; commit that input with the fix, as a seed. Nothing to fuzz
+(no target, or none the selectors match) fails, and a bad variable is refused
+before go runs. No CI job runs it. `make check-fuzz-runner`, in `lint-gates`,
+drives the runner on a stub `go`.
 
 ## CI
 

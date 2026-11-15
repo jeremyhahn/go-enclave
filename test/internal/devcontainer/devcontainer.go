@@ -17,7 +17,6 @@
 package devcontainer
 
 import (
-	"bufio"
 	"crypto/fips140"
 	"fmt"
 	"os"
@@ -59,21 +58,50 @@ const capIPCLock = 14
 // declares. Each line it returns is a reason the suite's results would not
 // mean what they claim.
 func Problems() []string {
+	in := inputs{
+		getenv:       os.Getenv,
+		euid:         os.Geteuid(),
+		fipsEnabled:  fips140.Enabled(),
+		fipsEnforced: fips140.Enforced(),
+	}
+	if in.getenv(envDevcontainer) == "1" {
+		status, err := os.ReadFile("/proc/self/status")
+		in.status, in.statusErr = string(status), err
+		in.memlockErr = unix.Getrlimit(unix.RLIMIT_MEMLOCK, &in.memlock)
+	}
+	return problemsFrom(in)
+}
+
+// inputs is everything the guard reads from the process and the kernel, so
+// that problemsFrom is a pure function of it.
+type inputs struct {
+	getenv       func(string) string
+	status       string // the text of /proc/self/status
+	statusErr    error  // reading /proc/self/status failed
+	euid         int
+	memlock      unix.Rlimit // RLIMIT_MEMLOCK soft (Cur) and hard (Max)
+	memlockErr   error       // getrlimit(RLIMIT_MEMLOCK) failed
+	fipsEnabled  bool        // fips140.Enabled()
+	fipsEnforced bool        // fips140.Enforced()
+}
+
+// problemsFrom is Problems over the given inputs.
+func problemsFrom(in inputs) []string {
 	var problems []string
-	if os.Getenv(envDevcontainer) != "1" {
+	if in.getenv(envDevcontainer) != "1" {
 		problems = append(problems, envDevcontainer+" is not 1: not running in build/docker/devcontainer")
 		// Nothing below is meaningful on a host.
 		return problems
 	}
 
-	if os.Geteuid() == 0 {
+	if in.euid == 0 {
 		problems = append(problems, "running as root: the devcontainer runs as an unprivileged user")
 	}
 
 	// cap_drop: [ALL] empties every set. CAP_IPC_LOCK in particular would make
 	// the kernel ignore RLIMIT_MEMLOCK and every admission test vacuous.
 	for _, field := range []string{"CapEff", "CapPrm", "CapBnd", "CapAmb"} {
-		v, err := statusHex(field)
+		v, err := statusHex(in.status, in.statusErr, field)
 		switch {
 		case err != nil:
 			problems = append(problems, err.Error())
@@ -84,7 +112,7 @@ func Problems() []string {
 			}
 		}
 	}
-	if v, err := statusInt("NoNewPrivs"); err != nil {
+	if v, err := statusInt(in.status, in.statusErr, "NoNewPrivs"); err != nil {
 		problems = append(problems, err.Error())
 	} else if v != 1 {
 		problems = append(problems, "NoNewPrivs is not set (compose.yaml: no-new-privileges)")
@@ -92,22 +120,22 @@ func Problems() []string {
 
 	// RLIMIT_MEMLOCK must be finite, soft = hard, and exactly the figure
 	// compose.yaml declares: the admission tests are written against it.
-	want, err := envUint64(EnvMemlockBytes)
+	want, err := envUint64(in.getenv, EnvMemlockBytes)
 	if err != nil {
 		problems = append(problems, err.Error())
 	} else {
-		var rl unix.Rlimit
-		if err := unix.Getrlimit(unix.RLIMIT_MEMLOCK, &rl); err != nil {
-			problems = append(problems, "getrlimit(RLIMIT_MEMLOCK): "+err.Error())
+		rl := in.memlock
+		if in.memlockErr != nil {
+			problems = append(problems, "getrlimit(RLIMIT_MEMLOCK): "+in.memlockErr.Error())
 		} else if rl.Cur != want || rl.Max != want {
 			problems = append(problems, fmt.Sprintf("RLIMIT_MEMLOCK is %d/%d, want %d/%d (compose.yaml ulimits.memlock)", rl.Cur, rl.Max, want, want))
 		}
 	}
-	if _, err := EnvInt64(EnvCoreBytes); err != nil {
+	if _, err := envInt64(in.getenv, EnvCoreBytes); err != nil {
 		problems = append(problems, err.Error())
 	}
 
-	if p := checkFIPSMode(); p != "" {
+	if p := checkFIPSMode(in.getenv(EnvFIPSMode), in.fipsEnabled, in.fipsEnforced); p != "" {
 		problems = append(problems, p)
 	}
 	return problems
@@ -115,15 +143,16 @@ func Problems() []string {
 
 // checkFIPSMode checks the runtime's FIPS 140-3 state in both directions: a
 // FIPS run that lost GOFIPS140/GODEBUG would otherwise pass as an ordinary run.
-func checkFIPSMode() string {
-	switch mode := os.Getenv(EnvFIPSMode); mode {
+// enabled and enforced are fips140.Enabled() and fips140.Enforced().
+func checkFIPSMode(mode string, enabled, enforced bool) string {
+	switch mode {
 	case "only":
-		if !fips140.Enabled() || !fips140.Enforced() {
+		if !enabled || !enforced {
 			return fmt.Sprintf("%s=only but fips140.Enabled()=%t Enforced()=%t: GOFIPS140=latest and GODEBUG=fips140=only did not reach the test binary",
-				EnvFIPSMode, fips140.Enabled(), fips140.Enforced())
+				EnvFIPSMode, enabled, enforced)
 		}
 	case "off":
-		if fips140.Enabled() {
+		if enabled {
 			return EnvFIPSMode + "=off but FIPS 140-3 mode is enabled: the default run must use Go's defaults"
 		}
 	default:
@@ -132,8 +161,8 @@ func checkFIPSMode() string {
 	return ""
 }
 
-func envUint64(name string) (uint64, error) {
-	s := os.Getenv(name)
+func envUint64(getenv func(string) string, name string) (uint64, error) {
+	s := getenv(name)
 	v, err := strconv.ParseUint(s, 10, 64)
 	if err != nil || v == 0 {
 		return 0, fmt.Errorf("%s=%q: want a positive integer (set by compose.yaml)", name, s)
@@ -143,7 +172,11 @@ func envUint64(name string) (uint64, error) {
 
 // EnvInt64 reads a required positive integer from the environment.
 func EnvInt64(name string) (int64, error) {
-	s := os.Getenv(name)
+	return envInt64(os.Getenv, name)
+}
+
+func envInt64(getenv func(string) string, name string) (int64, error) {
+	s := getenv(name)
 	v, err := strconv.ParseInt(s, 10, 64)
 	if err != nil || v <= 0 {
 		return 0, fmt.Errorf("%s=%q: want a positive integer (set by compose.yaml)", name, s)
@@ -151,27 +184,23 @@ func EnvInt64(name string) (int64, error) {
 	return v, nil
 }
 
-func statusField(name string) (string, error) {
-	f, err := os.Open("/proc/self/status")
-	if err != nil {
-		return "", err
+// statusField returns the value of the name line of status, the text of
+// /proc/self/status; readErr is the error reading it, if any.
+func statusField(status string, readErr error, name string) (string, error) {
+	if readErr != nil {
+		return "", readErr
 	}
-	defer func() { _ = f.Close() }()
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		k, v, ok := strings.Cut(sc.Text(), ":")
+	for line := range strings.Lines(status) {
+		k, v, ok := strings.Cut(line, ":")
 		if ok && k == name {
 			return strings.TrimSpace(v), nil
 		}
 	}
-	if err := sc.Err(); err != nil {
-		return "", err
-	}
 	return "", fmt.Errorf("/proc/self/status has no %s line", name)
 }
 
-func statusHex(name string) (uint64, error) {
-	v, err := statusField(name)
+func statusHex(status string, readErr error, name string) (uint64, error) {
+	v, err := statusField(status, readErr, name)
 	if err != nil {
 		return 0, err
 	}
@@ -182,8 +211,8 @@ func statusHex(name string) (uint64, error) {
 	return n, nil
 }
 
-func statusInt(name string) (int64, error) {
-	v, err := statusField(name)
+func statusInt(status string, readErr error, name string) (int64, error) {
+	v, err := statusField(status, readErr, name)
 	if err != nil {
 		return 0, err
 	}

@@ -482,6 +482,39 @@ func TestSealed_Lifecycle(t *testing.T) {
 	}
 }
 
+// TestSealed_FormatRedacts formats a live and a destroyed sealed value with
+// every common verb, alone and as a struct field: none prints the material
+// or the envelope.
+func TestSealed_FormatRedacts(t *testing.T) {
+	freshProcessSealer(t)
+	live, err := newSealed(t.Context(), append([]byte(nil), sealedMaterial...))
+	if err != nil {
+		t.Fatalf("NewSealed: %v", err)
+	}
+	defer live.Destroy()
+
+	dead, err := newSealed(t.Context(), append([]byte(nil), sealedMaterial...))
+	if err != nil {
+		t.Fatalf("NewSealed: %v", err)
+	}
+	if err := dead.Destroy(); err != nil {
+		t.Fatalf("Destroy: %v", err)
+	}
+
+	if got := live.GoString(); got != "Sealed(sealed)" {
+		t.Errorf("GoString = %q, want Sealed(sealed)", got)
+	}
+	if got := dead.GoString(); got != "Sealed(destroyed)" {
+		t.Errorf("GoString after Destroy = %q, want Sealed(destroyed)", got)
+	}
+
+	// The envelope halves are checked on the live value only: Destroy wipes them.
+	for _, secret := range [][]byte{sealedMaterial, live.sealed, live.blob} {
+		assertFormatRedacts(t, live, secret, "Sealed(sealed)")
+	}
+	assertFormatRedacts(t, dead, sealedMaterial, "Sealed(destroyed)")
+}
+
 func TestSealed_Empty(t *testing.T) {
 	for name, in := range map[string][]byte{"nil": nil, "empty": {}} {
 		t.Run(name, func(t *testing.T) {
