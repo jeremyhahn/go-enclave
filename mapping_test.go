@@ -15,6 +15,8 @@ import (
 	"go/parser"
 	"go/token"
 	"io"
+	"math"
+	"math/big"
 	"os"
 	"slices"
 	"strings"
@@ -398,6 +400,108 @@ func TestMapping_RejectsUnmappableSizes(t *testing.T) {
 			_ = m.release()
 		}
 	}
+}
+
+// lockedSizeCase is one row of the lockedSize boundary table.
+type lockedSizeCase struct {
+	name   string
+	n      int64
+	locked int64
+	ok     bool
+}
+
+// lockedSizeCases is the lockedSize boundary table. pageSize is only
+// known at run time, so the table is built rather than declared. L is
+// the largest page multiple whose mapping plus two guard pages still
+// fits an int.
+func lockedSizeCases() []lockedSizeCase {
+	l := (maxInt - 2*pageSize) / pageSize * pageSize
+	return []lockedSizeCase{
+		{"MinInt64", math.MinInt64, 0, false},
+		{"minus one", -1, 0, false},
+		{"zero", 0, 0, false},
+		{"one", 1, pageSize, true},
+		{"page minus one", pageSize - 1, pageSize, true},
+		{"page", pageSize, pageSize, true},
+		{"page plus one", pageSize + 1, 2 * pageSize, true},
+		{"L minus one", l - 1, l, true},
+		{"L", l, l, true},
+		{"L plus one", l + 1, 0, false},
+		{"maxInt", maxInt, 0, false},
+		{"MaxInt64", math.MaxInt64, 0, false},
+	}
+}
+
+func TestLockedSize_Boundaries(t *testing.T) {
+	for _, tc := range lockedSizeCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			locked, ok := lockedSize(tc.n)
+			if locked != tc.locked || ok != tc.ok {
+				t.Fatalf("lockedSize(%d) = (%d, %v), want (%d, %v)", tc.n, locked, ok, tc.locked, tc.ok)
+			}
+			if int64(int(tc.n)) != tc.n {
+				return // n does not fit an int on this platform
+			}
+			got := LockedSize(int(tc.n))
+			if (got == 0) != !tc.ok {
+				t.Fatalf("LockedSize(%d) = %d, want zero exactly when ok is false (ok=%v)", tc.n, got, tc.ok)
+			}
+			if tc.ok && got != tc.locked {
+				t.Fatalf("LockedSize(%d) = %d, want %d", tc.n, got, tc.locked)
+			}
+		})
+	}
+}
+
+// FuzzLockedSize checks lockedSize against a math/big oracle that
+// cannot overflow: ok iff n > 0 and the page-rounded n plus two guard
+// pages fits an int.
+func FuzzLockedSize(f *testing.F) {
+	for _, tc := range lockedSizeCases() {
+		f.Add(tc.n)
+	}
+	ps := big.NewInt(pageSize)
+	limit := big.NewInt(maxInt)
+	f.Fuzz(func(t *testing.T, n int64) {
+		locked, ok := lockedSize(n)
+
+		wantOK := false
+		var want big.Int
+		if n > 0 {
+			bn := big.NewInt(n)
+			pages := new(big.Int).Add(bn, new(big.Int).Sub(ps, big.NewInt(1)))
+			pages.Quo(pages, ps)
+			want.Mul(pages, ps)
+			total := new(big.Int).Add(&want, new(big.Int).Mul(big.NewInt(2), ps))
+			wantOK = total.Cmp(limit) <= 0
+		}
+		if ok != wantOK {
+			t.Fatalf("lockedSize(%d) ok = %v, want %v", n, ok, wantOK)
+		}
+		if !ok {
+			if locked != 0 {
+				t.Fatalf("lockedSize(%d) = (%d, false), want locked 0", n, locked)
+			}
+			if int64(int(n)) == n && LockedSize(int(n)) != 0 {
+				t.Fatalf("LockedSize(%d) = %d, want 0", n, LockedSize(int(n)))
+			}
+			return
+		}
+		if !want.IsInt64() || locked != want.Int64() {
+			t.Fatalf("lockedSize(%d) = %d, want %s", n, locked, want.String())
+		}
+		if locked%pageSize != 0 {
+			t.Fatalf("lockedSize(%d) = %d, not a page multiple", n, locked)
+		}
+		if locked < n || locked-n >= pageSize {
+			t.Fatalf("lockedSize(%d) = %d, want n <= locked < n+pageSize", n, locked)
+		}
+		if int64(int(n)) == n {
+			if got := LockedSize(int(n)); got != locked {
+				t.Fatalf("LockedSize(%d) = %d, want %d", n, got, locked)
+			}
+		}
+	})
 }
 
 // TestMapping_ReleaseKeepsStateWhenUnmapFails pins that a release the kernel
