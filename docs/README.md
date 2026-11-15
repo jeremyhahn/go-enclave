@@ -88,8 +88,10 @@ release that removes each API adds its migration steps here.
 `github.com/jeremyhahn/go-enclave/backends/imxele` is removed from this
 repository: the i.MX 95 EdgeLock Enclave holds keys only, so it moved to
 [go-xkms](https://github.com/jeremyhahn/go-xkms) ([SPEC scope](SPEC.md#scope)).
-For protected memory on the i.MX 95, use `backends/armtrustzone`
-(TrustZone/OP-TEE).
+On the i.MX 95, go-enclave's backend is `backends/armtrustzone`
+(TrustZone/OP-TEE), but today it holds bytes in normal-world memory, readable
+by the process and kernel; secure-world storage (the vault trusted
+application) is planned.
 
 #### Go version
 
