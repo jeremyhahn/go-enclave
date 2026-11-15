@@ -389,6 +389,29 @@ func TestSweepKeepsAHitFromAnAttemptThatMetAnUnreadableMapping(t *testing.T) {
 	}
 }
 
+// TestSweepRecoversCleanAfterAMappingDisappears pins that a clean process
+// is not reported unmeasured because a mapping was unmapped mid-sweep: the
+// first listing meets an unreadable mapping, the second reads clean, and
+// neither holds the needle, so the sweep returns no hits and no error.
+func TestSweepRecoversCleanAfterAMappingDisappears(t *testing.T) {
+	needle := []byte("the-needle")
+	mem := addressSpace{0x10000: make([]byte, 0x1000), 0x30000: make([]byte, 0x1000)} // 0x20000 is unmapped: reads fail
+	first := "10000-11000 rw-p 00000000 00:00 0\n20000-21000 rw-p 00000000 00:00 0\n"
+	second := "10000-11000 rw-p 00000000 00:00 0\n30000-31000 rw-p 00000000 00:00 0\n"
+	reads := 0
+
+	hits, err := sweep(listings(&reads, first, second), mem, needle, 0, scratch(0x400, len(needle)))
+	if err != nil {
+		t.Fatalf("sweep = %q, %v; want a clean result once the retry reads every mapping", hits, err)
+	}
+	if len(hits) != 0 {
+		t.Fatalf("hits = %q; want none, no mapping held the needle", hits)
+	}
+	if reads != 2 {
+		t.Fatalf("the sweep read the maps %d time(s); want 2", reads)
+	}
+}
+
 // TestFindReturnsItsHitsWithAnUnreadableMapping pins that find hands back the
 // hits it made before an unreadable mapping, so a retry cannot drop them.
 func TestFindReturnsItsHitsWithAnUnreadableMapping(t *testing.T) {
