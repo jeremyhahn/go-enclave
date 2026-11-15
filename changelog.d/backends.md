@@ -4,4 +4,4 @@
 
 ### Removed
 
-- **backends**: The nested module `github.com/jeremyhahn/go-enclave/backends/imxele` and the i.MX EdgeLock backend's proposal are removed: the i.MX 95 EdgeLock Enclave holds keys only, so it moved to [go-xkms](https://github.com/jeremyhahn/go-xkms). On the i.MX 95, `backends/armtrustzone` stays the protected-memory backend. See [Upgrading](docs/README.md#imx-edgelock-backend-module-moved-to-go-xkms).
+- **backends**: The nested module `github.com/jeremyhahn/go-enclave/backends/imxele` is removed; the i.MX EdgeLock Enclave holds keys only and moved to [go-xkms](https://github.com/jeremyhahn/go-xkms). See [Upgrading](docs/README.md#imx-edgelock-backend-module-moved-to-go-xkms).
