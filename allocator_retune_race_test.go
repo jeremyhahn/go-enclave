@@ -191,10 +191,30 @@ func TestAllocator_RetuneRace_AdmissionsDestroysAndTransfers(t *testing.T) {
 
 	waitBounded(t, &wg, 60*time.Second, "retune race")
 
+	// The race's own invariants: every destroy refunded its charge exactly,
+	// and only SetLimit changed the sum of the limits.
+	for i, s := range sides {
+		if u := s.a.InUse(); u != 0 {
+			t.Errorf("allocator %d: InUse = %d after every destroy, want 0", i, u)
+		}
+		if av, l := s.a.Available(), s.a.Limit(); av != l {
+			t.Errorf("allocator %d: Available = %d, want the whole Limit %d", i, av, l)
+		}
+	}
+	if got, want := sides[0].a.Limit()+sides[1].a.Limit(), start+delta.Load(); got != want {
+		t.Errorf("Limit sum = %d, want start %d + SetLimit deltas %d = %d", got, start, delta.Load(), want)
+	}
+
 	// Every racing attempt may legitimately be refused, so a correct
-	// allocator need not admit, refuse, lower or transfer during the race.
-	// With every enclave destroyed, a quiet phase does each once, leaving
-	// each limit as it was.
+	// allocator need not admit, refuse, lower or transfer during the race,
+	// and the race may leave a side at limit 0. A quiet phase does each
+	// once from budgets set here, so it depends on nothing the race did.
+	quietLimit := 2 * pageSize
+	for i, s := range sides {
+		if err := s.a.SetLimit(quietLimit); err != nil {
+			t.Fatalf("allocator %d: SetLimit(%d) before the quiet phase err = %v", i, quietLimit, err)
+		}
+	}
 	for _, s := range sides {
 		forceRetuneRaceRefusal(t, s.a, &counts)
 	}
@@ -210,15 +230,9 @@ func TestAllocator_RetuneRace_AdmissionsDestroysAndTransfers(t *testing.T) {
 		}
 	}
 	for i, s := range sides {
-		if u := s.a.InUse(); u != 0 {
-			t.Errorf("allocator %d: InUse = %d after every destroy, want 0", i, u)
+		if u, l := s.a.InUse(), s.a.Limit(); u != 0 || l != quietLimit {
+			t.Errorf("allocator %d after the quiet phase: InUse = %d, Limit = %d, want 0 and %d", i, u, l, quietLimit)
 		}
-		if av, l := s.a.Available(), s.a.Limit(); av != l {
-			t.Errorf("allocator %d: Available = %d, want the whole Limit %d", i, av, l)
-		}
-	}
-	if got, want := sides[0].a.Limit()+sides[1].a.Limit(), start+delta.Load(); got != want {
-		t.Errorf("Limit sum = %d, want start %d + SetLimit deltas %d = %d", got, start, delta.Load(), want)
 	}
 }
 
