@@ -294,8 +294,8 @@ func TestFindSweepsOnlyWhatCanHoldACopy(t *testing.T) {
 }
 
 // TestFindFailsClosedOnAnUnreadableMapping pins that a swept mapping the
-// reader refuses is a typed error, not a clean result, and that a hit found
-// before it is not reported alongside it.
+// reader refuses is a typed error, not a clean result, and that no hit is
+// invented for a mapping that held no needle.
 func TestFindFailsClosedOnAnUnreadableMapping(t *testing.T) {
 	needle := []byte("the-needle")
 	mem := addressSpace{0x10000: make([]byte, 0x1000)} // 0x20000 is unmapped: reads fail
@@ -310,7 +310,7 @@ func TestFindFailsClosedOnAnUnreadableMapping(t *testing.T) {
 		t.Errorf("the read failure is not reachable through Unwrap: %v", err)
 	}
 	if hits != nil {
-		t.Errorf("hits = %q alongside an error", hits)
+		t.Errorf("hits = %q; the mapping read before the error held no needle", hits)
 	}
 }
 

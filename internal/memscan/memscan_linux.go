@@ -41,7 +41,8 @@ var (
 // It fails closed: a swept mapping it cannot read returns an
 // *UnreadableMappingError (ErrUnreadableMapping), and a sweep that read nothing
 // returns ErrEmptySweep. Only the kernel's own [vvar] and [vsyscall] regions
-// are excused. Callers must not discard these errors.
+// are excused. Callers must not discard these errors. A hit is never dropped:
+// one seen before an unreadable mapping is returned without error.
 //
 // It needs an unfiltered /proc that lets a process read its own
 // /proc/self/maps and /proc/self/mem; a caller fails rather than skips without
@@ -70,18 +71,33 @@ const sweepAttempts = 3
 // sweep runs find over a fresh maps listing. A mapping the runtime unmaps
 // between the listing and its read fails that read; it held nothing then, so
 // sweep lists the mappings again and reads what is there. A mapping that is
-// still unreadable after sweepAttempts listings fails the sweep closed.
+// still unreadable after sweepAttempts listings fails the sweep closed. A hit
+// any attempt made is kept and returned without error, even when that attempt
+// or a later one met an unreadable mapping: a copy seen once is a finding.
 func sweep(readMaps func() (string, error), mem io.ReaderAt, needle []byte, home uintptr, buf []byte) ([]string, error) {
+	var hits []string
+	seen := map[string]bool{}
 	var err error
 	for range sweepAttempts {
 		var maps string
 		if maps, err = readMaps(); err != nil {
-			return nil, err
+			break
 		}
-		var hits []string
-		if hits, err = find(maps, mem, needle, home, buf); !errors.Is(err, ErrUnreadableMapping) {
-			return hits, err
+		var found []string
+		found, err = find(maps, mem, needle, home, buf)
+		for _, m := range found {
+			if !seen[m] {
+				seen[m] = true
+				hits = append(hits, m)
+			}
 		}
+		if !errors.Is(err, ErrUnreadableMapping) {
+			break
+		}
+	}
+	// A hit any attempt made is a finding, whatever a later attempt saw.
+	if len(hits) > 0 {
+		return hits, nil
 	}
 	return nil, err
 }
@@ -91,8 +107,9 @@ func sweep(readMaps func() (string, error), mem io.ReaderAt, needle []byte, home
 // boundary is found, so buf must be longer than that.
 //
 // It fails closed. A swept mapping that cannot be read in full returns an
-// *UnreadableMappingError (ErrUnreadableMapping), and a sweep that read no
-// mapping returns ErrEmptySweep, so neither can pass as a clean result. The one
+// *UnreadableMappingError (ErrUnreadableMapping), with the hits made before
+// it, and a sweep that read no mapping returns ErrEmptySweep, so neither can
+// pass as a clean result. The one
 // excuse is a kernelMapping, which holds no process data. A home mapping is
 // excluded without being read, and does not count as read.
 func find(maps string, mem io.ReaderAt, needle []byte, home uintptr, buf []byte) ([]string, error) {
@@ -118,7 +135,7 @@ func find(maps string, mem io.ReaderAt, needle []byte, home uintptr, buf []byte)
 		}
 		found, err := mappingContains(mem, lo, hi, needle, buf)
 		if err != nil {
-			return nil, &UnreadableMappingError{Mapping: strings.TrimSpace(line), Err: err}
+			return hits, &UnreadableMappingError{Mapping: strings.TrimSpace(line), Err: err}
 		}
 		read++
 		if found {
