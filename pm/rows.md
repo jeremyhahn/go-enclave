@@ -15,7 +15,6 @@ One SPEC row = one row issue = one branch `row/<issue>-<row>` = one lane session
 | backend-detection | #455 | shipped | 0 | #402 |
 | public-release | #456 | in progress | 1 | #392, #365, #361 |
 | linux-secretmem | #457 | shipped | 0 | #407 |
-| mac-secure-enclave | #192 | future | 0 | #357 |
 | arm-trustzone | #458 | shipped | 3 | #426, #422, #373, #429, #395, #394, #393 |
 | intel-sgx | #193 | future | 0 | #353 |
 | confidential-vm | #194 | future | 1 | #352, #354 |
