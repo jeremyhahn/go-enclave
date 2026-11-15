@@ -1,6 +1,6 @@
 # arm-trustzone backend — design
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-11-12
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-11-13
 > Conflicts with this document are defects. The code in [`backends/armtrustzone`](../../backends/armtrustzone) is canonical: fix this document to match it.
 > The design of the backend that reaches OP-TEE through the [backend seam](architecture.md). Its API is in [user](user.md#arm-trustzone) and [engineering](engineering.md#arm-trustzone); its integration harness is [backend-conformance](../backend-conformance/engineering.md#the-arm-trustzone-harness).
 
@@ -20,6 +20,13 @@ in OP-TEE. It provides two things:
 - **Key sealing in the secure world.** `KeyProtector()` returns an
   `enclave.KeyProtector` whose sealing key lives in the TA, so a sealer's
   data-encryption keys are wrapped by a key the normal world never holds.
+
+Neither keeps the caller's bytes in the secure world. A handle from `Random`
+is normal-world memory from `enclave.NewMemorySized`, readable by the
+normal-world process and kernel like any memory enclave. Holding material in
+secure-world RAM through trusted-firmware's vault trusted application is
+planned ([SPEC](../SPEC.md#features)); the `KeyProtector` is to move to
+go-xkms ([removal](../SPEC.md#key-operation-api-removal)).
 
 ## Shape
 
