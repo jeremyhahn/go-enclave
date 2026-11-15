@@ -181,7 +181,10 @@ func sweepOutsideHome(probe enclave.ByteAccess, home uintptr) ([]string, error) 
 
 // sweepForKeyOrHalf sweeps for the whole needle and then for each half of
 // it, so a provider that keeps only part of the key is found as long as the
-// part holds either half whole. It returns each mapping once.
+// part holds either half whole. It returns each mapping once. A hit any
+// probe made is returned without error, even when another probe failed; with
+// no hit, the first probe error is returned, so an incomplete sweep is never
+// clean.
 func sweepForKeyOrHalf(needle []byte, home uintptr) ([]string, error) {
 	half := len(needle) / 2
 	probes := [][]byte{needle}
@@ -190,10 +193,11 @@ func sweepForKeyOrHalf(needle []byte, home uintptr) ([]string, error) {
 	}
 	var hits []string
 	seen := map[string]bool{}
+	var firstErr error
 	for _, p := range probes {
 		found, err := sweepProcess(p, home)
-		if err != nil {
-			return nil, err
+		if err != nil && firstErr == nil {
+			firstErr = err
 		}
 		for _, m := range found {
 			if !seen[m] {
@@ -202,7 +206,11 @@ func sweepForKeyOrHalf(needle []byte, home uintptr) ([]string, error) {
 			}
 		}
 	}
-	return hits, nil
+	// A hit any probe made is a finding, whatever another probe met.
+	if len(hits) > 0 {
+		return hits, nil
+	}
+	return nil, firstErr
 }
 
 // equalBytes is written out so borrowed slices are never passed to code this
