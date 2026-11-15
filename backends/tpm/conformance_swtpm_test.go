@@ -34,7 +34,7 @@ func openSWTPM(t *testing.T) *KeyProtector {
 	t.Helper()
 	path := os.Getenv(swtpmVar)
 	if path == "" {
-		t.Skipf("%s is not set; set it to a TPM device or a swtpm socket to run the TPM conformance test", swtpmVar)
+		t.Fatalf("%s is not set; set it to a TPM device or a swtpm socket to run the TPM conformance test", swtpmVar)
 	}
 	p, err := Open(path)
 	if err != nil {

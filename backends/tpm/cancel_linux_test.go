@@ -30,7 +30,7 @@ func newSilentTPM(t *testing.T) *silentTPM {
 	s := &silentTPM{path: filepath.Join(t.TempDir(), "tpm.sock"), got: make(chan struct{}, 1)}
 	ln, err := (&net.ListenConfig{}).Listen(context.Background(), "unix", s.path)
 	if err != nil {
-		t.Skipf("no unix socket: %v", err)
+		t.Fatalf("no unix socket: %v", err)
 	}
 	s.ln = ln
 	s.wg.Add(1)
