@@ -1,6 +1,6 @@
 # Hardware KeyProtector providers — design
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-11-10
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-11-14
 > Conflicts with this document are defects. The TPM provider ships in [`backends/tpm`](../../backends/tpm): the code is canonical for it, and this document is fixed to match. The secure-element provider is not shipped; it will implement the outline below once its open questions are answered.
 > The design of the TPM and secure-element providers behind the [`KeyProtector` seam](engineering.md#provider-contract). The TPM provider is shipped; the secure-element provider is an outline with its open questions.
 
@@ -17,10 +17,10 @@ operations with a device, which belong to a crypto library above it.
 
 A `ModePerOperation` sealer hands every data key (DEK) to its provider's
 `Protect` and stores the blob it gets back
-([Sealed envelope](engineering.md#sealed-envelope)). `SoftwareProvider`
-keeps its protect key in this process's locked memory, so a sealed
-value is no safer at rest than the process that sealed it. A TPM or a secure
-element holds a key the process can use but never read; a provider over one
+([Sealed envelope](engineering.md#sealed-envelope)). The memory provider
+(`SoftwareProvider`) keeps its protect key in this process's locked memory,
+so a sealed value is no safer at rest than the process that sealed it. A TPM
+or a secure element holds a key the process can use but never read; a provider over one
 makes a sealed value openable only on the device that sealed it.
 
 The [provider contract](engineering.md#provider-contract) is fixed and this
@@ -61,8 +61,9 @@ A call waiting for the provider when `Close` starts, and a call after
 
 Every call creates the parent with `TPM2_CreatePrimary` under the owner
 hierarchy and flushes it with `TPM2_FlushContext` before it returns. The
-parent is an ECC P-256 storage key in the shape of the TCG "EK and SRK"
-profile's storage template:
+parent is an ECC P-256 storage key in the shape of the storage template of
+the [TCG EK Credential Profile](../reference/TCG_EK_Credential_Profile_for_TPM_Family_2_0_Level_0_Version_2_7_Pub.pdf)
+2.7, §5.3.4 Template L-2 (see [TCG TPM 2.0](../reference/README.md#tcg-tpm-20)):
 
 | Field | Value |
 | --- | --- |
@@ -74,8 +75,19 @@ profile's storage template:
 | unique.x | SHA-256 of the label `go-enclave v1 TPM KeyProtector` (32 bytes) |
 | unique.y | 32 zero bytes |
 
-The only departure from the standard storage template is `unique.x`, which
-carries the label (see [Associated data](#associated-data)). A primary key is
+It departs from Template L-2 in its authorization and in `unique.x`:
+
+| Field | Template L-2 | `storageTemplate` |
+| --- | --- | --- |
+| `userWithAuth` | clear: use needs a policy session | set: the hierarchy's empty auth value authorizes use |
+| `adminWithPolicy` | set | clear |
+| `noDA` | clear | set: a failed authorization never counts toward dictionary-attack lockout |
+| authPolicy | the profile's policy digest | empty |
+| unique.x | the profile's value | the label (see [Associated data](#associated-data)) |
+
+The provider authorizes the parent with its empty auth value and no policy
+session, which Template L-2's policy-only authorization does not allow, so a
+key derived from Template L-2 itself is not the parent. A primary key is
 derived from the hierarchy's seed and its template, so the same template
 yields the same parent on every call, in every process and across reboots.
 No persistent handle is written: the provider changes no TPM state and needs
@@ -389,10 +401,13 @@ The interrupted call returns an error matching `ctx.Err()` either way.
 
 ## Secure-element provider (outline)
 
-A PKCS#11 provider in its own module, `backends/pkcs11` (module path
-`github.com/jeremyhahn/go-enclave/backends/pkcs11`), so the root module
-gains no dependency. Nothing here is decided beyond the shape; the
-[open questions](#open-questions) must be answered before it is built.
+A PKCS#11 provider, proposed for
+[go-xkms](https://github.com/jeremyhahn/go-xkms), not go-enclave: keys on a
+secure element belong to go-xkms only ([SPEC scope](../SPEC.md#scope)), and
+go-enclave ships no hardware key-protector provider. go-enclave gains no
+module, dependency or code for it. Nothing here is decided beyond the shape;
+the [open questions](#open-questions) must be answered before go-xkms builds
+it.
 
 - **Key:** one AES-256 secret key in the token, `CKA_TOKEN`, `CKA_SENSITIVE`,
   `CKA_ENCRYPT` and `CKA_DECRYPT` true, `CKA_EXTRACTABLE` false, found by its
@@ -489,20 +504,57 @@ gains no dependency. Nothing here is decided beyond the shape; the
    every format-one code on `TPM2_Load`'s parameters 1 and 2, and checks the
    public area against the template before device work.
 7. **Departure: sealed object attributes.** The row's attribute set is kept;
-   the design adds that `sensitiveDataOrigin` must stay clear, which TPM 2.0
-   Part 3 (`TPM2_Create`) requires when the caller supplies the sealed data.
+   the design adds that `sensitiveDataOrigin` must stay clear, which
+   [TPM 2.0 Part 3](../reference/TCG_TPM2_r1p59_Part3_Commands_pub.pdf)
+   (`TPM2_Create`) requires when the caller supplies the sealed data.
 8. **Secure element: cgo.** A PKCS#11 binding loads a C library: the common
-   Go bindings need cgo, and go-enclave builds without it today. Options: a
-   cgo binding in the nested module only; a pure-Go loader; or a separate
-   helper process. Open.
+   Go bindings need cgo. Options: a cgo binding confined to the provider's
+   module; a pure-Go loader; or a separate helper process. Open.
+
+   Proposed answer (for owner sign-off): a pure-Go loader in go-xkms, in
+   the provider's own package, so the provider builds with `CGO_ENABLED=0`
+   and go-enclave gains nothing; a helper process is rejected because the
+   key would cross an IPC boundary the provider does not control, and a cgo
+   binding would bring a C toolchain into the static and cross builds.
+   Whether a third-party pure-Go loader dependency is preferable to cgo
+   confined to that package is the owner's taste.
 9. **Secure element: test fixture.** SoftHSM in a CI fixture job, as `swtpm`
    for the TPM, is the obvious choice; whether its GCM behaviour matches the
    tokens the provider targets is not established. Open.
+
+   Proposed answer (for owner sign-off): SoftHSM v2, at its latest release,
+   in a CI fixture job that runs `providertest` (the residue sweep
+   included, with no skip) as `swtpm` does for the TPM; it is a real
+   PKCS#11 token driven through the same library interface, not a mock in
+   the provider's code. The suite asserts only the contract and the blob
+   layout, not token-specific GCM behaviour, so a difference on another
+   token shows as a failing run on that token; which hardware token, if
+   any, gets a recurring run is the owner's choice.
 10. **Secure element: nonce and limits.** A random 96-bit nonce bounds a key
     at 2^32 encryptions (NIST SP 800-38D), a count no single process can
     enforce across processes; and some tokens in FIPS mode refuse a
     caller-supplied GCM nonce and generate their own. Whether the provider
     asks the token for the nonce, and how the limit is enforced, is open.
+
+    Proposed answer (for owner sign-off): the provider supplies a random
+    96-bit nonce from `crypto/rand` and does not enforce the limit; the
+    limit is documented as the operator's, met by provisioning a new key
+    under a new `CKA_ID` well before 2^32 seals, and old blobs still open
+    because each names its key. This keeps the provider stateless across
+    processes, as the TPM provider writes no NV state; the blob already
+    stores the nonce, so token-generated nonces can be added later without
+    a layout change. Whether FIPS-mode tokens that refuse a caller nonce
+    are a target for the first code slice is the owner's call.
 11. **Secure element: key provisioning and login.** Who creates the token key
     (the provider on first use, or an operator beforehand), and where the
     user PIN comes from without a credential in configuration.
+
+    Proposed answer (for owner sign-off): an operator provisions the key
+    beforehand, and the provider never creates one; at construction it
+    checks the key's attributes against the outline and refuses a key that
+    is extractable or not sensitive. The caller hands the user PIN to the
+    constructor in a locked buffer the provider wipes after `C_Login`, and
+    a token with a protected authentication path logs in with no PIN, so
+    no credential enters the provider's configuration, as the TPM provider
+    takes no owner-auth option (question 1). Whether the PIN arrives as a
+    locked buffer or through a caller callback is the owner's taste.
