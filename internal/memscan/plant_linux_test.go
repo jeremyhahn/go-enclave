@@ -26,6 +26,8 @@ import (
 	"testing"
 	"time"
 	"unsafe"
+
+	"golang.org/x/sys/unix"
 )
 
 // TestFindPlantsNoCopyOfTheNeedle sweeps for a 32-byte needle while signals
@@ -500,16 +502,17 @@ func TestUrgDeliveredNeedsTheSignalTaken(t *testing.T) {
 	if urgPending(pid, tid) {
 		t.Fatal("SIGURG is already pending on this locked thread, or /proc gives no SigPnd: the delivery check cannot start clean")
 	}
-	const sigBlock, sigSetmask = 0, 2
-	set := uint64(1) << (uint(syscall.SIGURG) - 1)
-	var old uint64
-	if _, _, e := syscall.RawSyscall6(syscall.SYS_RT_SIGPROCMASK, sigBlock,
-		uintptr(unsafe.Pointer(&set)), uintptr(unsafe.Pointer(&old)), 8, 0, 0); e != 0 {
-		t.Fatalf("rt_sigprocmask: %v", e)
+	// Sigset_t's word size and the SIG_* values differ by architecture
+	// (mips among them), so the mask is built from x/sys/unix's own.
+	var set, old unix.Sigset_t
+	bit := uint(unix.SIGURG) - 1
+	word := uint(unsafe.Sizeof(set.Val[0])) * 8
+	set.Val[bit/word] |= 1 << (bit % word)
+	if err := unix.PthreadSigmask(unix.SIG_BLOCK, &set, &old); err != nil {
+		t.Fatalf("pthread_sigmask: %v", err)
 	}
 	restore := func() {
-		_, _, _ = syscall.RawSyscall6(syscall.SYS_RT_SIGPROCMASK, sigSetmask,
-			uintptr(unsafe.Pointer(&old)), 0, 8, 0, 0)
+		_ = unix.PthreadSigmask(unix.SIG_SETMASK, &old, nil)
 	}
 	if err := syscall.Tgkill(pid, tid, syscall.SIGURG); err != nil {
 		restore()
