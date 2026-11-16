@@ -669,10 +669,17 @@ func sweepRound(needle []byte, home uintptr, mode string) (hits []string, aborte
 		case childBusy:
 			// Running and busy in marked passes, but never comparing:
 			// each fill opens a window that closes at once, as one does
-			// after a search. None may count.
+			// after a search. None may count. SIGURG stays blocked from
+			// the fill to the close: a signal taken there would preempt
+			// the thread inside its open window, which the parent cannot
+			// tell from a compare.
 			r := markedReader{b: needle[0], st: &st, flag: true, hi: denseSpan}
-			_, _ = r.ReadAt(buf[:denseFill], 0)
-			st.inside.Store(false)
+			if err := withUrgBlocked(func() {
+				_, _ = r.ReadAt(buf[:denseFill], 0)
+				st.inside.Store(false)
+			}); err != nil {
+				return nil, false, err
+			}
 		case childOutside:
 			// The pass compares with the flag clear and the sleep after it
 			// takes most signals: none of them may count.
@@ -920,8 +927,20 @@ func urgDelivered(pid, tid int) bool {
 }
 
 // withUrgBlocked runs f on the calling thread, which must be locked to
-// its goroutine.
+// its goroutine, with SIGURG blocked. No SIGURG is taken while f runs, so
+// none lands in f and none preempts it there; one sent meanwhile stays
+// pending until f returns.
 func withUrgBlocked(f func()) error {
+	// Sigset_t's word size and the SIG_* values differ by architecture
+	// (mips among them), so the mask is built from x/sys/unix's own.
+	var set, old unix.Sigset_t
+	bit := uint(unix.SIGURG) - 1
+	word := uint(unsafe.Sizeof(set.Val[0])) * 8
+	set.Val[bit/word] |= 1 << (bit % word)
+	if err := unix.PthreadSigmask(unix.SIG_BLOCK, &set, &old); err != nil {
+		return fmt.Errorf("pthread_sigmask: %w", err)
+	}
+	defer func() { _ = unix.PthreadSigmask(unix.SIG_SETMASK, &old, nil) }()
 	f()
 	return nil
 }
