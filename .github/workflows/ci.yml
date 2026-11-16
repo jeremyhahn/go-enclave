@@ -2089,15 +2089,6 @@ jobs:
           done
           swtpm --version
 
-      # The kernel decides which pages /proc/self/mem cannot read (guard
-      # regions, PM_GUARD_REGION from 6.15), so the log names it before the
-      # residue sweeps run.
-      - name: Print the kernel
-        if: ${{ env.TPM_SELECTED == 'true' }}
-        run: |
-          uname -a
-          cat /proc/version
-
       - name: make integration-test-tpm
         if: ${{ env.TPM_SELECTED == 'true' }}
         run: make integration-test-tpm
