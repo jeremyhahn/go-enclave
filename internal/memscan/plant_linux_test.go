@@ -747,6 +747,8 @@ type passState struct {
 	seq     atomic.Uint64
 	inside  atomic.Bool
 	hold    atomic.Uint64 // the window a send in flight holds open; 0, no window's seq, for none
+	watch   atomic.Uint64 // the window a send last found open; 0 for none
+	read    atomic.Uint64 // watch, once the same search read on past it: its compare finished
 	verdict atomic.Uint32
 }
 
@@ -796,13 +798,17 @@ func readParent(st *passState, done chan<- error) {
 			return
 		}
 		for _, b := range in[:n] {
-			// A held signal counts once its window has closed: the thread
-			// finished that compare and read on, or its search returned.
-			// A thread parked in its window never closes it.
+			// A held signal counts once its window has closed by the same
+			// search reading on from it: the thread finished that compare.
+			// A window closed any other way (a fill with no compare, then
+			// a close) drops it, and a thread parked in its window never
+			// closes it.
 			if held > 0 && (st.seq.Load() != heldAt || !st.inside.Load()) {
-				signaled += held
+				if st.read.Load() == heldAt {
+					signaled += held
+					fmt.Printf("%s%d\n", roundSignaled, signaled)
+				}
 				held = 0
-				fmt.Printf("%s%d\n", roundSignaled, signaled)
 			}
 			switch b {
 			case sendBefore[0]:
@@ -813,6 +819,7 @@ func readParent(st *passState, done chan<- error) {
 					// already holds a counted signal is not held again,
 					// so it closes and that signal reports.
 					st.hold.Store(at)
+					st.watch.Store(at)
 				}
 				acked++
 				fmt.Printf("%s%d\n", roundAck, acked)
@@ -1089,6 +1096,12 @@ type markedReader struct {
 func (r markedReader) ReadAt(p []byte, off int64) (int, error) {
 	if r.flag && r.st.inside.Load() && r.st.hold.Load() == r.st.seq.Load() {
 		return firstByteReader(r.b).ReadAt(p, off) // still filled: no fill in the window
+	}
+	if off > 0 && r.st.inside.Load() && r.st.seq.Load() == r.st.watch.Load() {
+		// The search reads on from the watched window, so the compare of
+		// its buffer ran to the end. Stored before the window closes, so
+		// a reader that sees it closed sees this too.
+		r.st.read.Store(r.st.seq.Load())
 	}
 	r.st.inside.Store(false)
 	n, err := 0, io.EOF
