@@ -11,7 +11,8 @@
 # the forge:
 #
 #   1. Verify   — the tag agrees with its own tree (VERSION, the CHANGELOG
-#                 section, no unassembled fragment) and names a commit on main.
+#                 section, no unassembled fragment), names a commit on main,
+#                 and is greater than every other v* tag on the forge.
 #   2. Gate     — the full gate on the TAGGED commit, in the toolchain image,
 #                 through the make aggregates (ci-lint, ci-build, ci-security,
 #                 ci-test, and ci-integration with both FIPS configurations),
@@ -74,6 +75,15 @@ on:
 permissions:
   contents: read
 
+# One release run at a time, in tag-push order, and none cancelled: a run in
+# progress always finishes. Verify orders each tag against every other v* tag
+# on the forge (scripts/release-version-check.sh) before anything else runs,
+# so with the runs serialized a tag pushed after a higher one fails red and
+# publishes nothing, whatever raced on the maintainers' side.
+concurrency:
+  group: release-${{ github.repository }}
+  cancel-in-progress: false
+
 env:
   # 0 on our runners: require the image's baked tools at the pins, install
   # nothing. 1 on github.com, which has no baked image.
@@ -114,6 +124,23 @@ jobs:
           set -eu
           git fetch --no-tags --quiet origin main
           make release-verify
+
+      # The receive-time precedence guard (release-versioning §3): a tag
+      # pushed after a higher one, by two release-tag runs racing, must
+      # publish nothing. The forge's v* tags are fetched afresh (forced: the
+      # forge's tags are the truth here), the pushed tag itself is set
+      # aside, and release-version-check.sh, the order release-tag.sh uses,
+      # requires the tag to be greater than its commit's first parent's
+      # VERSION and every other v* tag.
+      - name: Tag is greater than every other release tag
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -eu
+          git fetch --no-tags --quiet --force origin '+refs/tags/v*:refs/tags/v*'
+          git tag -d "$TAG" >/dev/null
+          parent=$(git show HEAD^:VERSION) || { echo "::error::the tagged commit's first parent has no VERSION to order $TAG against"; exit 1; }
+          sh scripts/release-version-check.sh "$TAG" "$parent"
 
   # The gate in the toolchain image built from the tagged commit, as ci.yml's
   # image job runs its stages (that job's steps, one stage after another):

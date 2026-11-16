@@ -79,7 +79,7 @@ fi
 branch=$(git rev-parse --abbrev-ref HEAD)
 [ "$branch" = main ] || die "releases are cut from main; you are on $branch. 'push dev HEAD' would publish this branch to dev."
 ! git rev-parse -q --verify "refs/tags/$version" >/dev/null || die "tag $version already exists locally"
-git remote get-url dev >/dev/null 2>&1 || die "no 'dev' remote. The Gitea remote is named dev (version-control.md §2): git remote rename origin dev"
+git remote get-url dev >/dev/null 2>&1 || die "no 'dev' remote. The GitHub remote is named dev (version-control.md §2): git remote rename origin dev"
 rc=0
 "$agent_git" "$repo_name" ls-remote --exit-code --tags dev "refs/tags/$version" >/dev/null 2>&1 || rc=$?
 case $rc in

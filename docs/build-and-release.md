@@ -9,9 +9,9 @@ lint, cross-build, the devcontainer) are in
 [CONTRIBUTING.md](../CONTRIBUTING.md#make-targets); this page does not repeat
 them. `make help` lists every target.
 
-The project is developed on a primary forge and published to GitHub. The
-release tooling talks to the primary forge through a git remote named `dev`
-and through the forge's HTTP API; GitHub receives a copy of each release.
+The project is developed and published on GitHub, its only forge. The
+release tooling talks to GitHub through a git remote named `dev` and through
+GitHub's REST API (`https://api.github.com`).
 
 ## Design
 
@@ -37,17 +37,29 @@ make release-alpha|release-candidate|release VERSION=…
   └─ scripts/release.sh: refuse, assemble CHANGELOG.md, sign, push release/<version> only
        └─ pull request release/<version> → main (the ruleset requires CI Gate)
             └─ make release-tag VERSION=…
-                 └─ scripts/release-tag.sh: refuse, signed annotated tag on main's HEAD, push the tag only
-                      └─ release.yml on the tag
-                           1. Verify    make release-verify; resolves the tag to its commit (build/ci/release-tag.sh)
+                 └─ scripts/release-tag.sh: refuse, signed annotated tag on main's HEAD,
+                    re-read dev's tags (refuse if they changed), push the tag only
+                      └─ release.yml on the tag (one run at a time, none cancelled)
+                           1. Verify    make release-verify; resolves the tag to its commit (build/ci/release-tag.sh);
+                                        release-version-check.sh against every other v* tag on GitHub
                            2. Gate      ci-lint, ci-build, ci-security trivy, ci-test test-fips, ci-integration
                            3. Consumer  make consumer-check
-                           4. Publish   make release-publish (primary forge only)
+                           4. Publish   make release-publish (skipped on github.com)
 ```
 
 Every job after Verify checks out the commit Verify resolved, never the moving
-tag. Publish needs every earlier job; it is skipped when the workflow runs on
-github.com, where a maintainer publishes the release by hand.
+tag. Publish needs every earlier job; it is skipped on github.com, so a
+maintainer publishes the GitHub release by hand once the run is green.
+
+Version precedence is checked twice. `release-tag.sh` orders the version
+against its merged commit's first parent's `VERSION` and dev's tags, reads
+dev's tag list again just before it pushes, and pushes nothing when that list
+changed meanwhile (another release was tagged while it waited on the forge).
+The window between that read and the push is closed by `release.yml`: its
+`concurrency` group runs one release at a time without cancelling any, and
+Verify fetches every `v*` tag from GitHub, sets the pushed tag aside and runs
+`scripts/release-version-check.sh`, so a tag pushed after a higher one fails
+Verify and nothing is published for it.
 The published commit is then checked with
 `make release-tree-check TAG=… REF=<published ref>`: its tree must be the tag's.
 
@@ -55,7 +67,7 @@ The published commit is then checked with
 
 ### Prerequisites
 
-- A git remote named `dev` that points at the primary forge
+- A git remote named `dev` that points at the GitHub repository
   (`git remote rename origin dev`).
 - `AGENT_GIT`, the path of the commit-signing wrapper, set in `local.mk`
   (ignored by git and refused by the releasability gate if tracked). It has no
@@ -159,10 +171,15 @@ refuses:
 - a HEAD the forge does not name as the merge commit of a merged pull request
   from `release/<version>` into `main`;
 - a `CI Gate` check run on that pull request's head that is not `success`, or
-  a forge it cannot reach.
+  a forge it cannot reach;
+- a `dev` tag list that changed between the precedence check and the push
+  (it creates the tag, lists `dev`'s tags again, and deletes the local tag
+  and pushes nothing when the list differs from the one read before the
+  check).
 
-Then it creates the signed annotated tag on HEAD and pushes the tag alone.
-`release.yml` gates the tagged commit again, including that it is on `main`.
+Then it pushes the tag alone. `release.yml` gates the tagged commit again,
+including that it is on `main` and greater than every other `v*` tag on
+GitHub.
 
 ### Post-tag targets
 
@@ -171,15 +188,16 @@ Then it creates the signed annotated tag on HEAD and pushes the tag alone.
 | `make release-verify` | `TAG`, optional `MAIN_REF` | The tag agrees with `VERSION` and `CHANGELOG.md`; with `MAIN_REF`, `HEAD` is an ancestor of it |
 | `make release-tree-check` | `TAG`, `REF` | Offline, in the local clone: the tree of the published commit `REF` is byte-identical to the tree of the release tag `TAG` (SPEC release criterion 8). Refuses, naming both trees, when they differ, when either does not resolve, or when `TAG` is not a release version. Writes nothing |
 | `make consumer-check` | `TAG` | In a fresh directory with a fresh module cache and `GOWORK=off`, `go get`s the module at the tag, asserts the build list selected that version, runs `go mod verify`, and builds and runs `scripts/testdata/consumer`, which also runs `providertest.TestProvider` against the software provider |
-| `make release-publish` | `TAG`, `SHA`, `FORGE_*` (a write token) | Confirms the tag exists on the forge and names `SHA`, then creates the release or updates it in place, and reads it back. Primary forge only: it refuses an `api.github.com` endpoint |
+| `make release-publish` | `TAG`, `SHA`, `FORGE_*` (a write token) | Confirms the tag exists on the forge and names `SHA`, then creates the release or updates it in place, and reads it back. It refuses an `api.github.com` endpoint, and `release.yml` skips it on github.com: a GitHub release is published by hand |
 
 The release body is the tag's `CHANGELOG.md` section (`release-notes.sh`).
 `release-publish` never creates a tag (the forge's create-release call would
 make one from the default branch) and never deletes anything, so a re-run
 converges. `consumer-check` clears `GOFLAGS` and sets no `GOPRIVATE`,
 `GONOSUMDB` or `GOINSECURE`: resolution is whatever the runner configured.
-On the primary forge's runners, `build/ci/forge-resolution.sh` first asserts
-that the runner configured it.
+Off github.com (a self-hosted forge's runners), `build/ci/forge-resolution.sh`
+first asserts that the runner configured it; on github.com the step is
+skipped.
 
 ### Verifying a signed release
 
@@ -272,7 +290,7 @@ repository's volumes on that host exceed `CI_CACHE_MAX_GIB` (32).
 | Soak | nightly | `make ci-integration` looped on `ubuntu-latest` for 30 minutes, each iteration its own compose project |
 | TPM swtpm Conformance | full | `make integration-test-tpm` on the runner host, with `swtpm` from the runner's package manager and Go from `setup-go`. On a pull request it runs only when a file under `backends/tpm/`, `scripts/swtpm-fixture.sh` or `ci.yml` changed |
 | OP-TEE | full | `make integration-test-arm-trustzone` in the OP-TEE fixture image pinned by digest in `scripts/tool-pins.sh`; it fails when the pin is empty. It runs only when an OP-TEE path changed |
-| Publish CI images | push to `main` | On the primary forge only: publishes the toolchain image to the CI image registry (`CI_IMAGE_NAMESPACE`) when the registry lacks its hash. It skips on github.com |
+| Publish CI images | push to `main` | Off github.com only (a self-hosted forge's runners): publishes the toolchain image to the CI image registry (`CI_IMAGE_NAMESPACE`) when the registry lacks its hash. It skips on github.com |
 
 The **PR tier** runs on every event. The **full tier** runs on every event
 but a pull request (a push to `main`, the nightly schedule, `workflow_dispatch`

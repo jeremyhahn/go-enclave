@@ -94,7 +94,7 @@ func TestScriptsReleaseWorkflow_OrdersTheTagBeforePublishing(t *testing.T) {
 		t.Fatal("release.yml has no workflow-level concurrency group, so two tag runs are not serialized")
 	}
 	if c := wf.Concurrency.CancelInProgress; c != nil && c != false {
-		t.Fatalf("release.yml's concurrency cancels in progress (%v); a tag run must finish, not be cancelled", c)
+		t.Fatalf("release.yml's concurrency cancels in progress (%v); a tag run must finish, not be canceled", c)
 	}
 	publish, ok := wf.Jobs["publish"]
 	if !ok {
