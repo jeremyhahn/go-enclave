@@ -462,10 +462,10 @@ func TestSweepUnderSignalsFailsAParkedChild(t *testing.T) {
 	}
 }
 
-// A thread that runs and takes every signal in its marked passes but
-// only fills its buffer and keeps its loop's books, never comparing:
-// run and delivery evidence alone must not count, so the round counts
-// none and fails.
+// A thread that runs and takes every signal, SIGURG unblocked, in marked
+// windows it holds open as a compare pass does, but that only fills its
+// buffer and spins, never comparing: window, run and delivery evidence
+// alone must not count, so the round counts none and fails.
 func TestSweepUnderSignalsFailsABusyNonComparingChild(t *testing.T) {
 	requireRunEvidence(t)
 	out, sent, _, err := runSweepChild(childBusy, 32, controlDeadline)
@@ -475,6 +475,33 @@ func TestSweepUnderSignalsFailsABusyNonComparingChild(t *testing.T) {
 	if len(sent) != 1 || sent[0] != 0 {
 		t.Fatalf("a round whose thread never compared counted %v signal(s), want [0]", sent)
 	}
+}
+
+// TestSweepUnderSignalsCatchesAnUnsafeComparator runs a round whose child
+// compares under signals beside a comparator that leaves the needle on the
+// heap: the sweep after the round must find that copy.
+func TestSweepUnderSignalsCatchesAnUnsafeComparator(t *testing.T) {
+	requireRunEvidence(t)
+	out, sent, code, err := runSweepChild(childLeak, 32, sweepDeadline)
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if code != exitResidue {
+		t.Fatalf("a child whose comparator copies the needle exited %d, want %d (signals %v):\n%s", code, exitResidue, sent, out)
+	}
+	if len(sent) != 1 || sent[0] < minSignals {
+		t.Fatalf("the residue round took %v signal(s), want one round of at least %d", sent, minSignals)
+	}
+}
+
+// leakSink holds leakyCompare's copy of the needle past its return.
+var leakSink []byte
+
+// leakyCompare is the unsafe comparator childLeak runs: it compares a copy
+// of the needle on the heap and never wipes it.
+func leakyCompare(hay, needle []byte) bool {
+	leakSink = append(leakSink[:0], needle...)
+	return bytes.Contains(hay, leakSink)
 }
 
 // TestSweepUnderSignalsFailsSignalsInTheBufferClear pins that a signal
@@ -667,17 +694,25 @@ func sweepRound(needle []byte, home uintptr, mode string) (hits []string, aborte
 			st.inside.Store(false)
 			done <- verdict // for the receive below
 		case childBusy:
-			// Running and busy in marked passes, but never comparing:
-			// each fill opens a window that closes at once, as one does
-			// after a search. None may count. SIGURG stays blocked from
-			// the fill to the close: a signal taken there would preempt
-			// the thread inside its open window, which the parent cannot
-			// tell from a compare.
+			// The same window protocol as a compare pass, with SIGURG
+			// taken as usual, but no compare: each fill opens a window
+			// that stays open, the thread running and busy in it, while
+			// a send holds it and for a compare's length after, and then
+			// closes without the search reading on. None may count.
 			r := markedReader{b: needle[0], st: &st, flag: true, hi: denseSpan}
-			if err := withUrgBlocked(func() {
-				_, _ = r.ReadAt(buf[:denseFill], 0)
-				st.inside.Store(false)
-			}); err != nil {
+			_, _ = r.ReadAt(buf[:denseFill], 0)
+			for t0 := time.Now(); st.hold.Load() == st.seq.Load() || time.Since(t0) < busySpan; {
+				if st.verdict.Load() != 0 {
+					break
+				}
+			}
+			st.inside.Store(false)
+		case childLeak:
+			// A compare pass under signals, beside a deliberately unsafe
+			// comparator that leaves a copy of the needle on the heap:
+			// the sweep after the round must report it.
+			leakyCompare(buf, needle)
+			if err := pass(true); err != nil {
 				return nil, false, err
 			}
 		case childOutside:
@@ -999,7 +1034,9 @@ const (
 	childStall        = "stall"                // stops itself while its sweep runs
 	childPause        = "pause"                // compares once before its signals, then stops comparing
 	childOutside      = "outside"              // compares outside its in-compare flag, sleeps between passes
-	childBusy         = "busy"                 // spins through fills and bookkeeping in marked passes, never compares
+	childBusy         = "busy"                 // holds marked windows open, running and taking SIGURG, but never compares
+	busySpan          = 50 * time.Microsecond  // the least a childBusy window stays open after its fill
+	childLeak         = "leak"                 // compares under signals beside an unsafe comparator that copies the needle to the heap
 	childParked       = "parked"               // marks a pass, then parks its thread in it until the verdict
 	childClear        = "clear"                // searches that read nothing: each skips its compare and only clears its buffer
 	clearSpan         = 64 << 20               // the buffer a childClear search clears, so the clear outlasts a signal's two looks
