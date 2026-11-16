@@ -528,6 +528,35 @@ func TestUrgDeliveredNeedsTheSignalTaken(t *testing.T) {
 	}
 }
 
+// A busy child fills and closes its window with SIGURG blocked, so a
+// signal sent meanwhile is not taken in the window: it stays pending
+// until the step returns, and only then is delivered.
+func TestWithUrgBlockedHoldsTheSignalPending(t *testing.T) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	pid, tid := os.Getpid(), syscall.Gettid()
+	if urgPending(pid, tid) {
+		t.Fatal("SIGURG is already pending on this locked thread, or /proc gives no SigPnd: the check cannot start clean")
+	}
+	var sent, inside bool
+	err := withUrgBlocked(func() {
+		sent = syscall.Tgkill(pid, tid, syscall.SIGURG) == nil
+		inside = urgDelivered(pid, tid)
+	})
+	if err != nil {
+		t.Fatalf("withUrgBlocked: %v", err)
+	}
+	if !sent {
+		t.Fatal("tgkill failed")
+	}
+	if inside {
+		t.Fatal("a SIGURG sent inside withUrgBlocked was taken before the step returned")
+	}
+	if !urgDelivered(pid, tid) {
+		t.Fatal("a SIGURG sent inside withUrgBlocked still shows pending after it returned")
+	}
+}
+
 // TestSweepNeedleNeverStartsWithZero: a needle that starts with a zero
 // byte sends Find's search to a whole-needle compare at every zero byte of
 // the process, which under the race detector takes seconds per sweep and
@@ -888,6 +917,13 @@ func urgDelivered(pid, tid int) bool {
 		}
 		time.Sleep(runPoll)
 	}
+}
+
+// withUrgBlocked runs f on the calling thread, which must be locked to
+// its goroutine.
+func withUrgBlocked(f func()) error {
+	f()
+	return nil
 }
 
 // requireRunEvidence fails a test whose rounds need run evidence the
