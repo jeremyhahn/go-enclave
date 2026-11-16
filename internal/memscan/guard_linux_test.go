@@ -14,9 +14,13 @@ import (
 	"io"
 	"math"
 	"os"
+	"slices"
+	"strings"
 	"syscall"
 	"testing"
 	"unsafe"
+
+	"golang.org/x/sys/unix"
 )
 
 const testPage = 0x1000
@@ -267,6 +271,89 @@ func (c *countingReader) ReadAt(p []byte, off int64) (int, error) {
 }
 
 func readerOf(b []byte) io.ReaderAt { return &byteReader{b} }
+
+// guardKernel names the kernel the live guard test needs: MADV_GUARD_INSTALL
+// came in Linux 6.13 and the pagemap PM_GUARD_REGION bit in 6.15.
+const guardKernel = "Linux 6.15+ (MADV_GUARD_INSTALL from 6.13, PM_GUARD_REGION in /proc/self/pagemap from 6.15)"
+
+// TestSweepSkipsALiveGuardRegion installs a real guard region with
+// madvise(MADV_GUARD_INSTALL), plants a needle after it, and sweeps the
+// mapping through /proc/self/mem: the sweep must read past the guard, find the
+// needle and report exactly the guarded pages as skipped.
+func TestSweepSkipsALiveGuardRegion(t *testing.T) {
+	const pages, first, guards = 6, 1, 2 // pages first..first+guards-1 are guarded
+	ps := os.Getpagesize()
+	// A PROT_NONE page either side keeps the region in a VMA of its own.
+	m, err := unix.Mmap(-1, 0, (pages+2)*ps, unix.PROT_NONE, unix.MAP_PRIVATE|unix.MAP_ANONYMOUS)
+	if err != nil {
+		t.Fatalf("mmap: %v", err)
+	}
+	defer func() { _ = unix.Munmap(m) }()
+	region := m[ps : (pages+1)*ps]
+	if err := unix.Mprotect(region, unix.PROT_READ|unix.PROT_WRITE); err != nil {
+		t.Fatalf("mprotect: %v", err)
+	}
+	needle := []byte("memscan live guard-region needle")
+	copy(region[(first+guards)*ps+17:], needle)
+	if err := unix.Madvise(region[first*ps:(first+guards)*ps], unix.MADV_GUARD_INSTALL); err != nil {
+		t.Fatalf("madvise(MADV_GUARD_INSTALL) = %v; this test needs %s", err, guardKernel)
+	}
+
+	proc, closeProc, err := openProc()
+	if err != nil {
+		t.Fatalf("openProc: %v", err)
+	}
+	defer closeProc()
+	lo := uintptr(unsafe.Pointer(&region[0]))
+	hi := lo + uintptr(len(region))
+	for i := range pages {
+		addr := lo + uintptr(i*ps)
+		_, guard, err := proc.guardRegion(addr)
+		if err != nil {
+			t.Fatalf("guardRegion(page %d): %v", i, err)
+		}
+		if want := i >= first && i < first+guards; guard != want {
+			t.Fatalf("pagemap PM_GUARD_REGION of page %d = %v, want %v; this test needs %s", i, guard, want, guardKernel)
+		}
+	}
+
+	maps, err := os.ReadFile("/proc/self/maps")
+	if err != nil {
+		t.Fatalf("read /proc/self/maps: %v", err)
+	}
+	var line string
+	for _, l := range strings.Split(string(maps), "\n") {
+		if a, b, ok := ParseMapsHeader(l); ok && a == lo {
+			if b != hi {
+				t.Fatalf("the region's mapping is %s, want it to end at %#x", l, hi)
+			}
+			line = l
+		}
+	}
+	if line == "" {
+		t.Fatalf("no mapping starts at the region, %#x", lo)
+	}
+
+	got, err := sweep(line, proc, needle, 0, make([]byte, chunk+len(needle)-1))
+	if err != nil {
+		t.Fatalf("sweep of the guarded mapping: %v", err)
+	}
+	if len(got.Hits) != 1 || got.GuardPages != guards {
+		t.Fatalf("sweep of the guarded mapping = %d hit(s), %d guard page(s) skipped; want 1 hit and %d skipped",
+			len(got.Hits), got.GuardPages, guards)
+	}
+
+	// The whole-process sweep finds the region too and counts its guard pages
+	// among any other guard regions the process holds.
+	all, err := Sweep(needle, 0)
+	if err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	if !slices.Contains(all.Hits, strings.TrimSpace(line)) || all.GuardPages < guards {
+		t.Fatalf("Sweep = %d hit(s), %d guard page(s) skipped; want the region %q among the hits and at least %d skipped",
+			len(all.Hits), all.GuardPages, line, guards)
+	}
+}
 
 // byteReader is bytes.Reader's ReadAt without its other methods.
 type byteReader struct{ b []byte }
