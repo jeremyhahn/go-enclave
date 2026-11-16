@@ -1003,10 +1003,14 @@ const (
 	// with the needle's first byte. It is small so that a compare, and so
 	// a window, ends within a send even under the race detector and
 	// coverage: a held signal counts only once its window closes.
-	denseFill      = 4 << 10
-	denseSpan      = 16 * denseFill         // the region one search of a pass reads, a buffer at a time
-	minSignals     = 50                     // a round counts only after this many
-	maxSends       = 4 * minSignals         // a round fails once it has sent this many short of minSignals
+	denseFill  = 4 << 10
+	denseSpan  = 16 * denseFill // the region one search of a pass reads, a buffer at a time
+	minSignals = 50             // a round counts only after this many
+	// maxSends is the send budget: a round fails once it has sent this
+	// many short of minSignals. At -cpu=1 under -race on four CPUs a
+	// round needs up to 4*minSignals sends (the child reads its stdin only
+	// when the sweep is preempted), so the budget is twice that.
+	maxSends       = 8 * minSignals
 	signalPhase    = 50 * time.Millisecond  // of signals to the sweeping thread per round
 	signalInterval = 200 * time.Microsecond // between signals to the sweeping thread
 	ackWait        = 250 * time.Millisecond // for the child to take the pass state at a sendBefore
