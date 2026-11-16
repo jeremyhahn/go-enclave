@@ -1,6 +1,6 @@
 # go-enclave documentation
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-11-13
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-11-15
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 What go-enclave is and every feature it has: [SPEC](SPEC.md). What is done
@@ -53,7 +53,6 @@ implemented.
 | Proposal | What it covers |
 |---|---|
 | [confidential-vm](backends/confidential-vm.md) | Attestation and, on SEV-SNP, a derived-key `KeyProtector` for a process in an AMD SEV-SNP or Intel TDX confidential VM. Not a backend |
-| [imx-edgelock-enclave](backends/imx-edgelock-enclave.md) | A backend on the NXP i.MX 95 EdgeLock Secure Enclave |
 
 ### Project
 
@@ -82,6 +81,17 @@ go-enclave: the hardware `KeyProtector` providers (`backends/tpm` and
 [go-xkms](https://github.com/jeremyhahn/go-xkms), and callers of these APIs
 move there ([SPEC scope](SPEC.md#scope)). This release changes no code; the
 release that removes each API adds its migration steps here.
+
+#### i.MX EdgeLock backend module moved to go-xkms
+
+**A caller of `backends/imxele` moves to go-xkms.** The nested module
+`github.com/jeremyhahn/go-enclave/backends/imxele` is removed from this
+repository: the i.MX 95 EdgeLock Enclave holds keys only, so it moved to
+[go-xkms](https://github.com/jeremyhahn/go-xkms) ([SPEC scope](SPEC.md#scope)).
+On the i.MX 95, go-enclave's backend is `backends/armtrustzone`
+(TrustZone/OP-TEE), but today it holds bytes in normal-world memory, readable
+by the process and kernel; secure-world storage (the vault trusted
+application) is planned.
 
 #### Go version
 

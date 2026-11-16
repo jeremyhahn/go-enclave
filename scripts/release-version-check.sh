@@ -1,7 +1,11 @@
 #!/bin/sh
 # release-version-check.sh — refuse a release version that does not move forward.
 #
-# Usage: scripts/release-version-check.sh <vX.Y.Z[-pre]>   (from the repository root)
+# Usage: scripts/release-version-check.sh <vX.Y.Z[-pre]> [<X.Y.Z[-pre]>]   (from the repository root)
+#
+# With a second argument, that is the VERSION ordered against in place of the
+# VERSION file: release-tag.sh passes the merged release commit's first
+# parent's VERSION, since the file already holds the new version there.
 #
 # The release targets (scripts/release.sh) run this before they write anything. release-versioning
 # §3: a VERSION file is never lowered and a published tag is never superseded
@@ -31,13 +35,20 @@ NUM='(0|[1-9][0-9]*)'
 ID='(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)'
 SEMVER="$NUM\\.$NUM\\.$NUM(-$ID(\\.$ID)*)?(\\+[0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*)?"
 
-[ $# -eq 1 ] || die "usage: $0 <vX.Y.Z[-pre]>"
+case $# in
+  1 | 2) ;;
+  *) die "usage: $0 <vX.Y.Z[-pre]> [<current VERSION>]" ;;
+esac
 new=$1
 matches "$new" "^v$SEMVER\$" || die "'$new' is not a v-prefixed SemVer 2.0.0 version"
 
-[ -f VERSION ] || die "VERSION not found (run from the repository root)"
-[ "$(wc -l < VERSION | tr -d ' ')" -le 1 ] || die "VERSION holds more than one line"
-current=$(cat VERSION)
+if [ $# -eq 2 ]; then
+  current=$2
+else
+  [ -f VERSION ] || die "VERSION not found (run from the repository root)"
+  [ "$(wc -l < VERSION | tr -d ' ')" -le 1 ] || die "VERSION holds more than one line"
+  current=$(cat VERSION)
+fi
 matches "$current" "^$SEMVER\$" || die "VERSION reads '$current', which is not an unprefixed SemVer version; refusing to order against it"
 
 tags=$(git tag -l 'v*') || die "could not list tags (git tag -l 'v*')"

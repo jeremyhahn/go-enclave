@@ -1,8 +1,11 @@
 #!/bin/sh
-# release.sh — cut a signed release of one kind:
+# release.sh — the first of a release's two steps: prepare a signed release
+# commit of one kind on release/<version>.
 #   make release-alpha     VERSION=vX.Y.Z-alpha
 #   make release-candidate VERSION=vX.Y.Z-rc.N
 #   make release           VERSION=vX.Y.Z
+# The second step, after the release pull request is merged, is
+# `make release-tag VERSION=…` (release-tag.sh).
 #
 # Usage: scripts/release.sh <alpha|candidate|release>   (from the repository root)
 #
@@ -12,27 +15,36 @@
 #
 # Environment (exported by the Makefile, read raw): VERSION, AGENT_GIT (the
 # commit/signing wrapper, no default: this fails closed without it) and
-# REPO_NAME (the literal repo name, which selects the signing identity), and
-# FORGE_API_URL, FORGE_REPOSITORY and FORGE_TOKEN (a read token) for the forge's
-# combined commit status.
+# REPO_NAME (the literal repo name, which selects the signing identity). This
+# step does not read the forge.
 #
-# Every git operation that talks to dev (the tag-free ls-remote, the fetch of
-# main and the push) runs through "$AGENT_GIT" "$REPO_NAME", which carries the
-# agent's credentials and URL rewrite; plain git on a maintainer host has no key
-# for dev. Local-only git (rev-parse, status, remote get-url) stays plain.
+# Every git operation that talks to dev (the tag-free and branch-free
+# ls-remote, the fetch of main and the push) runs through "$AGENT_GIT"
+# "$REPO_NAME", which carries the agent's credentials and URL rewrite; plain
+# git on a maintainer host has no key for dev. Local-only git (rev-parse,
+# status, remote get-url, checkout) stays plain.
 #
 # The version is explicit, never derived. Before anything is written: VERSION
 # must have the form of its kind, be cut from main, move forward
-# (release-version-check.sh), the tag must be free locally and on dev (ls-remote
-# exit 2 is the only "free"; anything else fails closed), the tree must be
-# clean, HEAD must be dev's main (fetched, not remembered) with a green combined
-# status on the forge (an unreachable forge refuses), and the assembled tree
-# must pass release-check-tag.sh (no fragment
-# left, a literal `## [vX.Y.Z…]` heading). VERSION is written unprefixed, by
-# overwriting, so repeating the step leaves the same bytes; changelog.d/
-# fragments fold into CHANGELOG.md in the same commit. main and the tag go in
-# one atomic push, so a rejected main never leaves the tag behind. Pushing the
-# tag hands off to release.yml.
+# (release-version-check.sh), the tag and the branch release/<version> must be
+# free locally and on dev (ls-remote exit 2 is the only "free"; anything else
+# fails closed), the tree must be clean, HEAD must be dev's main (fetched, not
+# remembered), and the assembled tree must pass release-check-tag.sh (no
+# fragment left, a literal `## [vX.Y.Z…]` heading). VERSION is written
+# unprefixed, by overwriting, so repeating the step leaves the same bytes;
+# changelog.d/ fragments fold into CHANGELOG.md in the same commit.
+#
+# main's ruleset takes a commit only through a pull request whose CI Gate
+# passed, so this step pushes release/<version> and nothing else: never main,
+# never a tag. The local checkout returns to main. A maintainer opens the pull
+# request from the branch it prints; release-tag.sh tags the merge.
+#
+# This step does not read main's CI Gate. main can be red for exactly the
+# reason the release fixes (a backend module tested against the previous
+# released root goes green only once the release exists), and a gate here
+# would keep it red for ever. The gate is the release pull request's CI Gate:
+# under the main ruleset the pull request cannot merge without it, and
+# release-tag.sh requires it again (release-ci-gate.sh) before it tags.
 set -eu
 # shellcheck source=lib.sh
 . "${0%/*}/lib.sh"
@@ -75,55 +87,34 @@ case $rc in
   2) ;;
   *) die "could not query dev for tag $version (git ls-remote exit $rc) — refusing to release on an unanswered check" ;;
 esac
+release_branch="release/$version"
+! git rev-parse -q --verify "refs/heads/$release_branch" >/dev/null || die "branch $release_branch already exists locally (git branch -D $release_branch if it is a failed earlier attempt)"
+rc=0
+"$agent_git" "$repo_name" ls-remote --exit-code --heads dev "refs/heads/$release_branch" >/dev/null 2>&1 || rc=$?
+case $rc in
+  0) die "branch $release_branch already exists on dev; a release pull request for $version is already open or was left behind" ;;
+  2) ;;
+  *) die "could not query dev for branch $release_branch (git ls-remote exit $rc) — refusing to release on an unanswered check" ;;
+esac
 [ -z "$(git status --porcelain)" ] || die "working tree not clean"
 
-# The commit being released is the tip of dev's main, and the forge says CI is
-# green on it (release-versioning §1a). A stale local main would have its main
-# push rejected while the tag still landed, burning an immutable tag; and an
-# unreached forge is an error here, never a pass.
+# The commit being released is the tip of dev's main. A stale local main would
+# put a release commit on a base the pull request does not merge cleanly onto.
 "$agent_git" "$repo_name" fetch --quiet dev main || die "could not fetch main from dev; refusing to release on an unanswered check"
 remote_main=$(git rev-parse -q --verify 'FETCH_HEAD^{commit}') || die "dev has no main to compare against"
 head_sha=$(git rev-parse HEAD)
-[ "$head_sha" = "$remote_main" ] || die "local main ($head_sha) is not dev/main ($remote_main); update it first (git pull --ff-only dev main). Releasing from it would push a tag the main push does not accompany."
-
-api=${FORGE_API_URL-}
-forge_repo=${FORGE_REPOSITORY-}
-token=${FORGE_TOKEN-}
-[ -n "$api" ] || die "FORGE_API_URL is unset - the release needs the forge's combined commit status for main (e.g. https://git.example.com/api/v1)"
-[ -n "$forge_repo" ] || die "FORGE_REPOSITORY is unset - set it to owner/repo"
-[ -n "$token" ] || die "FORGE_TOKEN is unset - the release needs a read token for the forge's commit status"
-# The token is written into a curl configuration line, so anything but a forge
-# token's own characters is refused, not escaped (release-publish.sh, same rule).
-case $token in
-  *[!A-Za-z0-9_.-]*) die "FORGE_TOKEN has characters no forge token carries; refusing to use it" ;;
-esac
-case $api in
-  *[!A-Za-z0-9._~:/?#@!\$\&\'\(\)*+,\;=%-]*) die "FORGE_API_URL contains characters a URL does not" ;;
-  http://*|https://*) ;;
-  *) die "FORGE_API_URL '$api' is not an http(s) URL" ;;
-esac
-api=${api%/}
-matches "$forge_repo" '^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$' || die "FORGE_REPOSITORY '$forge_repo' is not owner/repo"
-for t in curl jq; do
-  command -v "$t" >/dev/null 2>&1 || die "$t is required to read the forge's commit status and was not found"
-done
-work=$(mktemp -d "${TMPDIR:-/tmp}/release.XXXXXX")
-trap 'rm -rf "$work"' EXIT
-code=$(printf 'header = "Authorization: token %s"\n' "$token" |
-  curl --silent --show-error --config - --connect-timeout 10 --max-time 60 \
-    -H 'Accept: application/json' -o "$work/status" -w '%{http_code}' \
-    "$api/repos/$forge_repo/commits/$head_sha/status") || code=000
-[ "$code" = 200 ] || die "could not read the forge's commit status for $head_sha (HTTP $code); refusing to release on an unanswered check"
-state=$(jq -r --arg sha "$head_sha" 'select(.sha == $sha) | .state // empty' "$work/status" 2>/dev/null) || state=
-[ "$state" = success ] || die "CI is not green on $head_sha (combined status '${state:-unreadable}'); a release is cut only from a commit whose checks all passed"
+[ "$head_sha" = "$remote_main" ] || die "local main ($head_sha) is not dev/main ($remote_main); update it first (git pull --ff-only dev main)."
 
 sh "$here/release-version-check.sh" "$version"
 sh "$here/changelog-assemble.sh" "$version" "$(date -u +%Y-%m-%d)"
 printf '%s\n' "${version#v}" > VERSION
 sh "$here/release-check-tag.sh" "$version" || die "the assembled tree would be refused by release.yml; nothing was committed (git checkout -- VERSION CHANGELOG.md changelog.d to start over)"
+# The assembled tree carries over onto the new branch; main stays as fetched.
+git checkout -q -b "$release_branch"
 
 "$agent_git" "$repo_name" add -A -- VERSION CHANGELOG.md changelog.d
 "$agent_git" "$repo_name" commit -m "chore(release): $version"
-"$agent_git" "$repo_name" tag -a "$version" -m "$version"
-"$agent_git" "$repo_name" push --atomic dev HEAD:main "refs/tags/$version"
-echo "Released $version (signed, annotated, main and the tag pushed atomically); release.yml gates it and publishes the Gitea release"
+"$agent_git" "$repo_name" push dev "refs/heads/$release_branch:refs/heads/$release_branch"
+git checkout -q main
+echo "Prepared $version on $release_branch (signed, pushed; main and the tag untouched)."
+echo "Next: open a pull request from $release_branch into main; when it has merged, run make release-tag VERSION=$version"

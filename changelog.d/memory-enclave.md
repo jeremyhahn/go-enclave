@@ -6,3 +6,4 @@
 ### Fixed
 
 - **memory-enclave**: `memscan.ParseMapsHeader` no longer accepts a header whose low bound is above its high bound (#366).
+- **memory-enclave**: the residue sweep behind the `providertest` and `backendtest` residue checks now skips a thread-stack guard page (glibc on Linux 6.13 and later) instead of failing with an unreadable mapping, but only on a kernel whose `/proc/self/pagemap` reports `PM_GUARD_REGION` (Linux 6.15 or later, or a backport) and only when the process can read its pagemap. Elsewhere such a page, like every other unreadable page, still fails the sweep closed.

@@ -120,11 +120,12 @@ func checkNoResidueAfterUnprotect(r *report, cfg Config) {
 
 	// Control: with the key resident in the destination there must be a hit
 	// outside home, or a negative result below would be vacuous.
-	control, err := sweepOutsideHome(needle, home)
+	controlSweep, err := sweepOutsideHome(needle, home)
 	if err != nil {
 		r.unmeasured(property, "residue sweep not run: %v. Retention by copy is unmeasured", err)
 		return
 	}
+	control := controlSweep.Hits
 	if len(control) == 0 {
 		r.unmeasured(property, "residue sweep not run: with the key deliberately resident in a second locked "+
 			"mapping the sweep still found no match outside the needle's own mapping, so it cannot see the "+
@@ -144,12 +145,13 @@ func checkNoResidueAfterUnprotect(r *report, cfg Config) {
 	release(r, "destination", dst)
 	destroyed = true
 
-	after, err := sweepOutsideHome(needle, home)
+	afterSweep, err := sweepOutsideHome(needle, home)
 	if err != nil {
 		r.unmeasured(property, "residue sweep failed after its control succeeded: %v. Retention by copy is "+
 			"unmeasured", err)
 		return
 	}
+	after := afterSweep.Hits
 	if len(after) > 0 {
 		r.fail(property, "the protected key, or a half of it, is byte-exact resident in %d mapping(s) outside the caller's "+
 			"own — with the caller's destination wiped and unmapped, so every legitimate copy is gone. The "+
@@ -158,25 +160,27 @@ func checkNoResidueAfterUnprotect(r *report, cfg Config) {
 			"so it is not blind.)", len(after), after[0])
 	}
 	r.note("providertest: residue sweep ran — %d mapping(s) held the key while the destination was alive, "+
-		"%d after it was wiped and unmapped", len(control), len(after))
+		"%d after it was wiped and unmapped; it skipped %d kernel guard page(s) while the destination was alive "+
+		"and %d after, pages /proc/self/pagemap proves hold no data", len(control), len(after),
+		controlSweep.GuardPages, afterSweep.GuardPages)
 }
 
 // sweepProcess is the platform sweep; a variable so a test can blind it.
-var sweepProcess = memscan.Find
+var sweepProcess = memscan.Sweep
 
 // sweepOutsideHome returns the mappings, other than the one containing home,
 // in which the material held in probe, or either half of it, is byte-exact
-// resident.
-func sweepOutsideHome(probe enclave.ByteAccess, home uintptr) ([]string, error) {
-	var hits []string
+// resident, and the kernel guard pages the sweep skipped.
+func sweepOutsideHome(probe enclave.ByteAccess, home uintptr) (memscan.Result, error) {
+	var res memscan.Result
 	var scanErr error
 	if err := probe.WithBytes(func(needle []byte) error {
-		hits, scanErr = sweepForKeyOrHalf(needle, home)
+		res, scanErr = sweepForKeyOrHalf(needle, home)
 		return nil
 	}); err != nil {
-		return nil, &stepError{step: "borrowing the needle", err: err}
+		return memscan.Result{}, &stepError{step: "borrowing the needle", err: err}
 	}
-	return hits, scanErr
+	return res, scanErr
 }
 
 // sweepForKeyOrHalf sweeps for the whole needle and then for each half of
@@ -184,14 +188,15 @@ func sweepOutsideHome(probe enclave.ByteAccess, home uintptr) ([]string, error) 
 // part holds either half whole. It returns each mapping once. A hit any
 // probe made is returned without error, even when another probe failed; with
 // no hit, the first probe error is returned, so an incomplete sweep is never
-// clean.
-func sweepForKeyOrHalf(needle []byte, home uintptr) ([]string, error) {
+// clean. GuardPages is the most any probe skipped: every probe walks the same
+// process, so the counts are of the same pages.
+func sweepForKeyOrHalf(needle []byte, home uintptr) (memscan.Result, error) {
 	half := len(needle) / 2
 	probes := [][]byte{needle}
 	if half > 0 {
 		probes = append(probes, needle[:half], needle[half:])
 	}
-	var hits []string
+	var res memscan.Result
 	seen := map[string]bool{}
 	var firstErr error
 	for _, p := range probes {
@@ -199,18 +204,22 @@ func sweepForKeyOrHalf(needle []byte, home uintptr) ([]string, error) {
 		if err != nil && firstErr == nil {
 			firstErr = err
 		}
-		for _, m := range found {
+		res.GuardPages = max(res.GuardPages, found.GuardPages)
+		for _, m := range found.Hits {
 			if !seen[m] {
 				seen[m] = true
-				hits = append(hits, m)
+				res.Hits = append(res.Hits, m)
 			}
 		}
 	}
 	// A hit any probe made is a finding, whatever another probe met.
-	if len(hits) > 0 {
-		return hits, nil
+	if len(res.Hits) > 0 {
+		return res, nil
 	}
-	return nil, firstErr
+	if firstErr != nil {
+		return memscan.Result{}, firstErr
+	}
+	return res, nil
 }
 
 // equalBytes is written out so borrowed slices are never passed to code this

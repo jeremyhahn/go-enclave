@@ -1,6 +1,6 @@
 # go-enclave specification
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-11-13
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-11-15
 > What the project is and every feature it has. [ROADMAP.md](../ROADMAP.md) carries what is complete and what remains; the two agree.
 > A feature listed here, in any status, is never deleted: not its docs, code or issues. Removing or re-scoping one is a change to this file.
 
@@ -18,9 +18,13 @@ go-enclave backends hold arbitrary bytes in protected memory outside the
 normal world, at RAM speed, on nothing that wears out. Any hardware that does
 so is a go-enclave backend. Keys, key operations and attestation are out of
 scope: they belong to [go-xkms](https://github.com/jeremyhahn/go-xkms).
-Persistent secure-element storage (for example NXP SE05x, or the EdgeLock
-Secure Enclave's key store) wears and is slow, so keys on it belong to go-xkms
-only.
+Persistent secure-element storage (for example NXP SE05x) wears and is slow,
+so keys on it belong to go-xkms only. The NXP i.MX 95 EdgeLock Enclave holds
+keys only and gives applications no protected memory, so it moved to go-xkms
+(owner ruling 697). On the i.MX 95, TrustZone/OP-TEE (`backends/armtrustzone`)
+stays go-enclave's backend, but today it holds bytes in normal-world memory,
+readable by the process and kernel; secure-world storage (the vault trusted
+application) is planned.
 
 Two design limits govern every feature:
 

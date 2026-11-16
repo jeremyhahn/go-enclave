@@ -23,3 +23,9 @@ const UnsupportedReason = "sweeping this process's own address space needs /proc
 func Find([]byte, uintptr) ([]string, error) {
 	return nil, errors.New("memscan: " + UnsupportedReason)
 }
+
+// Sweep fails on this platform: see UnsupportedReason.
+func Sweep(needle []byte, home uintptr) (Result, error) {
+	_, err := Find(needle, home)
+	return Result{}, err
+}

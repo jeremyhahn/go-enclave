@@ -16,17 +16,18 @@ import (
 	"testing"
 
 	enclave "github.com/jeremyhahn/go-enclave"
+	"github.com/jeremyhahn/go-enclave/internal/memscan"
 )
 
 // plantedSweep returns a sweep that reports hit for the whole key and fails
 // every half-key probe with errProbe, as a mapping that turns unreadable
 // between probes would.
-func plantedSweep(hit string, errProbe error) func([]byte, uintptr) ([]string, error) {
-	return func(p []byte, _ uintptr) ([]string, error) {
+func plantedSweep(hit string, errProbe error) func([]byte, uintptr) (memscan.Result, error) {
+	return func(p []byte, _ uintptr) (memscan.Result, error) {
 		if len(p) == keyBytes {
-			return []string{hit}, nil
+			return memscan.Result{Hits: []string{hit}}, nil
 		}
-		return nil, errProbe
+		return memscan.Result{}, errProbe
 	}
 }
 
@@ -39,14 +40,29 @@ func TestSweepForKeyOrHalfKeepsAHitAcrossALaterProbeError(t *testing.T) {
 	t.Cleanup(func() { sweepProcess = orig })
 
 	sweepProcess = plantedSweep("planted-mapping", errProbe)
-	hits, err := sweepForKeyOrHalf(make([]byte, keyBytes), 0)
-	if err != nil || !slices.Equal(hits, []string{"planted-mapping"}) {
-		t.Fatalf("sweepForKeyOrHalf = %q, %v; want the full-key hit and no error", hits, err)
+	res, err := sweepForKeyOrHalf(make([]byte, keyBytes), 0)
+	if err != nil || !slices.Equal(res.Hits, []string{"planted-mapping"}) {
+		t.Fatalf("sweepForKeyOrHalf = %q, %v; want the full-key hit and no error", res.Hits, err)
 	}
 
-	sweepProcess = func([]byte, uintptr) ([]string, error) { return nil, errProbe }
-	if hits, err := sweepForKeyOrHalf(make([]byte, keyBytes), 0); !errors.Is(err, errProbe) || hits != nil {
-		t.Fatalf("sweepForKeyOrHalf with every probe failing = %q, %v; want no hits and the probe error", hits, err)
+	sweepProcess = func([]byte, uintptr) (memscan.Result, error) { return memscan.Result{}, errProbe }
+	if res, err := sweepForKeyOrHalf(make([]byte, keyBytes), 0); !errors.Is(err, errProbe) || res.Hits != nil {
+		t.Fatalf("sweepForKeyOrHalf with every probe failing = %q, %v; want no hits and the probe error", res.Hits, err)
+	}
+}
+
+// TestSweepForKeyOrHalfKeepsTheGuardPageCount pins that the half-key probes
+// carry the sweep's skipped guard-page count through, so the residue note
+// still reports it.
+func TestSweepForKeyOrHalfKeepsTheGuardPageCount(t *testing.T) {
+	orig := sweepProcess
+	t.Cleanup(func() { sweepProcess = orig })
+	sweepProcess = func(p []byte, _ uintptr) (memscan.Result, error) {
+		return memscan.Result{GuardPages: len(p)}, nil
+	}
+	res, err := sweepForKeyOrHalf(make([]byte, keyBytes), 0)
+	if err != nil || res.GuardPages != keyBytes || res.Hits != nil {
+		t.Fatalf("sweepForKeyOrHalf = %+v, %v; want no hits and %d guard pages", res, err, keyBytes)
 	}
 }
 

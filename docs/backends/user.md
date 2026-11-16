@@ -1,6 +1,6 @@
 # Backends — user guide
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-11-12
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-11-15
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 A backend is what holds an enclave's material. Locked memory, the
@@ -138,11 +138,7 @@ a TA without them, `Connect` and `Random` work but the first seal fails with a
 
 ## Proposed hardware backends
 
-These are design proposals. No code exists for them yet:
-
-| Backend | Proposal |
-|---|---|
-| NXP i.MX 95 EdgeLock Enclave | [imx-edgelock-enclave.md](imx-edgelock-enclave.md) |
+None is proposed today.
 
 A program in an AMD SEV-SNP or Intel TDX confidential VM keeps its usual
 backend: the VM already encrypts every page of the guest against the host.

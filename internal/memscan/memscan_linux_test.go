@@ -335,7 +335,8 @@ func TestSweepRetriesAMappingThatChangedUnderIt(t *testing.T) {
 	after := "10000-11000 rw-p 00000000 00:00 0\n"
 	reads := 0
 
-	hits, err := sweep(listings(&reads, before, after), mem, needle, 0, scratch(0x400, len(needle)))
+	res, err := resweep(listings(&reads, before, after), mem, needle, 0, scratch(0x400, len(needle)))
+	hits := res.Hits
 	if err != nil {
 		t.Fatalf("sweep = %v; want the second listing swept without error", err)
 	}
@@ -355,7 +356,8 @@ func TestSweepFailsClosedOnAMappingThatStaysUnreadable(t *testing.T) {
 	maps := "10000-11000 rw-p 00000000 00:00 0\n20000-21000 rw-p 00000000 00:00 0\n"
 	reads := 0
 
-	hits, err := sweep(listings(&reads, maps), mem, needle, 0, scratch(0x400, len(needle)))
+	res, err := resweep(listings(&reads, maps), mem, needle, 0, scratch(0x400, len(needle)))
+	hits := res.Hits
 	if !errors.Is(err, ErrUnreadableMapping) || hits != nil {
 		t.Fatalf("sweep = %q, %v; want only an ErrUnreadableMapping", hits, err)
 	}
@@ -377,7 +379,8 @@ func TestSweepKeepsAHitFromAnAttemptThatMetAnUnreadableMapping(t *testing.T) {
 	second := "30000-31000 rw-p 00000000 00:00 0\n" // the needle's mapping was unmapped before the retry
 	reads := 0
 
-	hits, err := sweep(listings(&reads, first, second), mem, needle, 0, scratch(0x400, len(needle)))
+	res, err := resweep(listings(&reads, first, second), mem, needle, 0, scratch(0x400, len(needle)))
+	hits := res.Hits
 	if err != nil {
 		t.Fatalf("sweep = %q, %v; want the first attempt's hit and no error", hits, err)
 	}
@@ -400,7 +403,8 @@ func TestSweepRecoversCleanAfterAMappingDisappears(t *testing.T) {
 	second := "10000-11000 rw-p 00000000 00:00 0\n30000-31000 rw-p 00000000 00:00 0\n"
 	reads := 0
 
-	hits, err := sweep(listings(&reads, first, second), mem, needle, 0, scratch(0x400, len(needle)))
+	res, err := resweep(listings(&reads, first, second), mem, needle, 0, scratch(0x400, len(needle)))
+	hits := res.Hits
 	if err != nil {
 		t.Fatalf("sweep = %q, %v; want a clean result once the retry reads every mapping", hits, err)
 	}
@@ -433,7 +437,7 @@ func TestFindReturnsItsHitsWithAnUnreadableMapping(t *testing.T) {
 // A maps listing that cannot be read ends the sweep with that error.
 func TestSweepReturnsAMapsReadError(t *testing.T) {
 	fail := errors.New("maps unreadable")
-	_, err := sweep(func() (string, error) { return "", fail }, addressSpace{}, []byte("n"), 0, scratch(0x400, 1))
+	_, err := resweep(func() (string, error) { return "", fail }, addressSpace{}, []byte("n"), 0, scratch(0x400, 1))
 	if !errors.Is(err, fail) {
 		t.Fatalf("sweep = %v; want %v", err, fail)
 	}
