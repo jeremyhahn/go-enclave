@@ -152,7 +152,9 @@ refuses:
   `release-check-tag.sh`;
 - a version not strictly greater than the first parent's `VERSION` and every
   existing `v*` tag (`release-version-check.sh`, as `release.sh` runs it), so
-  an older release pull request merged after a newer release is not tagged;
+  an older release pull request merged after a newer release is not tagged.
+  It fetches `dev`'s `v*` tags first and refuses when that fetch fails or a
+  local tag differs from `dev`'s;
 - a tag that exists locally or on `dev`;
 - a HEAD the forge does not name as the merge commit of a merged pull request
   from `release/<version>` into `main`;
