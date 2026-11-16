@@ -120,11 +120,12 @@ func checkNoResidueAfterUnprotect(r *report, cfg Config) {
 
 	// Control: with the key resident in the destination there must be a hit
 	// outside home, or a negative result below would be vacuous.
-	control, err := sweepOutsideHome(needle, home)
+	controlSweep, err := sweepOutsideHome(needle, home)
 	if err != nil {
 		r.unmeasured(property, "residue sweep not run: %v. Retention by copy is unmeasured", err)
 		return
 	}
+	control := controlSweep.Hits
 	if len(control) == 0 {
 		r.unmeasured(property, "residue sweep not run: with the key deliberately resident in a second locked "+
 			"mapping the sweep still found no match outside the needle's own mapping, so it cannot see the "+
@@ -144,12 +145,13 @@ func checkNoResidueAfterUnprotect(r *report, cfg Config) {
 	release(r, "destination", dst)
 	destroyed = true
 
-	after, err := sweepOutsideHome(needle, home)
+	afterSweep, err := sweepOutsideHome(needle, home)
 	if err != nil {
 		r.unmeasured(property, "residue sweep failed after its control succeeded: %v. Retention by copy is "+
 			"unmeasured", err)
 		return
 	}
+	after := afterSweep.Hits
 	if len(after) > 0 {
 		r.fail(property, "the protected key is byte-exact resident in %d mapping(s) outside the caller's "+
 			"own — with the caller's destination wiped and unmapped, so every legitimate copy is gone. The "+
@@ -158,24 +160,27 @@ func checkNoResidueAfterUnprotect(r *report, cfg Config) {
 			"so it is not blind.)", len(after), after[0])
 	}
 	r.note("providertest: residue sweep ran — %d mapping(s) held the key while the destination was alive, "+
-		"%d after it was wiped and unmapped", len(control), len(after))
+		"%d after it was wiped and unmapped; it skipped %d kernel guard page(s) while the destination was alive "+
+		"and %d after, pages /proc/self/pagemap proves hold no data", len(control), len(after),
+		controlSweep.GuardPages, afterSweep.GuardPages)
 }
 
 // sweepProcess is the platform sweep; a variable so a test can blind it.
-var sweepProcess = memscan.Find
+var sweepProcess = memscan.Sweep
 
 // sweepOutsideHome returns the mappings, other than the one containing home,
-// in which the material held in probe is byte-exact resident.
-func sweepOutsideHome(probe enclave.ByteAccess, home uintptr) ([]string, error) {
-	var hits []string
+// in which the material held in probe is byte-exact resident, and the kernel
+// guard pages the sweep skipped.
+func sweepOutsideHome(probe enclave.ByteAccess, home uintptr) (memscan.Result, error) {
+	var res memscan.Result
 	var scanErr error
 	if err := probe.WithBytes(func(needle []byte) error {
-		hits, scanErr = sweepProcess(needle, home)
+		res, scanErr = sweepProcess(needle, home)
 		return nil
 	}); err != nil {
-		return nil, &stepError{step: "borrowing the needle", err: err}
+		return memscan.Result{}, &stepError{step: "borrowing the needle", err: err}
 	}
-	return hits, scanErr
+	return res, scanErr
 }
 
 // equalBytes is written out so borrowed slices are never passed to code this

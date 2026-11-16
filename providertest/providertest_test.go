@@ -155,11 +155,11 @@ func TestAnUnmeasuredResidueSweepIsNotAPass(t *testing.T) {
 	const property = "no copy of the key is findable in the process after Unprotect returns"
 	tests := []struct {
 		name  string
-		sweep func([]byte, uintptr) ([]string, error)
+		sweep func([]byte, uintptr) (memscan.Result, error)
 	}{
-		{"a blind control", func([]byte, uintptr) ([]string, error) { return nil, nil }},
-		{"a sweep that cannot read memory", func([]byte, uintptr) ([]string, error) {
-			return nil, errors.New("planted: /proc/self/mem unreadable")
+		{"a blind control", func([]byte, uintptr) (memscan.Result, error) { return memscan.Result{}, nil }},
+		{"a sweep that cannot read memory", func([]byte, uintptr) (memscan.Result, error) {
+			return memscan.Result{}, errors.New("planted: /proc/self/mem unreadable")
 		}},
 	}
 	for _, tc := range tests {

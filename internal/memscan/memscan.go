@@ -26,6 +26,16 @@ import (
 
 var errEmptySlice = errors.New("memscan: cannot take the address of an empty slice")
 
+// Result is what a sweep found.
+type Result struct {
+	// Hits are the /proc/self/maps lines of the mappings that hold the needle.
+	Hits []string
+	// GuardPages counts the pages the sweep skipped because
+	// /proc/self/pagemap proved them kernel guard pages (PM_GUARD_REGION),
+	// which hold no data. Every other unreadable page fails the sweep.
+	GuardPages int
+}
+
 // AllZero reports whether every byte of b is zero: the check that a wipe
 // reached all of it.
 func AllZero(b []byte) bool {
