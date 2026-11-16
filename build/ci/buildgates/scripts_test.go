@@ -1726,7 +1726,7 @@ func TestScriptsRelease_ChecksTheVersionBeforeWritingAnything(t *testing.T) {
 	// variable.
 	// The first step pushes its release branch and nothing else: main takes
 	// the release commit through a pull request, and the tag waits for it.
-	for _, never := range []string{"tag -a", "HEAD:main", "refs/tags/", "/status\""} {
+	for _, never := range []string{"tag -a", "HEAD:main", "--atomic", "/status\""} {
 		if strings.Contains(script, never) {
 			t.Fatalf("release.sh contains %q; it pushes only release/<version>:\n%s", never, script)
 		}
@@ -1754,7 +1754,7 @@ type releaseRepo struct {
 	t         *testing.T
 	dir, bare string
 	env       map[string]string
-	forge     *fakeForge // answers the combined commit status; green by default
+	forge     *fakeForge // answers the CI Gate check runs and pull requests; green by default
 }
 
 func newReleaseRepo(t *testing.T) *releaseRepo {

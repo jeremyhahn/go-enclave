@@ -755,23 +755,33 @@ deps-latest:
 deps-check:
 	@sh scripts/deps-check.sh
 
-## release: Tag and push a production release (VERSION=vX.Y.Z; refuses -alpha and -rc.N)
-# The version is explicit, never derived. The three release targets run the one
-# scripts/release.sh with their kind: every check runs before anything is
-# written, and pushing the tag hands off to release.yml.
+## release: Prepare a production release on release/<version> (VERSION=vX.Y.Z; refuses -alpha and -rc.N)
+# The version is explicit, never derived. A release is two steps. The three
+# release targets run the one scripts/release.sh with their kind: every check
+# runs before anything is written, and it pushes only the branch
+# release/<version>, never main or a tag (main's ruleset takes commits only
+# through a pull request). After that pull request merges, release-tag tags
+# the merge commit and pushes the tag, which hands off to release.yml.
 .PHONY: release
 release:
 	@sh scripts/release.sh release
 
-## release-candidate: Tag and push a release candidate (VERSION=vX.Y.Z-rc.N; refuses the other kinds)
+## release-candidate: Prepare a release candidate on release/<version> (VERSION=vX.Y.Z-rc.N; refuses the other kinds)
 .PHONY: release-candidate
 release-candidate:
 	@sh scripts/release.sh candidate
 
-## release-alpha: Tag and push an alpha release (VERSION=vX.Y.Z-alpha; refuses the other kinds)
+## release-alpha: Prepare an alpha release on release/<version> (VERSION=vX.Y.Z-alpha; refuses the other kinds)
 .PHONY: release-alpha
 release-alpha:
 	@sh scripts/release.sh alpha
+
+## release-tag: After the release pull request merged, tag main's HEAD and push only the tag (VERSION=vX.Y.Z[-alpha|-rc.N])
+# See scripts/release-tag.sh: HEAD must be the merged release commit, and the
+# release pull request's head (not main's run) must have CI Gate success.
+.PHONY: release-tag
+release-tag:
+	@sh scripts/release-tag.sh
 
 # RELEASE TARGETS: release.yml calls these, never the scripts directly. Each
 # takes TAG=vX.Y.Z[-pre].
