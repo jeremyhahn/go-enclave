@@ -1,9 +1,8 @@
 #!/bin/sh
-# release-ci-gate.sh — read the forge's CI Gate check run for a release step.
+# release-ci-gate.sh — read the forge's CI Gate check run on the release pull
+# request before release-tag.sh tags.
 #
-# Usage (from the repository root; release.sh and release-tag.sh run it):
-#   scripts/release-ci-gate.sh commit <sha>
-#       CI Gate on <sha> must be success.
+# Usage (from the repository root; release-tag.sh runs it):
 #   scripts/release-ci-gate.sh merged <sha> <branch>
 #       <sha> must be the merge commit of a merged pull request from <branch>
 #       into main, and CI Gate on that pull request's head must be success.
@@ -24,19 +23,12 @@ set -eu
 # shellcheck source=lib.sh
 . "${0%/*}/lib.sh"
 
-usage="usage: $0 commit <sha> | $0 merged <sha> <release-branch>"
-[ $# -ge 2 ] || die "$usage"
-mode=$1
+usage="usage: $0 merged <sha> <release-branch>"
+[ $# -eq 3 ] && [ "$1" = merged ] || die "$usage"
 sha=$2
-case $mode in
-  commit) [ $# -eq 2 ] || die "$usage" ;;
-  merged) [ $# -eq 3 ] || die "$usage"; branch=$3 ;;
-  *) die "$usage" ;;
-esac
+branch=$3
 matches "$sha" '^[0-9a-f]{40}$' || die "'$sha' is not a full commit id"
-if [ "$mode" = merged ]; then
-  matches "$branch" '^release/v[0-9A-Za-z.-]+$' || die "'$branch' is not a release branch"
-fi
+matches "$branch" '^release/v[0-9A-Za-z.-]+$' || die "'$branch' is not a release branch"
 
 api=${FORGE_API_URL-}
 forge_repo=${FORGE_REPOSITORY-}
@@ -80,30 +72,23 @@ ci_gate() {
     | if length == 0 then "missing"
       else max_by(.id) | if .status != "completed" then "pending" else (.conclusion // "none") end
       end' "$work/runs" 2>/dev/null) || state=
-  [ "$state" = success ] || die "CI Gate is not success on $2 $1 (check run '${state:-unreadable}'); a release is cut only from a commit whose CI Gate passed"
+  [ "$state" = success ] || die "CI Gate is not success on $2 $1 (check run '${state:-unreadable}'); a release is tagged only when its pull request's CI Gate passed"
 }
 
-case $mode in
-  commit)
-    ci_gate "$sha" "commit"
-    ;;
-  merged)
-    # main's own CI Gate run is not the one read here: when a release ships
-    # the fix for a red main job, main's run of the merge commit can still be
-    # red for exactly the reason the release fixes. The ruleset let the merge
-    # in on the pull request's CI Gate, so that run is the one required.
-    code=$(get "commits/$sha/pulls" "$work/pulls") || code=000
-    [ "$code" = 200 ] || die "could not read the forge's pull requests for $sha (HTTP $code); refusing to release on an unanswered check"
-    pr=$(jq -r --arg sha "$sha" --arg branch "$branch" '
-      [.[]? | select(.merge_commit_sha == $sha and .merged_at != null
-                     and .head.ref == $branch and .base.ref == "main")]
-      | if length == 1 then "\(.[0].number) \(.[0].head.sha)" else empty end' "$work/pulls" 2>/dev/null) || pr=
-    [ -n "$pr" ] || die "no pull request from $branch was merged as $sha; tag only the commit the release pull request's merge put on main"
-    number=${pr%% *}
-    head=${pr#* }
-    matches "$number" '^[0-9]+$' || die "the forge named pull request '$number'"
-    matches "$head" '^[0-9a-f]{40}$' || die "the forge named head '$head' for pull request #$number"
-    ci_gate "$head" "the release pull request #$number's head"
-    echo "#$number $head"
-    ;;
-esac
+# main's own CI Gate run is not the one read here: when a release ships the
+# fix for a red main job, main's run of the merge commit can still be red for
+# exactly the reason the release fixes. The ruleset let the merge in on the
+# pull request's CI Gate, so that run is the one required.
+code=$(get "commits/$sha/pulls" "$work/pulls") || code=000
+[ "$code" = 200 ] || die "could not read the forge's pull requests for $sha (HTTP $code); refusing to release on an unanswered check"
+pr=$(jq -r --arg sha "$sha" --arg branch "$branch" '
+  [.[]? | select(.merge_commit_sha == $sha and .merged_at != null
+                 and .head.ref == $branch and .base.ref == "main")]
+  | if length == 1 then "\(.[0].number) \(.[0].head.sha)" else empty end' "$work/pulls" 2>/dev/null) || pr=
+[ -n "$pr" ] || die "no pull request from $branch was merged as $sha; tag only the commit the release pull request's merge put on main"
+number=${pr%% *}
+head=${pr#* }
+matches "$number" '^[0-9]+$' || die "the forge named pull request '$number'"
+matches "$head" '^[0-9a-f]{40}$' || die "the forge named head '$head' for pull request #$number"
+ci_gate "$head" "the release pull request #$number's head"
+echo "#$number $head"
