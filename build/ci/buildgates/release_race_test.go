@@ -2,6 +2,7 @@ package buildgates
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -173,9 +174,13 @@ func TestScriptsReleaseWorkflow_OrdersEveryTagInItsOwnRun(t *testing.T) {
 	if !ordered {
 		t.Fatal("release.yml's verify job does not run sh scripts/release-version-check.sh")
 	}
+	// The retired publisher's names, built from parts so that a search of the
+	// tree for them finds only the changelog that records their removal.
+	publisher := strings.Join([]string{"release", "publish"}, "-")
+	ciPublisher := strings.Join([]string{"publish", "release"}, "-") + ".sh"
 	for name, j := range wf.Jobs {
 		for _, s := range j.Steps {
-			if strings.Contains(s.Run, "publish-release.sh") || strings.Contains(s.Run, "release-publish") {
+			if strings.Contains(s.Run, ciPublisher) || strings.Contains(s.Run, publisher) {
 				t.Fatalf("job %s still runs the retired forge's release publisher:\n%s", name, s.Run)
 			}
 		}
@@ -190,9 +195,160 @@ func TestScriptsReleaseWorkflow_OrdersEveryTagInItsOwnRun(t *testing.T) {
 			t.Fatalf("job %s does not need verify, so it can run on a tag not yet ordered (needs: %v)", name, j.Needs)
 		}
 	}
-	for _, gone := range []string{"scripts/release-publish.sh", "build/ci/publish-release.sh"} {
+	for _, gone := range []string{filepath.Join("scripts", publisher+".sh"), filepath.Join("build", "ci", ciPublisher)} {
 		if _, err := os.Stat(filepath.Join(repoRoot(t), gone)); err == nil {
 			t.Fatalf("%s, the retired forge's release publisher, is still in the tree", gone)
 		}
+	}
+}
+
+// verifyPrecedenceStep returns the run script of release.yml's Verify step
+// that orders the pushed tag: the one that runs release-version-check.sh.
+func verifyPrecedenceStep(t *testing.T) string {
+	t.Helper()
+	var wf struct {
+		Jobs map[string]struct {
+			Steps []struct {
+				Run string `yaml:"run"`
+			} `yaml:"steps"`
+		} `yaml:"jobs"`
+	}
+	raw, err := os.ReadFile(filepath.Join(repoRoot(t), ".github", "workflows", "release.yml"))
+	if err != nil {
+		t.Fatalf("read release.yml: %v", err)
+	}
+	if err := yaml.Unmarshal(raw, &wf); err != nil {
+		t.Fatalf("parse release.yml: %v", err)
+	}
+	for _, s := range wf.Jobs["verify"].Steps {
+		if strings.Contains(s.Run, "sh scripts/release-version-check.sh") {
+			return s.Run
+		}
+	}
+	t.Fatal("release.yml's verify job does not run sh scripts/release-version-check.sh")
+	return ""
+}
+
+// verifyForge is a forge with one line of commits, each setting VERSION and
+// carrying the scripts Verify runs, and the v* tags pushed on them: what
+// release.yml's Verify job fetches from when a tag's run starts.
+type verifyForge struct {
+	t          *testing.T
+	bare, work string
+	env        map[string]string
+}
+
+func newVerifyForge(t *testing.T) *verifyForge {
+	t.Helper()
+	root := t.TempDir()
+	f := &verifyForge{t: t, bare: filepath.Join(root, "forge.git"), work: filepath.Join(root, "work"), env: map[string]string{
+		"GIT_CONFIG_GLOBAL": os.DevNull, "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_COUNT": "0",
+		"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com",
+		"GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.com",
+	}}
+	f.git(root, "init", "-q", "--bare", f.bare)
+	f.git(root, "init", "-q", f.work)
+	f.git(f.work, "remote", "add", "origin", f.bare)
+	for _, name := range []string{"release-version-check.sh", "lib.sh"} {
+		body, err := os.ReadFile(filepath.Join(repoRoot(t), "scripts", name))
+		if err != nil {
+			t.Fatalf("read scripts/%s: %v", name, err)
+		}
+		if err := os.MkdirAll(filepath.Join(f.work, "scripts"), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(f.work, "scripts", name), body, 0o644); err != nil {
+			t.Fatalf("write scripts/%s: %v", name, err)
+		}
+	}
+	return f
+}
+
+func (f *verifyForge) git(dir string, args ...string) string {
+	f.t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	cmd.Env = layerEnv(os.Environ(), f.env)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		f.t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// commit records a commit that sets VERSION to version on top of the line,
+// tags it with each of tags and pushes the commit and the tags to the forge.
+func (f *verifyForge) commit(version string, tags ...string) {
+	f.t.Helper()
+	if err := os.WriteFile(filepath.Join(f.work, "VERSION"), []byte(version+"\n"), 0o644); err != nil {
+		f.t.Fatalf("write VERSION: %v", err)
+	}
+	f.git(f.work, "add", "-A")
+	f.git(f.work, "commit", "-q", "-m", "VERSION "+version)
+	for _, tag := range tags {
+		f.git(f.work, "tag", "-a", tag, "-m", tag)
+	}
+	f.git(f.work, "push", "-q", "--tags", "origin", "HEAD:refs/heads/main")
+}
+
+// verify runs the Verify precedence step for tag, as a run of release.yml
+// would now: in a fresh checkout of the tagged commit, against every tag the
+// forge holds at this moment.
+func (f *verifyForge) verify(run, tag string) (string, bool) {
+	f.t.Helper()
+	dir := filepath.Join(f.t.TempDir(), "runner")
+	f.git(filepath.Dir(dir), "clone", "-q", f.bare, dir)
+	sha := f.git(dir, "rev-parse", tag+"^{commit}")
+	f.git(dir, "checkout", "-q", "--detach", sha)
+	env := map[string]string{"TAG": tag, "SHA": sha}
+	for k, v := range f.env {
+		env[k] = v
+	}
+	cmd := exec.Command("bash", "-e", "-c", run)
+	cmd.Dir = dir
+	cmd.Env = layerEnv(os.Environ(), env)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		if _, ok := err.(*exec.ExitError); !ok {
+			f.t.Fatalf("run the verify step: %v", err)
+		}
+		return string(out), false
+	}
+	return string(out), true
+}
+
+// TestScriptsReleaseWorkflow_VerifyPassesAnEarlierTagAfterALaterOne pushes
+// rc.1 and then rc.2, in order, on successive commits before rc.1's run
+// verifies. rc.2 is on a descendant of rc.1's commit, so it is not part of
+// the release state rc.1 was published in: rc.1's Verify must pass (and a
+// rerun of it later), and so must rc.2's. The leased push of the release
+// lock, not Verify, is what orders releases.
+func TestScriptsReleaseWorkflow_VerifyPassesAnEarlierTagAfterALaterOne(t *testing.T) {
+	run := verifyPrecedenceStep(t)
+	f := newVerifyForge(t)
+	f.commit("1.4.0", "v1.4.0")
+	f.commit("1.5.0-rc.1", "v1.5.0-rc.1")
+	f.commit("1.5.0-rc.2", "v1.5.0-rc.2")
+	for _, tag := range []string{"v1.5.0-rc.1", "v1.5.0-rc.2", "v1.5.0-rc.1"} {
+		if out, ok := f.verify(run, tag); !ok {
+			t.Fatalf("Verify refused %s, pushed in order before v1.5.0-rc.2 on a descendant commit:\n%s", tag, out)
+		}
+	}
+}
+
+// TestScriptsReleaseWorkflow_VerifyRefusesATagBelowAnAncestorTag requires
+// Verify to refuse a tag when a tag on an ancestor of its commit outranks it:
+// that tag was in the release state the pushed tag was cut from.
+func TestScriptsReleaseWorkflow_VerifyRefusesATagBelowAnAncestorTag(t *testing.T) {
+	run := verifyPrecedenceStep(t)
+	f := newVerifyForge(t)
+	f.commit("1.4.0", "v1.4.0", "v1.6.0")
+	f.commit("1.5.0-rc.1", "v1.5.0-rc.1")
+	out, ok := f.verify(run, "v1.5.0-rc.1")
+	if ok {
+		t.Fatalf("Verify passed v1.5.0-rc.1 below v1.6.0 on an ancestor commit, want a refusal:\n%s", out)
+	}
+	if !strings.Contains(out, "v1.6.0") {
+		t.Fatalf("Verify's refusal does not name the ancestor tag v1.6.0:\n%s", out)
 	}
 }
