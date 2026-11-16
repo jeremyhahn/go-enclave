@@ -61,9 +61,10 @@ The published commit is then checked with
   (ignored by git and refused by the releasability gate if tracked). It has no
   default: a release fails closed without it. Only a release needs it, never
   a build or a test.
-- `curl` and `jq`, to read the forge's `CI Gate` check runs and pull requests.
-- `FORGE_API_URL` (the API root, `https://api.github.com` on GitHub),
-  `FORGE_REPOSITORY` (`owner/repo`) and `FORGE_TOKEN` (a read token).
+- For `make release-tag`: `curl` and `jq`, to read the forge's `CI Gate`
+  check runs and pull requests, and `FORGE_API_URL` (the API root,
+  `https://api.github.com` on GitHub), `FORGE_REPOSITORY` (`owner/repo`) and
+  `FORGE_TOKEN` (a read token).
 
 ### Targets
 
@@ -94,25 +95,29 @@ pre-release.
 | `VERSION` | The version to cut, with its `v` prefix |
 | `AGENT_GIT` | The signing wrapper; every git command that talks to `dev` runs as `"$AGENT_GIT" "$REPO_NAME" …` |
 | `REPO_NAME` | The literal repository name, which selects the signing identity (default `go-enclave`) |
-| `FORGE_API_URL`, `FORGE_REPOSITORY`, `FORGE_TOKEN` | Where and how to read the `CI Gate` check runs and the release pull request |
+| `FORGE_API_URL`, `FORGE_REPOSITORY`, `FORGE_TOKEN` | Where and how `make release-tag` reads the release pull request and its `CI Gate` check runs |
 
 ### The `CI Gate` rule
 
-Both steps read GitHub's check runs, not the legacy combined commit status
-(which reads `pending` for ever when CI reports only check runs):
+The gate on a release is the **release pull request's `CI Gate`**, never
+`main`'s. Under the `main` ruleset the pull request cannot merge without it,
+and `release-tag.sh` requires it again before it tags. `main` itself can be
+red for exactly the reason the release fixes (a backend module tested against
+the previous released root goes green only once the release exists), so a
+gate on `main`'s CI would keep it red for ever:
+
+- `release.sh` (step 1) does not read `CI Gate`, and cuts the release branch
+  while `main`'s CI Gate is red.
+- `release-tag.sh` (step 2) reads `CI Gate` on the release pull request's
+  head, found with `GET /repos/<owner>/<repo>/commits/<main sha>/pulls`, not
+  on `main`'s HEAD, whose own run of the merge commit can still be red.
+
+The read is GitHub's check runs, not the legacy combined commit status (which
+reads `pending` for ever when CI reports only check runs):
 `GET /repos/<owner>/<repo>/commits/<sha>/check-runs?check_name=CI%20Gate`.
 The latest `CI Gate` run (the highest id) must be completed with conclusion
 `success`; no run, a run in progress, any other conclusion, an HTTP error or
-an unparsable answer refuses. `scripts/release-ci-gate.sh` makes the read for
-both steps.
-
-- `release.sh` reads `CI Gate` on the commit it releases from, `main`'s HEAD.
-- `release-tag.sh` reads `CI Gate` on the **release pull request's head**,
-  found with `GET /repos/<owner>/<repo>/commits/<main sha>/pulls`, not on
-  `main`'s HEAD. When a release ships the fix for a red `main` job, `main`'s
-  own run of the merge commit can still be red for exactly the reason the
-  release fixes; the ruleset admitted the merge on the pull request's
-  `CI Gate`, so that is the run required.
+an unparsable answer refuses. `scripts/release-ci-gate.sh` makes the read.
 
 ### What `release.sh` refuses
 
@@ -122,8 +127,9 @@ Before it writes anything, it refuses:
 - any branch but `main`, and a local `main` that is not `dev`'s `main` as just fetched;
 - a tag, or a branch `release/<version>`, that exists locally or on `dev`; an unreachable `dev` refuses too;
 - a version that does not move forward (`release-version-check.sh`);
-- a dirty tree;
-- a `CI Gate` check run on `main`'s HEAD that is not `success`, or a forge it cannot reach.
+- a dirty tree.
+
+It does not read `main`'s `CI Gate` (see [the rule](#the-ci-gate-rule)).
 
 Then it writes `VERSION` unprefixed, folds `changelog.d/` into `CHANGELOG.md`
 (`changelog-assemble.sh`), and requires the result to pass

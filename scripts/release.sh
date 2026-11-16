@@ -15,9 +15,8 @@
 #
 # Environment (exported by the Makefile, read raw): VERSION, AGENT_GIT (the
 # commit/signing wrapper, no default: this fails closed without it) and
-# REPO_NAME (the literal repo name, which selects the signing identity), and
-# FORGE_API_URL, FORGE_REPOSITORY and FORGE_TOKEN (a read token) for the forge's
-# CI Gate check run (release-ci-gate.sh).
+# REPO_NAME (the literal repo name, which selects the signing identity). This
+# step does not read the forge.
 #
 # Every git operation that talks to dev (the tag-free and branch-free
 # ls-remote, the fetch of main and the push) runs through "$AGENT_GIT"
@@ -30,8 +29,7 @@
 # (release-version-check.sh), the tag and the branch release/<version> must be
 # free locally and on dev (ls-remote exit 2 is the only "free"; anything else
 # fails closed), the tree must be clean, HEAD must be dev's main (fetched, not
-# remembered) with a CI Gate check run of success on the forge (an unreachable
-# forge refuses), and the assembled tree must pass release-check-tag.sh (no
+# remembered), and the assembled tree must pass release-check-tag.sh (no
 # fragment left, a literal `## [vX.Y.Z…]` heading). VERSION is written
 # unprefixed, by overwriting, so repeating the step leaves the same bytes;
 # changelog.d/ fragments fold into CHANGELOG.md in the same commit.
@@ -40,6 +38,13 @@
 # passed, so this step pushes release/<version> and nothing else: never main,
 # never a tag. The local checkout returns to main. A maintainer opens the pull
 # request from the branch it prints; release-tag.sh tags the merge.
+#
+# This step does not read main's CI Gate. main can be red for exactly the
+# reason the release fixes (a backend module tested against the previous
+# released root goes green only once the release exists), and a gate here
+# would keep it red for ever. The gate is the release pull request's CI Gate:
+# under the main ruleset the pull request cannot merge without it, and
+# release-tag.sh requires it again (release-ci-gate.sh) before it tags.
 set -eu
 # shellcheck source=lib.sh
 . "${0%/*}/lib.sh"
@@ -93,15 +98,12 @@ case $rc in
 esac
 [ -z "$(git status --porcelain)" ] || die "working tree not clean"
 
-# The commit being released is the tip of dev's main, and CI Gate passed on it
-# (release-versioning §1a). A stale local main would put a release commit on a
-# base the pull request does not merge cleanly onto; and an unreached forge is
-# an error here, never a pass.
+# The commit being released is the tip of dev's main. A stale local main would
+# put a release commit on a base the pull request does not merge cleanly onto.
 "$agent_git" "$repo_name" fetch --quiet dev main || die "could not fetch main from dev; refusing to release on an unanswered check"
 remote_main=$(git rev-parse -q --verify 'FETCH_HEAD^{commit}') || die "dev has no main to compare against"
 head_sha=$(git rev-parse HEAD)
 [ "$head_sha" = "$remote_main" ] || die "local main ($head_sha) is not dev/main ($remote_main); update it first (git pull --ff-only dev main)."
-sh "$here/release-ci-gate.sh" commit "$head_sha"
 
 sh "$here/release-version-check.sh" "$version"
 sh "$here/changelog-assemble.sh" "$version" "$(date -u +%Y-%m-%d)"
