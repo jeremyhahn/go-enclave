@@ -182,13 +182,23 @@ func TestScriptsReleaseNotes_RealChangelog(t *testing.T) {
 	if want := strings.Count("\n"+changelog, "\n## [v"); len(headings) != want {
 		t.Fatalf("found %d released sections in CHANGELOG.md, want %d; the discovery is broken, not the file", len(headings), want)
 	}
-	for i, h := range headings {
+	// The section's text is release-notes.sh's: it runs to the next "#" or
+	// "##" heading, and the link reference definitions at its end (the Keep a
+	// Changelog footer after the last section) belong to the file, so they and
+	// the blank lines around them are not part of it.
+	nextHeading := regexp.MustCompile(`(?m)^##? `)
+	blankOrLinkRef := regexp.MustCompile(`^[ \t]*$|^\[[^\]]+\]: `)
+	for _, h := range headings {
 		version := changelog[h[2]:h[3]]
 		end := len(changelog)
-		if i+1 < len(headings) {
-			end = headings[i+1][0]
+		if loc := nextHeading.FindStringIndex(changelog[h[1]:]); loc != nil {
+			end = h[1] + loc[0]
 		}
-		want := strings.Trim(changelog[h[1]:end], "\n") + "\n"
+		lines := strings.Split(strings.Trim(changelog[h[1]:end], "\n"), "\n")
+		for len(lines) > 0 && blankOrLinkRef.MatchString(lines[len(lines)-1]) {
+			lines = lines[:len(lines)-1]
+		}
+		want := strings.Join(lines, "\n") + "\n"
 		out, ok := runScript(t, root, nil, "release-notes.sh", version)
 		if !ok {
 			t.Fatalf("%s: extraction failed:\n%s", version, out)
