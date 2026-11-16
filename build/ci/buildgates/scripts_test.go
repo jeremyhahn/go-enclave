@@ -1932,23 +1932,10 @@ func TestScriptsRelease_RefusesWhatItMustNotPublish(t *testing.T) {
 		{"dev has no main", "candidate", "v1.5.0-rc.1", func(r *releaseRepo) {
 			r.git(r.bare, "update-ref", "-d", "refs/heads/main")
 		}, "could not fetch main from dev"},
-		{"CI Gate failed on main", "candidate", "v1.5.0-rc.1", func(r *releaseRepo) { r.forge.setDefaultState("failure") }, "CI Gate is not success"},
-		{"CI Gate pending on main", "candidate", "v1.5.0-rc.1", func(r *releaseRepo) { r.forge.setDefaultState("pending") }, "CI Gate is not success"},
-		{"CI Gate missing on main", "candidate", "v1.5.0-rc.1", func(r *releaseRepo) { r.forge.setDefaultState("missing") }, "CI Gate is not success"},
-		{"CI Gate timed out on main", "candidate", "v1.5.0-rc.1", func(r *releaseRepo) { r.forge.setDefaultState("timed_out") }, "CI Gate is not success"},
-		{"forge has no check runs", "candidate", "v1.5.0-rc.1", func(r *releaseRepo) { r.forge.setDefaultState("") }, "could not read the forge's CI Gate check run"},
-		{"forge unreachable", "candidate", "v1.5.0-rc.1", func(r *releaseRepo) { r.env["FORGE_API_URL"] = "http://127.0.0.1:1/api/v1" }, "could not read the forge's CI Gate check run"},
-		{"forge rejects the token", "candidate", "v1.5.0-rc.1", func(r *releaseRepo) { r.env["FORGE_TOKEN"] = "wrong" }, "could not read the forge's CI Gate check run"},
 		{"release branch exists locally", "candidate", "v1.5.0-rc.1", func(r *releaseRepo) { r.git(r.dir, "branch", "release/v1.5.0-rc.1") }, "branch release/v1.5.0-rc.1 already exists locally"},
 		{"release branch exists on dev", "candidate", "v1.5.0-rc.1", func(r *releaseRepo) {
 			r.git(r.dir, "push", "-q", "dev", "HEAD:refs/heads/release/v1.5.0-rc.1")
 		}, "branch release/v1.5.0-rc.1 already exists on dev"},
-		{"no forge URL", "candidate", "v1.5.0-rc.1", func(r *releaseRepo) { r.env["FORGE_API_URL"] = "" }, "FORGE_API_URL is unset"},
-		{"no forge repository", "candidate", "v1.5.0-rc.1", func(r *releaseRepo) { r.env["FORGE_REPOSITORY"] = "" }, "FORGE_REPOSITORY is unset"},
-		{"no forge token", "candidate", "v1.5.0-rc.1", func(r *releaseRepo) { r.env["FORGE_TOKEN"] = "" }, "FORGE_TOKEN is unset"},
-		{"token that could inject curl directives", "candidate", "v1.5.0-rc.1", func(r *releaseRepo) {
-			r.env["FORGE_TOKEN"] = "abc\"\nurl = \"http://example.invalid"
-		}, "refusing to use it"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := newReleaseRepo(t)
@@ -2085,6 +2072,35 @@ func TestScriptsRelease_NeverPushesMainOrATag(t *testing.T) {
 	}
 }
 
+// The first step does not read main's CI Gate. main can be red for exactly
+// the reason the release fixes (a backend module tested against the old
+// released root), so a gate on main would keep it red for ever; the gate is
+// the release pull request's CI Gate, which the ruleset requires for the
+// merge and release-tag reads again.
+func TestScriptsRelease_SucceedsWhileMainsCIGateIsRed(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(r *releaseRepo)
+	}{
+		{"main's CI Gate failed", func(r *releaseRepo) { r.forge.setDefaultState("failure") }},
+		{"main's CI Gate pending", func(r *releaseRepo) { r.forge.setDefaultState("pending") }},
+		{"main has no CI Gate", func(r *releaseRepo) { r.forge.setDefaultState("missing") }},
+		{"forge unreachable", func(r *releaseRepo) { r.env["FORGE_API_URL"] = "http://127.0.0.1:1/api/v1" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newReleaseRepo(t)
+			tc.setup(r)
+			out, ok := r.run("alpha", "v1.5.0-alpha")
+			if !ok {
+				t.Fatalf("make release-alpha refused while main's CI Gate is red:\n%s", out)
+			}
+			if got, want := r.git(r.bare, "rev-parse", "refs/heads/release/v1.5.0-alpha"), r.git(r.dir, "rev-parse", "refs/heads/release/v1.5.0-alpha"); got != want {
+				t.Fatalf("dev's release/v1.5.0-alpha names %s, want %s", got, want)
+			}
+		})
+	}
+}
+
 // TestScriptsReleaseTag_TagsTheMergedReleaseCommitEveryKind: after the
 // release pull request is merged, release-tag.sh tags main's HEAD and pushes
 // only the tag. main's own CI Gate is red here, as it is when the release is
@@ -2171,6 +2187,12 @@ func TestScriptsReleaseTag_RefusesWhatItMustNotTag(t *testing.T) {
 		}, "no pull request from release/v1.5.0-rc.1 was merged as"},
 		{"forge unreachable", version, func(r *releaseRepo, _, _ string) { r.env["FORGE_API_URL"] = "http://127.0.0.1:1/api/v1" }, "could not read the forge's pull requests"},
 		{"no forge token", version, func(r *releaseRepo, _, _ string) { r.env["FORGE_TOKEN"] = "" }, "FORGE_TOKEN is unset"},
+		{"no forge URL", version, func(r *releaseRepo, _, _ string) { r.env["FORGE_API_URL"] = "" }, "FORGE_API_URL is unset"},
+		{"no forge repository", version, func(r *releaseRepo, _, _ string) { r.env["FORGE_REPOSITORY"] = "" }, "FORGE_REPOSITORY is unset"},
+		{"token that could inject curl directives", version, func(r *releaseRepo, _, _ string) {
+			r.env["FORGE_TOKEN"] = "abc\"\nurl = \"http://example.invalid"
+		}, "refusing to use it"},
+		{"forge rejects the token", version, func(r *releaseRepo, _, _ string) { r.env["FORGE_TOKEN"] = "wrong" }, "could not read the forge's pull requests"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := newReleaseRepo(t)
