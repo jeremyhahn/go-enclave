@@ -12,7 +12,10 @@
 # Before it tags, it refuses unless: VERSION is a release version; the local
 # checkout is a clean main that is dev's main as just fetched; that HEAD is the
 # merged release commit, i.e. VERSION there is the version and its parent's is
-# not, and the tree passes release-check-tag.sh (no fragment left, a literal
+# not; the version is strictly greater than that parent's VERSION and every
+# existing v* tag, dev's fetched first (release-version-check.sh, as release.sh runs it: an older
+# release pull request merged after a newer release must not be tagged);
+# and the tree passes release-check-tag.sh (no fragment left, a literal
 # `## [vX.Y.Z…]` heading); the tag is free locally and on dev; the forge names
 # HEAD as the merge commit of a merged pull request from release/<version>
 # into main; and that pull request's head has a CI Gate check run of success.
@@ -66,6 +69,12 @@ have=$(cat VERSION 2>/dev/null) || have=
 [ "$have" = "$want" ] || die "VERSION on main is ${have:-missing}, not $want; tag only the merged release commit of $version"
 parent=$(git show HEAD^:VERSION 2>/dev/null) || parent=
 [ "$parent" != "$want" ] || die "main's HEAD $head_sha is not the commit that set VERSION to $want (its parent already has it); tag the release pull request's merge commit, before anything merged after it"
+# Order against every release tag on dev, not only the ones this clone has:
+# no '+' on the refspec, so a local tag that differs from dev's fails the
+# fetch instead of being overwritten.
+"$agent_git" "$repo_name" fetch --quiet --no-tags dev 'refs/tags/v*:refs/tags/v*' || die "could not fetch dev's release tags (or a local tag differs from dev's); refusing to order $version against a partial list"
+[ -n "$parent" ] || die "main's HEAD $head_sha has a first parent with no VERSION to order $version against"
+sh "$here/release-version-check.sh" "$version" "$parent" || die "$version does not move forward from the first parent's VERSION ($parent) and every release tag; a release pull request prepared before a newer release must be prepared again at a higher version"
 sh "$here/release-check-tag.sh" "$version" || die "main's tree would be refused by release.yml for $version"
 
 sh "$here/release-ci-gate.sh" merged "$head_sha" "release/$version" >/dev/null
