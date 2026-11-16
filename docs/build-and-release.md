@@ -9,9 +9,9 @@ lint, cross-build, the devcontainer) are in
 [CONTRIBUTING.md](../CONTRIBUTING.md#make-targets); this page does not repeat
 them. `make help` lists every target.
 
-The project is developed on a primary forge and published to GitHub. The
-release tooling talks to the primary forge through a git remote named `dev`
-and through the forge's HTTP API; GitHub receives a copy of each release.
+The project is developed and published on GitHub, its only forge. The
+release tooling talks to GitHub through a git remote named `dev` and through
+GitHub's REST API (`https://api.github.com`).
 
 ## Design
 
@@ -28,7 +28,7 @@ and through the forge's HTTP API; GitHub receives a copy of each release.
 - **A release is a signed tag on `main`.** The version is explicit, never
   derived. The release commit reaches `main` through a pull request, like any
   other change, and the tag follows the merge. The tag hands off to `release.yml`, which gates the tagged commit
-  again before anything is published.
+  again before the tag is announced.
 
 ## Release flow
 
@@ -37,17 +37,55 @@ make release-alpha|release-candidate|release VERSION=…
   └─ scripts/release.sh: refuse, assemble CHANGELOG.md, sign, push release/<version> only
        └─ pull request release/<version> → main (the ruleset requires CI Gate)
             └─ make release-tag VERSION=…
-                 └─ scripts/release-tag.sh: refuse, signed annotated tag on main's HEAD, push the tag only
-                      └─ release.yml on the tag
-                           1. Verify    make release-verify; resolves the tag to its commit (build/ci/release-tag.sh)
+                 └─ scripts/release-tag.sh: read dev's release lock, refuse, signed annotated tag
+                    on main's HEAD, push the tag and the lock's move atomically, leased on the lock
+                      └─ release.yml on the tag (a concurrency group of its own, never cancelled)
+                           1. Verify    make release-verify; resolves the tag to its commit (build/ci/release-tag.sh);
+                                        release-version-check.sh --merged: the v* tags its commit descends from
                            2. Gate      ci-lint, ci-build, ci-security trivy, ci-test test-fips, ci-integration
                            3. Consumer  make consumer-check
-                           4. Publish   make release-publish (primary forge only)
 ```
 
 Every job after Verify checks out the commit Verify resolved, never the moving
-tag. Publish needs every earlier job; it is skipped when the workflow runs on
-github.com, where a maintainer publishes the release by hand.
+tag. Nothing is published by the workflow: the pushed tag is what a Go
+consumer resolves, and a GitHub release, when one is wanted, is made by hand
+once the run is green. A red run says the tag must not be announced.
+
+### Release order: the release lock
+
+Releases are ordered by one ref on `dev`, `refs/heads/release-lock`, which
+points at the commit of the latest release tag. `release-tag.sh` reads it
+(`git ls-remote`) before its precedence check, then orders the version against
+its merged commit's first parent's `VERSION` and every `v*` tag fetched from
+`dev`. It pushes the tag and the move of the lock to the tagged commit in one
+push, `--atomic` and `--force-with-lease=refs/heads/release-lock:<value read>`:
+
+- When no other release was pushed since the read, `dev` writes both refs.
+- When one was (another maintainer's `release-tag` landed while this one
+  waited on the forge, say), the lock moved, so the lease fails and `dev`
+  writes neither ref. `release-tag.sh` deletes the local tag and says nothing
+  was written; run `make release-tag` again, and the precedence check then
+  sees the other release.
+- The first release finds no lock: the lease is on an absent ref, so the push
+  creates it, and refuses if another first release created it meanwhile.
+- A lock that does not read as an object name, or a read that fails, is
+  refused before anything is tagged.
+
+`release.yml`'s `concurrency` group is keyed by the tag ref
+(`release-${{ github.ref }}`, `cancel-in-progress: false`). GitHub keeps one
+pending run per group and drops an older pending run when a newer one queues,
+so a group shared by every tag could lose a tag's run; one group per tag
+loses none. The workflow does not order releases: the lease does.
+
+Verify still checks precedence, as defense in depth, against the release
+state the tag was cut from. It fetches every `v*` tag from GitHub, sets the
+pushed tag aside and runs `scripts/release-version-check.sh --merged <tagged
+commit>`, which orders the tag against its commit's first parent's `VERSION`
+and only the `v*` tags merged into that commit (on it or its ancestors). A
+later tag on a descendant commit is not in that state: when rc.1 and then
+rc.2 are pushed in order and rc.2 lands before rc.1's run reaches Verify,
+rc.1 still passes, and so does a rerun of it. A tag below a tag on an
+ancestor of its commit fails Verify, and every other job needs Verify.
 The published commit is then checked with
 `make release-tree-check TAG=… REF=<published ref>`: its tree must be the tag's.
 
@@ -55,7 +93,7 @@ The published commit is then checked with
 
 ### Prerequisites
 
-- A git remote named `dev` that points at the primary forge
+- A git remote named `dev` that points at the GitHub repository
   (`git remote rename origin dev`).
 - `AGENT_GIT`, the path of the commit-signing wrapper, set in `local.mk`
   (ignored by git and refused by the releasability gate if tracked). It has no
@@ -83,7 +121,8 @@ pull request whose `CI Gate` check passed, and nobody pushes `main` directly:
    alone. Open a pull request from it into `main` and merge it once `CI Gate`
    is green.
 2. `make release-tag VERSION=…` then tags the merge commit on `main` and
-   pushes the tag alone, which starts `release.yml`.
+   pushes the tag with a move of `dev`'s release lock, atomically, which
+   starts `release.yml`.
 
 Each of the three preparing targets accepts only its own kind and refuses the
 other two; all three run `scripts/release.sh`. `make release-tag` runs
@@ -159,10 +198,16 @@ refuses:
 - a HEAD the forge does not name as the merge commit of a merged pull request
   from `release/<version>` into `main`;
 - a `CI Gate` check run on that pull request's head that is not `success`, or
-  a forge it cannot reach.
+  a forge it cannot reach;
+- a `dev` whose `refs/heads/release-lock` cannot be read or does not read as
+  an object name.
 
-Then it creates the signed annotated tag on HEAD and pushes the tag alone.
-`release.yml` gates the tagged commit again, including that it is on `main`.
+Then it creates the tag and pushes it, with the move of `dev`'s release lock,
+in one atomic push leased on the lock it read before the precedence check
+([release order](#release-order-the-release-lock)). When `dev` refuses that
+push, it deletes the local tag; nothing was written. `release.yml` gates the
+tagged commit again, including that it is on `main` and greater than every
+`v*` tag on GitHub that its commit descends from.
 
 ### Post-tag targets
 
@@ -171,15 +216,12 @@ Then it creates the signed annotated tag on HEAD and pushes the tag alone.
 | `make release-verify` | `TAG`, optional `MAIN_REF` | The tag agrees with `VERSION` and `CHANGELOG.md`; with `MAIN_REF`, `HEAD` is an ancestor of it |
 | `make release-tree-check` | `TAG`, `REF` | Offline, in the local clone: the tree of the published commit `REF` is byte-identical to the tree of the release tag `TAG` (SPEC release criterion 8). Refuses, naming both trees, when they differ, when either does not resolve, or when `TAG` is not a release version. Writes nothing |
 | `make consumer-check` | `TAG` | In a fresh directory with a fresh module cache and `GOWORK=off`, `go get`s the module at the tag, asserts the build list selected that version, runs `go mod verify`, and builds and runs `scripts/testdata/consumer`, which also runs `providertest.TestProvider` against the software provider |
-| `make release-publish` | `TAG`, `SHA`, `FORGE_*` (a write token) | Confirms the tag exists on the forge and names `SHA`, then creates the release or updates it in place, and reads it back. Primary forge only: it refuses an `api.github.com` endpoint |
 
-The release body is the tag's `CHANGELOG.md` section (`release-notes.sh`).
-`release-publish` never creates a tag (the forge's create-release call would
-make one from the default branch) and never deletes anything, so a re-run
-converges. `consumer-check` clears `GOFLAGS` and sets no `GOPRIVATE`,
+`consumer-check` clears `GOFLAGS` and sets no `GOPRIVATE`,
 `GONOSUMDB` or `GOINSECURE`: resolution is whatever the runner configured.
-On the primary forge's runners, `build/ci/forge-resolution.sh` first asserts
-that the runner configured it.
+Off github.com (a self-hosted forge's runners), `build/ci/forge-resolution.sh`
+first asserts that the runner configured it; on github.com the step is
+skipped.
 
 ### Verifying a signed release
 
@@ -272,7 +314,7 @@ repository's volumes on that host exceed `CI_CACHE_MAX_GIB` (32).
 | Soak | nightly | `make ci-integration` looped on `ubuntu-latest` for 30 minutes, each iteration its own compose project |
 | TPM swtpm Conformance | full | `make integration-test-tpm` on the runner host, with `swtpm` from the runner's package manager and Go from `setup-go`. On a pull request it runs only when a file under `backends/tpm/`, `scripts/swtpm-fixture.sh` or `ci.yml` changed |
 | OP-TEE | full | `make integration-test-arm-trustzone` in the OP-TEE fixture image pinned by digest in `scripts/tool-pins.sh`; it fails when the pin is empty. It runs only when an OP-TEE path changed |
-| Publish CI images | push to `main` | On the primary forge only: publishes the toolchain image to the CI image registry (`CI_IMAGE_NAMESPACE`) when the registry lacks its hash. It skips on github.com |
+| Publish CI images | push to `main` | Off github.com only (a self-hosted forge's runners): publishes the toolchain image to the CI image registry (`CI_IMAGE_NAMESPACE`) when the registry lacks its hash. It skips on github.com |
 
 The **PR tier** runs on every event. The **full tier** runs on every event
 but a pull request (a push to `main`, the nightly schedule, `workflow_dispatch`
@@ -419,15 +461,14 @@ rules.
 | `features.sh`, `features.map` | The features a change touches, for `test-<feature>` and `integration-test-<feature>` |
 | `devcontainer.sh`, `integration-image.sh`, `integration-test.sh`, `userns-test.sh`, `lint-integration.sh` | The devcontainer images; the scanned integration image and suites; the user-namespace test; proof the `integration` tag selects the suite |
 | `release.sh`, `release-tag.sh`, `release-ci-gate.sh`, `release-version-check.sh`, `release-check-tag.sh`, `changelog-assemble.sh`, `release-notes.sh` | Cutting a release ([above](#what-releasesh-refuses)) |
-| `release-verify.sh`, `consumer-check.sh`, `release-publish.sh` | The [post-tag targets](#post-tag-targets) |
+| `release-verify.sh`, `consumer-check.sh` | The [post-tag targets](#post-tag-targets) |
 | `deps-check.sh`, `deps-latest.sh` | `make deps-check`: fail on a module behind its latest release; `make deps-latest`: bump every direct `github.com/jeremyhahn/` dependency to its latest tag, then tidy |
 | `swtpm-fixture.sh` | `make integration-test-tpm`: a throwaway `swtpm` on loopback TCP for `backends/tpm`'s swtpm-tagged tests |
 | `optee-fixture.sh`, `optee-selected.sh` | `make optee-fixture-check` and `make integration-test-arm-trustzone`: the pinned trusted-firmware OP-TEE fixture; whether a change reaches it |
 | `ci-image-cache.sh`, `apk-index-sum.sh`, `in-toolchain-image_test.sh` | CI only: the toolchain image's registry cache; a checksum of the Alpine package indexes the integration image's tag hashes; the tests of `in-toolchain-image.sh` (`make check-in-toolchain-image`) |
 | `in-toolchain-image.sh`, `reap-stale-ci-stacks.sh`, `trim-ci-caches.sh`, `assert-build-tags.sh` | CI only, shared unchanged with other repositories that use the same CI layout: run a command in the toolchain image on a copy of the checkout; remove this repository's stale CI containers and compose stacks; bound this repository's CI cache volumes on the host; fail when a `GO_BUILD_TAGS` tag selects no file |
 
-`build/ci/` holds what only a workflow runs: `release-tag.sh`,
-`publish-release.sh`, `summary.sh`, `forge-resolution.sh` and
+`build/ci/` holds what only a workflow runs: `release-tag.sh`, `summary.sh`, `forge-resolution.sh` and
 `toolchain-trivy.sh` (copies the pinned trivy out of the toolchain image).
 
 ## Troubleshooting

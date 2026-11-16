@@ -17,6 +17,8 @@ import (
 	"os"
 	"strings"
 	"syscall"
+
+	"golang.org/x/sys/unix"
 )
 
 // Supported reports that this platform can sweep its own address space.
@@ -174,7 +176,9 @@ func sweep(maps string, mem io.ReaderAt, needle []byte, home uintptr, buf []byte
 		}
 		found, guards, err := mappingScan(mem, lo, hi, needle, buf)
 		if err != nil {
-			return r, &UnreadableMappingError{Mapping: strings.TrimSpace(line), Err: err}
+			ue := &UnreadableMappingError{Mapping: strings.TrimSpace(line), Err: err, Kernel: kernelRelease()}
+			probeMapping(mem, lo, hi, ue)
+			return r, ue
 		}
 		read++
 		r.GuardPages += guards
@@ -292,22 +296,73 @@ func (p procMem) ReadAt(b []byte, off int64) (int, error) { return p.mem.ReadAt(
 // guardRegion reads the 64-bit, native-endian pagemap entry of the page
 // holding addr, at offset (addr / page size) * 8.
 func (p procMem) guardRegion(addr uintptr) (uintptr, bool, error) {
+	entry, err := p.pagemapEntry(addr)
+	if err != nil {
+		return 0, false, err
+	}
+	return (addr/p.pageSize + 1) * p.pageSize, entry&pmGuardRegion != 0, nil
+}
+
+// pagemapEntry returns the raw /proc/self/pagemap entry of the page holding addr.
+func (p procMem) pagemapEntry(addr uintptr) (uint64, error) {
 	if p.pagemapErr != nil {
-		return 0, false, p.pagemapErr
+		return 0, p.pagemapErr
 	}
 	page := addr / p.pageSize
 	if uint64(page) > math.MaxInt64/8 {
 		// Unreachable for a real page size, but ReadAt takes a signed offset
 		// and a wrap would read another page's entry. Widened to uint64 so it
 		// compiles on 32-bit targets, where it is always false.
-		return 0, false, errOffsetRange
+		return 0, errOffsetRange
 	}
-	off := int64(page) * 8
 	var entry [8]byte
-	if _, err := p.pagemap.ReadAt(entry[:], off); err != nil {
-		return 0, false, err
+	if _, err := p.pagemap.ReadAt(entry[:], int64(page)*8); err != nil {
+		return 0, err
 	}
-	return (page + 1) * p.pageSize, binary.NativeEndian.Uint64(entry[:])&pmGuardRegion != 0, nil
+	return binary.NativeEndian.Uint64(entry[:]), nil
+}
+
+// probeMapping fills e with the evidence for a mapping the scan failed to
+// read: it reads one byte of each page of [lo, hi) through /proc/self/mem and
+// names the pages that fail and are not proven guard pages (EIO with
+// PM_GUARD_REGION set), with their raw pagemap entries. The probe only
+// reports; the scan has already failed closed. A reader that is not
+// /proc/self/mem has no pagemap and gets no probe.
+func probeMapping(mem io.ReaderAt, lo, hi uintptr, e *UnreadableMappingError) {
+	p, ok := mem.(procMem)
+	if !ok || p.pageSize == 0 {
+		return
+	}
+	var b [1]byte
+	// clear is a memclr of memory b still references, so it is not elided.
+	defer clear(b[:])
+	// first <= a stops the walk if a wraps past the top of the address space,
+	// and ReadAt takes a signed offset.
+	first := lo &^ (p.pageSize - 1)
+	for a := first; a >= first && a < hi && uint64(a) <= math.MaxInt64; a += p.pageSize {
+		n, rerr := p.mem.ReadAt(b[:], int64(a))
+		if n == len(b) {
+			continue
+		}
+		entry, perr := p.pagemapEntry(a)
+		if perr == nil && errors.Is(rerr, syscall.EIO) && entry&pmGuardRegion != 0 {
+			e.GuardPages++
+			continue
+		}
+		e.UnreadablePages++
+		if len(e.Pages) < maxUnreadablePages {
+			e.Pages = append(e.Pages, UnreadablePage{Addr: a, Pagemap: entry, PagemapErr: perr})
+		}
+	}
+}
+
+// kernelRelease is the running kernel's release, as uname -r prints it.
+func kernelRelease() string {
+	var u unix.Utsname
+	if err := unix.Uname(&u); err != nil {
+		return "unknown (uname: " + err.Error() + ")"
+	}
+	return unix.ByteSliceToString(u.Release[:])
 }
 
 // skipGuard decides whether a read that failed at addr with rerr may step

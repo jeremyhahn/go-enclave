@@ -11,6 +11,7 @@ package memscan
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"math"
 	"os"
@@ -214,6 +215,101 @@ func TestFindSkipsGuardPagesAndReportsTheMapping(t *testing.T) {
 	_, err = find(maps, guarded(&guardedSpace{data: region, bad: map[int]bool{1: true}}, readerOf(pagemapOf(4))), needle, 0x100000, scratch(0x800, len(needle)))
 	if !errors.Is(err, ErrUnreadableMapping) || !errors.Is(err, syscall.EIO) {
 		t.Errorf("EIO without the guard bit: find err = %v; want ErrUnreadableMapping wrapping EIO", err)
+	}
+}
+
+// unreadable sweeps a one-mapping process of pages pages whose bad pages fail
+// to read, with pagemap behind it, and returns the fail-closed error.
+func unreadable(t *testing.T, pages int, bad map[int]bool, pagemap io.ReaderAt) (*UnreadableMappingError, error) {
+	t.Helper()
+	region := make([]byte, pages*testPage)
+	maps := fmt.Sprintf("00000000-%08x rw-p 00000000 00:00 0\n", len(region))
+	_, err := find(maps, guarded(&guardedSpace{data: region, bad: bad}, pagemap), []byte("the-needle"), 0x100000, scratch(0x800, 10))
+	var ue *UnreadableMappingError
+	if !errors.As(err, &ue) || !errors.Is(err, ErrUnreadableMapping) {
+		t.Fatalf("find = %v; want an *UnreadableMappingError matching ErrUnreadableMapping", err)
+	}
+	return ue, err
+}
+
+// unameRelease is the running kernel's release, as uname -r prints it.
+func unameRelease(t *testing.T) string {
+	t.Helper()
+	var u unix.Utsname
+	if err := unix.Uname(&u); err != nil {
+		t.Fatalf("uname: %v", err)
+	}
+	return unix.ByteSliceToString(u.Release[:])
+}
+
+// TestFindReportsTheUnreadablePages pins the evidence the fail-closed error
+// carries: it still fails closed on EIO without PM_GUARD_REGION, and names
+// each unreadable page that is not a guard page with its raw pagemap entry,
+// counts the guard pages beside them, and names the running kernel.
+func TestFindReportsTheUnreadablePages(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		guards []int // pages of bad the pagemap marks PM_GUARD_REGION
+		want   []uintptr
+		guard  int
+	}{
+		{"guard bit on a neighbor", []int{3}, []uintptr{0x2000, 0x5000}, 1},
+		{"no guard bit anywhere", nil, []uintptr{0x2000, 0x3000, 0x5000}, 0},
+	} {
+		ue, err := unreadable(t, 8, map[int]bool{2: true, 3: true, 5: true}, readerOf(pagemapOf(8, tc.guards...)))
+		if !errors.Is(err, syscall.EIO) {
+			t.Errorf("%s: err = %v; want it to wrap EIO", tc.name, err)
+		}
+		var got []uintptr
+		for _, p := range ue.Pages {
+			got = append(got, p.Addr)
+			if p.Pagemap != 1<<63 || p.PagemapErr != nil {
+				t.Errorf("%s: page %#x pagemap = %#x, %v; want %#x, nil", tc.name, p.Addr, p.Pagemap, p.PagemapErr, uint64(1<<63))
+			}
+		}
+		if !slices.Equal(got, tc.want) || ue.UnreadablePages != len(tc.want) || ue.GuardPages != tc.guard {
+			t.Errorf("%s: pages %#x, %d unreadable, %d guard; want %#x, %d, %d", tc.name, got, ue.UnreadablePages, ue.GuardPages, tc.want, len(tc.want), tc.guard)
+		}
+		if ue.Kernel == "" || ue.Kernel != unameRelease(t) {
+			t.Errorf("%s: kernel = %q; want %q", tc.name, ue.Kernel, unameRelease(t))
+		}
+		msg := err.Error()
+		for _, s := range []string{"0x2000", "0x5000", "pagemap 0x8000000000000000", "kernel " + ue.Kernel, "00000000-00008000 rw-p"} {
+			if !strings.Contains(msg, s) {
+				t.Errorf("%s: error %q does not name %q", tc.name, msg, s)
+			}
+		}
+	}
+}
+
+// TestFindBoundsTheUnreadablePageReport pins the bound: at most the first 16
+// unreadable pages are named, and the count carries the rest.
+func TestFindBoundsTheUnreadablePageReport(t *testing.T) {
+	bad := map[int]bool{}
+	for i := 4; i < 24; i++ {
+		bad[i] = true
+	}
+	ue, err := unreadable(t, 24, bad, readerOf(pagemapOf(24)))
+	if len(ue.Pages) != 16 || ue.UnreadablePages != 20 {
+		t.Fatalf("named %d page(s), counted %d; want 16 and 20", len(ue.Pages), ue.UnreadablePages)
+	}
+	if first, last := ue.Pages[0].Addr, ue.Pages[15].Addr; first != 0x4000 || last != 0x13000 {
+		t.Errorf("named pages %#x..%#x; want 0x4000..0x13000", first, last)
+	}
+	if msg := err.Error(); !strings.Contains(msg, "0x13000") || strings.Contains(msg, "0x14000") {
+		t.Errorf("error %q; want it to stop after the 16th page", msg)
+	}
+}
+
+// TestFindReportsAnUnreadablePagemap pins that a page whose pagemap entry
+// cannot be read is named with the pagemap failure instead of a word.
+func TestFindReportsAnUnreadablePagemap(t *testing.T) {
+	ue, err := unreadable(t, 3, map[int]bool{1: true}, &failingPagemap{})
+	if len(ue.Pages) != 1 || ue.Pages[0].Addr != 0x1000 || !errors.Is(ue.Pages[0].PagemapErr, errPagemap) {
+		t.Fatalf("pages = %+v; want page 0x1000 with the pagemap failure", ue.Pages)
+	}
+	if msg := err.Error(); !strings.Contains(msg, "0x1000 pagemap unreadable: pagemap refused") {
+		t.Errorf("error %q does not name the pagemap failure", msg)
 	}
 }
 

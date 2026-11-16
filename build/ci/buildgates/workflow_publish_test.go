@@ -11,8 +11,8 @@ import (
 )
 
 // A write-capable job must not run repository code it has not verified, and
-// must not leave its token in the checkout. release.yml's publish job runs under
-// always() so a failed stage turns it red, which also starts it after a failed
+// must not leave its token in the checkout. A publishing job that runs under
+// always(), so a failed stage turns it red, also starts after a failed
 // Verify: its first step must therefore check every stage inline, before any
 // checkout, and its checkouts must not persist the job token.
 
@@ -156,20 +156,6 @@ func publishGateViolations(src []byte, job string) ([]string, error) {
 		bad = append(bad, fmt.Sprintf("job %s: the step before the first checkout never requires `success`", job))
 	}
 	return bad, nil
-}
-
-func TestReleasePublishGatesOnEveryNeedBeforeCheckout(t *testing.T) {
-	src, err := os.ReadFile(filepath.Join(repoRoot(t), ".github", "workflows", "release.yml"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	bad, err := publishGateViolations(src, "publish")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, b := range bad {
-		t.Error(b)
-	}
 }
 
 func TestWorkflowsWriteCapableCheckoutsDoNotPersistCredentials(t *testing.T) {
