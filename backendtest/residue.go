@@ -127,11 +127,12 @@ func checkCaseResidue(r *report, property string, cfg Config, hc HandleCase, who
 
 	// Control: with the handle alive its own mapping holds the material, so the
 	// sweep must find it, or a negative result below would be vacuous.
-	control, err := sweepOutsideHome(needle, home)
+	controlSweep, err := sweepOutsideHome(needle, home)
 	if err != nil {
 		r.unmeasured(property, "%s: residue sweep not run: %v", who, err)
 		return
 	}
+	control := controlSweep.Hits
 	if len(control) == 0 {
 		r.unmeasured(property, "%s: residue sweep not run: with the handle alive the sweep found its material in no "+
 			"mapping outside the needle's own, so it cannot see where the backend keeps it and a negative result "+
@@ -142,16 +143,21 @@ func checkCaseResidue(r *report, property string, cfg Config, hc HandleCase, who
 	if !end(r, property, who, b, h) {
 		return
 	}
-	after, err := sweepOutsideHome(needle, home)
+	afterSweep, err := sweepOutsideHome(needle, home)
 	if err != nil {
 		r.unmeasured(property, "%s: residue sweep failed after its control succeeded: %v", who, err)
 		return
 	}
+	after := afterSweep.Hits
 	if len(after) > 0 {
 		r.fail(property, "%s: the material is byte-exact resident in %d mapping(s) after %s returned: %q. "+
 			"%s wipes every copy; this same sweep found the material while the handle was alive, so it is not blind",
 			who, len(after), how, after[0], how)
 	}
+	r.note("backendtest: %s: residue sweep ran — %d mapping(s) held the material while the handle was alive, "+
+		"%d after %s returned; it skipped %d kernel guard page(s) while the handle was alive and %d after, "+
+		"pages /proc/self/pagemap proves hold no data", who, len(control), len(after), how,
+		controlSweep.GuardPages, afterSweep.GuardPages)
 }
 
 // isUniform reports whether b is one byte repeated.
@@ -198,21 +204,22 @@ func residueHandle(r *report, b enclave.Backend, hc HandleCase) (enclave.Handle,
 	return h, nil
 }
 
-// sweepProcess is memscan.Find; a test blinds it to prove the control
+// sweepProcess is memscan.Sweep; a test blinds it to prove the control
 // reports the sweep unmeasured.
-var sweepProcess = memscan.Find
+var sweepProcess = memscan.Sweep
 
-// sweepOutsideHome reports every mapping outside home that holds the needle.
-func sweepOutsideHome(probe enclave.ByteAccess, home uintptr) ([]string, error) {
-	var hits []string
+// sweepOutsideHome reports every mapping outside home that holds the needle,
+// and the kernel guard pages the sweep skipped.
+func sweepOutsideHome(probe enclave.ByteAccess, home uintptr) (memscan.Result, error) {
+	var res memscan.Result
 	var scanErr error
 	if err := probe.WithBytes(func(needle []byte) error {
-		hits, scanErr = sweepProcess(needle, home)
+		res, scanErr = sweepProcess(needle, home)
 		return nil
 	}); err != nil {
-		return nil, &stepError{step: "borrowing the needle", err: err}
+		return memscan.Result{}, &stepError{step: "borrowing the needle", err: err}
 	}
-	return hits, scanErr
+	return res, scanErr
 }
 
 func release(r *report, what string, m enclave.Handle) {

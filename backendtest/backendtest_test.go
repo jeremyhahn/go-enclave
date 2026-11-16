@@ -353,14 +353,14 @@ func TestBackendConformance_Residue(t *testing.T) {
 	})
 	sweeps := []struct {
 		name  string
-		sweep func([]byte, uintptr) ([]string, error)
+		sweep func([]byte, uintptr) (memscan.Result, error)
 	}{
-		{name: "blind", sweep: func([]byte, uintptr) ([]string, error) { return nil, nil }},
-		{name: "failing", sweep: func([]byte, uintptr) ([]string, error) { return nil, errFake }},
+		{name: "blind", sweep: func([]byte, uintptr) (memscan.Result, error) { return memscan.Result{}, nil }},
+		{name: "failing", sweep: func([]byte, uintptr) (memscan.Result, error) { return memscan.Result{}, errFake }},
 	}
 	for _, tc := range sweeps {
 		t.Run(tc.name, func(t *testing.T) {
-			defer func(orig func([]byte, uintptr) ([]string, error)) { sweepProcess = orig }(sweepProcess)
+			defer func(orig func([]byte, uintptr) (memscan.Result, error)) { sweepProcess = orig }(sweepProcess)
 			sweepProcess = tc.sweep
 			if err := runFake(context.Background(), residueConfig(faults{})); !errors.Is(err, ErrNotMeasured) || hasProperty(err, "residue") {
 				t.Fatalf("TestBackend with a %s sweep = %v, want ErrNotMeasured and no residue finding", tc.name, err)
@@ -368,13 +368,13 @@ func TestBackendConformance_Residue(t *testing.T) {
 		})
 	}
 	t.Run("sweep fails after its control", func(t *testing.T) {
-		defer func(orig func([]byte, uintptr) ([]string, error)) { sweepProcess = orig }(sweepProcess)
+		defer func(orig func([]byte, uintptr) (memscan.Result, error)) { sweepProcess = orig }(sweepProcess)
 		calls := 0
-		sweepProcess = func(needle []byte, home uintptr) ([]string, error) {
+		sweepProcess = func(needle []byte, home uintptr) (memscan.Result, error) {
 			if calls++; calls == 1 {
-				return memscan.Find(needle, home)
+				return memscan.Sweep(needle, home)
 			}
-			return nil, errFake
+			return memscan.Result{}, errFake
 		}
 		cfg := residueConfig(faults{})
 		if err := runFake(context.Background(), cfg); !errors.Is(err, ErrNotMeasured) {
