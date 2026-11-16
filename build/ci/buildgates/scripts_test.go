@@ -313,7 +313,9 @@ type fakeRelease struct {
 	Prerelease bool   `json:"prerelease"`
 }
 
-// fakeForge is the slice of the Gitea API release-publish.sh uses.
+// fakeForge is the slice of the forge API release-publish.sh and
+// release-ci-gate.sh use, served at GitHub's paths (/repos/<owner>/<repo>/…
+// under an API root with no path of its own, as https://api.github.com).
 type fakeForge struct {
 	mu        sync.Mutex
 	tagSHA    map[string]string // tag -> commit; absent = 404
@@ -331,6 +333,10 @@ type fakeForge struct {
 	defaultState string
 	// pulls is the pull requests GitHub associates with a commit.
 	pulls map[string][]fakePull
+	// onPulls, when set, runs once (under mu) as the forge answers the next
+	// read of a commit's pull requests: a test's stand-in for what another
+	// maintainer does while release-tag.sh waits on the forge.
+	onPulls func()
 }
 
 // fakePull is the slice of a GitHub pull request release-ci-gate.sh reads.
@@ -397,7 +403,7 @@ func (f *fakeForge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"message":"unauthorized"}`, http.StatusUnauthorized)
 		return
 	}
-	const prefix = "/api/v1/repos/owner/repo"
+	const prefix = "/repos/owner/repo"
 	path, ok := strings.CutPrefix(r.URL.Path, prefix)
 	if !ok {
 		http.NotFound(w, r)
@@ -425,6 +431,10 @@ func (f *fakeForge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		reply(http.StatusOK, checkRuns(sha, state))
 	case r.Method == http.MethodGet && strings.HasPrefix(path, "/commits/") && strings.HasSuffix(path, "/pulls"):
+		if hook := f.onPulls; hook != nil {
+			f.onPulls = nil
+			hook()
+		}
 		pulls := f.pulls[strings.TrimSuffix(strings.TrimPrefix(path, "/commits/"), "/pulls")]
 		if pulls == nil {
 			pulls = []fakePull{}
@@ -489,7 +499,7 @@ func startForge(t *testing.T, f *fakeForge) string {
 	t.Helper()
 	srv := httptest.NewServer(f)
 	t.Cleanup(srv.Close)
-	return srv.URL + "/api/v1"
+	return srv.URL // GitHub's API root has no path: https://api.github.com
 }
 
 func TestScriptsReleasePublish_CreatesTheReleaseFromTheChangelog(t *testing.T) {
@@ -2087,7 +2097,7 @@ func TestScriptsRelease_SucceedsWhileMainsCIGateIsRed(t *testing.T) {
 		{"main's CI Gate failed", func(r *releaseRepo) { r.forge.setDefaultState("failure") }},
 		{"main's CI Gate pending", func(r *releaseRepo) { r.forge.setDefaultState("pending") }},
 		{"main has no CI Gate", func(r *releaseRepo) { r.forge.setDefaultState("missing") }},
-		{"forge unreachable", func(r *releaseRepo) { r.env["FORGE_API_URL"] = "http://127.0.0.1:1/api/v1" }},
+		{"forge unreachable", func(r *releaseRepo) { r.env["FORGE_API_URL"] = "http://127.0.0.1:1" }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := newReleaseRepo(t)
@@ -2190,7 +2200,7 @@ func TestScriptsReleaseTag_RefusesWhatItMustNotTag(t *testing.T) {
 		{"pull request not merged", version, func(r *releaseRepo, merge, head string) {
 			r.forge.setPulls(merge, fakePull{Number: 7, State: "open", MergeCommitSHA: merge, Head: fakePullRe{Ref: "release/" + version, SHA: head}, Base: fakePullRe{Ref: "main"}})
 		}, "no pull request from release/v1.5.0-rc.1 was merged as"},
-		{"forge unreachable", version, func(r *releaseRepo, _, _ string) { r.env["FORGE_API_URL"] = "http://127.0.0.1:1/api/v1" }, "could not read the forge's pull requests"},
+		{"forge unreachable", version, func(r *releaseRepo, _, _ string) { r.env["FORGE_API_URL"] = "http://127.0.0.1:1" }, "could not read the forge's pull requests"},
 		{"no forge token", version, func(r *releaseRepo, _, _ string) { r.env["FORGE_TOKEN"] = "" }, "FORGE_TOKEN is unset"},
 		{"no forge URL", version, func(r *releaseRepo, _, _ string) { r.env["FORGE_API_URL"] = "" }, "FORGE_API_URL is unset"},
 		{"no forge repository", version, func(r *releaseRepo, _, _ string) { r.env["FORGE_REPOSITORY"] = "" }, "FORGE_REPOSITORY is unset"},
@@ -2499,7 +2509,7 @@ func TestScriptsMakeEntryPoints_TreatHostileValuesAsData(t *testing.T) {
 				// Publishing must never get as far as a request, whatever
 				// happens: point it at nothing.
 				env := map[string]string{
-					"FORGE_API_URL": "http://127.0.0.1:9/api/v1", "FORGE_REPOSITORY": "owner/repo", "FORGE_TOKEN": "x",
+					"FORGE_API_URL": "http://127.0.0.1:9", "FORGE_REPOSITORY": "owner/repo", "FORGE_TOKEN": "x",
 					"TAG": "", "SHA": "", "MAIN_REF": "", "REF": "", "VERSION": "",
 				}
 				var assignments []string
