@@ -39,7 +39,14 @@ skipping tests. It needs:
   the hard one. Raise it with `ulimit -l 2048`, or `--ulimit memlock=…` for a
   container;
 - a readable `/proc`;
-- permission to lower its own resource limits.
+- permission to lower its own resource limits;
+- Linux 6.15 or later, or a kernel with the same features backported:
+  `madvise(MADV_GUARD_INSTALL)` (Linux 6.13) and the `PM_GUARD_REGION` bit in
+  `/proc/self/pagemap` (Linux 6.15). The live guard-region test in
+  `internal/memscan` installs a real guard region; on an older kernel it fails,
+  and does not skip, with a message naming the kernel it needs. A container
+  shares the host kernel, so `make docker-run` does not lift this requirement:
+  the host must run such a kernel.
 
 ## Make targets
 
