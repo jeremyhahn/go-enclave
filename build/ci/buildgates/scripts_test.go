@@ -323,10 +323,29 @@ type fakeForge struct {
 	badAuth   int
 	failWrite bool                // answer 500 to POST/PATCH
 	mangle    func(string) string // what the forge "stores" instead of the sent body
-	// commitState is the combined commit status per commit; a commit absent
-	// from it reads defaultState, and "" there answers 404.
+	// commitState is the CI Gate check run per commit, as GitHub's
+	// check-runs API reports it: "success", "failure" or another completed
+	// conclusion, "pending" (in progress), or "missing" (no CI Gate run). A
+	// commit absent from it reads defaultState, and "" there answers 404.
 	commitState  map[string]string
 	defaultState string
+	// pulls is the pull requests GitHub associates with a commit.
+	pulls map[string][]fakePull
+}
+
+// fakePull is the slice of a GitHub pull request release-ci-gate.sh reads.
+type fakePull struct {
+	Number         int        `json:"number"`
+	State          string     `json:"state"`
+	MergeCommitSHA string     `json:"merge_commit_sha"`
+	MergedAt       *string    `json:"merged_at"`
+	Head           fakePullRe `json:"head"`
+	Base           fakePullRe `json:"base"`
+}
+
+type fakePullRe struct {
+	Ref string `json:"ref"`
+	SHA string `json:"sha"`
 }
 
 // setDefaultState sets defaultState under the lock ServeHTTP reads it under:
@@ -337,8 +356,36 @@ func (f *fakeForge) setDefaultState(state string) {
 	f.defaultState = state
 }
 
+// setState sets one commit's CI Gate check run.
+func (f *fakeForge) setState(sha, state string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.commitState[sha] = state
+}
+
+// setPulls sets the pull requests GitHub associates with sha.
+func (f *fakeForge) setPulls(sha string, pulls ...fakePull) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.pulls[sha] = pulls
+}
+
 func newFakeForge() *fakeForge {
-	return &fakeForge{tagSHA: map[string]string{}, releases: map[string]*fakeRelease{}}
+	return &fakeForge{tagSHA: map[string]string{}, releases: map[string]*fakeRelease{}, commitState: map[string]string{}, pulls: map[string][]fakePull{}}
+}
+
+// checkRuns is GitHub's answer to check-runs?check_name=CI%20Gate for sha.
+func checkRuns(sha, state string) map[string]any {
+	if state == "missing" {
+		return map[string]any{"total_count": 0, "check_runs": []any{}}
+	}
+	run := map[string]any{"id": 7, "name": "CI Gate", "head_sha": sha, "status": "completed", "conclusion": state}
+	if state == "pending" {
+		run["status"], run["conclusion"] = "in_progress", nil
+	}
+	// An older, failed run of the same check: only the latest counts.
+	old := map[string]any{"id": 3, "name": "CI Gate", "head_sha": sha, "status": "completed", "conclusion": "failure"}
+	return map[string]any{"total_count": 2, "check_runs": []any{old, run}}
 }
 
 func (f *fakeForge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -362,8 +409,12 @@ func (f *fakeForge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(v)
 	}
 	switch {
-	case r.Method == http.MethodGet && strings.HasPrefix(path, "/commits/") && strings.HasSuffix(path, "/status"):
-		sha := strings.TrimSuffix(strings.TrimPrefix(path, "/commits/"), "/status")
+	case r.Method == http.MethodGet && strings.HasPrefix(path, "/commits/") && strings.HasSuffix(path, "/check-runs"):
+		if r.URL.Query().Get("check_name") != "CI Gate" {
+			reply(http.StatusBadRequest, map[string]string{"message": "this fake answers only check_name=CI Gate"})
+			return
+		}
+		sha := strings.TrimSuffix(strings.TrimPrefix(path, "/commits/"), "/check-runs")
 		state, ok := f.commitState[sha]
 		if !ok {
 			state = f.defaultState
@@ -372,7 +423,13 @@ func (f *fakeForge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			reply(http.StatusNotFound, map[string]string{"message": "not found"})
 			return
 		}
-		reply(http.StatusOK, map[string]any{"sha": sha, "state": state, "total_count": 1})
+		reply(http.StatusOK, checkRuns(sha, state))
+	case r.Method == http.MethodGet && strings.HasPrefix(path, "/commits/") && strings.HasSuffix(path, "/pulls"):
+		pulls := f.pulls[strings.TrimSuffix(strings.TrimPrefix(path, "/commits/"), "/pulls")]
+		if pulls == nil {
+			pulls = []fakePull{}
+		}
+		reply(http.StatusOK, pulls)
 	case r.Method == http.MethodGet && strings.HasPrefix(path, "/tags/"):
 		tag := strings.TrimPrefix(path, "/tags/")
 		sha, ok := f.tagSHA[tag]
@@ -1644,6 +1701,7 @@ func TestScriptsRelease_ChecksTheVersionBeforeWritingAnything(t *testing.T) {
 		{"release", "v9.9.9", "scripts/release.sh release"},
 		{"release-candidate", "v9.9.9-rc.1", "scripts/release.sh candidate"},
 		{"release-alpha", "v9.9.9-alpha", "scripts/release.sh alpha"},
+		{"release-tag", "v9.9.9-alpha", "scripts/release-tag.sh"},
 	} {
 		cmd := exec.Command("make", "-n", "--no-print-directory", tc.target, "VERSION="+tc.version, "AGENT_GIT=/bin/false")
 		cmd.Dir = root
@@ -1666,7 +1724,14 @@ func TestScriptsRelease_ChecksTheVersionBeforeWritingAnything(t *testing.T) {
 	}
 	// Every git write goes through the AGENT_GIT wrapper, read as a quoted
 	// variable.
-	for _, write := range []string{`"$here/changelog-assemble.sh"`, "> VERSION", `"$agent_git" "$repo_name" add `, `"$agent_git" "$repo_name" commit `, `"$agent_git" "$repo_name" tag -a `, `"$agent_git" "$repo_name" push `} {
+	// The first step pushes its release branch and nothing else: main takes
+	// the release commit through a pull request, and the tag waits for it.
+	for _, never := range []string{"tag -a", "HEAD:main", "refs/tags/", "/status\""} {
+		if strings.Contains(script, never) {
+			t.Fatalf("release.sh contains %q; it pushes only release/<version>:\n%s", never, script)
+		}
+	}
+	for _, write := range []string{`"$here/changelog-assemble.sh"`, "> VERSION", `"$agent_git" "$repo_name" add `, `"$agent_git" "$repo_name" commit `, `"$agent_git" "$repo_name" push `} {
 		at := strings.Index(script, write)
 		if at < 0 {
 			t.Fatalf("release.sh no longer contains %q; update this test with the script:\n%s", write, script)
@@ -1749,9 +1814,53 @@ func (r *releaseRepo) state() string {
 		r.git(r.dir, "rev-parse", "HEAD"),
 		r.git(r.dir, "tag", "-l"),
 		r.git(r.bare, "tag", "-l"),
+		r.git(r.dir, "for-each-ref", "--format=%(refname) %(objectname)", "refs/heads"),
+		r.git(r.bare, "for-each-ref", "--format=%(refname) %(objectname)", "refs/heads"),
 		readFile(r.t, filepath.Join(r.dir, "VERSION")),
 		readFile(r.t, filepath.Join(r.dir, "CHANGELOG.md")),
 	}, "\x00")
+}
+
+// merge stands in for GitHub squash-merging the release pull request: one
+// new commit on dev's main with the release branch's tree. The forge then
+// associates the merge commit with that pull request, whose head carries a
+// green CI Gate, and the local main is brought up to dev's.
+func (r *releaseRepo) merge(version string) (mergeSHA, headSHA string) {
+	r.t.Helper()
+	branch := "release/" + version
+	headSHA = r.git(r.bare, "rev-parse", "refs/heads/"+branch)
+	other := filepath.Join(r.t.TempDir(), "other")
+	r.git(r.t.TempDir(), "clone", "-q", "-b", "main", r.bare, other)
+	r.git(other, "merge", "-q", "--squash", "origin/"+branch)
+	r.git(other, "commit", "-q", "-m", "chore(release): "+version+" (#7)")
+	r.git(other, "push", "-q", "origin", "HEAD:main")
+	mergeSHA = r.git(other, "rev-parse", "HEAD")
+	merged := "2026-11-16T00:00:00Z"
+	r.forge.setState(headSHA, "success")
+	r.forge.setPulls(mergeSHA, fakePull{
+		Number: 7, State: "closed", MergeCommitSHA: mergeSHA, MergedAt: &merged,
+		Head: fakePullRe{Ref: branch, SHA: headSHA}, Base: fakePullRe{Ref: "main"},
+	})
+	r.git(r.dir, "checkout", "-q", "main")
+	r.git(r.dir, "pull", "-q", "--ff-only", "dev", "main")
+	return mergeSHA, headSHA
+}
+
+func (r *releaseRepo) tag(version string) (string, bool) {
+	r.t.Helper()
+	return runScript(r.t, r.dir, mergeEnv(r.env, map[string]string{"VERSION": version}), "release-tag.sh")
+}
+
+// cut runs both steps: the release branch, its merge, and the tag.
+func (r *releaseRepo) cut(kind, version string) {
+	r.t.Helper()
+	if out, ok := r.run(kind, version); !ok {
+		r.t.Fatalf("release %s refused:\n%s", version, out)
+	}
+	r.merge(version)
+	if out, ok := r.tag(version); !ok {
+		r.t.Fatalf("release-tag %s refused:\n%s", version, out)
+	}
 }
 
 // advanceDev lands a commit on dev's main from a second clone, leaving the
@@ -1823,11 +1932,17 @@ func TestScriptsRelease_RefusesWhatItMustNotPublish(t *testing.T) {
 		{"dev has no main", "candidate", "v1.5.0-rc.1", func(r *releaseRepo) {
 			r.git(r.bare, "update-ref", "-d", "refs/heads/main")
 		}, "could not fetch main from dev"},
-		{"CI red on main", "candidate", "v1.5.0-rc.1", func(r *releaseRepo) { r.forge.setDefaultState("failure") }, "CI is not green"},
-		{"CI pending on main", "candidate", "v1.5.0-rc.1", func(r *releaseRepo) { r.forge.setDefaultState("pending") }, "CI is not green"},
-		{"forge has no status", "candidate", "v1.5.0-rc.1", func(r *releaseRepo) { r.forge.setDefaultState("") }, "could not read the forge's commit status"},
-		{"forge unreachable", "candidate", "v1.5.0-rc.1", func(r *releaseRepo) { r.env["FORGE_API_URL"] = "http://127.0.0.1:1/api/v1" }, "could not read the forge's commit status"},
-		{"forge rejects the token", "candidate", "v1.5.0-rc.1", func(r *releaseRepo) { r.env["FORGE_TOKEN"] = "wrong" }, "could not read the forge's commit status"},
+		{"CI Gate failed on main", "candidate", "v1.5.0-rc.1", func(r *releaseRepo) { r.forge.setDefaultState("failure") }, "CI Gate is not success"},
+		{"CI Gate pending on main", "candidate", "v1.5.0-rc.1", func(r *releaseRepo) { r.forge.setDefaultState("pending") }, "CI Gate is not success"},
+		{"CI Gate missing on main", "candidate", "v1.5.0-rc.1", func(r *releaseRepo) { r.forge.setDefaultState("missing") }, "CI Gate is not success"},
+		{"CI Gate cancelled on main", "candidate", "v1.5.0-rc.1", func(r *releaseRepo) { r.forge.setDefaultState("cancelled") }, "CI Gate is not success"},
+		{"forge has no check runs", "candidate", "v1.5.0-rc.1", func(r *releaseRepo) { r.forge.setDefaultState("") }, "could not read the forge's CI Gate check run"},
+		{"forge unreachable", "candidate", "v1.5.0-rc.1", func(r *releaseRepo) { r.env["FORGE_API_URL"] = "http://127.0.0.1:1/api/v1" }, "could not read the forge's CI Gate check run"},
+		{"forge rejects the token", "candidate", "v1.5.0-rc.1", func(r *releaseRepo) { r.env["FORGE_TOKEN"] = "wrong" }, "could not read the forge's CI Gate check run"},
+		{"release branch exists locally", "candidate", "v1.5.0-rc.1", func(r *releaseRepo) { r.git(r.dir, "branch", "release/v1.5.0-rc.1") }, "branch release/v1.5.0-rc.1 already exists locally"},
+		{"release branch exists on dev", "candidate", "v1.5.0-rc.1", func(r *releaseRepo) {
+			r.git(r.dir, "push", "-q", "dev", "HEAD:refs/heads/release/v1.5.0-rc.1")
+		}, "branch release/v1.5.0-rc.1 already exists on dev"},
 		{"no forge URL", "candidate", "v1.5.0-rc.1", func(r *releaseRepo) { r.env["FORGE_API_URL"] = "" }, "FORGE_API_URL is unset"},
 		{"no forge repository", "candidate", "v1.5.0-rc.1", func(r *releaseRepo) { r.env["FORGE_REPOSITORY"] = "" }, "FORGE_REPOSITORY is unset"},
 		{"no forge token", "candidate", "v1.5.0-rc.1", func(r *releaseRepo) { r.env["FORGE_TOKEN"] = "" }, "FORGE_TOKEN is unset"},
@@ -1898,7 +2013,11 @@ func TestScriptsRelease_MakeTargetsRefuseTheOtherKinds(t *testing.T) {
 	}
 }
 
-func TestScriptsRelease_TagsAndPushesEveryKind(t *testing.T) {
+// TestScriptsRelease_PushesOnlyTheReleaseBranch: the first step commits the
+// release on release/<version> and pushes that branch alone. dev's main and
+// tags are untouched (main's ruleset takes the commit only through a pull
+// request), and the local main is left where it was.
+func TestScriptsRelease_PushesOnlyTheReleaseBranch(t *testing.T) {
 	for _, tc := range []struct{ kind, version string }{
 		{"candidate", "v1.5.0-rc.1"},
 		{"candidate", "v1.5.0-rc.12"},
@@ -1907,33 +2026,42 @@ func TestScriptsRelease_TagsAndPushesEveryKind(t *testing.T) {
 	} {
 		t.Run(tc.kind+" "+tc.version, func(t *testing.T) {
 			r := newReleaseRepo(t)
+			base := r.git(r.dir, "rev-parse", "HEAD")
 			out, ok := r.run(tc.kind, tc.version)
 			if !ok {
 				t.Fatalf("refused:\n%s", out)
 			}
-			if got, want := readFile(t, filepath.Join(r.dir, "VERSION")), strings.TrimPrefix(tc.version, "v")+"\n"; got != want {
-				t.Fatalf("VERSION = %q, want %q", got, want)
+			branch := "release/" + tc.version
+			if !strings.Contains(out, branch) {
+				t.Fatalf("the output does not name %s for the pull request:\n%s", branch, out)
 			}
-			if changelog := readFile(t, filepath.Join(r.dir, "CHANGELOG.md")); !strings.Contains(changelog, "\n## ["+tc.version+"] - ") || !strings.Contains(changelog, "- a candidate") {
+			rel := "refs/heads/" + branch
+			if got := r.git(r.dir, "show", rel+":VERSION"); got != strings.TrimPrefix(tc.version, "v") {
+				t.Fatalf("VERSION on %s = %q", branch, got)
+			}
+			if changelog := r.git(r.dir, "show", rel+":CHANGELOG.md"); !strings.Contains(changelog, "\n## ["+tc.version+"] - ") || !strings.Contains(changelog, "- a candidate") {
 				t.Fatalf("CHANGELOG.md has no assembled section for %s:\n%s", tc.version, changelog)
 			}
-			if _, err := os.Stat(filepath.Join(r.dir, "changelog.d", "134-x.md")); !os.IsNotExist(err) {
-				t.Fatalf("the fragment was not folded in (stat err %v)", err)
+			if got := r.git(r.dir, "ls-tree", "--name-only", rel+":changelog.d"); got != ".gitkeep" {
+				t.Fatalf("the fragment was not folded in: changelog.d holds %q", got)
 			}
-			if got := r.git(r.dir, "cat-file", "-t", "refs/tags/"+tc.version); got != "tag" {
-				t.Fatalf("%s is a %q object, want an annotated tag", tc.version, got)
+			if got := r.git(r.dir, "rev-parse", rel+"^"); got != base {
+				t.Fatalf("%s is not one commit on main (parent %s, main %s)", branch, got, base)
 			}
-			if got, want := r.git(r.bare, "rev-parse", tc.version+"^{commit}"), r.git(r.dir, "rev-parse", "HEAD"); got != want {
-				t.Fatalf("dev's %s names %s, want HEAD %s", tc.version, got, want)
-			}
-			if got := r.git(r.bare, "tag", "-l"); got != tc.version {
-				t.Fatalf("dev holds tags %q, want only %s", got, tc.version)
-			}
-			if got, want := r.git(r.bare, "rev-parse", "refs/heads/main"), r.git(r.dir, "rev-parse", "HEAD"); got != want {
-				t.Fatalf("dev's main names %s, want the release commit %s", got, want)
-			}
-			if got := r.git(r.dir, "log", "-1", "--format=%s"); got != "chore(release): "+tc.version {
+			if got := r.git(r.dir, "log", "-1", "--format=%s", rel); got != "chore(release): "+tc.version {
 				t.Fatalf("release commit = %q", got)
+			}
+			if got, want := r.git(r.bare, "rev-parse", rel), r.git(r.dir, "rev-parse", rel); got != want {
+				t.Fatalf("dev's %s names %s, want %s", branch, got, want)
+			}
+			if got := r.git(r.bare, "rev-parse", "refs/heads/main"); got != base {
+				t.Fatalf("dev's main moved to %s; the first step must not push main", got)
+			}
+			if got := r.git(r.bare, "tag", "-l") + r.git(r.dir, "tag", "-l"); got != "" {
+				t.Fatalf("tags %q exist after the first step; the tag waits for the merge", got)
+			}
+			if got := r.git(r.dir, "rev-parse", "--abbrev-ref", "HEAD") + " " + r.git(r.dir, "rev-parse", "main"); got != "main "+base {
+				t.Fatalf("the local checkout is %q, want main at %s", got, base)
 			}
 			if got := r.git(r.dir, "status", "--porcelain"); got != "" {
 				t.Fatalf("the release left the tree dirty:\n%s", got)
@@ -1945,13 +2073,134 @@ func TestScriptsRelease_TagsAndPushesEveryKind(t *testing.T) {
 	}
 }
 
+// TestScriptsRelease_NeverPushesMainOrATag: dev refuses every main and tag
+// update (as the ruleset refuses a direct push to main) and the first step
+// still succeeds, because it pushes neither.
+func TestScriptsRelease_NeverPushesMainOrATag(t *testing.T) {
+	r := newReleaseRepo(t)
+	hook := "#!/bin/sh\ncase $1 in refs/heads/main|refs/tags/*) exit 1 ;; esac\nexit 0\n"
+	writeExecutable(t, filepath.Join(r.bare, "hooks", "update"), []byte(hook))
+	if out, ok := r.run("candidate", "v1.5.0-rc.1"); !ok {
+		t.Fatalf("refused although it needs no main or tag push:\n%s", out)
+	}
+}
+
+// TestScriptsReleaseTag_TagsTheMergedReleaseCommitEveryKind: after the
+// release pull request is merged, release-tag.sh tags main's HEAD and pushes
+// only the tag. main's own CI Gate is red here, as it is when the release is
+// the fix: the release PR's head is what is read.
+func TestScriptsReleaseTag_TagsTheMergedReleaseCommitEveryKind(t *testing.T) {
+	for _, k := range releaseKinds {
+		t.Run(k.version, func(t *testing.T) {
+			r := newReleaseRepo(t)
+			if out, ok := r.run(k.kind, k.version); !ok {
+				t.Fatalf("first step refused:\n%s", out)
+			}
+			mergeSHA, _ := r.merge(k.version)
+			r.forge.setState(mergeSHA, "failure")
+			out, ok := r.tag(k.version)
+			if !ok {
+				t.Fatalf("refused:\n%s", out)
+			}
+			if got := r.git(r.dir, "cat-file", "-t", "refs/tags/"+k.version); got != "tag" {
+				t.Fatalf("%s is a %q object, want an annotated tag", k.version, got)
+			}
+			if got := r.git(r.bare, "rev-parse", k.version+"^{commit}"); got != mergeSHA {
+				t.Fatalf("dev's %s names %s, want the merge commit %s", k.version, got, mergeSHA)
+			}
+			if got := r.git(r.bare, "tag", "-l"); got != k.version {
+				t.Fatalf("dev holds tags %q, want only %s", got, k.version)
+			}
+			if got := r.git(r.bare, "rev-parse", "refs/heads/main"); got != mergeSHA {
+				t.Fatalf("dev's main moved to %s", got)
+			}
+			if log := readFile(t, r.env["AGENT_GIT"]+".log"); strings.Trim(strings.ReplaceAll(log, "go-enclave-test\n", ""), "\n") != "" {
+				t.Fatalf("a git write ran under another repo name:\n%s", log)
+			}
+		})
+	}
+}
+
+// TestScriptsReleaseTag_RefusesWhatItMustNotTag starts from a merged
+// v1.5.0-rc.1 release and breaks one thing per case. A refusal leaves no tag,
+// locally or on dev.
+func TestScriptsReleaseTag_RefusesWhatItMustNotTag(t *testing.T) {
+	const version = "v1.5.0-rc.1"
+	for _, tc := range []struct {
+		name, version string
+		setup         func(r *releaseRepo, mergeSHA, headSHA string)
+		wantMsg       string
+	}{
+		{"no version", "", nil, "state the version explicitly"},
+		{"not a release version", "v1.5", nil, "is not vX.Y.Z, vX.Y.Z-alpha or vX.Y.Z-rc.N"},
+		{"hostile characters", "v1.5.0-rc.1;x", nil, "characters no release version does"},
+		{"version mismatch", "v1.5.0-rc.2", nil, "VERSION on main is 1.5.0-rc.1, not 1.5.0-rc.2"},
+		{"no signing wrapper", version, func(r *releaseRepo, _, _ string) { r.env["AGENT_GIT"] = "" }, "AGENT_GIT is unset"},
+		{"another branch", version, func(r *releaseRepo, _, _ string) { r.git(r.dir, "checkout", "-q", "-b", "topic") }, "releases are tagged from main; you are on topic"},
+		{"dirty tree", version, func(r *releaseRepo, _, _ string) {
+			if err := os.WriteFile(filepath.Join(r.dir, "stray.txt"), []byte("x"), 0o600); err != nil {
+				t.Fatalf("write stray: %v", err)
+			}
+		}, "working tree not clean"},
+		{"local main behind dev", version, func(r *releaseRepo, _, _ string) { r.advanceDev("someone else's commit") }, "is not dev/main"},
+		{"HEAD not the release commit", version, func(r *releaseRepo, _, _ string) {
+			r.advanceDev("merged after the release")
+			r.git(r.dir, "pull", "-q", "--ff-only", "dev", "main")
+		}, "is not the commit that set VERSION to 1.5.0-rc.1"},
+		{"tag exists locally", version, func(r *releaseRepo, _, _ string) { r.git(r.dir, "tag", version) }, "already exists locally"},
+		{"tag exists on dev", version, func(r *releaseRepo, _, _ string) {
+			r.git(r.dir, "tag", version)
+			r.git(r.dir, "push", "-q", "dev", "refs/tags/"+version)
+			r.git(r.dir, "tag", "-d", version)
+		}, "already exists on dev"},
+		{"release PR's CI Gate failed", version, func(r *releaseRepo, _, head string) { r.forge.setState(head, "failure") }, "CI Gate is not success on " + "the release pull request"},
+		{"release PR's CI Gate pending", version, func(r *releaseRepo, _, head string) { r.forge.setState(head, "pending") }, "CI Gate is not success"},
+		{"release PR's CI Gate missing", version, func(r *releaseRepo, _, head string) { r.forge.setState(head, "missing") }, "CI Gate is not success"},
+		{"release PR's CI Gate unreadable", version, func(r *releaseRepo, _, head string) { r.forge.setState(head, "") }, "could not read the forge's CI Gate check run"},
+		{"main's own green CI Gate does not stand in", version, func(r *releaseRepo, merge, head string) {
+			r.forge.setState(merge, "success")
+			r.forge.setState(head, "failure")
+		}, "CI Gate is not success"},
+		{"no pull request merged as HEAD", version, func(r *releaseRepo, merge, _ string) { r.forge.setPulls(merge) }, "no pull request from release/v1.5.0-rc.1 was merged as"},
+		{"merged from another branch", version, func(r *releaseRepo, merge, head string) {
+			at := "2026-11-16T00:00:00Z"
+			r.forge.setPulls(merge, fakePull{Number: 8, State: "closed", MergeCommitSHA: merge, MergedAt: &at, Head: fakePullRe{Ref: "topic", SHA: head}, Base: fakePullRe{Ref: "main"}})
+		}, "no pull request from release/v1.5.0-rc.1 was merged as"},
+		{"pull request not merged", version, func(r *releaseRepo, merge, head string) {
+			r.forge.setPulls(merge, fakePull{Number: 7, State: "open", MergeCommitSHA: merge, Head: fakePullRe{Ref: "release/" + version, SHA: head}, Base: fakePullRe{Ref: "main"}})
+		}, "no pull request from release/v1.5.0-rc.1 was merged as"},
+		{"forge unreachable", version, func(r *releaseRepo, _, _ string) { r.env["FORGE_API_URL"] = "http://127.0.0.1:1/api/v1" }, "could not read the forge's pull requests"},
+		{"no forge token", version, func(r *releaseRepo, _, _ string) { r.env["FORGE_TOKEN"] = "" }, "FORGE_TOKEN is unset"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newReleaseRepo(t)
+			if out, ok := r.run("candidate", version); !ok {
+				t.Fatalf("first step refused:\n%s", out)
+			}
+			mergeSHA, headSHA := r.merge(version)
+			if tc.setup != nil {
+				tc.setup(r, mergeSHA, headSHA)
+			}
+			before := r.state()
+			out, ok := r.tag(tc.version)
+			if ok {
+				t.Fatalf("tagged, want a refusal:\n%s", out)
+			}
+			if !strings.Contains(out, tc.wantMsg) {
+				t.Fatalf("refusal does not say %q:\n%s", tc.wantMsg, out)
+			}
+			if after := r.state(); after != before {
+				t.Fatalf("a refused release-tag changed the repository:\nbefore %q\nafter  %q", before, after)
+			}
+		})
+	}
+}
+
 // TestScriptsRelease_CandidatesFollowOneAnother cuts rc.1, then refuses the
 // same candidate again and an alpha below it, and then cuts rc.2.
 func TestScriptsRelease_CandidatesFollowOneAnother(t *testing.T) {
 	r := newReleaseRepo(t)
-	if out, ok := r.run("candidate", "v1.5.0-rc.1"); !ok {
-		t.Fatalf("rc.1 refused:\n%s", out)
-	}
+	r.cut("candidate", "v1.5.0-rc.1")
 	if out, ok := r.run("candidate", "v1.5.0-rc.1"); ok || !strings.Contains(out, "already exists locally") {
 		t.Fatalf("a second rc.1 was not refused as an existing tag (ok=%v):\n%s", ok, out)
 	}
@@ -1964,28 +2213,9 @@ func TestScriptsRelease_CandidatesFollowOneAnother(t *testing.T) {
 	r.git(r.dir, "add", "-A")
 	r.git(r.dir, "commit", "-q", "-m", "fix")
 	r.git(r.dir, "push", "-q", "dev", "main")
-	if out, ok := r.run("candidate", "v1.5.0-rc.2"); !ok {
-		t.Fatalf("rc.2 refused:\n%s", out)
-	}
+	r.cut("candidate", "v1.5.0-rc.2")
 	if got := r.git(r.bare, "tag", "-l"); got != "v1.5.0-rc.1\nv1.5.0-rc.2" {
 		t.Fatalf("dev holds tags %q", got)
-	}
-}
-
-// TestScriptsRelease_ARejectedMainNeverLeavesTheTag stands in for main moving
-// between the check and the push: dev refuses the main update (a per-ref hook,
-// so only an atomic push stops the tag with it). The immutable tag must not
-// land.
-func TestScriptsRelease_ARejectedMainNeverLeavesTheTag(t *testing.T) {
-	r := newReleaseRepo(t)
-	hook := "#!/bin/sh\n[ \"$1\" = refs/heads/main ] && exit 1\nexit 0\n"
-	writeExecutable(t, filepath.Join(r.bare, "hooks", "update"), []byte(hook))
-	out, ok := r.run("candidate", "v1.5.0-rc.1")
-	if ok {
-		t.Fatalf("released although dev refused main:\n%s", out)
-	}
-	if got := r.git(r.bare, "tag", "-l"); got != "" {
-		t.Fatalf("dev holds tags %q after its main was refused; the push was not atomic", got)
 	}
 }
 
@@ -2115,6 +2345,7 @@ func TestScriptsMakeEntryPoints_TreatHostileValuesAsData(t *testing.T) {
 		{"release VERSION", "release", "VERSION", map[string]string{"AGENT_GIT": "/bin/false"}, false, ""},
 		{"release-candidate VERSION", "release-candidate", "VERSION", map[string]string{"AGENT_GIT": "/bin/false"}, false, ""},
 		{"release-alpha VERSION", "release-alpha", "VERSION", map[string]string{"AGENT_GIT": "/bin/false"}, false, ""},
+		{"release-tag VERSION", "release-tag", "VERSION", map[string]string{"AGENT_GIT": "/bin/false"}, false, ""},
 		{"release-tree-check TAG", "release-tree-check", "TAG", map[string]string{"REF": "main"}, false, ""},
 		{"release-tree-check REF", "release-tree-check", "REF", map[string]string{"TAG": "v0.0.1"}, false, ""},
 		{"lint-scripts TOOL_INSTALL", "lint-scripts", "TOOL_INSTALL", nil, false, ""},
