@@ -220,8 +220,15 @@ func (p procMem) guardRegion(addr uintptr) (uintptr, bool, error) {
 		return 0, false, p.pagemapErr
 	}
 	page := addr / p.pageSize
+	if uint64(page) > math.MaxInt64/8 {
+		// Unreachable for a real page size, but ReadAt takes a signed offset
+		// and a wrap would read another page's entry. Widened to uint64 so it
+		// compiles on 32-bit targets, where it is always false.
+		return 0, false, errOffsetRange
+	}
+	off := int64(page) * 8
 	var entry [8]byte
-	if _, err := p.pagemap.ReadAt(entry[:], int64(page)*8); err != nil { //nolint:gosec // page is addr/pageSize, far below math.MaxInt64/8
+	if _, err := p.pagemap.ReadAt(entry[:], off); err != nil {
 		return 0, false, err
 	}
 	return (page + 1) * p.pageSize, binary.NativeEndian.Uint64(entry[:])&pmGuardRegion != 0, nil
