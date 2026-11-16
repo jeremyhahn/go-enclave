@@ -17,7 +17,9 @@ import (
 // sweep must read could not be read in full. A mapping that cannot be read is
 // not a mapping that is clean, so the sweep fails closed. The only mappings
 // excused are the kernel-provided regions that never hold process data (see
-// kernelMapping); a caller must not swallow this error.
+// kernelMapping), and the only pages excused inside a mapping are guard
+// regions: a read that fails with EIO on a page /proc/self/pagemap marks
+// PM_GUARD_REGION (see skipGuard). A caller must not swallow this error.
 var ErrUnreadableMapping = errors.New("memscan: a mapping the sweep must read could not be read")
 
 // ErrEmptySweep is matched by the error Find returns when the sweep read no
