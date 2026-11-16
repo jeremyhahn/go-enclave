@@ -1777,7 +1777,10 @@ func newReleaseRepo(t *testing.T) *releaseRepo {
 	})
 	bare := t.TempDir()
 	wrapper := filepath.Join(t.TempDir(), "agent-git")
-	script := "#!/bin/sh\nprintf '%s\\n' \"$1\" >> \"$0.log\"\nshift\nexec git -c '" + devInsteadOf(bare) + "' -c commit.gpgsign=false -c tag.gpgsign=false \"$@\"\n"
+	// A test's beforePush script runs once, just before the next push.
+	script := "#!/bin/sh\nprintf '%s\\n' \"$1\" >> \"$0.log\"\nshift\n" +
+		"if [ \"$1\" = push ] && [ -f \"$0.before-push\" ]; then sh \"$0.before-push\" || exit 1; rm -f \"$0.before-push\"; fi\n" +
+		"exec git -c '" + devInsteadOf(bare) + "' -c commit.gpgsign=false -c tag.gpgsign=false \"$@\"\n"
 	writeExecutable(t, wrapper, []byte(script))
 	forge := newFakeForge()
 	forge.defaultState = "success"
