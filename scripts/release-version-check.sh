@@ -1,7 +1,15 @@
 #!/bin/sh
 # release-version-check.sh — refuse a release version that does not move forward.
 #
-# Usage: scripts/release-version-check.sh <vX.Y.Z[-pre]> [<X.Y.Z[-pre]>]   (from the repository root)
+# Usage: scripts/release-version-check.sh [--merged <commit>] <vX.Y.Z[-pre]> [<X.Y.Z[-pre]>]
+#        (from the repository root)
+#
+# With --merged, only the v* tags merged into <commit> (on it or its
+# ancestors) are ordered against: the release state that commit was cut from.
+# release.yml's Verify passes the tagged commit, so a later tag on a
+# descendant never fails an earlier tag's run, or a rerun of it. The order of
+# releases is enforced when the tag is pushed (release-tag.sh's leased push of
+# the release lock); without --merged every v* tag is ordered against.
 #
 # With a second argument, that is the VERSION ordered against in place of the
 # VERSION file: release-tag.sh passes the merged release commit's first
@@ -35,9 +43,16 @@ NUM='(0|[1-9][0-9]*)'
 ID='(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)'
 SEMVER="$NUM\\.$NUM\\.$NUM(-$ID(\\.$ID)*)?(\\+[0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*)?"
 
+merged=
+if [ "${1-}" = --merged ]; then
+  [ $# -ge 2 ] || die "usage: $0 [--merged <commit>] <vX.Y.Z[-pre]> [<current VERSION>]"
+  merged=$2
+  shift 2
+  git rev-parse --verify --quiet "$merged^{commit}" >/dev/null || die "--merged '$merged' does not name a commit"
+fi
 case $# in
   1 | 2) ;;
-  *) die "usage: $0 <vX.Y.Z[-pre]> [<current VERSION>]" ;;
+  *) die "usage: $0 [--merged <commit>] <vX.Y.Z[-pre]> [<current VERSION>]" ;;
 esac
 new=$1
 matches "$new" "^v$SEMVER\$" || die "'$new' is not a v-prefixed SemVer 2.0.0 version"
@@ -51,7 +66,13 @@ else
 fi
 matches "$current" "^$SEMVER\$" || die "VERSION reads '$current', which is not an unprefixed SemVer version; refusing to order against it"
 
-tags=$(git tag -l 'v*') || die "could not list tags (git tag -l 'v*')"
+if [ -n "$merged" ]; then
+  tags=$(git tag -l --merged "$merged" 'v*') || die "could not list the tags merged into $merged (git tag -l --merged)"
+  scope="every v* tag merged into $merged"
+else
+  tags=$(git tag -l 'v*') || die "could not list tags (git tag -l 'v*')"
+  scope="every existing v* tag"
+fi
 list="VERSION v$current"
 for t in $tags; do
   matches "$t" "^v$SEMVER\$" || die "tag '$t' is not SemVer 2.0.0, so the new version cannot be ordered against it"
@@ -101,4 +122,4 @@ if [ -n "$offenders" ]; then
   printf '%s\n' "$offenders" | sed 's/^/  /' >&2
   die "a release never lowers VERSION or goes below an existing tag (release-versioning §3); choose a higher version"
 fi
-echo "$prog: $new is greater than VERSION ($current) and every existing v* tag"
+echo "$prog: $new is greater than VERSION ($current) and $scope"

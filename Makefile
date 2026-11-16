@@ -805,14 +805,6 @@ consumer-check:
 	@test -n "$$TAG" || { echo "ERROR: TAG=vX.Y.Z[-pre] is required"; exit 1; }
 	sh scripts/consumer-check.sh "$$("$$GOCMD" list -m)" "$$TAG"
 
-## release-publish: TAG=vX.Y.Z[-pre] SHA=<commit> — publish the Gitea release for TAG (FORGE_API_URL, FORGE_REPOSITORY, FORGE_TOKEN)
-# Refuses GitHub; see scripts/release-publish.sh.
-.PHONY: release-publish
-release-publish:
-	@test -n "$$TAG" || { echo "ERROR: TAG=vX.Y.Z[-pre] is required"; exit 1; }
-	@test -n "$$SHA" || { echo "ERROR: SHA=<the gated commit> is required"; exit 1; }
-	sh scripts/release-publish.sh "$$TAG" "$$SHA"
-
 ## clean: remove build/test artifacts (the pinned-tool cache stays: clean-tools)
 # Removes files, and the report directory only if empty (never rm -rf).
 .PHONY: clean

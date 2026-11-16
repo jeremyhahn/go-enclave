@@ -8,8 +8,10 @@
 #       into main, and CI Gate on that pull request's head must be success.
 #       Prints the pull request's number and head.
 #
-# Environment: FORGE_API_URL (the API root, https://api.github.com on
-# GitHub), FORGE_REPOSITORY (owner/repo) and FORGE_TOKEN (a read token).
+# Environment: FORGE_API_URL (the API root, https://api.github.com),
+# FORGE_REPOSITORY (owner/repo) and FORGE_TOKEN (a read token). GitHub is the
+# repository's only forge (dev is its remote), so GitHub's REST API is the
+# only one read here.
 #
 # CI Gate is the one check the main ruleset requires, and GitHub reports it
 # as a check run, not a commit status: the legacy combined status of a commit
@@ -37,7 +39,7 @@ token=${FORGE_TOKEN-}
 [ -n "$forge_repo" ] || die "FORGE_REPOSITORY is unset - set it to owner/repo"
 [ -n "$token" ] || die "FORGE_TOKEN is unset - the release needs a read token for the forge's check runs"
 # The token is written into a curl configuration line, so anything but a forge
-# token's own characters is refused, not escaped (release-publish.sh, same rule).
+# token's own characters is refused, not escaped.
 case $token in
   *[!A-Za-z0-9_.-]*) die "FORGE_TOKEN has characters no forge token carries; refusing to use it" ;;
 esac

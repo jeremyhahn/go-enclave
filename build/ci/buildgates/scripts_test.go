@@ -22,7 +22,7 @@ import (
 )
 
 // Tests for the release and tooling scripts: scripts/release-notes.sh,
-// release-check-tag.sh, release-publish.sh, consumer-check.sh and tool.sh.
+// release-check-tag.sh, consumer-check.sh and tool.sh.
 //
 // Most of these run for real only when a tag is pushed, some with a write
 // token, and tool.sh decides which binary every lint and security gate trusts.
@@ -295,34 +295,15 @@ func TestScriptsReleaseCheckTag_RefusesEveryDisagreement(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// release-publish.sh, against a fake of the Gitea API.
+// The forge release-ci-gate.sh reads, faked.
 
-const (
-	fakeToken = "0123456789abcdef0123456789abcdef01234567"
-	fakeSHA   = "1111111111111111111111111111111111111111"
-	otherSHA  = "2222222222222222222222222222222222222222"
-)
+const fakeToken = "0123456789abcdef0123456789abcdef01234567"
 
-type fakeRelease struct {
-	ID         int    `json:"id"`
-	TagName    string `json:"tag_name"`
-	Target     string `json:"target_commitish"`
-	Name       string `json:"name"`
-	Body       string `json:"body"`
-	Draft      bool   `json:"draft"`
-	Prerelease bool   `json:"prerelease"`
-}
-
-// fakeForge is the slice of the Gitea API release-publish.sh uses.
+// fakeForge is the slice of GitHub's API release-ci-gate.sh uses, served at
+// GitHub's paths (/repos/<owner>/<repo>/… under an API root with no path of
+// its own, as https://api.github.com).
 type fakeForge struct {
-	mu        sync.Mutex
-	tagSHA    map[string]string // tag -> commit; absent = 404
-	releases  map[string]*fakeRelease
-	writes    []string // "POST <path>" / "PATCH <path>"
-	requests  int
-	badAuth   int
-	failWrite bool                // answer 500 to POST/PATCH
-	mangle    func(string) string // what the forge "stores" instead of the sent body
+	mu sync.Mutex
 	// commitState is the CI Gate check run per commit, as GitHub's
 	// check-runs API reports it: "success", "failure" or another completed
 	// conclusion, "pending" (in progress), or "missing" (no CI Gate run). A
@@ -371,7 +352,7 @@ func (f *fakeForge) setPulls(sha string, pulls ...fakePull) {
 }
 
 func newFakeForge() *fakeForge {
-	return &fakeForge{tagSHA: map[string]string{}, releases: map[string]*fakeRelease{}, commitState: map[string]string{}, pulls: map[string][]fakePull{}}
+	return &fakeForge{commitState: map[string]string{}, pulls: map[string][]fakePull{}}
 }
 
 // checkRuns is GitHub's answer to check-runs?check_name=CI%20Gate for sha.
@@ -391,13 +372,11 @@ func checkRuns(sha, state string) map[string]any {
 func (f *fakeForge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.requests++
 	if r.Header.Get("Authorization") != "token "+fakeToken {
-		f.badAuth++
 		http.Error(w, `{"message":"unauthorized"}`, http.StatusUnauthorized)
 		return
 	}
-	const prefix = "/api/v1/repos/owner/repo"
+	const prefix = "/repos/owner/repo"
 	path, ok := strings.CutPrefix(r.URL.Path, prefix)
 	if !ok {
 		http.NotFound(w, r)
@@ -430,58 +409,8 @@ func (f *fakeForge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			pulls = []fakePull{}
 		}
 		reply(http.StatusOK, pulls)
-	case r.Method == http.MethodGet && strings.HasPrefix(path, "/tags/"):
-		tag := strings.TrimPrefix(path, "/tags/")
-		sha, ok := f.tagSHA[tag]
-		if !ok {
-			reply(http.StatusNotFound, map[string]string{"message": "not found"})
-			return
-		}
-		reply(http.StatusOK, map[string]any{"name": tag, "commit": map[string]string{"sha": sha}})
-	case r.Method == http.MethodGet && strings.HasPrefix(path, "/releases/tags/"):
-		rel, ok := f.releases[strings.TrimPrefix(path, "/releases/tags/")]
-		if !ok {
-			reply(http.StatusNotFound, map[string]string{"message": "not found"})
-			return
-		}
-		reply(http.StatusOK, rel)
-	case r.Method == http.MethodPost && path == "/releases", r.Method == http.MethodPatch && strings.HasPrefix(path, "/releases/"):
-		f.writes = append(f.writes, r.Method+" "+path)
-		if f.failWrite {
-			reply(http.StatusInternalServerError, map[string]string{"message": "boom"})
-			return
-		}
-		if r.Header.Get("Content-Type") != "application/json" {
-			reply(http.StatusUnsupportedMediaType, map[string]string{"message": "json only"})
-			return
-		}
-		var in fakeRelease
-		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
-			reply(http.StatusBadRequest, map[string]string{"message": err.Error()})
-			return
-		}
-		if f.mangle != nil {
-			in.Body = f.mangle(in.Body)
-		}
-		status := http.StatusOK
-		if r.Method == http.MethodPost {
-			status = http.StatusCreated
-			in.ID = 100 + len(f.releases)
-		} else {
-			in.ID = f.releases[in.TagName].ID
-		}
-		f.releases[in.TagName] = &in
-		reply(status, in)
 	default:
 		reply(http.StatusNotFound, map[string]string{"message": "no route " + r.Method + " " + path})
-	}
-}
-
-func publishEnv(api string) map[string]string {
-	return map[string]string{
-		"FORGE_API_URL":    api,
-		"FORGE_REPOSITORY": "owner/repo",
-		"FORGE_TOKEN":      fakeToken,
 	}
 }
 
@@ -489,266 +418,7 @@ func startForge(t *testing.T, f *fakeForge) string {
 	t.Helper()
 	srv := httptest.NewServer(f)
 	t.Cleanup(srv.Close)
-	return srv.URL + "/api/v1"
-}
-
-func TestScriptsReleasePublish_CreatesTheReleaseFromTheChangelog(t *testing.T) {
-	for _, tc := range []struct {
-		tag        string
-		prerelease bool
-	}{
-		{"v1.4.0-alpha", true},
-		{"v1.4.0-rc.1", true},
-		{"v1.4.0-rc.12", true},
-		{"v1.3.0", false},
-	} {
-		t.Run(tc.tag, func(t *testing.T) {
-			f := newFakeForge()
-			f.tagSHA[tc.tag] = fakeSHA
-			dir := writeTree(t, map[string]string{"CHANGELOG.md": checkTagChangelog})
-			out, ok := runScript(t, dir, publishEnv(startForge(t, f)), "release-publish.sh", tc.tag, fakeSHA)
-			if !ok {
-				t.Fatalf("publish failed:\n%s", out)
-			}
-			if strings.Contains(out, fakeToken) {
-				t.Fatalf("the token reached the output:\n%s", out)
-			}
-			notes, ok := runScript(t, dir, nil, "release-notes.sh", tc.tag)
-			if !ok {
-				t.Fatalf("notes: %s", notes)
-			}
-			rel := f.releases[tc.tag]
-			if rel == nil {
-				t.Fatalf("no release was created; writes: %v", f.writes)
-			}
-			if rel.Body+"\n" != notes || rel.Name != tc.tag || rel.Prerelease != tc.prerelease || rel.Draft {
-				t.Fatalf("release = %+v, want body %q, name %s, prerelease %v, not a draft", rel, notes, tc.tag, tc.prerelease)
-			}
-			if rel.Target != fakeSHA {
-				t.Fatalf("release target_commitish = %q, want the gated commit %s", rel.Target, fakeSHA)
-			}
-			if len(f.writes) != 1 || f.writes[0] != "POST /releases" {
-				t.Fatalf("writes = %v, want exactly one POST /releases", f.writes)
-			}
-		})
-	}
-}
-
-func TestScriptsReleasePublish_ConvergesAnExistingRelease(t *testing.T) {
-	f := newFakeForge()
-	f.tagSHA["v1.4.0-alpha"] = fakeSHA
-	f.releases["v1.4.0-alpha"] = &fakeRelease{ID: 7, TagName: "v1.4.0-alpha", Name: "old", Body: "stale", Prerelease: false}
-	dir := writeTree(t, map[string]string{"CHANGELOG.md": checkTagChangelog})
-	out, ok := runScript(t, dir, publishEnv(startForge(t, f)), "release-publish.sh", "v1.4.0-alpha", fakeSHA)
-	if !ok {
-		t.Fatalf("re-publishing failed:\n%s", out)
-	}
-	if len(f.writes) != 1 || f.writes[0] != "PATCH /releases/7" {
-		t.Fatalf("writes = %v, want exactly one PATCH of the existing release", f.writes)
-	}
-	if rel := f.releases["v1.4.0-alpha"]; rel.Body != "### Added\n\n- a thing" || !rel.Prerelease || rel.Name != "v1.4.0-alpha" || rel.Target != fakeSHA {
-		t.Fatalf("release not converged: %+v", rel)
-	}
-}
-
-func TestScriptsReleasePublish_RefusesWithoutWriting(t *testing.T) {
-	for _, tc := range []struct {
-		name    string
-		setup   func(f *fakeForge)
-		env     func(api string) map[string]string
-		sha     string
-		tag     string
-		wantMsg string
-		noCalls bool // refused before any request
-	}{
-		{
-			name: "tag missing on the forge", setup: func(*fakeForge) {},
-			wantMsg: "does not exist on the forge",
-		},
-		{
-			name: "tag names a different commit", setup: func(f *fakeForge) { f.tagSHA["v1.4.0-alpha"] = otherSHA },
-			wantMsg: "but the gate ran on",
-		},
-		{
-			name: "GitHub endpoint", env: func(string) map[string]string { return publishEnv("https://api.github.com") },
-			wantMsg: "refusing to publish on GitHub", noCalls: true,
-		},
-		{
-			name: "token that could inject curl directives",
-			env: func(api string) map[string]string {
-				e := publishEnv(api)
-				e["FORGE_TOKEN"] = "abc\"\nurl = \"http://example.invalid"
-				return e
-			},
-			wantMsg: "refusing to use it", noCalls: true,
-		},
-		// Curl-config injection: a token whose second line is a valid token
-		// on its own would otherwise become a curl directive.
-		{
-			name: "multi-line token, a later line valid on its own",
-			env: func(api string) map[string]string {
-				e := publishEnv(api)
-				e["FORGE_TOKEN"] = "x\"\nurl = \"file:///dev/null\"\n" + fakeToken
-				return e
-			},
-			wantMsg: "refusing to use it", noCalls: true,
-		},
-		{
-			name: "multi-line token, the first line valid on its own",
-			env: func(api string) map[string]string {
-				e := publishEnv(api)
-				e["FORGE_TOKEN"] = fakeToken + "\nurl = \"file:///dev/null\""
-				return e
-			},
-			wantMsg: "refusing to use it", noCalls: true,
-		},
-		{
-			name: "token with a trailing newline",
-			env: func(api string) map[string]string {
-				e := publishEnv(api)
-				e["FORGE_TOKEN"] = fakeToken + "\n"
-				return e
-			},
-			wantMsg: "refusing to use it", noCalls: true,
-		},
-		{name: "multi-line tag", tag: "v1.4.0-alpha\nv1.3.0", wantMsg: "is not vX.Y.Z", noCalls: true},
-		{name: "multi-line sha", sha: "zz\n" + fakeSHA, wantMsg: "not a 40-hex", noCalls: true},
-		{
-			name: "missing token",
-			env: func(api string) map[string]string {
-				e := publishEnv(api)
-				e["FORGE_TOKEN"] = ""
-				return e
-			},
-			wantMsg: "FORGE_TOKEN is unset", noCalls: true,
-		},
-		{name: "short sha", sha: "abc123", wantMsg: "not a 40-hex", noCalls: true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			f := newFakeForge()
-			if tc.setup != nil {
-				tc.setup(f)
-			} else {
-				f.tagSHA["v1.4.0-alpha"] = fakeSHA
-			}
-			api := startForge(t, f)
-			env := publishEnv(api)
-			if tc.env != nil {
-				env = tc.env(api)
-			}
-			sha := fakeSHA
-			if tc.sha != "" {
-				sha = tc.sha
-			}
-			tag := "v1.4.0-alpha"
-			if tc.tag != "" {
-				tag = tc.tag
-			}
-			dir := writeTree(t, map[string]string{"CHANGELOG.md": checkTagChangelog})
-			out, ok := runScript(t, dir, env, "release-publish.sh", tag, sha)
-			if ok {
-				t.Fatalf("published, want a refusal:\n%s", out)
-			}
-			if !strings.Contains(out, tc.wantMsg) {
-				t.Fatalf("refusal does not say %q:\n%s", tc.wantMsg, out)
-			}
-			if len(f.writes) != 0 {
-				t.Fatalf("refused, but wrote anyway: %v", f.writes)
-			}
-			if tc.noCalls && f.requests != 0 {
-				t.Fatalf("refused, but made %d request(s) first", f.requests)
-			}
-		})
-	}
-}
-
-// TestScriptsReleasePublish_RefusesEverySpellingOfGitHub pins that the refusal
-// tests the host, so no spelling of a github.com endpoint (case, port, scheme,
-// userinfo, trailing dot, bare domain, another subdomain) gets through, nor a
-// URL whose host cannot be verified. All are refused before any request.
-func TestScriptsReleasePublish_RefusesEverySpellingOfGitHub(t *testing.T) {
-	for _, api := range []string{
-		"https://api.github.com",
-		"https://api.github.com/",
-		"https://api.github.com:443",
-		"https://api.github.com:443/repos",
-		"HTTPS://API.GITHUB.COM/",
-		"https://Api.GitHub.Com",
-		"http://api.github.com",
-		"https://token@api.github.com",
-		"https://user:pass@api.github.com:8443/x",
-		"https://api.github.com./",
-		"https://api.github.com..",
-		"https://github.com/api/v3",
-		"https://uploads.github.com",
-		"https://api.github.com?x=1",
-		"https://api.github.com#frag",
-	} {
-		t.Run(api, func(t *testing.T) {
-			dir := writeTree(t, map[string]string{"CHANGELOG.md": checkTagChangelog})
-			out, ok := runScript(t, dir, publishEnv(api), "release-publish.sh", "v1.4.0-alpha", fakeSHA)
-			if ok || !strings.Contains(out, "refusing to publish on GitHub") {
-				t.Fatalf("not refused as GitHub (ok=%v):\n%s", ok, out)
-			}
-		})
-	}
-	for api, wantMsg := range map[string]string{
-		"https://api.github.com\\@evil.example": "characters a URL does not",
-		"https://api.github.com\n":              "characters a URL does not",
-		"https://[::1]/api/v1":                  "characters a URL does not",
-		"https://":                              "no host this script can verify",
-		"ftp://git.example.com/api/v1":          "not an http(s) URL",
-	} {
-		dir := writeTree(t, map[string]string{"CHANGELOG.md": checkTagChangelog})
-		out, ok := runScript(t, dir, publishEnv(api), "release-publish.sh", "v1.4.0-alpha", fakeSHA)
-		if ok || !strings.Contains(out, wantMsg) {
-			t.Fatalf("%q: not refused with %q (ok=%v):\n%s", api, wantMsg, ok, out)
-		}
-	}
-}
-
-// TestScriptsReleasePublish_AHostMerelyNamingGitHubIsAForge pins that the
-// refusal is exact, not a substring match. curl resolves any *.localhost name
-// to loopback, so these hosts reach the local fake forge and publish.
-func TestScriptsReleasePublish_AHostMerelyNamingGitHubIsAForge(t *testing.T) {
-	for _, host := range []string{"github.com.localhost", "notgithub.localhost"} {
-		t.Run(host, func(t *testing.T) {
-			f := newFakeForge()
-			f.tagSHA["v1.4.0-alpha"] = fakeSHA
-			api := startForge(t, f)
-			api = strings.Replace(api, "127.0.0.1", host, 1)
-			dir := writeTree(t, map[string]string{"CHANGELOG.md": checkTagChangelog})
-			out, ok := runScript(t, dir, publishEnv(api), "release-publish.sh", "v1.4.0-alpha", fakeSHA)
-			if !ok || f.releases["v1.4.0-alpha"] == nil {
-				t.Fatalf("%s did not publish (ok=%v):\n%s", api, ok, out)
-			}
-		})
-	}
-}
-
-func TestScriptsReleasePublish_FailsWhenTheForgeDoesNotKeepWhatWasSent(t *testing.T) {
-	for _, tc := range []struct {
-		name    string
-		setup   func(f *fakeForge)
-		wantMsg string
-	}{
-		{"write refused", func(f *fakeForge) { f.failWrite = true }, "HTTP 500"},
-		{"body altered on store", func(f *fakeForge) { f.mangle = func(s string) string { return s + "\nextra" } }, "does not match what was sent"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			f := newFakeForge()
-			f.tagSHA["v1.4.0-alpha"] = fakeSHA
-			tc.setup(f)
-			dir := writeTree(t, map[string]string{"CHANGELOG.md": checkTagChangelog})
-			out, ok := runScript(t, dir, publishEnv(startForge(t, f)), "release-publish.sh", "v1.4.0-alpha", fakeSHA)
-			if ok {
-				t.Fatalf("reported success:\n%s", out)
-			}
-			if !strings.Contains(out, tc.wantMsg) {
-				t.Fatalf("failure does not say %q:\n%s", tc.wantMsg, out)
-			}
-		})
-	}
+	return srv.URL // GitHub's API root has no path: https://api.github.com
 }
 
 // ---------------------------------------------------------------------------
@@ -1767,7 +1437,10 @@ func newReleaseRepo(t *testing.T) *releaseRepo {
 	})
 	bare := t.TempDir()
 	wrapper := filepath.Join(t.TempDir(), "agent-git")
-	script := "#!/bin/sh\nprintf '%s\\n' \"$1\" >> \"$0.log\"\nshift\nexec git -c '" + devInsteadOf(bare) + "' -c commit.gpgsign=false -c tag.gpgsign=false \"$@\"\n"
+	// A test's beforePush script runs once, just before the next push.
+	script := "#!/bin/sh\nprintf '%s\\n' \"$1\" >> \"$0.log\"\nshift\n" +
+		"if [ \"$1\" = push ] && [ -f \"$0.before-push\" ]; then sh \"$0.before-push\" || exit 1; rm -f \"$0.before-push\"; fi\n" +
+		"exec git -c '" + devInsteadOf(bare) + "' -c commit.gpgsign=false -c tag.gpgsign=false \"$@\"\n"
 	writeExecutable(t, wrapper, []byte(script))
 	forge := newFakeForge()
 	forge.defaultState = "success"
@@ -2087,7 +1760,7 @@ func TestScriptsRelease_SucceedsWhileMainsCIGateIsRed(t *testing.T) {
 		{"main's CI Gate failed", func(r *releaseRepo) { r.forge.setDefaultState("failure") }},
 		{"main's CI Gate pending", func(r *releaseRepo) { r.forge.setDefaultState("pending") }},
 		{"main has no CI Gate", func(r *releaseRepo) { r.forge.setDefaultState("missing") }},
-		{"forge unreachable", func(r *releaseRepo) { r.env["FORGE_API_URL"] = "http://127.0.0.1:1/api/v1" }},
+		{"forge unreachable", func(r *releaseRepo) { r.env["FORGE_API_URL"] = "http://127.0.0.1:1" }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := newReleaseRepo(t)
@@ -2190,7 +1863,7 @@ func TestScriptsReleaseTag_RefusesWhatItMustNotTag(t *testing.T) {
 		{"pull request not merged", version, func(r *releaseRepo, merge, head string) {
 			r.forge.setPulls(merge, fakePull{Number: 7, State: "open", MergeCommitSHA: merge, Head: fakePullRe{Ref: "release/" + version, SHA: head}, Base: fakePullRe{Ref: "main"}})
 		}, "no pull request from release/v1.5.0-rc.1 was merged as"},
-		{"forge unreachable", version, func(r *releaseRepo, _, _ string) { r.env["FORGE_API_URL"] = "http://127.0.0.1:1/api/v1" }, "could not read the forge's pull requests"},
+		{"forge unreachable", version, func(r *releaseRepo, _, _ string) { r.env["FORGE_API_URL"] = "http://127.0.0.1:1" }, "could not read the forge's pull requests"},
 		{"no forge token", version, func(r *releaseRepo, _, _ string) { r.env["FORGE_TOKEN"] = "" }, "FORGE_TOKEN is unset"},
 		{"no forge URL", version, func(r *releaseRepo, _, _ string) { r.env["FORGE_API_URL"] = "" }, "FORGE_API_URL is unset"},
 		{"no forge repository", version, func(r *releaseRepo, _, _ string) { r.env["FORGE_REPOSITORY"] = "" }, "FORGE_REPOSITORY is unset"},
@@ -2466,7 +2139,6 @@ func requireNoMarkers(t *testing.T, marker, context, out string) {
 // a make command-line assignment and through the environment. Nothing may
 // execute, and every call must be refused.
 func TestScriptsMakeEntryPoints_TreatHostileValuesAsData(t *testing.T) {
-	const okSHA = "1111111111111111111111111111111111111111"
 	for _, tc := range []struct {
 		name, target, variable string
 		fixed                  map[string]string // other values the target needs
@@ -2480,8 +2152,6 @@ func TestScriptsMakeEntryPoints_TreatHostileValuesAsData(t *testing.T) {
 		{"release-verify TAG", "release-verify", "TAG", nil, false, ""},
 		{"release-verify MAIN_REF", "release-verify", "MAIN_REF", map[string]string{"TAG": "v0.0.1"}, false, ""},
 		{"consumer-check TAG", "consumer-check", "TAG", nil, false, ""},
-		{"release-publish TAG", "release-publish", "TAG", map[string]string{"SHA": okSHA}, false, ""},
-		{"release-publish SHA", "release-publish", "SHA", map[string]string{"TAG": "v0.0.1"}, false, ""},
 		{"release VERSION", "release", "VERSION", map[string]string{"AGENT_GIT": "/bin/false"}, false, ""},
 		{"release-candidate VERSION", "release-candidate", "VERSION", map[string]string{"AGENT_GIT": "/bin/false"}, false, ""},
 		{"release-alpha VERSION", "release-alpha", "VERSION", map[string]string{"AGENT_GIT": "/bin/false"}, false, ""},
@@ -2496,10 +2166,10 @@ func TestScriptsMakeEntryPoints_TreatHostileValuesAsData(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			marker := t.TempDir()
 			for i, value := range hostileValues(marker) {
-				// Publishing must never get as far as a request, whatever
+				// A forge read must never get as far as a request, whatever
 				// happens: point it at nothing.
 				env := map[string]string{
-					"FORGE_API_URL": "http://127.0.0.1:9/api/v1", "FORGE_REPOSITORY": "owner/repo", "FORGE_TOKEN": "x",
+					"FORGE_API_URL": "http://127.0.0.1:9", "FORGE_REPOSITORY": "owner/repo", "FORGE_TOKEN": "x",
 					"TAG": "", "SHA": "", "MAIN_REF": "", "REF": "", "VERSION": "",
 				}
 				var assignments []string
@@ -2975,11 +2645,6 @@ func TestScriptsMakefile_CleanToolsRefusesWhatItMustNotDelete(t *testing.T) {
 	}
 }
 
-// TestScriptsReleaseWorkflow_PublishWaitsForTheErasingBuild requires release.yml
-// to run `make test-runtimesecret` on the tag, directly or through the ci-test
-// aggregate that includes it, on the runner or in the toolchain image
-// (scripts/in-toolchain-image.sh), in a job that publish needs and checks by name,
-// so a regression confined to that build cannot ship.
 func TestScriptsReleaseWorkflow_EveryJobRunsOnTheVerifiedCommit(t *testing.T) {
 	type step struct {
 		Uses string            `yaml:"uses"`
@@ -2998,7 +2663,7 @@ func TestScriptsReleaseWorkflow_EveryJobRunsOnTheVerifiedCommit(t *testing.T) {
 	if err := yaml.Unmarshal(raw, &wf); err != nil {
 		t.Fatalf("parse release.yml: %v", err)
 	}
-	if len(wf.Jobs) < 5 {
+	if len(wf.Jobs) < 4 {
 		t.Fatalf("release.yml has %d jobs; the discovery is broken", len(wf.Jobs))
 	}
 	const verified = "${{ needs.verify.outputs.sha }}"
@@ -3022,13 +2687,17 @@ func TestScriptsReleaseWorkflow_EveryJobRunsOnTheVerifiedCommit(t *testing.T) {
 	}
 }
 
-func TestScriptsReleaseWorkflow_PublishWaitsForTheErasingBuild(t *testing.T) {
+// TestScriptsReleaseWorkflow_GatesTheTagOnTheErasingBuild requires release.yml
+// to run `make test-runtimesecret` on the tag, directly or through the ci-test
+// aggregate that includes it, on the runner or in the toolchain image
+// (scripts/in-toolchain-image.sh), so a regression confined to that build
+// turns the tag's run red.
+func TestScriptsReleaseWorkflow_GatesTheTagOnTheErasingBuild(t *testing.T) {
 	type step struct {
 		Run string `yaml:"run"`
 	}
 	type job struct {
-		Needs []string `yaml:"needs"`
-		Steps []step   `yaml:"steps"`
+		Steps []step `yaml:"steps"`
 	}
 	var wf struct {
 		Jobs map[string]job `yaml:"jobs"`
@@ -3039,10 +2708,6 @@ func TestScriptsReleaseWorkflow_PublishWaitsForTheErasingBuild(t *testing.T) {
 	}
 	if err := yaml.Unmarshal(raw, &wf); err != nil {
 		t.Fatalf("parse release.yml: %v", err)
-	}
-	publish, ok := wf.Jobs["publish"]
-	if !ok {
-		t.Fatal("release.yml has no publish job")
 	}
 	var gate string
 	for name, j := range wf.Jobs {
@@ -3057,19 +2722,5 @@ func TestScriptsReleaseWorkflow_PublishWaitsForTheErasingBuild(t *testing.T) {
 	}
 	if gate == "" {
 		t.Fatal("no release.yml job runs `make test-runtimesecret`")
-	}
-	needed := false
-	for _, n := range publish.Needs {
-		needed = needed || n == gate
-	}
-	if !needed {
-		t.Fatalf("publish does not need %q, the job that runs make test-runtimesecret (needs: %v)", gate, publish.Needs)
-	}
-	var checks string
-	for _, s := range publish.Steps {
-		checks += s.Run
-	}
-	if !strings.Contains(checks, "needs."+gate+".result") {
-		t.Fatalf("publish does not check needs.%s.result before publishing", gate)
 	}
 }
