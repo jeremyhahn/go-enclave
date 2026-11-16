@@ -2279,6 +2279,63 @@ func TestScriptsReleaseTag_OrdersAgainstTheParentAndTheTags(t *testing.T) {
 	})
 }
 
+// TestScriptsReleaseTag_OrdersAgainstDevsTags: the tags release-tag orders
+// against are dev's, not only the ones this clone has fetched. A newer tag
+// pushed from another clone refuses an older version; a tag fetch that fails,
+// or a local tag that differs from dev's, refuses rather than ordering
+// against a partial list.
+func TestScriptsReleaseTag_OrdersAgainstDevsTags(t *testing.T) {
+	const version = "v1.5.0-rc.1"
+	// devTag puts tag on dev at HEAD^ without leaving it in r.dir.
+	devTag := func(r *releaseRepo, tag string) {
+		r.git(r.dir, "tag", tag, "HEAD^")
+		r.git(r.dir, "push", "-q", "dev", "refs/tags/"+tag)
+		r.git(r.dir, "tag", "-d", tag)
+	}
+	for _, tc := range []struct {
+		name    string
+		setup   func(t *testing.T, r *releaseRepo)
+		wantMsg []string
+	}{
+		{"newer tag only on dev", func(_ *testing.T, r *releaseRepo) { devTag(r, "v1.5.0-rc.2") },
+			[]string{"is not greater than", "v1.5.0-rc.2 (v1.5.0-rc.2)"}},
+		{"tag fetch fails", func(t *testing.T, r *releaseRepo) {
+			devTag(r, "v1.5.0-rc.2")
+			wrapper := filepath.Join(t.TempDir(), "agent-git")
+			script := "#!/bin/sh\nfor a; do case $a in 'refs/tags/v*:refs/tags/v*') echo 'fetch refused' >&2; exit 128 ;; esac; done\nexec '" + r.env["AGENT_GIT"] + "' \"$@\"\n"
+			writeExecutable(t, wrapper, []byte(script))
+			r.env["AGENT_GIT"] = wrapper
+		}, []string{"could not fetch dev's release tags"}},
+		{"local tag differs from dev's", func(_ *testing.T, r *releaseRepo) {
+			devTag(r, "v1.4.0")
+			r.git(r.dir, "tag", "v1.4.0", "HEAD")
+		}, []string{"could not fetch dev's release tags"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newReleaseRepo(t)
+			if out, ok := r.run("candidate", version); !ok {
+				t.Fatalf("first step refused:\n%s", out)
+			}
+			r.merge(version)
+			tc.setup(t, r)
+			out, ok := r.tag(version)
+			if ok {
+				t.Fatalf("tagged, want a refusal:\n%s", out)
+			}
+			for _, want := range tc.wantMsg {
+				if !strings.Contains(out, want) {
+					t.Fatalf("refusal does not say %q:\n%s", want, out)
+				}
+			}
+			for _, dir := range []string{r.dir, r.bare} {
+				if got := r.git(dir, "tag", "-l", version); got != "" {
+					t.Fatalf("a refused release-tag left tag %s in %s", version, dir)
+				}
+			}
+		})
+	}
+}
+
 // TestScriptsRelease_CandidatesFollowOneAnother cuts rc.1, then refuses the
 // same candidate again and an alpha below it, and then cuts rc.2.
 func TestScriptsRelease_CandidatesFollowOneAnother(t *testing.T) {
