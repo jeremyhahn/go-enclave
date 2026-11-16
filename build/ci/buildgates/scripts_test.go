@@ -1935,7 +1935,7 @@ func TestScriptsRelease_RefusesWhatItMustNotPublish(t *testing.T) {
 		{"CI Gate failed on main", "candidate", "v1.5.0-rc.1", func(r *releaseRepo) { r.forge.setDefaultState("failure") }, "CI Gate is not success"},
 		{"CI Gate pending on main", "candidate", "v1.5.0-rc.1", func(r *releaseRepo) { r.forge.setDefaultState("pending") }, "CI Gate is not success"},
 		{"CI Gate missing on main", "candidate", "v1.5.0-rc.1", func(r *releaseRepo) { r.forge.setDefaultState("missing") }, "CI Gate is not success"},
-		{"CI Gate cancelled on main", "candidate", "v1.5.0-rc.1", func(r *releaseRepo) { r.forge.setDefaultState("cancelled") }, "CI Gate is not success"},
+		{"CI Gate timed out on main", "candidate", "v1.5.0-rc.1", func(r *releaseRepo) { r.forge.setDefaultState("timed_out") }, "CI Gate is not success"},
 		{"forge has no check runs", "candidate", "v1.5.0-rc.1", func(r *releaseRepo) { r.forge.setDefaultState("") }, "could not read the forge's CI Gate check run"},
 		{"forge unreachable", "candidate", "v1.5.0-rc.1", func(r *releaseRepo) { r.env["FORGE_API_URL"] = "http://127.0.0.1:1/api/v1" }, "could not read the forge's CI Gate check run"},
 		{"forge rejects the token", "candidate", "v1.5.0-rc.1", func(r *releaseRepo) { r.env["FORGE_TOKEN"] = "wrong" }, "could not read the forge's CI Gate check run"},
