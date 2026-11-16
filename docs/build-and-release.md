@@ -1,6 +1,6 @@
 # Build and release
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-11-13
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-11-16
 > Conflicts with this document are defects. For shipped behavior the Makefile, `scripts/` and `build/ci/` are canonical: fix this document to match them.
 
 How a change is built and gated, and how a signed release is cut, verified and
@@ -26,19 +26,23 @@ and through the forge's HTTP API; GitHub receives a copy of each release.
   every `CROSS_TARGETS` entry, and nothing runs there
   ([test status](memory-enclave/engineering.md#test-status)).
 - **A release is a signed tag on `main`.** The version is explicit, never
-  derived. The tag hands off to `release.yml`, which gates the tagged commit
+  derived. The release commit reaches `main` through a pull request, like any
+  other change, and the tag follows the merge. The tag hands off to `release.yml`, which gates the tagged commit
   again before anything is published.
 
 ## Release flow
 
 ```text
 make release-alpha|release-candidate|release VERSION=…
-  └─ scripts/release.sh: refuse, assemble CHANGELOG.md, sign, atomic push of main + tag
-       └─ release.yml on the tag
-            1. Verify    make release-verify; resolves the tag to its commit (build/ci/release-tag.sh)
-            2. Gate      ci-lint, ci-build, ci-security trivy, ci-test test-fips, ci-integration
-            3. Consumer  make consumer-check
-            4. Publish   make release-publish (primary forge only)
+  └─ scripts/release.sh: refuse, assemble CHANGELOG.md, sign, push release/<version> only
+       └─ pull request release/<version> → main (the ruleset requires CI Gate)
+            └─ make release-tag VERSION=…
+                 └─ scripts/release-tag.sh: refuse, signed annotated tag on main's HEAD, push the tag only
+                      └─ release.yml on the tag
+                           1. Verify    make release-verify; resolves the tag to its commit (build/ci/release-tag.sh)
+                           2. Gate      ci-lint, ci-build, ci-security trivy, ci-test test-fips, ci-integration
+                           3. Consumer  make consumer-check
+                           4. Publish   make release-publish (primary forge only)
 ```
 
 Every job after Verify checks out the commit Verify resolved, never the moving
@@ -57,9 +61,10 @@ The published commit is then checked with
   (ignored by git and refused by the releasability gate if tracked). It has no
   default: a release fails closed without it. Only a release needs it, never
   a build or a test.
-- `curl` and `jq`, to read the forge's combined commit status.
-- `FORGE_API_URL` (the API root, e.g. `https://git.example.com/api/v1`),
-  `FORGE_REPOSITORY` (`owner/repo`) and `FORGE_TOKEN` (a read token).
+- For `make release-tag`: `curl` and `jq`, to read the forge's `CI Gate`
+  check runs and pull requests, and `FORGE_API_URL` (the API root,
+  `https://api.github.com` on GitHub), `FORGE_REPOSITORY` (`owner/repo`) and
+  `FORGE_TOKEN` (a read token).
 
 ### Targets
 
@@ -68,16 +73,51 @@ The published commit is then checked with
 | `make release-alpha VERSION=vX.Y.Z-alpha` | pre-release |
 | `make release-candidate VERSION=vX.Y.Z-rc.N` | pre-release |
 | `make release VERSION=vX.Y.Z` | production |
+| `make release-tag VERSION=…` | any of the three, after the release pull request merged |
 
-Each target accepts only its own kind and refuses the other two. All three run
-`scripts/release.sh`. An `-alpha` or `-rc.N` tag is published as a pre-release.
+A release is two steps, because `main`'s ruleset takes a commit only through a
+pull request whose `CI Gate` check passed, and nobody pushes `main` directly:
+
+1. `make release-alpha`, `make release-candidate` or `make release` prepares
+   the release commit on the branch `release/<version>` and pushes that branch
+   alone. Open a pull request from it into `main` and merge it once `CI Gate`
+   is green.
+2. `make release-tag VERSION=…` then tags the merge commit on `main` and
+   pushes the tag alone, which starts `release.yml`.
+
+Each of the three preparing targets accepts only its own kind and refuses the
+other two; all three run `scripts/release.sh`. `make release-tag` runs
+`scripts/release-tag.sh`. An `-alpha` or `-rc.N` tag is published as a
+pre-release.
 
 | Variable | Meaning |
 |---|---|
 | `VERSION` | The version to cut, with its `v` prefix |
 | `AGENT_GIT` | The signing wrapper; every git command that talks to `dev` runs as `"$AGENT_GIT" "$REPO_NAME" …` |
 | `REPO_NAME` | The literal repository name, which selects the signing identity (default `go-enclave`) |
-| `FORGE_API_URL`, `FORGE_REPOSITORY`, `FORGE_TOKEN` | Where and how to read the commit status of `main` |
+| `FORGE_API_URL`, `FORGE_REPOSITORY`, `FORGE_TOKEN` | Where and how `make release-tag` reads the release pull request and its `CI Gate` check runs |
+
+### The `CI Gate` rule
+
+The gate on a release is the **release pull request's `CI Gate`**, never
+`main`'s. Under the `main` ruleset the pull request cannot merge without it,
+and `release-tag.sh` requires it again before it tags. `main` itself can be
+red for exactly the reason the release fixes (a backend module tested against
+the previous released root goes green only once the release exists), so a
+gate on `main`'s CI would keep it red for ever:
+
+- `release.sh` (step 1) does not read `CI Gate`, and cuts the release branch
+  while `main`'s CI Gate is red.
+- `release-tag.sh` (step 2) reads `CI Gate` on the release pull request's
+  head, found with `GET /repos/<owner>/<repo>/commits/<main sha>/pulls`, not
+  on `main`'s HEAD, whose own run of the merge commit can still be red.
+
+The read is GitHub's check runs, not the legacy combined commit status (which
+reads `pending` for ever when CI reports only check runs):
+`GET /repos/<owner>/<repo>/commits/<sha>/check-runs?check_name=CI%20Gate`.
+The latest `CI Gate` run (the highest id) must be completed with conclusion
+`success`; no run, a run in progress, any other conclusion, an HTTP error or
+an unparsable answer refuses. `scripts/release-ci-gate.sh` makes the read.
 
 ### What `release.sh` refuses
 
@@ -85,17 +125,39 @@ Before it writes anything, it refuses:
 
 - a missing version, or one not of the target's kind;
 - any branch but `main`, and a local `main` that is not `dev`'s `main` as just fetched;
-- a tag that exists locally or on `dev`; an unreachable `dev` refuses too;
+- a tag, or a branch `release/<version>`, that exists locally or on `dev`; an unreachable `dev` refuses too;
 - a version that does not move forward (`release-version-check.sh`);
-- a dirty tree;
-- a combined commit status on the forge that is not green, or a forge it cannot reach.
+- a dirty tree.
+
+It does not read `main`'s `CI Gate` (see [the rule](#the-ci-gate-rule)).
 
 Then it writes `VERSION` unprefixed, folds `changelog.d/` into `CHANGELOG.md`
 (`changelog-assemble.sh`), and requires the result to pass
 `release-check-tag.sh`: no fragment left, and a literal `## [vX.Y.Z…]`
-heading. It commits and signs, tags, and pushes `main` and the tag in one
-atomic push, so a rejected `main` never leaves the tag behind. Repeating a
-step leaves the same bytes.
+heading. It commits and signs on a new branch `release/<version>`, pushes that
+branch and nothing else (never `main`, never a tag), returns the checkout to
+`main`, and prints the branch to open the pull request from. Repeating a step
+leaves the same bytes.
+
+### What `release-tag.sh` refuses
+
+Run on `main` after the release pull request merged. Before it tags, it
+refuses:
+
+- a missing version, or one that is not a release version;
+- any branch but `main`, a dirty tree, and a local `main` that is not `dev`'s
+  `main` as just fetched;
+- a `main` HEAD that is not the merged release commit: `VERSION` there must be
+  the version and its parent's must not be, and the tree must pass
+  `release-check-tag.sh`;
+- a tag that exists locally or on `dev`;
+- a HEAD the forge does not name as the merge commit of a merged pull request
+  from `release/<version>` into `main`;
+- a `CI Gate` check run on that pull request's head that is not `success`, or
+  a forge it cannot reach.
+
+Then it creates the signed annotated tag on HEAD and pushes the tag alone.
+`release.yml` gates the tagged commit again, including that it is on `main`.
 
 ### Post-tag targets
 
@@ -351,7 +413,7 @@ rules.
 | `coverage-gate.sh`, `test-runtimesecret.sh` | The coverage floor; the unit tests under `GOEXPERIMENT=runtimesecret` |
 | `features.sh`, `features.map` | The features a change touches, for `test-<feature>` and `integration-test-<feature>` |
 | `devcontainer.sh`, `integration-image.sh`, `integration-test.sh`, `userns-test.sh`, `lint-integration.sh` | The devcontainer images; the scanned integration image and suites; the user-namespace test; proof the `integration` tag selects the suite |
-| `release.sh`, `release-version-check.sh`, `release-check-tag.sh`, `changelog-assemble.sh`, `release-notes.sh` | Cutting a release ([above](#what-releasesh-refuses)) |
+| `release.sh`, `release-tag.sh`, `release-ci-gate.sh`, `release-version-check.sh`, `release-check-tag.sh`, `changelog-assemble.sh`, `release-notes.sh` | Cutting a release ([above](#what-releasesh-refuses)) |
 | `release-verify.sh`, `consumer-check.sh`, `release-publish.sh` | The [post-tag targets](#post-tag-targets) |
 | `deps-check.sh`, `deps-latest.sh` | `make deps-check`: fail on a module behind its latest release; `make deps-latest`: bump every direct `github.com/jeremyhahn/` dependency to its latest tag, then tidy |
 | `swtpm-fixture.sh` | `make integration-test-tpm`: a throwaway `swtpm` on loopback TCP for `backends/tpm`'s swtpm-tagged tests |

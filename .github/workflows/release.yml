@@ -1,9 +1,14 @@
 # Release for go-enclave, on every pushed `v*` tag (#89, release-versioning §5).
 #
-# `make release`, `make release-candidate` or `make release-alpha` assembles the CHANGELOG, writes
-# VERSION, commits, tags and pushes the tag; the tag is vX.Y.Z, vX.Y.Z-alpha or
-# vX.Y.Z-rc.N. Everything after that is here, and nothing is created by
-# hand on the forge:
+# A release reaches this workflow in two steps (docs/build-and-release.md):
+#   a. `make release-alpha`, `make release-candidate` or `make release`
+#      assembles the CHANGELOG, writes VERSION, commits on release/<version>
+#      and pushes that branch alone, for a pull request into main.
+#   b. After that pull request merges, `make release-tag` tags the merged
+#      release commit and pushes only the tag (vX.Y.Z, vX.Y.Z-alpha or
+#      vX.Y.Z-rc.N), which triggers this workflow.
+# Everything after the tag push is here, and nothing is created by hand on
+# the forge:
 #
 #   1. Verify   — the tag agrees with its own tree (VERSION, the CHANGELOG
 #                 section, no unassembled fragment) and names a commit on main.
