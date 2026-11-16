@@ -26,15 +26,17 @@
 #                 program that allocates and destroys an enclave
 #                 (release-versioning §2: in-repo builds resolve through the
 #                 working tree and never exercise what a consumer gets).
-#   4. Publish  — the forge release, with the version's CHANGELOG section as
-#                 its body, a prerelease when the tag is `-alpha` or `-rc.N`. Gitea only.
+#
+# Nothing is published here: the pushed tag is what a Go consumer resolves,
+# and a GitHub release object, when one is wanted, is made by hand (it needs
+# the owner's explicit, per-instance approval: release-versioning §5, devops
+# §3). A red run says the tag must not be announced.
 #
 # Every check is a make target (release-verify, the gate aggregates,
-# consumer-check, release-publish), so each stage reproduces from a shell with
-# the same `make` line. What stays here is orchestration: reading the tag from
-# the event (build/ci/release-tag.sh), asserting the runner injected forge
-# resolution (build/ci/forge-resolution.sh), and refusing to publish unless
-# every stage succeeded (build/ci/summary.sh).
+# consumer-check), so each stage reproduces from a shell with the same `make`
+# line. What stays here is orchestration: reading the tag from the event
+# (build/ci/release-tag.sh) and asserting the runner injected forge resolution
+# (build/ci/forge-resolution.sh).
 #
 # The gate runs in the devcontainer's toolchain image, built from the tagged
 # commit as ci.yml's image job builds it (`make docker-build`, then each stage
@@ -45,18 +47,9 @@
 # bare runner, with actions/setup-go at the version go.mod declares: it builds
 # what a consumer gets.
 #
-# PUBLICATION ON GITHUB IS NEVER AUTOMATIC. This file is byte-identical on the
-# public mirror, where a tag arrives only when the owner pushes one; there the
-# verify, gate and consumer jobs still run, and the publish job is skipped.
-# Publishing a GitHub release is a publication needing the owner's explicit,
-# per-instance approval (release-versioning §5, devops §3) — the publish
-# script also refuses api.github.com on its own.
-#
-# Verify resolves the tag to a commit once; every other job checks out that
-# SHA (needs.verify.outputs.sha), never the tag ref again, so a tag moved after
-# Verify cannot change what the gates run on. Publish additionally confirms the
-# forge's tag still names that commit and sends it as the release's
-# target_commitish, before attaching anything to it.
+# Verify resolves the tag to a commit once; every other job needs Verify and
+# checks out that SHA (needs.verify.outputs.sha), never the tag ref again, so
+# a tag moved after Verify cannot change what the gates run on.
 #
 # NEVER add `GOPROXY: direct` or `GOSUMDB: off` here either (see ci.yml). The
 # consumer resolves exactly as dependency-resolution §1/§6 says. Every job runs
@@ -75,13 +68,17 @@ on:
 permissions:
   contents: read
 
-# One release run at a time, in tag-push order, and none cancelled: a run in
-# progress always finishes. Verify orders each tag against every other v* tag
-# on the forge (scripts/release-version-check.sh) before anything else runs,
-# so with the runs serialized a tag pushed after a higher one fails red and
-# publishes nothing, whatever raced on the maintainers' side.
+# One group per tag: GitHub keeps a single pending run per concurrency group
+# and drops an older pending run when a newer one queues, so a group shared by
+# every tag could lose a tag's run. Keyed by the tag ref, no tag's run waits
+# behind or displaces another's, and none is canceled in progress. The order
+# of releases is not this workflow's to enforce: release-tag.sh pushes each
+# tag atomically with dev's release lock, leased on the lock it read before
+# its precedence check. Verify still orders the tag against every other v*
+# tag on the forge (scripts/release-version-check.sh), so a tag pushed some
+# other way below a higher one runs red.
 concurrency:
-  group: release-${{ github.repository }}
+  group: release-${{ github.ref }}
   cancel-in-progress: false
 
 env:
@@ -125,9 +122,10 @@ jobs:
           git fetch --no-tags --quiet origin main
           make release-verify
 
-      # The receive-time precedence guard (release-versioning §3): a tag
-      # pushed after a higher one, by two release-tag runs racing, must
-      # publish nothing. The forge's v* tags are fetched afresh (forced: the
+      # Precedence again, as defense in depth (release-versioning §3):
+      # release-tag.sh's leased push of dev's release lock is what keeps a
+      # lower tag from following a higher one; a tag pushed some other way
+      # below a higher one fails here, and every other job needs this one. The forge's v* tags are fetched afresh (forced: the
       # forge's tags are the truth here), the pushed tag itself is set
       # aside, and release-version-check.sh, the order release-tag.sh uses,
       # requires the tag to be greater than its commit's first parent's
@@ -334,46 +332,3 @@ jobs:
         env:
           TAG: ${{ needs.verify.outputs.tag }}
         run: make consumer-check
-
-  publish:
-    name: Publish release
-    needs: [verify, gate, integration, consumer]
-    # always(): so a failed or skipped stage produces a red, named publish job
-    # below rather than a silently skipped one. The server guard keeps the
-    # public mirror from ever publishing on its own.
-    if: always() && github.server_url != 'https://github.com'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: write   # create/update the release; nothing else
-    steps:
-      # Nothing from the repository runs, and no checkout happens, until every
-      # stage has passed: with always() this job also starts after a failed
-      # Verify, when the SHA may name unverified tag code or be empty (checkout
-      # then defaults to the event ref). Gitea combines a skipped job as success
-      # and does not implement join(needs.*.result) (devops §1), so every stage
-      # is checked by name, inline, and anything but success refuses to publish.
-      - name: Every stage passed
-        run: |
-          bad=0
-          for r in \
-            verify=${{ needs.verify.result }} \
-            gate=${{ needs.gate.result }} \
-            integration=${{ needs.integration.result }} \
-            consumer=${{ needs.consumer.result }}
-          do
-            case $r in *=success) ;; *) echo "::error::not publishing: ${r%%=*} is ${r#*=}"; bad=1 ;; esac
-          done
-          [ "$bad" -eq 0 ] || exit 1
-
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          ref: ${{ needs.verify.outputs.sha }}   # the commit Verify saw, never the tag again
-          persist-credentials: false             # publishing uses the step-scoped FORGE_TOKEN
-
-      - name: Publish the release with its CHANGELOG section
-        env:
-          TAG: ${{ needs.verify.outputs.tag }}
-          SHA: ${{ needs.verify.outputs.sha }}
-          FORGE_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: sh build/ci/publish-release.sh
