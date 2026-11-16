@@ -11,6 +11,7 @@ package memscan
 import (
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // ErrUnreadableMapping is matched by the error Find returns when a mapping the
@@ -26,18 +27,61 @@ var ErrUnreadableMapping = errors.New("memscan: a mapping the sweep must read co
 // mapping at all, so "no hits" would say nothing.
 var ErrEmptySweep = errors.New("memscan: the sweep read no mapping")
 
+// maxUnreadablePages bounds the pages an UnreadableMappingError names.
+const maxUnreadablePages = 16
+
+// UnreadablePage is a page of a mapping whose read failed and that is not a
+// proven guard page: its address and its raw /proc/self/pagemap entry, or the
+// failure to read that entry.
+type UnreadablePage struct {
+	Addr       uintptr
+	Pagemap    uint64
+	PagemapErr error
+}
+
 // UnreadableMappingError carries the /proc/self/maps line of the mapping that
-// could not be read and the read failure, if the reader reported one.
+// could not be read and the read failure, if the reader reported one. When the
+// reader is /proc/self/mem it also carries the evidence of a page-by-page probe
+// of the whole mapping: the first pages that failed and are not guard pages
+// (at most 16, with their pagemap entries; never their contents), how many
+// such pages there are, how many failing pages the pagemap marks as guard
+// pages, and the release of the running kernel.
 type UnreadableMappingError struct {
-	Mapping string
-	Err     error
+	Mapping         string
+	Err             error
+	Pages           []UnreadablePage
+	UnreadablePages int
+	GuardPages      int
+	Kernel          string
 }
 
 func (e *UnreadableMappingError) Error() string {
+	var b strings.Builder
 	if e.Err == nil {
-		return fmt.Sprintf("%v: %s: the read made no progress", ErrUnreadableMapping, e.Mapping)
+		fmt.Fprintf(&b, "%v: %s: the read made no progress", ErrUnreadableMapping, e.Mapping)
+	} else {
+		fmt.Fprintf(&b, "%v: %s: %v", ErrUnreadableMapping, e.Mapping, e.Err)
 	}
-	return fmt.Sprintf("%v: %s: %v", ErrUnreadableMapping, e.Mapping, e.Err)
+	if e.Kernel != "" {
+		fmt.Fprintf(&b, "; kernel %s", e.Kernel)
+	}
+	if e.UnreadablePages == 0 && e.GuardPages == 0 && len(e.Pages) == 0 {
+		return b.String()
+	}
+	fmt.Fprintf(&b, "; %d unreadable page(s) not marked as guard pages, %d guard page(s)", e.UnreadablePages, e.GuardPages)
+	for i, p := range e.Pages {
+		if i == 0 {
+			b.WriteString("; first:")
+		} else {
+			b.WriteString(",")
+		}
+		if p.PagemapErr != nil {
+			fmt.Fprintf(&b, " %#x pagemap unreadable: %v", p.Addr, p.PagemapErr)
+		} else {
+			fmt.Fprintf(&b, " %#x pagemap %#x", p.Addr, p.Pagemap)
+		}
+	}
+	return b.String()
 }
 
 // Unwrap returns the read failure.
