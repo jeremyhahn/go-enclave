@@ -12,6 +12,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"math"
 	"os"
 	"syscall"
 	"testing"
@@ -231,6 +232,26 @@ func TestProcMemReadsTheLivePagemap(t *testing.T) {
 	}
 	if want := (addr/p.pageSize + 1) * p.pageSize; end != want {
 		t.Errorf("guardRegion end = %#x; want %#x", end, want)
+	}
+}
+
+// TestProcMemRefusesAPagemapOffsetAboveInt64 pins the overflow bound: a page
+// index whose entry lies past math.MaxInt64 is never handed to ReadAt as a
+// wrapped offset; it fails closed with errOffsetRange and no read. A 32-bit
+// uintptr cannot reach the bound, so there the entry is read as usual.
+func TestProcMemRefusesAPagemapOffsetAboveInt64(t *testing.T) {
+	pm := &countingReader{r: readerOf(make([]byte, 8))}
+	p := procMem{pagemap: pm, pageSize: 1}
+	top := ^uintptr(0) // page index ^uintptr(0) with a one-byte page
+	_, guard, err := p.guardRegion(top)
+	if uint64(top) > math.MaxInt64/8 {
+		if !errors.Is(err, errOffsetRange) || guard || pm.calls != 0 {
+			t.Errorf("guardRegion(%#x) = %v, %v after %d reads; want errOffsetRange and no read", top, guard, err, pm.calls)
+		}
+		return
+	}
+	if pm.calls != 1 {
+		t.Errorf("guardRegion(%#x) read the pagemap %d times; want 1", top, pm.calls)
 	}
 }
 
