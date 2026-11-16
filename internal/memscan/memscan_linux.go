@@ -52,26 +52,43 @@ var (
 // (generate into locked pages, compare inside borrows), or the sweep finds
 // those copies.
 func Find(needle []byte, home uintptr) ([]string, error) {
+	r, err := Sweep(needle, home)
+	return r.Hits, err
+}
+
+// Sweep is Find, and also reports how many guard pages it skipped.
+func Sweep(needle []byte, home uintptr) (Result, error) {
 	if len(needle) == 0 {
-		return nil, errEmptyNeedle
+		return Result{}, errEmptyNeedle
 	}
 	maps, err := os.ReadFile("/proc/self/maps")
 	if err != nil {
-		return nil, err
+		return Result{}, err
 	}
+	proc, closeProc, err := openProc()
+	if err != nil {
+		return Result{}, err
+	}
+	defer closeProc()
+	return sweep(string(maps), proc, needle, home, make([]byte, chunk+len(needle)-1))
+}
+
+// openProc opens /proc/self/mem and, for guard-page checks, /proc/self/pagemap.
+// A pagemap that cannot be opened is recorded, not returned: it fails the
+// sweep only if an unreadable page needs it.
+func openProc() (procMem, func(), error) {
 	mem, err := os.Open("/proc/self/mem")
 	if err != nil {
-		return nil, err
+		return procMem{}, nil, err
 	}
-	defer func() { _ = mem.Close() }()
 	proc := procMem{mem: mem, pageSize: uintptr(os.Getpagesize())}
-	if pagemap, err := os.Open("/proc/self/pagemap"); err != nil {
+	pagemap, err := os.Open("/proc/self/pagemap")
+	if err != nil {
 		proc.pagemapErr = err
-	} else {
-		defer func() { _ = pagemap.Close() }()
-		proc.pagemap = pagemap
+		return proc, func() { _ = mem.Close() }, nil
 	}
-	return find(string(maps), proc, needle, home, make([]byte, chunk+len(needle)-1))
+	proc.pagemap = pagemap
+	return proc, func() { _ = mem.Close(); _ = pagemap.Close() }, nil
 }
 
 // find is Find over a maps listing and the memory it describes, reading
@@ -85,7 +102,13 @@ func Find(needle []byte, home uintptr) ([]string, error) {
 // skipGuard), neither of which holds process data. A home mapping is
 // excluded without being read, and does not count as read.
 func find(maps string, mem io.ReaderAt, needle []byte, home uintptr, buf []byte) ([]string, error) {
-	var hits []string
+	r, err := sweep(maps, mem, needle, home, buf)
+	return r.Hits, err
+}
+
+// sweep is find, and also counts the guard pages it skipped.
+func sweep(maps string, mem io.ReaderAt, needle []byte, home uintptr, buf []byte) (Result, error) {
+	var r Result
 	read := 0
 	for _, line := range strings.Split(maps, "\n") {
 		fields := strings.Fields(line)
@@ -105,19 +128,20 @@ func find(maps string, mem io.ReaderAt, needle []byte, home uintptr, buf []byte)
 		if kernelMapping(strings.Join(fields[5:], " ")) {
 			continue
 		}
-		found, err := mappingContains(mem, lo, hi, needle, buf)
+		found, guards, err := mappingScan(mem, lo, hi, needle, buf)
 		if err != nil {
-			return nil, &UnreadableMappingError{Mapping: strings.TrimSpace(line), Err: err}
+			return Result{}, &UnreadableMappingError{Mapping: strings.TrimSpace(line), Err: err}
 		}
 		read++
+		r.GuardPages += guards
 		if found {
-			hits = append(hits, strings.TrimSpace(line))
+			r.Hits = append(r.Hits, strings.TrimSpace(line))
 		}
 	}
 	if read == 0 {
-		return nil, ErrEmptySweep
+		return Result{}, ErrEmptySweep
 	}
-	return hits, nil
+	return r, nil
 }
 
 // kernelMapping reports whether a mapping is one the kernel provides to every
@@ -145,7 +169,14 @@ func kernelMapping(path string) bool {
 // read); the rest of buf was never written. Wiping the whole 1 MiB buffer per
 // mapping makes the sweep too slow under the race detector.
 func mappingContains(mem io.ReaderAt, lo, hi uintptr, needle, buf []byte) (bool, error) {
-	used := 0
+	found, _, err := mappingScan(mem, lo, hi, needle, buf)
+	return found, err
+}
+
+// mappingScan is mappingContains, and also counts the guard pages it skipped
+// before it returned.
+func mappingScan(mem io.ReaderAt, lo, hi uintptr, needle, buf []byte) (bool, int, error) {
+	used, guards := 0, 0
 	// clear is a memclr of memory buf still references, so it is not elided.
 	defer func() { clear(buf[:used]) }()
 
@@ -155,35 +186,36 @@ func mappingContains(mem io.ReaderAt, lo, hi uintptr, needle, buf []byte) (bool,
 			// Unreachable in practice, but ReadAt takes a signed offset and a
 			// wrap would scan the wrong region. Widened to uint64 so it compiles
 			// on 32-bit targets, where it is always false.
-			return false, errOffsetRange
+			return false, guards, errOffsetRange
 		}
 		n := readLen(off, hi, len(buf))
 		used = max(used, n)
 		read, rerr := mem.ReadAt(buf[:n], int64(off))
 		if read > 0 && contains(buf[:read], needle) {
-			return true, nil
+			return true, guards, nil
 		}
 		if off+uintptr(read) >= hi {
 			// The read reached the end of the region: all of it was scanned. An
 			// io.ReaderAt may return a full count with io.EOF, which is not a failure.
-			return false, nil
+			return false, guards, nil
 		}
 		if rerr != nil {
 			// A guard page holds no data and can hold no needle, so the
 			// scan restarts after it with no overlap.
 			end, err := skipGuard(mem, off+uintptr(read), rerr)
 			if err != nil {
-				return false, err
+				return false, guards, err
 			}
+			guards++
 			off = end
 			continue
 		}
 		if read <= overlap {
-			return false, errNoProgress
+			return false, guards, errNoProgress
 		}
 		off += uintptr(read - overlap)
 	}
-	return false, nil
+	return false, guards, nil
 }
 
 // pmGuardRegion is PM_GUARD_REGION, bit 58 of a /proc/self/pagemap entry: the
