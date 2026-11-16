@@ -74,9 +74,10 @@ permissions:
 # behind or displaces another's, and none is canceled in progress. The order
 # of releases is not this workflow's to enforce: release-tag.sh pushes each
 # tag atomically with dev's release lock, leased on the lock it read before
-# its precedence check. Verify still orders the tag against every other v*
-# tag on the forge (scripts/release-version-check.sh), so a tag pushed some
-# other way below a higher one runs red.
+# its precedence check. Verify still orders the tag against every v* tag on
+# the forge that is merged into its commit (scripts/release-version-check.sh
+# --merged), so a tag below a release it descends from runs red, and a later
+# tag on a descendant commit never fails an earlier tag's run.
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
@@ -122,23 +123,28 @@ jobs:
           git fetch --no-tags --quiet origin main
           make release-verify
 
-      # Precedence again, as defense in depth (release-versioning §3):
-      # release-tag.sh's leased push of dev's release lock is what keeps a
-      # lower tag from following a higher one; a tag pushed some other way
-      # below a higher one fails here, and every other job needs this one. The forge's v* tags are fetched afresh (forced: the
-      # forge's tags are the truth here), the pushed tag itself is set
-      # aside, and release-version-check.sh, the order release-tag.sh uses,
-      # requires the tag to be greater than its commit's first parent's
-      # VERSION and every other v* tag.
-      - name: Tag is greater than every other release tag
+      # Precedence again, as defense in depth (release-versioning §3).
+      # release-tag.sh's leased push of dev's release lock is what orders
+      # releases; this step checks the tag against the release state it was
+      # cut from: the v* tags merged into the tagged commit (on it or its
+      # ancestors), fetched afresh from the forge (forced: the forge's tags
+      # are the truth here), with the pushed tag itself set aside. A later
+      # tag on a descendant commit is not in that state, so it never fails an
+      # earlier tag's run or a rerun of it; a tag below a tag it descends
+      # from fails here, and every other job needs this one.
+      # release-version-check.sh, the order release-tag.sh uses, requires the
+      # tag to be greater than its commit's first parent's VERSION and every
+      # one of those tags.
+      - name: Tag is greater than every release tag it descends from
         env:
           TAG: ${{ steps.tag.outputs.tag }}
+          SHA: ${{ steps.tag.outputs.sha }}
         run: |
           set -eu
           git fetch --no-tags --quiet --force origin '+refs/tags/v*:refs/tags/v*'
           git tag -d "$TAG" >/dev/null
-          parent=$(git show HEAD^:VERSION) || { echo "::error::the tagged commit's first parent has no VERSION to order $TAG against"; exit 1; }
-          sh scripts/release-version-check.sh "$TAG" "$parent"
+          parent=$(git show "$SHA^:VERSION") || { echo "::error::the tagged commit's first parent has no VERSION to order $TAG against"; exit 1; }
+          sh scripts/release-version-check.sh --merged "$SHA" "$TAG" "$parent"
 
   # The gate in the toolchain image built from the tagged commit, as ci.yml's
   # image job runs its stages (that job's steps, one stage after another):

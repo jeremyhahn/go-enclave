@@ -109,7 +109,8 @@ func TestScriptsReleaseTag_SetsTheReleaseLockAndMovesIt(t *testing.T) {
 // another's pending one (GitHub keeps one pending run per group), never to
 // cancel a run in progress, and to order the tag before anything else runs:
 // Verify fetches every v* tag from the forge, sets the pushed tag aside, and
-// runs scripts/release-version-check.sh, and every other job needs Verify.
+// runs scripts/release-version-check.sh --merged on the tagged commit, and
+// every other job needs Verify.
 // Nothing publishes: the retired forge's release publisher is gone.
 func TestScriptsReleaseWorkflow_OrdersEveryTagInItsOwnRun(t *testing.T) {
 	type step struct {

@@ -41,7 +41,7 @@ make release-alpha|release-candidate|release VERSION=…
                     on main's HEAD, push the tag and the lock's move atomically, leased on the lock
                       └─ release.yml on the tag (a concurrency group of its own, never cancelled)
                            1. Verify    make release-verify; resolves the tag to its commit (build/ci/release-tag.sh);
-                                        release-version-check.sh against every other v* tag on GitHub
+                                        release-version-check.sh --merged: the v* tags its commit descends from
                            2. Gate      ci-lint, ci-build, ci-security trivy, ci-test test-fips, ci-integration
                            3. Consumer  make consumer-check
 ```
@@ -75,11 +75,17 @@ push, `--atomic` and `--force-with-lease=refs/heads/release-lock:<value read>`:
 (`release-${{ github.ref }}`, `cancel-in-progress: false`). GitHub keeps one
 pending run per group and drops an older pending run when a newer one queues,
 so a group shared by every tag could lose a tag's run; one group per tag
-loses none. The workflow does not order releases. Verify still checks
-precedence, as defense in depth: it fetches every `v*` tag from GitHub, sets
-the pushed tag aside and runs `scripts/release-version-check.sh`, so a tag
-pushed some other way below a higher one fails Verify, and every other job
-needs Verify.
+loses none. The workflow does not order releases: the lease does.
+
+Verify still checks precedence, as defense in depth, against the release
+state the tag was cut from. It fetches every `v*` tag from GitHub, sets the
+pushed tag aside and runs `scripts/release-version-check.sh --merged <tagged
+commit>`, which orders the tag against its commit's first parent's `VERSION`
+and only the `v*` tags merged into that commit (on it or its ancestors). A
+later tag on a descendant commit is not in that state: when rc.1 and then
+rc.2 are pushed in order and rc.2 lands before rc.1's run reaches Verify,
+rc.1 still passes, and so does a rerun of it. A tag below a tag on an
+ancestor of its commit fails Verify, and every other job needs Verify.
 The published commit is then checked with
 `make release-tree-check TAG=… REF=<published ref>`: its tree must be the tag's.
 
@@ -201,7 +207,7 @@ in one atomic push leased on the lock it read before the precedence check
 ([release order](#release-order-the-release-lock)). When `dev` refuses that
 push, it deletes the local tag; nothing was written. `release.yml` gates the
 tagged commit again, including that it is on `main` and greater than every
-other `v*` tag on GitHub.
+`v*` tag on GitHub that its commit descends from.
 
 ### Post-tag targets
 
