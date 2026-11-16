@@ -1824,14 +1824,16 @@ func (r *releaseRepo) state() string {
 // merge stands in for GitHub squash-merging the release pull request: one
 // new commit on dev's main with the release branch's tree. The forge then
 // associates the merge commit with that pull request, whose head carries a
-// green CI Gate, and the local main is brought up to dev's.
+// green CI Gate, and the local main is brought up to dev's. Where another
+// release merged first, the branch's side wins each conflict, as when its
+// author updates the pull request against main.
 func (r *releaseRepo) merge(version string) (mergeSHA, headSHA string) {
 	r.t.Helper()
 	branch := "release/" + version
 	headSHA = r.git(r.bare, "rev-parse", "refs/heads/"+branch)
 	other := filepath.Join(r.t.TempDir(), "other")
 	r.git(r.t.TempDir(), "clone", "-q", "-b", "main", r.bare, other)
-	r.git(other, "merge", "-q", "--squash", "origin/"+branch)
+	r.git(other, "merge", "-q", "--squash", "-X", "theirs", "origin/"+branch)
 	r.git(other, "commit", "-q", "-m", "chore(release): "+version+" (#7)")
 	r.git(other, "push", "-q", "origin", "HEAD:main")
 	mergeSHA = r.git(other, "rev-parse", "HEAD")
@@ -2164,6 +2166,9 @@ func TestScriptsReleaseTag_RefusesWhatItMustNotTag(t *testing.T) {
 			r.git(r.dir, "pull", "-q", "--ff-only", "dev", "main")
 		}, "is not the commit that set VERSION to 1.5.0-rc.1"},
 		{"tag exists locally", version, func(r *releaseRepo, _, _ string) { r.git(r.dir, "tag", version) }, "already exists locally"},
+		{"below an existing release tag", version, func(r *releaseRepo, _, _ string) {
+			r.git(r.dir, "tag", "v1.5.0-rc.2", "HEAD^")
+		}, "v1.5.0-rc.2 (v1.5.0-rc.2)"},
 		{"tag exists on dev", version, func(r *releaseRepo, _, _ string) {
 			r.git(r.dir, "tag", version)
 			r.git(r.dir, "push", "-q", "dev", "refs/tags/"+version)
@@ -2216,6 +2221,62 @@ func TestScriptsReleaseTag_RefusesWhatItMustNotTag(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestScriptsReleaseTag_OrdersAgainstTheParentAndTheTags prepares two release
+// pull requests, rc.1 and rc.2, from the same main. Merged in order, each is
+// tagged. Merged the other way round, rc.1 lands over rc.2's tagged release
+// and release-tag refuses it: it is not greater than its first parent's
+// VERSION or the highest release tag, and a tag below them would publish a
+// release Go's version selection never prefers.
+func TestScriptsReleaseTag_OrdersAgainstTheParentAndTheTags(t *testing.T) {
+	const older, newer = "v1.5.0-rc.1", "v1.5.0-rc.2"
+	prepare := func(t *testing.T) *releaseRepo {
+		t.Helper()
+		r := newReleaseRepo(t)
+		for _, v := range []string{older, newer} {
+			if out, ok := r.run("candidate", v); !ok {
+				t.Fatalf("first step for %s refused:\n%s", v, out)
+			}
+		}
+		return r
+	}
+	t.Run("in order", func(t *testing.T) {
+		r := prepare(t)
+		for _, v := range []string{older, newer} {
+			r.merge(v)
+			if out, ok := r.tag(v); !ok {
+				t.Fatalf("release-tag %s refused:\n%s", v, out)
+			}
+		}
+		if got := r.git(r.bare, "tag", "-l"); got != older+"\n"+newer {
+			t.Fatalf("dev holds tags %q, want %s and %s", got, older, newer)
+		}
+	})
+	t.Run("older merged after newer", func(t *testing.T) {
+		r := prepare(t)
+		r.merge(newer)
+		if out, ok := r.tag(newer); !ok {
+			t.Fatalf("release-tag %s refused:\n%s", newer, out)
+		}
+		r.merge(older)
+		if got := r.git(r.dir, "show", "HEAD^:VERSION"); got != strings.TrimPrefix(newer, "v") {
+			t.Fatalf("the first parent's VERSION is %q, want %s", got, newer)
+		}
+		before := r.state()
+		out, ok := r.tag(older)
+		if ok {
+			t.Fatalf("tagged %s over %s, want a refusal:\n%s", older, newer, out)
+		}
+		for _, want := range []string{"is not greater than", "VERSION (" + newer + ")", newer + " (" + newer + ")"} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("refusal does not say %q:\n%s", want, out)
+			}
+		}
+		if after := r.state(); after != before {
+			t.Fatalf("a refused release-tag changed the repository:\nbefore %q\nafter  %q", before, after)
+		}
+	})
 }
 
 // TestScriptsRelease_CandidatesFollowOneAnother cuts rc.1, then refuses the
