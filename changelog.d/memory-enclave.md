@@ -4,4 +4,4 @@
 
 ### Fixed
 
-- **memory-enclave**: the residue sweep behind the `providertest` and `backendtest` residue checks no longer fails with an unreadable mapping when a thread stack carries a kernel guard region (glibc on Linux 6.13 and later); it skips only pages the kernel reports as guard regions and still fails on every other unreadable page.
+- **memory-enclave**: the residue sweep behind the `providertest` and `backendtest` residue checks now skips a thread-stack guard page (glibc on Linux 6.13 and later) instead of failing with an unreadable mapping, but only on a kernel whose `/proc/self/pagemap` reports `PM_GUARD_REGION` (Linux 6.15 or later, or a backport) and only when the process can read its pagemap. Elsewhere such a page, like every other unreadable page, still fails the sweep closed.
