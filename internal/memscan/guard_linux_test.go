@@ -253,7 +253,7 @@ func TestFindReportsTheUnreadablePages(t *testing.T) {
 		want   []uintptr
 		guard  int
 	}{
-		{"guard bit on a neighbour", []int{3}, []uintptr{0x2000, 0x5000}, 1},
+		{"guard bit on a neighbor", []int{3}, []uintptr{0x2000, 0x5000}, 1},
 		{"no guard bit anywhere", nil, []uintptr{0x2000, 0x3000, 0x5000}, 0},
 	} {
 		ue, err := unreadable(t, 8, map[int]bool{2: true, 3: true, 5: true}, readerOf(pagemapOf(8, tc.guards...)))
