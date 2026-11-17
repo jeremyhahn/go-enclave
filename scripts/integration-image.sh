@@ -25,7 +25,11 @@
 # image that no longer has it (scripts/lib.sh, require_scanned_image).
 #
 # Environment (exported by the Makefile): DEVCONTAINER_COMPOSE,
-# DEVCONTAINER_SERVICE, TRIVY_VERSION and IT_IMAGE.
+# DEVCONTAINER_SERVICE, TRIVY_VERSION and IT_IMAGE. IT_SCAN=0 builds and pins
+# the image with no trivy scan: CI's integration and soak jobs set it, so the
+# CI Gate never fails on an advisory database that changed with no change to
+# the tree (ci-template v1.42, owner ruling 742 (1)); scans.yml scans the
+# image on main. Any other value, or none, scans as before.
 set -eu
 # shellcheck source=lib.sh
 . "${0%/*}/lib.sh"
@@ -40,7 +44,11 @@ service=${DEVCONTAINER_SERVICE:-integration}
 docker version --format '{{.Server.Version}}' >/dev/null 2>&1 || die "the Docker daemon is not reachable (docker version cannot read the server). The integration suite runs in the devcontainer and cannot run without it."
 
 # The scanner first, so a missing or wrong trivy fails before a build.
-trivy=$(sh "$here/tool.sh" trivy "${TRIVY_VERSION:?TRIVY_VERSION is required}")
+scan=1
+[ "${IT_SCAN:-1}" != 0 ] || scan=0
+if [ "$scan" = 1 ]; then
+  trivy=$(sh "$here/tool.sh" trivy "${TRIVY_VERSION:?TRIVY_VERSION is required}")
+fi
 
 if [ -n "${IT_IMAGE:-}" ]; then image=$IT_IMAGE; else image=$(sh "$here/devcontainer.sh" it-tag); fi
 matches "$image" '^go-enclave-ci-it:[0-9a-f]{12}$' || die "the integration image '$image' is not a go-enclave-ci-it:<hash> tag"
@@ -55,10 +63,14 @@ fi
 id=$(docker image inspect --format '{{.Id}}' "$image")
 matches "$id" '^sha256:[0-9a-f]{64}$' || die "the integration image $image has no usable ID ('$id')"
 
-echo "trivy image $image ($id; CRITICAL,HIGH, fixable only — devops §8)"
-"$trivy" image --scanners vuln --severity CRITICAL,HIGH --ignore-unfixed --exit-code 1 \
-  --ignorefile .trivyignore --skip-version-check --format table "$image"
-[ "$(docker image inspect --format '{{.Id}}' "$image")" = "$id" ] || die "the image $image changed while it was scanned"
+if [ "$scan" = 1 ]; then
+  echo "trivy image $image ($id; CRITICAL,HIGH, fixable only — devops §8)"
+  "$trivy" image --scanners vuln --severity CRITICAL,HIGH --ignore-unfixed --exit-code 1 \
+    --ignorefile .trivyignore --skip-version-check --format table "$image"
+  [ "$(docker image inspect --format '{{.Id}}' "$image")" = "$id" ] || die "the image $image changed while it was scanned"
+else
+  echo "IT_SCAN=0: $image ($id) is not scanned here; scans.yml scans it on main (ruling 742 (1))"
+fi
 
 GO_ENCLAVE_IT_IMAGE=$image GO_ENCLAVE_IT_IMAGE_ID=$id
 export GO_ENCLAVE_IT_IMAGE GO_ENCLAVE_IT_IMAGE_ID

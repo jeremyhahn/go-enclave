@@ -759,7 +759,7 @@ func TestCIGateTiers_RefusesWhatItMustRefuse(t *testing.T) {
 		{"gate on a self-hosted label", "    name: CI Gate\n    runs-on: " + ciGateRunner + "\n", "    name: CI Gate\n    runs-on: ci-gate\n"},
 		{"deps-check back in the PR gate", "      - name: make gosec\n", "      - name: make deps-check\n        run: scripts/in-toolchain-image.sh \"$TOOLCHAIN_IMAGE\" make deps-check\n      - name: make gosec\n"},
 		{"make security back in the image job", "      - name: make build\n", "      - name: make security\n        run: scripts/in-toolchain-image.sh \"$TOOLCHAIN_IMAGE\" make security\n      - name: make build\n"},
-		{"gosec back on the PR tier only", "      - name: make gosec\n        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && needs.preflight", "      - name: make gosec\n        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && env.CI_FULL_TIER != 'true' && needs.preflight"},
+		{"gosec back on the PR tier only", "      - name: make gosec\n        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && needs.preflight", "      - name: make gosec\n        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && env.CI_FULL_TIER != 'true' && needs.preflight"}, //nolint:misspell // the Actions function's spelling, not prose
 		{"gate uses an action", "      - name: Fail closed on any non-success\n", "      - uses: actions/checkout@abc # v7\n      - name: Fail closed on any non-success\n"},
 		{"publish-images runs", "    if: ${{ " + publishGuard + " && ", "    if: ${{ "},
 		{"publish-images guard ored away", "    if: ${{ " + publishGuard + " && ", "    if: ${{ " + publishGuard + " || "},

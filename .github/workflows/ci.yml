@@ -1815,7 +1815,9 @@ jobs:
           image_lock || exit 1
           docker tag "$IT_LEASE_ID" "$IT_IMAGE"
           image_unlock
-          make ci-integration IT_PROJECT="$IT_PROJECT" IT_IMAGE="$IT_IMAGE" GO_BUILD_TAGS="$GO_BUILD_TAGS"
+          # v1.42 (ruling 742 (1)): IT_SCAN=0, no trivy scan in the gate;
+          # scans.yml scans the integration image on main.
+          IT_SCAN=0 make ci-integration IT_PROJECT="$IT_PROJECT" IT_IMAGE="$IT_IMAGE" GO_BUILD_TAGS="$GO_BUILD_TAGS"
 
       - name: Tear down
         if: always()
@@ -1840,6 +1842,7 @@ jobs:
     env:
       SOAK_MINUTES: 30        # CUSTOMIZE
       SOAK_TARGET: ci-integration     # CUSTOMIZE: a make target of the integration image
+      IT_SCAN: "0"                    # v1.42 (ruling 742 (1)): scans.yml scans the image on main
       CI_STACK_PREFIX: ${{ github.event.repository.name }}-ci-
       IT_PROJECT: ${{ github.event.repository.name }}-ci-${{ github.run_id }}-${{ github.run_attempt }}-soak
     steps:

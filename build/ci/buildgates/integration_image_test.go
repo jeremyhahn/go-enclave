@@ -174,6 +174,48 @@ func TestIntegrationImage_BuildsOnceScansThatImageAndRunsEverySuiteOnIt(t *testi
 	}
 }
 
+// TestIntegrationImage_ScanOffBuildsAndRunsWithoutTrivy: ci-template v1.42
+// (owner ruling 742 (1)). CI's integration and soak jobs set IT_SCAN=0, so the
+// gate never fails on an advisory database that changed with no change to
+// the tree: the image is built once and the three suites run on it, its ID
+// still pinned, with no trivy call at all; scans.yml scans it on main.
+func TestIntegrationImage_ScanOffBuildsAndRunsWithoutTrivy(t *testing.T) {
+	env, log, _ := fakeImageWorld(t)
+	env["IT_SCAN"] = "0"
+	out, ok := runImageScript(t, env, "sh", "-c", integrationSuites)
+	if !ok {
+		t.Fatalf("the suites failed under the image script with IT_SCAN=0:\n%s", out)
+	}
+	var builds, scans, runs int
+	for _, l := range readCallLog(t, log) {
+		switch {
+		case isComposeCall(l, "build"):
+			builds++
+		case strings.HasPrefix(l, "trivy "):
+			scans++
+		case isComposeCall(l, "run"):
+			runs++
+		}
+	}
+	if builds != 1 || scans != 0 || runs != 3 {
+		t.Fatalf("IT_SCAN=0: builds=%d trivy calls=%d runs=%d, want 1, 0, 3", builds, scans, runs)
+	}
+	for _, v := range []string{"1", "", "yes"} {
+		env, log, _ := fakeImageWorld(t)
+		env["IT_SCAN"] = v
+		runImageScript(t, env, "sh", "-c", "true")
+		n := 0
+		for _, l := range readCallLog(t, log) {
+			if strings.HasPrefix(l, "trivy image ") {
+				n++
+			}
+		}
+		if n != 1 {
+			t.Errorf("IT_SCAN=%q: %d trivy image calls, want 1 (only 0 turns the scan off)", v, n)
+		}
+	}
+}
+
 // An image the daemon already holds under its content tag is scanned and used,
 // not rebuilt; a tag the caller names (IT_IMAGE) is the one used, and one that
 // is not a content tag is refused.
