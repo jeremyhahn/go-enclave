@@ -31,7 +31,7 @@ import (
 // what it does by running its script in a repository that tracks one private
 // value (privatePatternRuns).
 const (
-	ciTemplateHeader     = "# ci-template: v1.34.1 (customized)"
+	ciTemplateHeader     = "# ci-template: v1.34.1 + v1.42 hermetic gate (customized)"
 	privatePatternStep   = "Releasability (private patterns)"
 	privatePatternSecret = "${{ secrets.RELEASABILITY_PATTERNS }}"
 	privatePatternSearch = `git grep -n -I -i -E -f "$pf" -- .`

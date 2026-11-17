@@ -1,4 +1,18 @@
-# ci-template: v1.34.1 (customized)
+# ci-template: v1.34.1 + v1.42 hermetic gate (customized)
+# v1.42 hermetic gate only (owner ruling 742 (1), Tenant Agent rulings 754 and
+# the hermetic-gate rollout order): the CI Gate's outcome depends only on the
+# tree under test. `make deps-check` (lint job), `make security` (gosec,
+# govulncheck, go mod verify, trivy fs) and `trivy image` of the integration
+# image (image job) read the module proxy and advisory databases, so they
+# could fail a PR or turn main red with no change to the tree. They leave
+# this workflow on every event and run in .github/workflows/scans.yml, on
+# workflow_dispatch on main (no schedule: build/ci/buildgates allows ci.yml
+# its one cron only). `make gosec` reads only the tree and now runs in the
+# lint job on every event but a docs-only PR. Nothing else of v1.35 to v1.42
+# is taken yet: the v1.35 Signatures job, v1.36 host-local caches and
+# in-toolchain-image.sh v6, v1.37 timeouts, v1.38 release label, v1.39/v1.40
+# scoped deps-check and deps-bump, and v1.41 PR/main parity are the full
+# catch-up, still to come.
 # v1.34.1 (2026-11-08, Company Agent m2226 item 2, ruling 377): one change.
 # GO_BUILD_PROXY is <DEVCACHE_GOPROXY>|https://proxy.golang.org, with no
 # trailing `direct`: the handbook allows no direct fetch anywhere
@@ -1037,7 +1051,7 @@ jobs:
   # here; the full tier runs gosec in the image job's `make security`, so it
   # runs once per event. It runs on a docs-only PR, as lint did.
   lint:
-    name: Lint [lint, gosec, deps-check, build tags]
+    name: Lint [lint, gosec, build tags]
     runs-on: ${{ ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","linux","x64","bigdisk-docker"]') || 'ubuntu-latest' }}
     needs: preflight   # v1.34
     if: ${{ !github.event.pull_request.draft && needs.preflight.outputs.verdict == 'run' }}
@@ -1216,20 +1230,16 @@ jobs:
         run: scripts/in-toolchain-image.sh "$TOOLCHAIN_IMAGE" "GO_BUILD_TAGS='$GO_BUILD_TAGS' sh scripts/assert-build-tags.sh"
 
       # v1.30 (fix 5): gosec on the PR tier, through the developers' target,
-      # with no network. On the full tier make security runs it in the image job.
-      - name: make gosec (PR tier)
-        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && env.CI_FULL_TIER != 'true' && needs.preflight.outputs.docs_only != 'true' }}
+      # with no network. v1.42 (ruling 742 (1)): make security left the image
+      # job, so gosec runs here on every event but a docs-only PR. It reads
+      # only the tree, so the gate stays hermetic.
+      - name: make gosec
+        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && needs.preflight.outputs.docs_only != 'true' }}
         run: scripts/in-toolchain-image.sh "$TOOLCHAIN_IMAGE" "make gosec GO_BUILD_TAGS='$GO_BUILD_TAGS'"
 
-      # Fails when a library, first-party or third-party, is behind its latest
-      # release without devops.md §9's documented reason (ci-standard.md §1).
-      # v1.28: a lint-class gate of seconds on the PR tier, every event, a
-      # docs-only PR included (ruling 219(3)); it was full tier only from v1.23.
-      - name: make deps-check
-        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' }}
-        env:
-          IN_IMAGE_NETWORK: bridge
-        run: scripts/in-toolchain-image.sh "$TOOLCHAIN_IMAGE" make deps-check
+      # v1.42 (ruling 742 (1)): `make deps-check` left this job. It reads the
+      # module proxy, so its answer changes with no change to the tree;
+      # scans.yml runs it on main. The Makefile keeps the target.
 
   # v1.21: every stage runs in the project's own devcontainer image and no
   # other (ci-standard.md §2, devcontainer.md §7). One image job (Company Agent
@@ -1287,7 +1297,7 @@ jobs:
   # on the full tier, make security and trivy image; it skips on a docs-only
   # PR, which runs none of them, and CI Gate reads that skip as passed.
   image:
-    name: Devcontainer image [build, test, security, trivy image]
+    name: Devcontainer image [build, test]
     runs-on: ubuntu-latest
     needs: preflight   # v1.24 (CA m749, m751 (a)); v1.29.3; v1.34
     # v1.29.3: on a schedule run, only on the schedule guard's `run`. v1.30:
@@ -1490,38 +1500,12 @@ jobs:
         if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && needs.preflight.outputs.docs_only != 'true' }}
         run: scripts/in-toolchain-image.sh "$TOOLCHAIN_IMAGE" make test-runtimesecret
 
-      # make security: gosec, govulncheck, go mod verify (devops.md §8), with
-      # trivy fs per the phase (§8a). The target owns gosec's flags and its
-      # memory bounds (GOMEMLIMIT, GOMAXPROCS, -concurrency; v1.6 to v1.8) and
-      # reports a kill by signal as a kill, not a finding. Nothing is uploaded
-      # to code scanning (m601 (d): CI runs on Gitea).
-      - name: make security
-        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && env.CI_FULL_TIER == 'true' }}
-        env:
-          IN_IMAGE_NETWORK: bridge
-        run: scripts/in-toolchain-image.sh "$TOOLCHAIN_IMAGE" "make security GO_BUILD_TAGS='$GO_BUILD_TAGS'"
-
-      # The integration image is gated before any push to either registry
-      # (devops.md §8): --ignore-unfixed (v1.19) and --skip-dirs /opt/go/mod
-      # (v1.20). trivy fs and make security never take --ignore-unfixed.
-      # A PR builds no image for a registry, so the scan is full tier (v1.23).
-      # CUSTOMIZE: integration-image.sh's scan flags, so this scan and the
-      # integration job's agree: vulnerabilities only, the repository's
-      # .trivyignore, and no version check (the pin decides the version).
-      - name: trivy image (integration image)
-        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && env.CI_FULL_TIER == 'true' }}
-        env:
-          IN_IMAGE_NETWORK: bridge
-        run: |
-          . "$RUNNER_TEMP/image-lock.sh"
-          trap image_unlock EXIT
-          image_lock || exit 1
-          docker tag "$IT_LEASE_ID" "$IT_IMAGE"
-          image_unlock
-          docker save -o it-image.tar "$IT_IMAGE"
-          scripts/in-toolchain-image.sh "$TOOLCHAIN_IMAGE" \
-            trivy image --input it-image.tar --ignore-unfixed --skip-dirs /opt/go/mod --severity CRITICAL,HIGH --exit-code 1 \
-              --scanners vuln --ignorefile .trivyignore --skip-version-check
+      # v1.42 (ruling 742 (1)): `make security` (gosec, govulncheck, go mod
+      # verify, trivy fs) and `trivy image (integration image)` left this job.
+      # Both read an advisory database that changes with no change to the
+      # tree. scans.yml runs them on main, the scan with the flags it had
+      # here (integration-image.sh's: vulnerabilities only, .trivyignore, no
+      # version check); gosec runs in the lint job on every event.
 
       - name: Tear down
         if: always()
