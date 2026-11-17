@@ -401,26 +401,32 @@ func ciTierViolations(src []byte) ([]string, error) {
 		bad = append(bad, fmt.Sprintf("no %s job", lintGatesJob))
 	}
 
-	// v1.28.0: deps-check is a lint-class gate on the PR tier and runs on
-	// every event, so its step sits in a pr job and is not conditioned on
-	// the full tier.
-	runsDepsCheck := false
+	// v1.42 (owner ruling 742 (1)): the CI Gate is hermetic. No step runs a
+	// check whose answer changes with no change to the tree (deps-check,
+	// make security, trivy image); scans.yml runs them on main. gosec reads
+	// only the tree: one pr-tier step runs it on every tier.
+	runsGosec := false
 	for _, name := range jobs {
 		for _, st := range wf.Jobs[name].Steps {
-			if !strings.Contains(st.Run, "make deps-check") {
+			for _, advisory := range []string{"make deps-check", "make security", "trivy image"} {
+				if strings.Contains(st.Run, advisory) {
+					bad = append(bad, fmt.Sprintf("job %s runs `%s`; ci-template v1.42 runs it in scans.yml only", name, advisory))
+				}
+			}
+			if !strings.Contains(st.Run, "make gosec") {
 				continue
 			}
-			runsDepsCheck = true
+			runsGosec = true
 			if tier[name] != "pr" {
-				bad = append(bad, fmt.Sprintf("job %s runs `make deps-check` but is tagged %q, want pr", name, tier[name]))
+				bad = append(bad, fmt.Sprintf("job %s runs `make gosec` but is tagged %q, want pr", name, tier[name]))
 			}
 			if strings.Contains(fmt.Sprint(st.If), "CI_FULL_TIER") {
-				bad = append(bad, fmt.Sprintf("job %s: the `make deps-check` step is conditioned on CI_FULL_TIER; it runs on every event", name))
+				bad = append(bad, fmt.Sprintf("job %s: the `make gosec` step is conditioned on CI_FULL_TIER; v1.42 runs it on every tier", name))
 			}
 		}
 	}
-	if !runsDepsCheck {
-		bad = append(bad, "no step runs `make deps-check`")
+	if !runsGosec {
+		bad = append(bad, "no step runs `make gosec`")
 	}
 
 	// v1.29.0: every job that names the integration image reads the Alpine
@@ -696,8 +702,8 @@ func TestCIGateTiers_RefusesWhatItMustRefuse(t *testing.T) {
 	const lintIf = "    if: " + guardedPRJobIf + "\n"
 	// lintRunsOn is the lint job's runs-on line: the trusted pool.
 	const lintRunsOn = "    runs-on: " + trustedPoolRunner + "\n"
-	const lintHead = "    name: Lint [lint, gosec, deps-check, build tags]\n" + lintRunsOn + "    needs: preflight   # v1.34\n" + lintIf
-	const lintNeeds = "    name: Lint [lint, gosec, deps-check, build tags]\n" + lintRunsOn + "    needs: preflight   # v1.34\n"
+	const lintHead = "    name: Lint [lint, gosec, build tags]\n" + lintRunsOn + "    needs: preflight   # v1.34\n" + lintIf
+	const lintNeeds = "    name: Lint [lint, gosec, build tags]\n" + lintRunsOn + "    needs: preflight   # v1.34\n"
 	const nightlyIf = "    if: ${{ (" + termNightly + ") && " + termRun + " }}\n"
 	const scopedIf = " && " + termScoped + " }}\n"
 	for _, tc := range []struct{ name, old, new string }{
@@ -730,7 +736,7 @@ func TestCIGateTiers_RefusesWhatItMustRefuse(t *testing.T) {
 		{"fips without the guard in needs", "    name: FIPS\n    needs: preflight   # v1.34\n", "    name: FIPS\n"},
 		{"swtpm without the guard in needs", fullIf + "    needs: preflight   # v1.34\n", fullIf + "    needs: lint\n"},
 		{"optee guarded through the image job only", "    needs: [preflight, image]   # v1.34\n", "    needs: [image]\n"},
-		{"lint without the guard in needs", lintHead, "    name: Lint [lint, gosec, deps-check, build tags]\n" + lintRunsOn + lintIf},
+		{"lint without the guard in needs", lintHead, "    name: Lint [lint, gosec, build tags]\n" + lintRunsOn + lintIf},
 		{"lint runs a refused dispatch", lintHead, lintNeeds + "    if: " + draftIf + "\n"},
 		{"gate does not fail on a draft", gateDraftCheck, `[ "${DRAFT}" = never ]`},
 		{"gate DRAFT flag differs", "          DRAFT: " + gateDraftEnv, "          DRAFT: ${{ github.event.pull_request.draft == false }}"},
@@ -743,15 +749,17 @@ func TestCIGateTiers_RefusesWhatItMustRefuse(t *testing.T) {
 		{"full job with a looser if", fullIf, "    if: github.event_name == 'push' || github.event_name == 'pull_request'\n"},
 		{"nightly job without its if", nightlyIf, ""},
 		{"nightly job on the full tier's if", nightlyIf, fullIf},
-		{"pr job needs a full job", lintNeeds, "    name: Lint [lint, gosec, deps-check, build tags]\n" + lintRunsOn + "    needs: [preflight, fips]\n"},
-		{"pr job needs a nightly job", lintNeeds, "    name: Lint [lint, gosec, deps-check, build tags]\n" + lintRunsOn + "    needs: [preflight, soak]\n"},
+		{"pr job needs a full job", lintNeeds, "    name: Lint [lint, gosec, build tags]\n" + lintRunsOn + "    needs: [preflight, fips]\n"},
+		{"pr job needs a nightly job", lintNeeds, "    name: Lint [lint, gosec, build tags]\n" + lintRunsOn + "    needs: [preflight, soak]\n"},
 		{"gate FULL_TIER flag differs", "          FULL_TIER: " + fullTierEnv, "          FULL_TIER: ${{ github.event_name == 'push' }}"},
 		{"gate NIGHTLY flag differs", "          NIGHTLY: " + nightlyTierIf, "          NIGHTLY: ${{ github.event_name == 'schedule' }}"},
 		{"gate drops check()", gateCheckFunc, "chk() {"},
 		{"workflow CI_FULL_TIER differs", "  CI_FULL_TIER: " + fullTierIf, "  CI_FULL_TIER: ${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full') }}"},
 		{"labeled type added back", "types: [opened, synchronize, reopened, ready_for_review]", "types: [opened, synchronize, reopened, ready_for_review, labeled]"},
 		{"gate on a self-hosted label", "    name: CI Gate\n    runs-on: " + ciGateRunner + "\n", "    name: CI Gate\n    runs-on: ci-gate\n"},
-		{"deps-check back on the full tier", "env.TOOLCHAIN_IMAGE != '' }}\n        env:\n          IN_IMAGE_NETWORK: bridge\n        run: scripts/in-toolchain-image.sh \"$TOOLCHAIN_IMAGE\" make deps-check\n", "env.TOOLCHAIN_IMAGE != '' && env.CI_FULL_TIER == 'true' }}\n        env:\n          IN_IMAGE_NETWORK: bridge\n        run: scripts/in-toolchain-image.sh \"$TOOLCHAIN_IMAGE\" make deps-check\n"},
+		{"deps-check back in the PR gate", "      - name: make gosec\n", "      - name: make deps-check\n        run: scripts/in-toolchain-image.sh \"$TOOLCHAIN_IMAGE\" make deps-check\n      - name: make gosec\n"},
+		{"make security back in the image job", "      - name: make build\n", "      - name: make security\n        run: scripts/in-toolchain-image.sh \"$TOOLCHAIN_IMAGE\" make security\n      - name: make build\n"},
+		{"gosec back on the PR tier only", "      - name: make gosec\n        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && needs.preflight", "      - name: make gosec\n        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && env.CI_FULL_TIER != 'true' && needs.preflight"}, //nolint:misspell // the Actions function's spelling, not prose
 		{"gate uses an action", "      - name: Fail closed on any non-success\n", "      - uses: actions/checkout@abc # v7\n      - name: Fail closed on any non-success\n"},
 		{"publish-images runs", "    if: ${{ " + publishGuard + " && ", "    if: ${{ "},
 		{"publish-images guard ored away", "    if: ${{ " + publishGuard + " && ", "    if: ${{ " + publishGuard + " || "},

@@ -1,0 +1,158 @@
+# scans-template: v1.0.0 (customized) — the scans on main.
+# ci-template v1.42 makes the CI Gate hermetic (owner ruling 742 (1)), so
+# every check that fails on the state of the world rather than on a change
+# runs here, and only here: `make deps-check`, `make security` (gosec,
+# govulncheck, go mod verify, trivy fs) and `trivy image` of the integration
+# image. It never runs on a pull_request or a push, and it is not the
+# workflow named CI, so a finding never reads as a red main and never blocks
+# a PR. A finding opens or updates ONE issue, found by its fixed title
+# (SCAN_ISSUE_TITLE), with the run link, and fails this job, so the Actions
+# run is red; a run with no finding closes that issue.
+#
+# CUSTOMIZE (go-enclave), against the template:
+#   - workflow_dispatch on main only, no `schedule:`: build/ci/buildgates
+#     allows ci.yml its one cron and no other workflow a schedule. A schedule
+#     comes with that test's change, in a code PR.
+#   - The images are built as ci.yml's image job builds them (`make -s
+#     it-image`, `make docker-build`), and trivy image keeps ci.yml's former
+#     flags, integration-image.sh's: vulnerabilities only, .trivyignore and
+#     no version check.
+#   - No bump half yet: the Makefile has no `make deps-bump` (depscheck
+#     v1.1.0); it comes with the full ci-template catch-up. Until then
+#     `make deps-check` runs as ci.yml v1.34.1 ran it.
+
+name: Scans
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scans-${{ github.repository }}
+  cancel-in-progress: false
+
+env:
+  GO_BUILD_TAGS: ""   # CUSTOMIZE: ci.yml's GO_BUILD_TAGS
+  SCAN_ISSUE_TITLE: 'scans: findings the scans report on main (ruling 742)'
+
+jobs:
+  scans:
+    name: Scans
+    if: ${{ github.server_url == 'https://github.com' && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    # Least privilege: the one write is the issue for a finding.
+    permissions:
+      contents: read
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      CI_STACK_PREFIX: ${{ github.event.repository.name }}-ci-
+      CI_CACHE_CLASS: pr
+      CI_IMAGE_NAMESPACE: ${{ vars.CI_IMAGE_NAMESPACE }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Mask the forge credentials
+        run: |
+          for v in GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0; do
+            val=${!v:-}
+            [ -n "$val" ] || continue
+            echo "::add-mask::$val"
+            case $val in *://*:*@*) t=${val#*://}; t=${t%%@*}; echo "::add-mask::${t#*:}" ;; esac
+          done
+
+      - name: Free the runner's disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          docker image prune -af >/dev/null
+          df -h /
+
+      - name: Pull the toolchain image from the registry cache
+        run: scripts/ci-image-cache.sh pull || true
+
+      - name: Build the devcontainer images
+        run: |
+          APK_INDEX_SUM=$(scripts/apk-index-sum.sh)
+          export APK_INDEX_SUM
+          echo "APK_INDEX_SUM=$APK_INDEX_SUM" >> "$GITHUB_ENV"
+          it=$(make -s it-image)
+          echo "IT_IMAGE=$it" >> "$GITHUB_ENV"
+          make docker-build GO_BUILD_PROXY="${GOPROXY:-}" IT_IMAGE="$it"
+          echo "TOOLCHAIN_IMAGE=$(make -s toolchain-image)" >> "$GITHUB_ENV"
+
+      # The checks that left ci.yml (ruling 742 (1)). Each runs to the end;
+      # FIRED lists the ones that fail, and the step's own log keeps their
+      # output.
+      - name: Scans (deps-check, make security, trivy image)
+        id: scans
+        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' }}
+        env:
+          IN_IMAGE_NETWORK: bridge
+        run: |
+          fired=
+          scripts/in-toolchain-image.sh "$TOOLCHAIN_IMAGE" make deps-check || fired="$fired deps-check"
+          scripts/in-toolchain-image.sh "$TOOLCHAIN_IMAGE" "make security GO_BUILD_TAGS='$GO_BUILD_TAGS'" || fired="$fired security"
+          if docker save -o it-image.tar "$IT_IMAGE"; then
+            scripts/in-toolchain-image.sh "$TOOLCHAIN_IMAGE" \
+              trivy image --input it-image.tar --ignore-unfixed --skip-dirs /opt/go/mod --severity CRITICAL,HIGH --exit-code 1 \
+                --scanners vuln --ignorefile .trivyignore --skip-version-check || fired="$fired trivy-image"
+          else
+            fired="$fired trivy-image"
+          fi
+          rm -f it-image.tar
+          fired=${fired# }
+          echo "scans: ${fired:-none fired}"
+          echo "fired=$fired" >> "$GITHUB_OUTPUT"
+
+      # ONE issue for the findings, found by its exact title among the open
+      # issues (pull requests excluded): created when none is open, its body
+      # replaced when one is, and closed with a comment by the first run with
+      # no finding.
+      - name: Open, update or close the scan issue
+        if: ${{ !cancelled() && steps.scans.outcome == 'success' }}
+        env:
+          FIRED: ${{ steps.scans.outputs.fired }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          issue=$(gh api --paginate "repos/$REPO/issues?state=open&per_page=100" \
+            --jq ".[] | select(.pull_request == null and .title == \"$SCAN_ISSUE_TITLE\") | .number" | head -n1)
+          if [ -z "$FIRED" ]; then
+            if [ -n "$issue" ]; then
+              gh api "repos/$REPO/issues/$issue/comments" -f body="The scans found nothing. Run: $RUN_URL" >/dev/null
+              gh api -X PATCH "repos/$REPO/issues/$issue" -f state=closed -f state_reason=completed >/dev/null
+              echo "closed #$issue"
+            fi
+            exit 0
+          fi
+          body=$(printf '%s\n\n%s\n\n%s\n' \
+            'The scans on main (scans.yml, ruling 742 (1)) fired: a dependency behind its latest release with no reason comment, a vulnerable version, or an image package. Each needs a fix PR or a documented reason (devops.md §9). The Scans step log of the run names each finding.' \
+            "Firing: $FIRED." \
+            "Run: $RUN_URL")
+          if [ -z "$issue" ]; then
+            issue=$(jq -n --arg t "$SCAN_ISSUE_TITLE" --arg b "$body" '{title: $t, body: $b}' | gh api "repos/$REPO/issues" --input - --jq .number)
+            echo "opened #$issue"
+          else
+            jq -n --arg b "$body" '{body: $b}' | gh api -X PATCH "repos/$REPO/issues/$issue" --input - >/dev/null
+            echo "updated #$issue"
+          fi
+
+      # A finding fails the run, after the issue is open, so it is seen and
+      # fixed. This is not CI: no PR and no main commit status reads it.
+      - name: Fail on a finding
+        if: ${{ !cancelled() && steps.scans.outputs.fired != '' }}
+        env:
+          FIRED: ${{ steps.scans.outputs.fired }}
+        run: |
+          echo "::error title=scans::firing: $FIRED (see the Scans step log)"
+          exit 1
+
+      - name: Tear down
+        if: always()
+        run: rm -f "$RUNNER_TEMP/gomodauth.env" it-image.tar
