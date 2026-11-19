@@ -32,11 +32,10 @@ const (
 const hostedRunner = "ubuntu-latest"
 
 // trustedPoolRunner is the one self-hosted form a job may take: the
-// self-hosted pool for a push to main and a same-repository pull request,
-// and hostedRunner for every other event, a fork pull request included, so
-// code from a fork never runs on the pool. A schedule run takes hostedRunner:
-// the pool's job-started hook refuses every event but those two.
-const trustedPoolRunner = `${{ ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","linux","x64","bigdisk-docker"]') || 'ubuntu-latest' }}`
+// self-hosted pool for a push to main, a schedule run and a same-repository
+// pull request, and hostedRunner for every other event, a fork pull request
+// included, so code from a fork never runs on the pool.
+const trustedPoolRunner = `${{ ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","linux","x64","bigdisk-docker"]') || 'ubuntu-latest' }}`
 
 // trustedPoolJobs are the only jobs that may take trustedPoolRunner.
 var trustedPoolJobs = map[string]bool{"lint": true, "lint-gates": true}
@@ -140,7 +139,6 @@ func TestEveryJobRunsOnAHostedRunner_TrustedPool(t *testing.T) {
 	noPR := strings.Replace(trustedPoolRunner, " || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)", "", 1)
 	anyPR := strings.Replace(trustedPoolRunner, " && github.event.pull_request.head.repo.full_name == github.repository", "", 1)
 	noFallback := strings.Replace(trustedPoolRunner, " || 'ubuntu-latest'", "", 1)
-	withSchedule := strings.Replace(trustedPoolRunner, " || (github.event_name == 'pull_request'", " || github.event_name == 'schedule' || (github.event_name == 'pull_request'", 1)
 	for _, tc := range []struct {
 		name                   string
 		lint, lintGates, image any
@@ -154,7 +152,6 @@ func TestEveryJobRunsOnAHostedRunner_TrustedPool(t *testing.T) {
 		{"fork pull requests on the pool", hostedRunner, anyPR, hostedRunner, []string{"job lint-gates:"}},
 		{"pull requests off the pool", noPR, hostedRunner, hostedRunner, []string{"job lint:"}},
 		{"no hosted fallback", hostedRunner, noFallback, hostedRunner, []string{"job lint-gates:"}},
-		{"schedule runs on the pool", withSchedule, hostedRunner, hostedRunner, []string{"job lint:"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			bad, err := hostedRunnerViolations(workflow(tc.lint, tc.lintGates, tc.image))
