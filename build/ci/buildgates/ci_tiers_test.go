@@ -121,11 +121,13 @@ var tierTerms = map[string][]string{
 }
 
 // ciJobTimeouts is every ci.yml job's timeout-minutes (#277): the measured
-// jobs at ceil(1.5 x p95), lint and publish-images at the template's value,
-// the swtpm and OP-TEE jobs at the values they had before the template,
-// preflight at the template's 10 (v1.34), the rest at 5.
+// jobs at ceil(1.5 x p95), publish-images at the template's value, the swtpm
+// and OP-TEE jobs at the values they had before the template, preflight at
+// the template's 10 (v1.34), the rest at 5. Lint on a cold self-hosted runner
+// builds the toolchain image before make lint: ceil(1.5 x (19 + 8)) = 41, the
+// cold-cache run of main fc58102.
 var ciJobTimeouts = map[string]int{
-	preflightJob: 10, publishJob: 60, lintJob: 30, "image": 32,
+	preflightJob: 10, publishJob: 60, lintJob: 41, "image": 32,
 	lintGatesJob: 20, "fips": 11, "integration": 22, "soak": 56, ciGateJob: 5,
 	"tpm-swtpm": 30, "optee": 180,
 }
