@@ -1056,7 +1056,7 @@ jobs:
     runs-on: ${{ ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","linux","x64","bigdisk-docker"]') || 'ubuntu-latest' }}
     needs: preflight   # v1.34
     if: ${{ !github.event.pull_request.draft && needs.preflight.outputs.verdict == 'run' }}
-    timeout-minutes: 30       # CUSTOMIZE: ceil(1.5 x this job's 72-hour p95), ci-standard.md §12
+    timeout-minutes: 41       # CUSTOMIZE: on a cold self-hosted runner lint builds the toolchain image before make lint: ceil(1.5 x (19 + 8)) = 41, the cold-cache run of main fc58102
     env:
       CI_STACK_PREFIX: ${{ github.event.repository.name }}-ci-
       CI_CACHE_CLASS: ${{ (github.event_name == 'push' || github.event_name == 'schedule') && 'main' || 'pr' }}
