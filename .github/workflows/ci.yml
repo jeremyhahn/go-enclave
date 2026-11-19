@@ -71,8 +71,9 @@
 # CUSTOMIZE (go-enclave, #277): v1.30 and v1.31 are adopted with go-enclave's
 # runners and image build unchanged. Every job runs on ubuntu-latest except
 # lint and lint-gates, which run on the self-hosted pool (self-hosted, linux,
-# x64, bigdisk-docker) for a push to main, a schedule run and a same-repository
-# PR, and on ubuntu-latest for a fork PR; no other job takes a self-hosted
+# x64, bigdisk-docker) for a push to main and a same-repository PR, and on
+# ubuntu-latest for every other event, a fork PR and a schedule run included
+# (the pool's job-started hook refuses them); no other job takes a self-hosted
 # label. Each image build passes the
 # inherited GOPROXY as GO_BUILD_PROXY and stages no forge credential, so the
 # module-cache probe of v1.29.4 and v1.29.5 below is not carried.
@@ -1052,7 +1053,7 @@ jobs:
   # runs once per event. It runs on a docs-only PR, as lint did.
   lint:
     name: Lint [lint, gosec, build tags]
-    runs-on: ${{ ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","linux","x64","bigdisk-docker"]') || 'ubuntu-latest' }}
+    runs-on: ${{ ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","linux","x64","bigdisk-docker"]') || 'ubuntu-latest' }}
     needs: preflight   # v1.34
     if: ${{ !github.event.pull_request.draft && needs.preflight.outputs.verdict == 'run' }}
     timeout-minutes: 30       # CUSTOMIZE: ceil(1.5 x this job's 72-hour p95), ci-standard.md §12
@@ -1287,9 +1288,9 @@ jobs:
   # Company Agent m605 item 8).
   #
   # Runners: every job, CI Gate included, runs on ubuntu-latest, except lint
-  # and lint-gates: they run on the self-hosted pool for a push to main, a
-  # schedule run and a same-repository PR, and on ubuntu-latest for a fork
-  # PR. A job that builds an image on a GitHub-hosted runner first frees disk
+  # and lint-gates: they run on the self-hosted pool for a push to main and
+  # a same-repository PR, and on ubuntu-latest for every other event, a fork
+  # PR and a schedule run included. A job that builds an image on a GitHub-hosted runner first frees disk
   # for the image build.
   #
   # v1.30: lint, the build-tag assertion, the releasability test and
@@ -1530,7 +1531,7 @@ jobs:
   # and the job; the gates after it run on the next push.
   lint-gates:
     name: Lint Gates [toolchain image]
-    runs-on: ${{ ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","linux","x64","bigdisk-docker"]') || 'ubuntu-latest' }}
+    runs-on: ${{ ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","linux","x64","bigdisk-docker"]') || 'ubuntu-latest' }}
     needs: preflight     # v1.29.3; v1.30; v1.34
     # v1.26: never on a draft. v1.29.3: on a schedule run, only on the
     # schedule guard's `run`. v1.30: only on `run` on every event, and on a PR
