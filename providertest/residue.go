@@ -153,7 +153,7 @@ func checkNoResidueAfterUnprotect(r *report, cfg Config) {
 	}
 	after := afterSweep.Hits
 	if len(after) > 0 {
-		r.fail(property, "the protected key is byte-exact resident in %d mapping(s) outside the caller's "+
+		r.fail(property, "the protected key, or a half of it, is byte-exact resident in %d mapping(s) outside the caller's "+
 			"own — with the caller's destination wiped and unmapped, so every legitimate copy is gone. The "+
 			"provider RETAINED a copy of the key, or materialized one and did not wipe it, which the seam "+
 			"requires: %q. (Instrument: this same sweep found the material while the destination was alive, "+
@@ -169,18 +169,57 @@ func checkNoResidueAfterUnprotect(r *report, cfg Config) {
 var sweepProcess = memscan.Sweep
 
 // sweepOutsideHome returns the mappings, other than the one containing home,
-// in which the material held in probe is byte-exact resident, and the kernel
-// guard pages the sweep skipped.
+// in which the material held in probe, or either half of it, is byte-exact
+// resident, and the kernel guard pages the sweep skipped.
 func sweepOutsideHome(probe enclave.ByteAccess, home uintptr) (memscan.Result, error) {
 	var res memscan.Result
 	var scanErr error
 	if err := probe.WithBytes(func(needle []byte) error {
-		res, scanErr = sweepProcess(needle, home)
+		res, scanErr = sweepForKeyOrHalf(needle, home)
 		return nil
 	}); err != nil {
 		return memscan.Result{}, &stepError{step: "borrowing the needle", err: err}
 	}
 	return res, scanErr
+}
+
+// sweepForKeyOrHalf sweeps for the whole needle and then for each half of
+// it, so a provider that keeps only part of the key is found as long as the
+// part holds either half whole. It returns each mapping once. A hit any
+// probe made is returned without error, even when another probe failed; with
+// no hit, the first probe error is returned, so an incomplete sweep is never
+// clean. GuardPages is the most any probe skipped: every probe walks the same
+// process, so the counts are of the same pages.
+func sweepForKeyOrHalf(needle []byte, home uintptr) (memscan.Result, error) {
+	half := len(needle) / 2
+	probes := [][]byte{needle}
+	if half > 0 {
+		probes = append(probes, needle[:half], needle[half:])
+	}
+	var res memscan.Result
+	seen := map[string]bool{}
+	var firstErr error
+	for _, p := range probes {
+		found, err := sweepProcess(p, home)
+		if err != nil && firstErr == nil {
+			firstErr = err
+		}
+		res.GuardPages = max(res.GuardPages, found.GuardPages)
+		for _, m := range found.Hits {
+			if !seen[m] {
+				seen[m] = true
+				res.Hits = append(res.Hits, m)
+			}
+		}
+	}
+	// A hit any probe made is a finding, whatever another probe met.
+	if len(res.Hits) > 0 {
+		return res, nil
+	}
+	if firstErr != nil {
+		return memscan.Result{}, firstErr
+	}
+	return res, nil
 }
 
 // equalBytes is written out so borrowed slices are never passed to code this

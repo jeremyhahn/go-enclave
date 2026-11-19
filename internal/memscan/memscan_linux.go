@@ -46,7 +46,8 @@ var (
 // *UnreadableMappingError (ErrUnreadableMapping), and a sweep that read nothing
 // returns ErrEmptySweep. Only the kernel's own [vvar] and [vsyscall] regions,
 // and guard pages that /proc/self/pagemap reports as guard regions, are
-// excused. Callers must not discard these errors.
+// excused. Callers must not discard these errors. A hit is never dropped:
+// one seen before an unreadable mapping is returned without error.
 //
 // It needs an unfiltered /proc that lets a process read its own
 // /proc/self/maps and /proc/self/mem; a caller fails rather than skips without
@@ -63,16 +64,16 @@ func Sweep(needle []byte, home uintptr) (Result, error) {
 	if len(needle) == 0 {
 		return Result{}, errEmptyNeedle
 	}
-	maps, err := os.ReadFile("/proc/self/maps")
-	if err != nil {
-		return Result{}, err
-	}
 	proc, closeProc, err := openProc()
 	if err != nil {
 		return Result{}, err
 	}
 	defer closeProc()
-	return sweep(string(maps), proc, needle, home, make([]byte, chunk+len(needle)-1))
+	readMaps := func() (string, error) {
+		maps, err := os.ReadFile("/proc/self/maps")
+		return string(maps), err
+	}
+	return resweep(readMaps, proc, needle, home, make([]byte, chunk+len(needle)-1))
 }
 
 // openProc opens /proc/self/mem and, for guard-page checks, /proc/self/pagemap.
@@ -93,15 +94,58 @@ func openProc() (procMem, func(), error) {
 	return proc, func() { _ = mem.Close(); _ = pagemap.Close() }, nil
 }
 
+// sweepAttempts bounds how many maps listings one sweep reads.
+const sweepAttempts = 3
+
+// resweep runs sweep over a fresh maps listing. A mapping the runtime unmaps
+// between the listing and its read fails that read; it held nothing then, so
+// resweep lists the mappings again and reads what is there. A mapping that is
+// still unreadable after sweepAttempts listings fails the sweep closed. A hit
+// any attempt made is kept and returned without error, even when that attempt
+// or a later one met an unreadable mapping: a copy seen once is a finding.
+// GuardPages is the count of the last attempt that read a listing.
+func resweep(readMaps func() (string, error), mem io.ReaderAt, needle []byte, home uintptr, buf []byte) (Result, error) {
+	var res Result
+	seen := map[string]bool{}
+	var err error
+	for range sweepAttempts {
+		var maps string
+		if maps, err = readMaps(); err != nil {
+			break
+		}
+		var r Result
+		r, err = sweep(maps, mem, needle, home, buf)
+		res.GuardPages = r.GuardPages
+		for _, m := range r.Hits {
+			if !seen[m] {
+				seen[m] = true
+				res.Hits = append(res.Hits, m)
+			}
+		}
+		if !errors.Is(err, ErrUnreadableMapping) {
+			break
+		}
+	}
+	// A hit any attempt made is a finding, whatever a later attempt saw.
+	if len(res.Hits) > 0 {
+		return res, nil
+	}
+	if err != nil {
+		return Result{}, err
+	}
+	return res, nil
+}
+
 // find is Find over a maps listing and the memory it describes, reading
 // through buf. Chunks overlap by len(needle)-1 so a needle straddling a read
 // boundary is found, so buf must be longer than that.
 //
 // It fails closed. A swept mapping that cannot be read in full returns an
-// *UnreadableMappingError (ErrUnreadableMapping), and a sweep that read no
-// mapping returns ErrEmptySweep, so neither can pass as a clean result. The
-// excuses are a kernelMapping and a guard page inside a mapping (see
-// skipGuard), neither of which holds process data. A home mapping is
+// *UnreadableMappingError (ErrUnreadableMapping), with the hits made before
+// it, and a sweep that read no mapping returns ErrEmptySweep, so neither can
+// pass as a clean result. The excuses are a kernelMapping and a guard page
+// inside a mapping (see skipGuard), neither of which holds process data. A
+// home mapping is
 // excluded without being read, and does not count as read.
 func find(maps string, mem io.ReaderAt, needle []byte, home uintptr, buf []byte) ([]string, error) {
 	r, err := sweep(maps, mem, needle, home, buf)
@@ -134,7 +178,7 @@ func sweep(maps string, mem io.ReaderAt, needle []byte, home uintptr, buf []byte
 		if err != nil {
 			ue := &UnreadableMappingError{Mapping: strings.TrimSpace(line), Err: err, Kernel: kernelRelease()}
 			probeMapping(mem, lo, hi, ue)
-			return Result{}, ue
+			return r, ue
 		}
 		read++
 		r.GuardPages += guards

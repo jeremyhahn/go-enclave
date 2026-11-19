@@ -294,8 +294,8 @@ func TestFindSweepsOnlyWhatCanHoldACopy(t *testing.T) {
 }
 
 // TestFindFailsClosedOnAnUnreadableMapping pins that a swept mapping the
-// reader refuses is a typed error, not a clean result, and that a hit found
-// before it is not reported alongside it.
+// reader refuses is a typed error, not a clean result, and that no hit is
+// invented for a mapping that held no needle.
 func TestFindFailsClosedOnAnUnreadableMapping(t *testing.T) {
 	needle := []byte("the-needle")
 	mem := addressSpace{0x10000: make([]byte, 0x1000)} // 0x20000 is unmapped: reads fail
@@ -310,7 +310,136 @@ func TestFindFailsClosedOnAnUnreadableMapping(t *testing.T) {
 		t.Errorf("the read failure is not reachable through Unwrap: %v", err)
 	}
 	if hits != nil {
-		t.Errorf("hits = %q alongside an error", hits)
+		t.Errorf("hits = %q; the mapping read before the error held no needle", hits)
+	}
+}
+
+// listings returns a maps reader that yields each listing in turn, the last
+// one from then on, and counts the reads.
+func listings(reads *int, maps ...string) func() (string, error) {
+	return func() (string, error) {
+		i := min(*reads, len(maps)-1)
+		*reads++
+		return maps[i], nil
+	}
+}
+
+// A mapping the runtime unmaps between the maps listing and the read is gone,
+// not unreadable: the sweep lists the mappings again and reads what is there.
+func TestSweepRetriesAMappingThatChangedUnderIt(t *testing.T) {
+	needle := []byte("the-needle")
+	page := make([]byte, 0x1000)
+	copy(page[0x100:], needle)
+	mem := addressSpace{0x10000: page} // 0x20000 was unmapped after the first listing
+	before := "10000-11000 rw-p 00000000 00:00 0\n20000-21000 rw-p 00000000 00:00 0\n"
+	after := "10000-11000 rw-p 00000000 00:00 0\n"
+	reads := 0
+
+	res, err := resweep(listings(&reads, before, after), mem, needle, 0, scratch(0x400, len(needle)))
+	hits := res.Hits
+	if err != nil {
+		t.Fatalf("sweep = %v; want the second listing swept without error", err)
+	}
+	if len(hits) != 1 || hits[0] != "10000-11000 rw-p 00000000 00:00 0" {
+		t.Fatalf("hits = %q; want the needle's mapping", hits)
+	}
+	if reads != 2 {
+		t.Fatalf("the sweep read the maps %d time(s); want 2", reads)
+	}
+}
+
+// A mapping that stays unreadable on every fresh listing still fails the
+// sweep closed, after a bounded number of listings.
+func TestSweepFailsClosedOnAMappingThatStaysUnreadable(t *testing.T) {
+	needle := []byte("the-needle")
+	mem := addressSpace{0x10000: make([]byte, 0x1000)}
+	maps := "10000-11000 rw-p 00000000 00:00 0\n20000-21000 rw-p 00000000 00:00 0\n"
+	reads := 0
+
+	res, err := resweep(listings(&reads, maps), mem, needle, 0, scratch(0x400, len(needle)))
+	hits := res.Hits
+	if !errors.Is(err, ErrUnreadableMapping) || hits != nil {
+		t.Fatalf("sweep = %q, %v; want only an ErrUnreadableMapping", hits, err)
+	}
+	if reads != sweepAttempts {
+		t.Fatalf("the sweep read the maps %d time(s); want %d", reads, sweepAttempts)
+	}
+}
+
+// TestSweepKeepsAHitFromAnAttemptThatMetAnUnreadableMapping pins that a hit
+// is never lost to a retry: the first attempt finds the needle in one mapping
+// and then meets an unreadable one; by the second listing the needle's mapping
+// is gone and the sweep is clean, yet the first attempt's hit is reported.
+func TestSweepKeepsAHitFromAnAttemptThatMetAnUnreadableMapping(t *testing.T) {
+	needle := []byte("the-needle")
+	page := make([]byte, 0x1000)
+	copy(page[0x100:], needle)
+	mem := addressSpace{0x10000: page, 0x30000: make([]byte, 0x1000)} // 0x20000 is unmapped: reads fail
+	first := "10000-11000 rw-p 00000000 00:00 0\n20000-21000 rw-p 00000000 00:00 0\n"
+	second := "30000-31000 rw-p 00000000 00:00 0\n" // the needle's mapping was unmapped before the retry
+	reads := 0
+
+	res, err := resweep(listings(&reads, first, second), mem, needle, 0, scratch(0x400, len(needle)))
+	hits := res.Hits
+	if err != nil {
+		t.Fatalf("sweep = %q, %v; want the first attempt's hit and no error", hits, err)
+	}
+	if len(hits) != 1 || hits[0] != "10000-11000 rw-p 00000000 00:00 0" {
+		t.Fatalf("hits = %q; want the mapping the first attempt found the needle in", hits)
+	}
+	if reads != 2 {
+		t.Fatalf("the sweep read the maps %d time(s); want 2", reads)
+	}
+}
+
+// TestSweepRecoversCleanAfterAMappingDisappears pins that a clean process
+// is not reported unmeasured because a mapping was unmapped mid-sweep: the
+// first listing meets an unreadable mapping, the second reads clean, and
+// neither holds the needle, so the sweep returns no hits and no error.
+func TestSweepRecoversCleanAfterAMappingDisappears(t *testing.T) {
+	needle := []byte("the-needle")
+	mem := addressSpace{0x10000: make([]byte, 0x1000), 0x30000: make([]byte, 0x1000)} // 0x20000 is unmapped: reads fail
+	first := "10000-11000 rw-p 00000000 00:00 0\n20000-21000 rw-p 00000000 00:00 0\n"
+	second := "10000-11000 rw-p 00000000 00:00 0\n30000-31000 rw-p 00000000 00:00 0\n"
+	reads := 0
+
+	res, err := resweep(listings(&reads, first, second), mem, needle, 0, scratch(0x400, len(needle)))
+	hits := res.Hits
+	if err != nil {
+		t.Fatalf("sweep = %q, %v; want a clean result once the retry reads every mapping", hits, err)
+	}
+	if len(hits) != 0 {
+		t.Fatalf("hits = %q; want none, no mapping held the needle", hits)
+	}
+	if reads != 2 {
+		t.Fatalf("the sweep read the maps %d time(s); want 2", reads)
+	}
+}
+
+// TestFindReturnsItsHitsWithAnUnreadableMapping pins that find hands back the
+// hits it made before an unreadable mapping, so a retry cannot drop them.
+func TestFindReturnsItsHitsWithAnUnreadableMapping(t *testing.T) {
+	needle := []byte("the-needle")
+	page := make([]byte, 0x1000)
+	copy(page[0x100:], needle)
+	mem := addressSpace{0x10000: page}
+	maps := "10000-11000 rw-p 00000000 00:00 0\n20000-21000 rw-p 00000000 00:00 0\n"
+
+	hits, err := find(maps, mem, needle, 0, scratch(0x400, len(needle)))
+	if !errors.Is(err, ErrUnreadableMapping) {
+		t.Fatalf("find = %q, %v; want ErrUnreadableMapping for the second mapping", hits, err)
+	}
+	if len(hits) != 1 || hits[0] != "10000-11000 rw-p 00000000 00:00 0" {
+		t.Fatalf("hits = %q; want the hit made before the unreadable mapping", hits)
+	}
+}
+
+// A maps listing that cannot be read ends the sweep with that error.
+func TestSweepReturnsAMapsReadError(t *testing.T) {
+	fail := errors.New("maps unreadable")
+	_, err := resweep(func() (string, error) { return "", fail }, addressSpace{}, []byte("n"), 0, scratch(0x400, 1))
+	if !errors.Is(err, fail) {
+		t.Fatalf("sweep = %v; want %v", err, fail)
 	}
 }
 
