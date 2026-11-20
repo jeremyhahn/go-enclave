@@ -46,7 +46,7 @@ jobs:
   amd-sev:
     name: AMD SEV guests
     if: ${{ vars.AMD_SEV_RUNNER == 'online' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
-    runs-on: [self-hosted, linux, x64, amd-sev] # self-hosted: hardware: AMD SEV host
+    runs-on: [self-hosted, amd-sev] # self-hosted: hardware: AMD SEV host
     # A cold cache builds QEMU from source (about 15 minutes) and fetches the
     # pinned packages; each guest boots in under a minute and the in-guest
     # suite takes a few; two guests plus the host scans fit well inside 90.
