@@ -261,6 +261,11 @@ func TestAmdSev_GuestRefusals(t *testing.T) {
 	}
 }
 
+// hostScanScripts are the kit's two entry points to the host scan:
+// host-scan.sh, which the suite runs, and amdsev-host-scan.sh, the earlier
+// kit's name for it. Both run the same scanner.
+var hostScanScripts = []string{"host-scan.sh", "amdsev-host-scan.sh"}
+
 func TestAmdSev_HostScanRefusesBadArguments(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -271,23 +276,46 @@ func TestAmdSev_HostScanRefusesBadArguments(t *testing.T) {
 		{"a needle that is not hex", []string{"1", "zz"}},
 		{"an odd needle", []string{"1", "abc"}},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			sh(t, "host-scan.sh", []string{"AMDSEV_HOSTSCAN=/bin/false"}, tc.args...).want(t, 2)
-		})
+		for _, script := range hostScanScripts {
+			t.Run(script+"/"+tc.name, func(t *testing.T) {
+				sh(t, script, []string{"AMDSEV_HOSTSCAN=/bin/false"}, tc.args...).want(t, 2)
+			})
+		}
 	}
 }
 
 // TestAmdSev_HostScanPassesTheHelpersStatus runs host-scan.sh on this test's
 // own process with a fake helper that exits with a chosen status.
 func TestAmdSev_HostScanPassesTheHelpersStatus(t *testing.T) {
-	for _, code := range []int{0, 1, 2} {
-		helper := filepath.Join(t.TempDir(), "scan")
-		if err := os.WriteFile(helper, []byte("#!/bin/sh\necho \"helper $*\"\nexit "+strconv.Itoa(code)+"\n"), 0o700); err != nil {
+	for _, script := range hostScanScripts {
+		for _, code := range []int{0, 1, 2} {
+			helper := filepath.Join(t.TempDir(), "scan")
+			if err := os.WriteFile(helper, []byte("#!/bin/sh\necho \"helper $*\"\nexit "+strconv.Itoa(code)+"\n"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			pid := os.Getpid()
+			r := sh(t, script, []string{"AMDSEV_HOSTSCAN=" + helper}, itoa(pid), "00ff")
+			r.want(t, code, "helper "+itoa(pid)+" 00ff")
+		}
+	}
+}
+
+// TestAmdSev_HostScanScriptsBuildTheModuleScanner reads both host-scan
+// scripts: without AMDSEV_HOSTSCAN each builds the one scanner,
+// backends/amdsev/integration/cmd/amdsev-hostscan, offline. The
+// scanner's own tests cover what it builds; this checks where it comes from.
+func TestAmdSev_HostScanScriptsBuildTheModuleScanner(t *testing.T) {
+	for _, script := range hostScanScripts {
+		b, err := os.ReadFile(filepath.Join(scripts(t), script))
+		if err != nil {
 			t.Fatal(err)
 		}
-		pid := os.Getpid()
-		r := sh(t, "host-scan.sh", []string{"AMDSEV_HOSTSCAN=" + helper}, itoa(pid), "00ff")
-		r.want(t, code, "helper "+itoa(pid)+" 00ff")
+		src := string(b)
+		for _, want := range []string{"backends/amdsev/integration", "GOPROXY=off", "go build -o \"$helper\" ./cmd/amdsev-hostscan"} {
+			if !strings.Contains(src, want) {
+				t.Errorf("%s must build the module's scanner offline: no %q", script, want)
+			}
+		}
 	}
 }
 
