@@ -23,6 +23,7 @@ import (
 	"time"
 
 	enclave "github.com/jeremyhahn/go-enclave"
+	"github.com/jeremyhahn/go-enclave/backends/amdsev"
 	"github.com/jeremyhahn/go-enclave/backendtest"
 
 	"github.com/jeremyhahn/go-enclave/backends/amdsev/integration/guestcfg"
@@ -78,8 +79,8 @@ func TestAmdSev_GuestConformance(t *testing.T) {
 func refused(t *testing.T, where string) {
 	t.Helper()
 	b, err := newBackend()
-	if !errors.Is(err, enclave.ErrBackendUnavailable) {
-		t.Fatalf("%s: newBackend = %v, %v; want an error that is enclave.ErrBackendUnavailable", where, b, err)
+	if b != nil || !errors.Is(err, amdsev.ErrSNPGuestUnavailable) {
+		t.Fatalf("%s: newBackend = %v, %v; want no backend and an error that is amdsev.ErrSNPGuestUnavailable", where, b, err)
 	}
 }
 
