@@ -84,7 +84,9 @@ func snpRoot(t *testing.T) (root, klog string) {
 	t.Helper()
 	root = t.TempDir()
 	write(t, filepath.Join(root, "proc", "cpuinfo"), "processor\t: 0\nvendor_id\t: AuthenticAMD\ncpu family\t: 25\nmodel\t\t: 17\nmodel name\t: AMD EPYC 9124 16-Core Processor\nflags\t\t: fpu sme sev sev_es sev_snp\n\n")
-	write(t, filepath.Join(root, "sys", "module", "kvm_amd", "parameters", "sev_snp"), "Y\n")
+	for _, p := range []string{"sev", "sev_es", "sev_snp"} {
+		write(t, filepath.Join(root, "sys", "module", "kvm_amd", "parameters", p), "Y\n")
+	}
 	write(t, filepath.Join(root, "dev", "kvm"), "")
 	write(t, filepath.Join(root, "dev", "sev"), "")
 	klog = filepath.Join(t.TempDir(), "klog")
@@ -92,10 +94,50 @@ func snpRoot(t *testing.T) (root, klog string) {
 	return root, klog
 }
 
+// sevRoot is a host with SEV and SEV-ES but no SEV-SNP: the CPU flag and the
+// kvm_amd parameter for SNP are absent or off, as where the firmware has no
+// SNP setting.
+func sevRoot(t *testing.T) (root, klog string) {
+	t.Helper()
+	root = t.TempDir()
+	write(t, filepath.Join(root, "proc", "cpuinfo"), "processor\t: 0\nvendor_id\t: AuthenticAMD\ncpu family\t: 23\nmodel\t\t: 49\nmodel name\t: AMD EPYC 7302 16-Core Processor\nflags\t\t: fpu sme sev sev_es\n\n")
+	write(t, filepath.Join(root, "sys", "module", "kvm_amd", "parameters", "sev"), "Y\n")
+	write(t, filepath.Join(root, "sys", "module", "kvm_amd", "parameters", "sev_es"), "Y\n")
+	write(t, filepath.Join(root, "sys", "module", "kvm_amd", "parameters", "sev_snp"), "N\n")
+	write(t, filepath.Join(root, "dev", "kvm"), "")
+	write(t, filepath.Join(root, "dev", "sev"), "")
+	klog = filepath.Join(t.TempDir(), "klog")
+	write(t, klog, "[    5.1] ccp 0000:01:00.5: sev enabled\n[    5.2] ccp 0000:01:00.5: SEV API:0.24 build:18\n")
+	return root, klog
+}
+
 func TestAmdSev_HostRecordReadyHost(t *testing.T) {
 	root, klog := snpRoot(t)
 	sh(t, "host-record.sh", []string{"AMDSEV_ROOT=" + root, "AMDSEV_KLOG=" + klog}).
-		want(t, 0, "AuthenticAMD", "AMD EPYC 9124", "1.55", "sev-snp: ready")
+		want(t, 0, "AuthenticAMD", "AMD EPYC 9124", "1.55", "guests: sev sev-es", "amd-sev: ready")
+	sh(t, "host-record.sh", []string{"AMDSEV_ROOT=" + root, "AMDSEV_KLOG=" + klog, "AMDSEV_GUESTS=sev sev-es snp"}).
+		want(t, 0, "guests: sev sev-es snp", "amd-sev: ready")
+}
+
+// A host whose firmware offers SEV and SEV-ES but not SNP runs the default
+// guests, and refuses an SNP guest naming what SNP lacks.
+func TestAmdSev_HostRecordSEVOnlyHost(t *testing.T) {
+	root, klog := sevRoot(t)
+	sh(t, "host-record.sh", []string{"AMDSEV_ROOT=" + root, "AMDSEV_KLOG=" + klog}).
+		want(t, 0, "AMD EPYC 7302", "amd-sev: ready")
+	r := sh(t, "host-record.sh", []string{"AMDSEV_ROOT=" + root, "AMDSEV_KLOG=" + klog, "AMDSEV_GUESTS=snp"})
+	r.want(t, 2, "cannot run", "sev_snp", "kvm_amd sev_snp=Y")
+	if strings.Contains(r.stderr, "sev_es CPU flag") {
+		t.Errorf("an SNP-only request named SEV-ES as missing: %s", r.stderr)
+	}
+}
+
+func TestAmdSev_HostRecordRefusesAnUnknownGuest(t *testing.T) {
+	root, klog := snpRoot(t)
+	for _, g := range []string{"tdx", "plain", "sev snp-x", " "} {
+		sh(t, "host-record.sh", []string{"AMDSEV_ROOT=" + root, "AMDSEV_KLOG=" + klog, "AMDSEV_GUESTS=" + g}).
+			want(t, 2, "AMDSEV_GUESTS")
+	}
 }
 
 func TestAmdSev_HostRecordNamesWhatIsMissing(t *testing.T) {
@@ -104,7 +146,7 @@ func TestAmdSev_HostRecordNamesWhatIsMissing(t *testing.T) {
 	klog := filepath.Join(t.TempDir(), "klog")
 	write(t, klog, "")
 	sh(t, "host-record.sh", []string{"AMDSEV_ROOT=" + root, "AMDSEV_KLOG=" + klog}).
-		want(t, 2, "cannot run an SEV-SNP guest", "sev_snp", "/dev/kvm", "kvm_amd", "/dev/sev")
+		want(t, 2, "cannot run", "the sev CPU flag", "the sev_es CPU flag", "/dev/kvm", "kvm_amd sev=Y", "kvm_amd sev_es=Y", "/dev/sev")
 }
 
 func TestAmdSev_HostRecordRefusesArguments(t *testing.T) {
@@ -163,6 +205,21 @@ func kit(t *testing.T) string {
 func TestAmdSev_GuestDryRunSNP(t *testing.T) {
 	r := sh(t, "guest.sh", nil, "--kit", kit(t), "--pidfile", "/run/q.pid", "--dry-run", "snp")
 	r.want(t, 0, "-accel kvm", "-pidfile /run/q.pid", "sev-snp-guest", "policy=0x30000", "confidential-guest-support=sev0", "memory-backend-memfd", "amdsev.mode=snp")
+}
+
+// SEV and SEV-ES guests boot with the sev-guest object: policy 0x1 forbids
+// debugging, and SEV-ES adds bit 2 for the encrypted register state. Neither
+// takes the SNP memfd backend.
+func TestAmdSev_GuestDryRunSEV(t *testing.T) {
+	for mode, policy := range map[string]string{"sev": "policy=0x1", "sev-es": "policy=0x5"} {
+		r := sh(t, "guest.sh", nil, "--kit", kit(t), "--pidfile", "/run/q.pid", "--dry-run", mode)
+		r.want(t, 0, "-accel kvm", "-pidfile /run/q.pid", "sev-guest,id=sev0", policy, "confidential-guest-support=sev0", "amdsev.mode="+mode)
+		for _, absent := range []string{"sev-snp-guest", "memory-backend-memfd"} {
+			if strings.Contains(r.stdout, absent) {
+				t.Errorf("%s: the dry run names %q:\n%s", mode, absent, r.stdout)
+			}
+		}
+	}
 }
 
 func TestAmdSev_GuestDryRunPlain(t *testing.T) {
@@ -237,7 +294,9 @@ func TestAmdSev_RunStopsAtTheHostRecord(t *testing.T) {
 	write(t, klog, "")
 	cache := t.TempDir()
 	sh(t, "run.sh", []string{"AMDSEV_ROOT=" + root, "AMDSEV_KLOG=" + klog, "AMDSEV_CACHE=" + cache}).
-		want(t, 2, "step 1", "cannot run the SEV-SNP tests", "sev_snp", "/dev/sev")
+		want(t, 2, "step 1", "cannot run", "the sev_es CPU flag", "/dev/sev")
+	sh(t, "run.sh", []string{"AMDSEV_ROOT=" + root, "AMDSEV_KLOG=" + klog, "AMDSEV_CACHE=" + cache, "AMDSEV_GUESTS=tdx"}).
+		want(t, 2, "AMDSEV_GUESTS")
 }
 
 // Step 4 runs under sudo when the caller is not root, and sudo's secure_path
