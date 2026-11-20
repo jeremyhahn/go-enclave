@@ -1,0 +1,78 @@
+# The SEV-SNP hardware job: the amd-sev tests on a self-hosted runner whose
+# host is an AMD EPYC with SEV-SNP enabled in firmware and in kvm_amd.
+#
+# make integration-test-amd-sev records the host (CPU family and model, SNP
+# firmware API version, host kernel, QEMU and OVMF versions), builds the guest
+# kit from pinned inputs (scripts/amd-sev-snp/pins.sh, each by version and
+# sha256), boots a fresh SEV-SNP guest and a plain-KVM control guest from the
+# same image, runs the in-guest tests as root, and scans the QEMU process from
+# the host. A runner without SNP fails the job with a message naming what is
+# missing; nothing here skips.
+#
+# The job is not a need of CI Gate: one hardware host must not hold every pull
+# request. It runs on dispatch, on a push to main, and on a pull request from
+# this repository that touches the backend, the kit or its tests; a fork's head
+# never reaches the hardware runner.
+name: AMD SEV-SNP
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - backends/amdsev/**
+      - scripts/amd-sev-snp/**
+      - test/integration/amdsev/**
+      - .github/workflows/amd-sev-snp.yml
+  pull_request:
+    paths:
+      - backends/amdsev/**
+      - scripts/amd-sev-snp/**
+      - test/integration/amdsev/**
+      - .github/workflows/amd-sev-snp.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'schedule' && format('schedule-{0}', github.repository) || github.ref == 'refs/heads/main' && format('main-{0}-{1}', github.event_name, github.sha) || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  amd-sev-snp:
+    name: AMD SEV-SNP guest
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: [self-hosted, linux, x64, amd-sev-snp] # self-hosted: hardware: AMD SEV host
+    # A cold cache builds QEMU from source (about 15 minutes) and fetches the
+    # pinned packages; each guest boots in under a minute and the in-guest
+    # suite takes a few; two guests plus the host scans fit well inside 90.
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: test/integration/amdsev/go.mod
+          cache: false
+      - name: Record the host
+        run: sh scripts/amd-sev-snp/host-record.sh
+      - name: SEV-SNP guest tests and the host scan
+        env:
+          AMDSEV_CACHE: ${{ runner.temp }}/amd-sev-snp-cache
+          AMDSEV_RESULTS: ${{ runner.temp }}/amd-sev-snp-results
+        run: make integration-test-amd-sev
+      - name: Guest consoles
+        if: always()
+        env:
+          AMDSEV_RESULTS: ${{ runner.temp }}/amd-sev-snp-results
+        run: |
+          set -eu
+          for f in "$AMDSEV_RESULTS"/*; do
+            [ -f "$f" ] || continue
+            echo "::group::$(basename "$f")"
+            cat -- "$f"
+            echo "::endgroup::"
+          done
