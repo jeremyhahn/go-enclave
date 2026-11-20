@@ -1124,6 +1124,10 @@ jobs:
           def eq(a, b):
               if unk(a) or unk(b):
                   return U
+              # Actions compares arrays and objects by instance, which this
+              # step cannot track, so their equality is unknown.
+              if isinstance(a, (list, dict)) or isinstance(b, (list, dict)):
+                  return U
               if isinstance(a, str) and isinstance(b, str):
                   return a.lower() == b.lower()
               if type(a) is type(b) and not isinstance(a, (int, float)):
@@ -1514,6 +1518,38 @@ jobs:
               return t
 
 
+          def hosted_or_reasoned(where, path, job, ro, ro_line, bad):
+              # v1.43 (ruling 833): hosted first.
+              if LARGER.search(ro) and re.search(r"ubuntu|windows|macos", ro):
+                  bad.append(f"{where}: (d) names a larger GitHub-hosted runner ({ro}); it bills on a public repository")
+                  return
+              w = WAIVER.search(ro_line)
+              if w and w.group(1) == "credential" and (path.rsplit("/", 1)[-1], job) != CREDENTIAL_JOB:
+                  bad.append(f"{where}: (f) its `# self-hosted: credential:` reason is allowed only on code-review.yml's job "
+                             f"`review`; any other job runs on a standard GitHub-hosted image or names a hardware or oversize reason")
+                  return
+              if w:
+                  return
+              off = []
+              if GROUP.search(ro):
+                  off.append("a runner group, which routes the job off the GitHub-hosted pool whatever its labels")
+              try:
+                  got = runs_on_labels(ro)
+              except ValueError as e:
+                  off.append(f"a runs-on this step cannot read ({e})")
+              else:
+                  if got is None:
+                      off.append("a runner this step cannot know: the expression tests an event, ref or value it does not pin")
+                  elif len(got) != 1 or not STANDARD.fullmatch(got[0]):
+                      off.append(", ".join(got))
+              if off and BARE.search(ro_line):
+                  bad.append(f"{where}: (e) its `# self-hosted:` reason names no category; ruling 999 allows a self-hosted job "
+                             f"only as `# self-hosted: hardware: <reason>` or `# self-hosted: oversize: <reason>`; it runs on " + "; ".join(dict.fromkeys(off)))
+              elif off:
+                  bad.append(f"{where}: (c) does not run on a standard GitHub-hosted image on github.com and its runs-on "
+                             f"line gives no `# self-hosted: hardware|oversize: <reason>`; it runs on " + "; ".join(dict.fromkeys(off)))
+
+
           def check(path):
               lines = open(path, encoding="utf-8").read().splitlines()
               on = triggers(lines)
@@ -1548,42 +1584,14 @@ jobs:
                           if ro is None and not uses:
                               bad.append(f"{where}: (g) has neither a runs-on nor a uses this step can read")
                               continue
-                          if ro is not None and not names_release(ro):
-                              # v1.43 (ruling 833): hosted first.
-                              if LARGER.search(ro) and re.search(r"ubuntu|windows|macos", ro):
-                                  bad.append(f"{where}: (d) names a larger GitHub-hosted runner ({ro}); it bills on a public repository")
-                                  continue
-                              w = WAIVER.search(ro_line)
-                              if w and w.group(1) == "credential" and (path.rsplit("/", 1)[-1], job) != CREDENTIAL_JOB:
-                                  bad.append(f"{where}: (f) its `# self-hosted: credential:` reason is allowed only on code-review.yml's job "
-                                             f"`review`; any other job runs on a standard GitHub-hosted image or names a hardware or oversize reason")
-                                  continue
-                              if w:
-                                  continue
-                              off = []
-                              if GROUP.search(ro):
-                                  off.append("a runner group, which routes the job off the GitHub-hosted pool whatever its labels")
-                              try:
-                                  got = runs_on_labels(ro)
-                              except ValueError as e:
-                                  off.append(f"a runs-on this step cannot read ({e})")
-                              else:
-                                  if got is None:
-                                      off.append("a runner this step cannot know: the expression tests an event, ref or value it does not pin")
-                                  elif len(got) != 1 or not STANDARD.fullmatch(got[0]):
-                                      off.append(", ".join(got))
-                              if off and BARE.search(ro_line):
-                                  bad.append(f"{where}: (e) its `# self-hosted:` reason names no category; ruling 999 allows a self-hosted job "
-                                             f"only as `# self-hosted: hardware: <reason>` or `# self-hosted: oversize: <reason>`; it runs on " + "; ".join(dict.fromkeys(off)))
-                              elif off:
-                                  bad.append(f"{where}: (c) does not run on a standard GitHub-hosted image on github.com and its runs-on "
-                                             f"line gives no `# self-hosted: hardware|oversize: <reason>`; it runs on " + "; ".join(dict.fromkeys(off)))
-                              continue
                           if ro is None:
                               continue
-                          if GROUP.search(ro) and not WAIVER.search(ro_line):
-                              bad.append(f"{where}: (c) routes by runner group and its runs-on line gives no "
-                                         f"`# self-hosted: hardware|oversize: <reason>`")
+                          # Every job, release-labelled or not, runs on a standard
+                          # GitHub-hosted image or names a category and a reason; a
+                          # release job's event and ref checks apply on top.
+                          hosted_or_reasoned(where, path, job, ro, ro_line, bad)
+                          if not names_release(ro):
+                              continue
                           if cond is None:
                               if on & PR:
                                   bad.append(f"{where}: (a) names `release` in a workflow with a pull_request trigger, and has no `if:`")
