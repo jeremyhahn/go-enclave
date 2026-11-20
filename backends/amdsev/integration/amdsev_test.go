@@ -22,7 +22,7 @@ import (
 	enclave "github.com/jeremyhahn/go-enclave"
 	"github.com/jeremyhahn/go-enclave/backendtest"
 
-	"github.com/jeremyhahn/go-enclave/test/integration/amdsev/guestcfg"
+	"github.com/jeremyhahn/go-enclave/backends/amdsev/integration/guestcfg"
 )
 
 // inGuest returns the kit guest's configuration, failing the test outside one.

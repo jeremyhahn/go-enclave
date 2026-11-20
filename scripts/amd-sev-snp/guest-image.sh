@@ -8,8 +8,8 @@
 #           OVMF.amdsev.fd, the kernel and the guest modules into the kit
 #   qemu    build the pinned QEMU release from its tarball into the cache
 #           (once per version) and link the kit's qemu-system-x86_64 to it
-#   initrd  build the guest's initrd: /init (test/integration/amdsev/guestinit,
-#           static), /amdsev.test (the test binary of test/integration/amdsev,
+#   initrd  build the guest's initrd: /init (backends/amdsev/integration/guestinit,
+#           static), /amdsev.test (the test binary of backends/amdsev/integration,
 #           which the guest runs as root) and the modules in load order
 #   all     the three, in that order (the default)
 #
@@ -30,7 +30,7 @@ here=$(cd "${0%/*}" && pwd)
 fail() { echo "$prog: $*" >&2; exit 2; }
 
 repo=$(cd "$here/../.." && pwd)
-module=$repo/test/integration/amdsev
+module=$repo/backends/amdsev/integration
 cache=${AMDSEV_CACHE:-${HOME:-/nonexistent}/.cache/go-enclave/amd-sev-snp}
 kit=$cache/kit
 snapshot=${AMDSEV_SNAPSHOT:-$AMDSEV_SNAPSHOT_DEFAULT}

@@ -22,13 +22,11 @@ on:
     paths:
       - backends/amdsev/**
       - scripts/amd-sev-snp/**
-      - test/integration/amdsev/**
       - .github/workflows/amd-sev-snp.yml
   pull_request:
     paths:
       - backends/amdsev/**
       - scripts/amd-sev-snp/**
-      - test/integration/amdsev/**
       - .github/workflows/amd-sev-snp.yml
 
 permissions:
@@ -55,7 +53,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
-          go-version-file: test/integration/amdsev/go.mod
+          go-version-file: backends/amdsev/integration/go.mod
           cache: false
       - name: Record the host
         run: sh scripts/amd-sev-snp/host-record.sh

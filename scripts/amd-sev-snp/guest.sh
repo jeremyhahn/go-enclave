@@ -29,7 +29,7 @@
 #   --dry-run                        print the QEMU command and exit 0
 #
 # The guest has no network device and no disk; the kernel command line carries
-# amdsev.mode=<mode>. The init contract (test/integration/amdsev/guestinit):
+# amdsev.mode=<mode>. The init contract (backends/amdsev/integration/guestinit):
 # the tests run as root with their output on ttyS0, then one line
 # `amdsev-guest: exit <status>`, then power off. The script prints the console
 # and exits with <status>; without that line, or on its own errors, it exits 2.

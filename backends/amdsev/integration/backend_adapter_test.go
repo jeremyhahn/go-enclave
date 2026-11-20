@@ -13,7 +13,7 @@ import (
 // require the module and make newBackend return its constructor's result.
 
 // errBackendNotLinked is newBackend's error until the backend is required.
-var errBackendNotLinked = errors.New("amdsev: the amd-sev backend module is not required by test/integration/amdsev yet; require it and return its constructor from newBackend")
+var errBackendNotLinked = errors.New("amdsev: the amd-sev backend module is not required by backends/amdsev/integration yet; require it and return its constructor from newBackend")
 
 // newBackend constructs the amd-sev backend: inside an SEV-SNP guest a
 // backend whose ConfinesProcess is true, elsewhere an error that is

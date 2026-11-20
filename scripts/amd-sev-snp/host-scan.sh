@@ -10,7 +10,7 @@
 # needle is not found, 1 when it is (naming each mapping), 2 on an error,
 # including when no mapping could be read.
 #
-# The scan is test/integration/amdsev/cmd/amdsev-hostscan: the script runs
+# The scan is backends/amdsev/integration/cmd/amdsev-hostscan: the script runs
 # $AMDSEV_HOSTSCAN when it is set, and otherwise builds the helper from this
 # tree with the module proxy off, so it downloads nothing.
 set -eu
@@ -34,12 +34,12 @@ esac
 
 helper=${AMDSEV_HOSTSCAN:-}
 if [ -z "$helper" ]; then
-  module=$(cd "$here/../../test/integration/amdsev" && pwd)
+  module=$(cd "$here/../../backends/amdsev/integration" && pwd)
   tmp=$(mktemp -d)
   trap 'rm -rf "$tmp"' EXIT
   helper=$tmp/amdsev-hostscan
   (cd "$module" && GOWORK=off GOPROXY=off GOFLAGS=-mod=readonly go build -o "$helper" ./cmd/amdsev-hostscan) ||
-    fail "cannot build test/integration/amdsev/cmd/amdsev-hostscan"
+    fail "cannot build backends/amdsev/integration/cmd/amdsev-hostscan"
 fi
 rc=0
 "$helper" "$pid" "$needle" || rc=$?

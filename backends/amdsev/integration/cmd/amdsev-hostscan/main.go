@@ -16,7 +16,7 @@ import (
 	"os"
 	"strconv"
 
-	"github.com/jeremyhahn/go-enclave/test/integration/amdsev/hostscan"
+	"github.com/jeremyhahn/go-enclave/backends/amdsev/integration/hostscan"
 )
 
 func main() {

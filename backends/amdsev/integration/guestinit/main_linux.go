@@ -15,7 +15,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"github.com/jeremyhahn/go-enclave/test/integration/amdsev/guestcfg"
+	"github.com/jeremyhahn/go-enclave/backends/amdsev/integration/guestcfg"
 )
 
 // moduleInitCompressedFile is finit_module's MODULE_INIT_COMPRESSED_FILE:

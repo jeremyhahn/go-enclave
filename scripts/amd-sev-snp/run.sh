@@ -8,7 +8,7 @@
 #   2. the kit's own tests, which need no hardware (the host-scan logic
 #      against a local process, the guest init, the scripts' argument handling)
 #   3. guest-image.sh: the guest kit from the pinned inputs
-#   4. the host tests of test/integration/amdsev (TestAmdSev_Host...), as
+#   4. the host tests of backends/amdsev/integration (TestAmdSev_Host...), as
 #      root: the backend's refusal on the host, then a fresh SEV-SNP guest and a
 #      fresh plain KVM guest of the same image, each running its in-guest tests
 #      (backendtest in SNP, the refusal in plain KVM, the held needle in both),
@@ -28,7 +28,7 @@ fail() { echo "$prog: $*" >&2; exit 2; }
 
 [ "$#" -eq 0 ] || fail "usage: $prog (no arguments; see the AMDSEV_ variables in the scripts)"
 
-module=$(cd "$here/../../test/integration/amdsev" && pwd)
+module=$(cd "$here/../../backends/amdsev/integration" && pwd)
 cache=${AMDSEV_CACHE:-${HOME:-/nonexistent}/.cache/go-enclave/amd-sev-snp}
 results=${AMDSEV_RESULTS:-$cache/results}
 export AMDSEV_CACHE="$cache"
@@ -41,7 +41,7 @@ sh "$here/host-record.sh" >"$results/host-record.txt" 2>&1 || {
 }
 cat -- "$results/host-record.txt"
 
-command -v go >/dev/null 2>&1 || fail "go: not found; the kit builds its tests with the Go toolchain test/integration/amdsev/go.mod names"
+command -v go >/dev/null 2>&1 || fail "go: not found; the kit builds its tests with the Go toolchain backends/amdsev/integration/go.mod names"
 (cd "$module" && GOWORK=off go test -count=1 ./guestcfg/... ./hostscan/... ./cmd/... ./guestinit/... ./kittest/...) ||
   fail "step 2, the kit's own tests, failed"
 
