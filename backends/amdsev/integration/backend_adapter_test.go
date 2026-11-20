@@ -27,12 +27,12 @@ func newBackend() (enclave.Backend, error) {
 func conformance(logf func(string, ...any)) backendtest.Config {
 	return backendtest.Config{
 		New:                 newBackend,
-		BackendCapabilities: []enclave.Capability{enclave.CapabilityConfine, enclave.CapabilityImport, enclave.CapabilityBytes},
+		BackendCapabilities: []enclave.Capability{enclave.CapabilityConfine, enclave.CapabilityImport},
 		Handles: []backendtest.HandleCase{{
 			Name:         "material",
 			Import:       []enclave.ImportOption{enclave.WithPurpose(enclave.PurposeMaterial)},
 			ImportSize:   32,
-			Capabilities: []enclave.Capability{enclave.CapabilityBytes},
+			Capabilities: []enclave.Capability{enclave.CapabilityBytes, enclave.CapabilityFreeze},
 		}},
 		Logf: logf,
 	}
