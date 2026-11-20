@@ -27,25 +27,10 @@ const (
 	toolchainBuildMakeCall = `make docker-build-toolchain GO_BUILD_PROXY="${GOPROXY:-}"`
 )
 
-// hostedRunner is the runner label every job in hostedWorkflows takes, but
-// for the jobs in trustedPoolJobs, which may take trustedPoolRunner instead.
+// hostedRunner is the runner label every job in hostedWorkflows takes, with
+// no exception: no self-hosted label, no label list and no expression that
+// picks a runner by event.
 const hostedRunner = "ubuntu-latest"
-
-// trustedPoolRunner is the one self-hosted form a job may take: the
-// self-hosted pool for a push to main and a same-repository pull request,
-// and hostedRunner for every other event, a fork pull request included, so
-// code from a fork never runs on the pool. A schedule run takes hostedRunner:
-// the pool's job-started hook refuses every event but those two.
-const trustedPoolRunner = `${{ ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","linux","x64","bigdisk-docker"]') || 'ubuntu-latest' }}`
-
-// trustedPoolJobs are the only jobs that may take trustedPoolRunner.
-var trustedPoolJobs = map[string]bool{"lint": true, "lint-gates": true}
-
-// runnerAllowed reports whether job name may run on runsOn: hostedRunner for
-// every job, trustedPoolRunner, exactly, for a job in trustedPoolJobs.
-func runnerAllowed(name string, runsOn any) bool {
-	return runsOn == hostedRunner || (trustedPoolJobs[name] && runsOn == trustedPoolRunner)
-}
 
 // goEnvSet matches a workflow line that sets one of the module variables, as
 // an env: key or a shell assignment or export.
@@ -56,8 +41,7 @@ var imageBuildWorkflows = []string{".github/workflows/ci.yml", ".github/workflow
 var hostedWorkflows = []string{".github/workflows/ci.yml", ".github/workflows/release.yml"}
 
 // hostedRunnerViolations lists every job in one workflow whose runs-on is
-// neither the GitHub-hosted runner nor, for a job in trustedPoolJobs,
-// trustedPoolRunner.
+// not the GitHub-hosted runner.
 func hostedRunnerViolations(src []byte) ([]string, error) {
 	var wf proxyWorkflow
 	if err := yaml.Unmarshal(src, &wf); err != nil {
@@ -65,7 +49,7 @@ func hostedRunnerViolations(src []byte) ([]string, error) {
 	}
 	var bad []string
 	for name, job := range wf.Jobs {
-		if !runnerAllowed(name, job.RunsOn) {
+		if job.RunsOn != hostedRunner {
 			bad = append(bad, fmt.Sprintf("job %s: runs-on %v, want %s", name, job.RunsOn, hostedRunner))
 		}
 	}
@@ -102,7 +86,8 @@ func TestEveryJobRunsOnAHostedRunner_RefusesWhatItMustRefuse(t *testing.T) {
 		}
 		wf := string(src)
 		for _, tc := range []struct{ name, new string }{
-			{"job on a self-hosted label", "runs-on: bigdisk\n"},
+			{"job on a self-hosted label", "runs-on: self-hosted\n"},
+			{"job on the event-picked pool", "runs-on: " + poolRunner + "\n"},
 			{"job on a server_url choice", "runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'batch' }}\n"},
 		} {
 			t.Run(filepath.Base(f)+"/"+tc.name, func(t *testing.T) {
@@ -123,9 +108,13 @@ func TestEveryJobRunsOnAHostedRunner_RefusesWhatItMustRefuse(t *testing.T) {
 	}
 }
 
-// TestEveryJobRunsOnAHostedRunner_TrustedPool pins the one self-hosted form
-// the check accepts: trustedPoolRunner, on lint and lint-gates only.
-func TestEveryJobRunsOnAHostedRunner_TrustedPool(t *testing.T) {
+// poolRunner is the event-picked self-hosted form ci.yml's lint and
+// lint-gates jobs once took: the check refuses it on every job.
+const poolRunner = `${{ ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","linux","x64"]') || 'ubuntu-latest' }}`
+
+// TestEveryJobRunsOnAHostedRunner_NoPoolException pins that no job, lint and
+// lint-gates included, may take a self-hosted runner in any form.
+func TestEveryJobRunsOnAHostedRunner_NoPoolException(t *testing.T) {
 	workflow := func(lint, lintGates, image any) []byte {
 		src, err := yaml.Marshal(map[string]any{"jobs": map[string]any{
 			"lint":       map[string]any{"runs-on": lint},
@@ -137,24 +126,19 @@ func TestEveryJobRunsOnAHostedRunner_TrustedPool(t *testing.T) {
 		}
 		return src
 	}
-	noPR := strings.Replace(trustedPoolRunner, " || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)", "", 1)
-	anyPR := strings.Replace(trustedPoolRunner, " && github.event.pull_request.head.repo.full_name == github.repository", "", 1)
-	noFallback := strings.Replace(trustedPoolRunner, " || 'ubuntu-latest'", "", 1)
-	withSchedule := strings.Replace(trustedPoolRunner, " || (github.event_name == 'pull_request'", " || github.event_name == 'schedule' || (github.event_name == 'pull_request'", 1)
 	for _, tc := range []struct {
 		name                   string
 		lint, lintGates, image any
 		want                   []string
 	}{
-		{"lint and lint-gates on the pool", trustedPoolRunner, trustedPoolRunner, hostedRunner, nil},
-		{"lint alone on the pool", trustedPoolRunner, hostedRunner, hostedRunner, nil},
-		{"another job on the pool", trustedPoolRunner, trustedPoolRunner, trustedPoolRunner, []string{"job image:"}},
+		{"every job hosted", hostedRunner, hostedRunner, hostedRunner, nil},
+		{"lint on the pool", poolRunner, hostedRunner, hostedRunner, []string{"job lint:"}},
+		{"lint-gates on the pool", hostedRunner, poolRunner, hostedRunner, []string{"job lint-gates:"}},
+		{"lint and lint-gates on the pool", poolRunner, poolRunner, hostedRunner, []string{"job lint-gates:", "job lint:"}},
+		{"another job on the pool", hostedRunner, hostedRunner, poolRunner, []string{"job image:"}},
 		{"bare self-hosted label", "self-hosted", hostedRunner, hostedRunner, []string{"job lint:"}},
-		{"self-hosted label list", []any{"self-hosted", "linux", "x64", "bigdisk-docker"}, hostedRunner, hostedRunner, []string{"job lint:"}},
-		{"fork pull requests on the pool", hostedRunner, anyPR, hostedRunner, []string{"job lint-gates:"}},
-		{"pull requests off the pool", noPR, hostedRunner, hostedRunner, []string{"job lint:"}},
-		{"no hosted fallback", hostedRunner, noFallback, hostedRunner, []string{"job lint-gates:"}},
-		{"schedule runs on the pool", withSchedule, hostedRunner, hostedRunner, []string{"job lint:"}},
+		{"self-hosted label list", []any{"self-hosted", "linux", "x64"}, hostedRunner, hostedRunner, []string{"job lint:"}},
+		{"hosted label in a list", []any{hostedRunner}, hostedRunner, hostedRunner, []string{"job lint:"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			bad, err := hostedRunnerViolations(workflow(tc.lint, tc.lintGates, tc.image))
@@ -170,34 +154,6 @@ func TestEveryJobRunsOnAHostedRunner_TrustedPool(t *testing.T) {
 				}
 			}
 		})
-	}
-	for _, name := range []string{"lint", "lint-gates", "image", "ci-gate"} {
-		if got := runnerAllowed(name, trustedPoolRunner); got != trustedPoolJobs[name] {
-			t.Errorf("runnerAllowed(%s, trustedPoolRunner) = %v, want %v", name, got, trustedPoolJobs[name])
-		}
-	}
-}
-
-// TestTrustedPoolJobsTakeThePool holds ci.yml's lint and lint-gates jobs to
-// trustedPoolRunner, so the gate's accepted form and the workflow agree.
-func TestTrustedPoolJobsTakeThePool(t *testing.T) {
-	src, err := os.ReadFile(filepath.Join(repoRoot(t), ".github/workflows/ci.yml"))
-	if err != nil {
-		t.Fatalf("read ci.yml: %v", err)
-	}
-	var wf proxyWorkflow
-	if err := yaml.Unmarshal(src, &wf); err != nil {
-		t.Fatalf("parse ci.yml: %v", err)
-	}
-	for name := range trustedPoolJobs {
-		job, ok := wf.Jobs[name]
-		if !ok {
-			t.Errorf("ci.yml has no job %s", name)
-			continue
-		}
-		if job.RunsOn != trustedPoolRunner {
-			t.Errorf("job %s: runs-on %v, want %s", name, job.RunsOn, trustedPoolRunner)
-		}
 	}
 }
 
@@ -249,7 +205,7 @@ func imageBuildProxyViolations(src []byte) ([]string, error) {
 				continue
 			}
 			builds++
-			if !runnerAllowed(name, job.RunsOn) {
+			if job.RunsOn != imageBuildRunner {
 				bad = append(bad, fmt.Sprintf("job %s: builds the image on runs-on %v, want %s", name, job.RunsOn, imageBuildRunner))
 			}
 			for _, line := range strings.Split(st.Run, "\n") {
@@ -379,8 +335,8 @@ func TestImageBuildUsesTheModuleProxy_RefusesWhatItMustRefuse(t *testing.T) {
 			{"GONOSUMDB exported", "      - name: ", "      - name: x\n        run: export GONOSUMDB=example.com/*\n      - name: "},
 			{"url insteadOf rewrite", "      - name: ", "      - name: x\n        run: git config --global url.https://example.com/.insteadOf https://github.com/\n      - name: "},
 			{"make call drops the proxy", imageBuildMakeCall, "make docker-build"},
-			{"image job on a self-hosted label", "runs-on: " + imageBuildRunner + "\n", "runs-on: bigdisk\n"},
-			{"image job back on the server_url choice", "runs-on: " + imageBuildRunner + "\n", "runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'bigdisk' }}\n"},
+			{"image job on a self-hosted label", "runs-on: " + imageBuildRunner + "\n", "runs-on: self-hosted\n"},
+			{"image job back on the server_url choice", "runs-on: " + imageBuildRunner + "\n", "runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'self-hosted' }}\n"},
 		} {
 			t.Run(filepath.Base(f)+"/"+tc.name, func(t *testing.T) {
 				if !strings.Contains(wf, tc.old) {

@@ -702,8 +702,8 @@ func TestCIGateTiers_RefusesWhatItMustRefuse(t *testing.T) {
 	// lintHead is the lint job's head: a PR-tier job that needs the preflight
 	// job for its guard (v1.34; the arch-gates job before), and lintIf its if.
 	const lintIf = "    if: " + guardedPRJobIf + "\n"
-	// lintRunsOn is the lint job's runs-on line: the trusted pool.
-	const lintRunsOn = "    runs-on: " + trustedPoolRunner + "\n"
+	// lintRunsOn is the lint job's runs-on line: the hosted runner.
+	const lintRunsOn = "    runs-on: " + hostedRunner + "\n"
 	const lintHead = "    name: Lint [lint, gosec, build tags]\n" + lintRunsOn + "    needs: preflight   # v1.34\n" + lintIf
 	const lintNeeds = "    name: Lint [lint, gosec, build tags]\n" + lintRunsOn + "    needs: preflight   # v1.34\n"
 	const nightlyIf = "    if: ${{ (" + termNightly + ") && " + termRun + " }}\n"
