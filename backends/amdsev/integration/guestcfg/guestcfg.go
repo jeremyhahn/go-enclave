@@ -6,6 +6,7 @@ package guestcfg
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -24,6 +25,8 @@ const (
 
 // The guest modes, the kernel command line's amdsev.mode.
 const (
+	ModeSEV   = "sev"
+	ModeSEVES = "sev-es"
 	ModeSNP   = "snp"
 	ModePlain = "plain"
 )
@@ -37,7 +40,7 @@ var ErrNotKitGuest = errors.New("guestcfg: no amdsev.mode on the kernel command 
 
 // Config is what the host told the guest.
 type Config struct {
-	// Mode is ModeSNP or ModePlain.
+	// Mode is one of SEVModes or ModePlain.
 	Mode string
 	// Run is the -test.run pattern for the in-guest tests.
 	Run string
@@ -51,6 +54,19 @@ func DefaultRun(mode string) string {
 		return "^TestAmdSev_Guest(Conformance|HoldNeedle)$"
 	}
 	return "^TestAmdSev_Guest(Refusal|HoldNeedle)$"
+}
+
+// SEVModes lists the encrypted guests the kit boots: SEV, SEV-ES and SEV-SNP.
+// Only an SEV-SNP guest gives the backend what it needs; in the others it
+// refuses, as it does in the plain control.
+func SEVModes() []string {
+	return []string{ModeSEV, ModeSEVES, ModeSNP}
+}
+
+// ValidMode reports whether m is a mode the kit boots: one of SEVModes or
+// ModePlain.
+func ValidMode(m string) bool {
+	return m == ModePlain || slices.Contains(SEVModes(), m)
 }
 
 // Parse reads a kernel command line (the contents of /proc/cmdline).
@@ -71,12 +87,11 @@ func Parse(cmdline string) (Config, error) {
 			c.Hold = time.Duration(secs) * time.Second
 		}
 	}
-	switch c.Mode {
-	case ModeSNP, ModePlain:
-	case "":
+	switch {
+	case c.Mode == "":
 		return Config{}, ErrNotKitGuest
-	default:
-		return Config{}, fmt.Errorf("guestcfg: amdsev.mode=%q, want %s or %s", c.Mode, ModeSNP, ModePlain)
+	case !ValidMode(c.Mode):
+		return Config{}, fmt.Errorf("guestcfg: amdsev.mode=%q, want one of %s or %s", c.Mode, strings.Join(SEVModes(), ", "), ModePlain)
 	}
 	if c.Run == "" {
 		c.Run = DefaultRun(c.Mode)
