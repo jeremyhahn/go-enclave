@@ -30,6 +30,9 @@ fail() { echo "$prog: $*" >&2; exit 2; }
 
 module=$(cd "$here/../../backends/amdsev/integration" && pwd)
 cache=${AMDSEV_CACHE:-${HOME:-/nonexistent}/.cache/go-enclave/amd-sev-snp}
+# Absolute: step 4 runs from $results and is handed paths under the cache.
+mkdir -p "$cache"
+cache=$(cd "$cache" && pwd)
 results=${AMDSEV_RESULTS:-$cache/results}
 export AMDSEV_CACHE="$cache"
 
@@ -49,7 +52,11 @@ sh "$here/guest-image.sh" all || fail "step 3, the guest kit, failed"
 
 bin=$cache/amdsev-host.test
 (cd "$module" && GOWORK=off CGO_ENABLED=0 go test -c -o "$bin" .) || fail "cannot build the host test binary"
-set -- env AMDSEV_KIT="$cache/kit" AMDSEV_RESULTS="$results" AMDSEV_SCRIPTS="$here" \
+# The scanner is built here, not by host-scan.sh: step 4 may run under sudo,
+# whose secure_path need not hold go.
+scanner=$cache/amdsev-hostscan
+(cd "$module" && GOWORK=off CGO_ENABLED=0 go build -o "$scanner" ./cmd/amdsev-hostscan) || fail "cannot build the host scanner"
+set -- env AMDSEV_KIT="$cache/kit" AMDSEV_RESULTS="$results" AMDSEV_SCRIPTS="$here" AMDSEV_HOSTSCAN="$scanner" \
   "$bin" -test.run '^TestAmdSev_Host' -test.v -test.count=1 -test.timeout=80m
 if [ "$(id -u)" -ne 0 ]; then
   command -v sudo >/dev/null 2>&1 || fail "not root and no sudo: the host scan reads QEMU's memory and needs root"
