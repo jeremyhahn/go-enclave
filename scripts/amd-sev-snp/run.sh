@@ -44,14 +44,14 @@ sh "$here/host-record.sh" >"$results/host-record.txt" 2>&1 || {
 }
 cat -- "$results/host-record.txt"
 
-command -v go >/dev/null 2>&1 || fail "go: not found; the kit builds its tests with the Go toolchain backends/amdsev/integration/go.mod names"
+command -v go >/dev/null 2>&1 || fail "go: not found; the kit builds its tests with the Go toolchain backends/amdsev/go.mod names"
 (cd "$module" && GOWORK=off go test -count=1 ./guestcfg/... ./hostscan/... ./cmd/... ./guestinit/... ./kittest/...) ||
   fail "step 2, the kit's own tests, failed"
 
 sh "$here/guest-image.sh" all || fail "step 3, the guest kit, failed"
 
 bin=$cache/amdsev-host.test
-(cd "$module" && GOWORK=off CGO_ENABLED=0 go test -c -o "$bin" .) || fail "cannot build the host test binary"
+(cd "$module" && GOWORK=off CGO_ENABLED=0 go test -c -tags amdsev -o "$bin" .) || fail "cannot build the host test binary"
 # The scanner is built here, not by host-scan.sh: step 4 may run under sudo,
 # whose secure_path need not hold go.
 scanner=$cache/amdsev-hostscan

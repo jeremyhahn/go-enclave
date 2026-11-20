@@ -143,7 +143,7 @@ initrd() {
   (cd "$module" && GOWORK=off CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
     go build -trimpath -o "$stage/init" ./guestinit) || fail "cannot build the guest init"
   (cd "$module" && GOWORK=off CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-    go test -c -trimpath -o "$stage/amdsev.test" .) || fail "cannot build the guest test binary"
+    go test -c -trimpath -tags amdsev -o "$stage/amdsev.test" .) || fail "cannot build the guest test binary"
   cp -f -- "$kit"/modules/* "$stage/modules/"
   (cd "$stage" && find . -mindepth 1 | LC_ALL=C sort | cpio -o -H newc --quiet) >"$kit/initrd.img.part"
   mv -f -- "$kit/initrd.img.part" "$kit/initrd.img"

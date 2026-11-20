@@ -1,7 +1,10 @@
+//go:build amdsev
+
 // Package amdsev_test is the SEV-SNP hardware suite. Its TestAmdSev_Guest
 // tests run inside a guest the kit boots (scripts/amd-sev-snp/guest.sh, with
 // guestinit as /init); its TestAmdSev_Host tests run on the host, as root,
-// under scripts/amd-sev-snp/run.sh. A test run in the wrong place fails.
+// under scripts/amd-sev-snp/run.sh. A test run in the wrong place fails. The
+// amdsev build tag selects it, so make test-backends never runs it.
 package amdsev_test
 
 import (
