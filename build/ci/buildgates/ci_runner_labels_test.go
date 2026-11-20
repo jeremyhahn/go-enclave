@@ -127,6 +127,7 @@ func TestCIRunnerLabelsStep(t *testing.T) {
 				t.Fatal(err)
 			}
 			out, failed := runRunnerLabels(t, script, dir)
+			t.Logf("the step on %s/%s:\n%s", c.dir, name, out)
 			finding := strings.Contains(out, "::error::.github/workflows/"+name+":")
 			switch {
 			case c.findings && (!failed || !finding):

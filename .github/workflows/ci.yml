@@ -1026,7 +1026,9 @@ jobs:
       # oversize: (credential: for the one Codex review job, code-review.yml's
       # `review`); a reason with no category is (e), a credential reason on
       # any other job (f). A runs-on expression that may yield a value the
-      # step cannot know names an unknown runner (c).
+      # step cannot know names an unknown runner (c): only the server is
+      # pinned, and the event, the ref and every other context are unknown.
+      # A workflow whose jobs, or a job whose runs-on, it cannot read is (g).
       # Its tests: build/ci/buildgates/ci_runner_labels_test.go.
       - name: Runner labels (ruling 633)
         run: |
@@ -1040,7 +1042,18 @@ jobs:
           # outside the release allow-list, with every value this step cannot know
           # (vars, needs, secrets, server_url, ...) unknown; the job passes only when
           # the `if` is false in each of them whatever the unknowns hold.
-          U = object()  # unknown value
+          class Unk:  # a value this step cannot know; t is its truthiness when that is known
+              def __init__(self, t=None):
+                  self.t = t
+
+
+          U, UT, UF = Unk(), Unk(True), Unk(False)  # unknown; unknown but truthy; unknown but falsy
+
+
+          def unk(v):
+              return isinstance(v, Unk)
+
+
           OPEN = "$" "{{"  # split, so the runner does not read it as an expression
           ALLOWED = "push to refs/heads/main or refs/tags/*, or workflow_dispatch on main"
           PR = {"pull_request", "pull_request_target"}
@@ -1093,8 +1106,8 @@ jobs:
 
 
           def truthy(v):
-              if v is U:
-                  return U
+              if unk(v):
+                  return U if v.t is None else v.t
               if isinstance(v, float) and v != v:
                   return False
               return v not in (None, False, 0, "", 0.0)
@@ -1116,7 +1129,7 @@ jobs:
 
 
           def eq(a, b):
-              if a is U or b is U:
+              if unk(a) or unk(b):
                   return U
               if isinstance(a, str) and isinstance(b, str):
                   return a.lower() == b.lower()
@@ -1126,10 +1139,8 @@ jobs:
 
 
           class P:
-              # value=True reads a runs-on: there the result is a runner label, not a
-              # truth, so `||` and `&&` with an unknown operand give an unknown value.
-              def __init__(self, toks, get, value=False):
-                  self.t, self.i, self.get, self.value = toks, 0, get, value
+              def __init__(self, toks, get):
+                  self.t, self.i, self.get = toks, 0, get
 
               def peek(self):
                   return self.t[self.i] if self.i < len(self.t) else (None, None)
@@ -1158,7 +1169,7 @@ jobs:
                       elif ta is False:
                           a = b
                       else:
-                          a = b if truthy(b) is True and not self.value else U
+                          a = UT if truthy(b) is True else U  # the unknown or b: truthy, value unknown
                   return a
 
               def andx(self):
@@ -1172,7 +1183,7 @@ jobs:
                       elif ta is True:
                           a = b
                       else:
-                          a = b if truthy(b) is False and not self.value else U
+                          a = UF if truthy(b) is False else U  # the unknown or b: falsy, value unknown
                   return a
 
               def cmp(self):
@@ -1185,7 +1196,7 @@ jobs:
                       elif op == "!=":
                           r = eq(a, b)
                           a = U if r is U else not r
-                      elif a is U or b is U:
+                      elif unk(a) or unk(b):
                           a = U
                       else:
                           x, y = (a.lower(), b.lower()) if isinstance(a, str) and isinstance(b, str) else (num(a), num(b))
@@ -1245,7 +1256,7 @@ jobs:
                   if f == "always":
                       return True
                   if f in ("startswith", "endswith", "contains") and len(a) == 2:
-                      if U in a:
+                      if any(unk(x) for x in a):
                           return U
                       if f == "contains" and isinstance(a[0], list):
                           return any(eq(x, a[1]) is True for x in a[0])
@@ -1256,7 +1267,7 @@ jobs:
                           return json.loads(a[0])
                       except ValueError:
                           return U
-                  if f == "format" and a and U not in a and isinstance(a[0], str):
+                  if f == "format" and a and not any(unk(x) for x in a) and isinstance(a[0], str):
                       return re.sub(r"\{(\d+)\}", lambda m: str(a[int(m.group(1)) + 1]) if int(m.group(1)) + 1 < len(a) else m.group(0), a[0])
                   return U  # success(), failure(), hashFiles(), ...: unknown
 
@@ -1339,45 +1350,34 @@ jobs:
           BARE = re.compile(r"#\s*self-hosted:")  # v1.46: a waiver whose reason names no category
           CREDENTIAL_JOB = ("code-review.yml", "review")  # the one job a credential reason may name
           GH = "https://github.com"
-          HOSTED_CTX = [  # (event, ref, head repo) on github.com; o/r is this repository
-              ("push", "refs/heads/main", None), ("push", "refs/heads/feature", None),
-              ("pull_request", "refs/pull/1/merge", "o/r"), ("pull_request", "refs/pull/1/merge", "fork/r"),
-              ("workflow_dispatch", "refs/heads/main", None), ("schedule", "refs/heads/main", None),
-          ]
 
 
-          def hosted_get(ev, ref, head):
-              def get(path):
-                  p = path.lower()
-                  if p == "github.server_url":
-                      return GH
-                  if p == "github.repository":
-                      return "o/r"
-                  if p == "github.event.pull_request.head.repo.full_name":
-                      return head if ev in PR else None
-                  if p == "github.event.pull_request.draft":
-                      return False if ev in PR else None
-                  return ctx_get(ev, ref, path)
-              return get
+
+          def hosted_get(path):
+              # Only the server is pinned, github.com; every other context (the
+              # event, the ref, vars, ...) is unknown, so a runs-on that tests one
+              # may pick its other runner on some event, and no sample of events
+              # stands in for all of them.
+              return GH if path.lower() == "github.server_url" else U
 
 
           def labels(value):
               # A runs-on value's labels: a string, a list, or an expression's result.
-              if value is U or value is None:
+              if unk(value) or value is None:
                   return None
               if isinstance(value, list):
                   return [str(x) for x in value]
               return [str(value)]
 
 
-          def runs_on_labels(text, ev, ref, head):
+          def runs_on_labels(text):
               t = text.strip()
               if t.startswith("group:") or t.startswith("labels:") or " labels:" in t:
                   m = re.search(r"labels:\s*(\[[^\]]*\]|\S+)", t)
                   t = m.group(1) if m else ""
               m = re.fullmatch(r"\$\{\{(.*)\}\}", unquote(t), re.S)
               if m:
-                  return labels(P(lex(m.group(1)), hosted_get(ev, ref, head), value=True).parse())
+                  return labels(P(lex(m.group(1)), hosted_get).parse())
               if t.startswith("["):
                   return [unquote(x) for x in re.split(r"\s*,\s*", t.strip("[] ")) if x]
               if t.startswith("- "):
@@ -1403,16 +1403,36 @@ jobs:
               lines = open(path, encoding="utf-8").read().splitlines()
               on = triggers(lines)
               bad = []
+              seen = False
               for i, s in enumerate(lines):
-                  if re.match(r"jobs\s*:\s*(#.*)?$", s):
-                      for j, job, _ in keys_under(lines, i):
+                  m = re.match(r"(['\"]?)jobs\1\s*:(.*)$", s)
+                  if m:
+                      # Fail closed: jobs this step cannot list are a finding, not a pass.
+                      seen = True
+                      if strip_comment(m.group(2)).strip():
+                          bad.append(f"{path}: (g) its `jobs:` value is not a block mapping, so this step cannot list its jobs; "
+                                     f"write `jobs:` on its own line and each job as a block under it")
+                          continue
+                      jobs = keys_under(lines, i)
+                      if not jobs:
+                          bad.append(f"{path}: (g) its `jobs:` holds no job this step can read")
+                      for j, job, jinline in jobs:
+                          where = f"{path}:{job}"
+                          if strip_comment(jinline).strip():
+                              bad.append(f"{where}: (g) is not a block mapping, so this step cannot read its runs-on")
+                              continue
                           ro = cond = ro_line = None
+                          uses = False
                           for k, key, inline in keys_under(lines, j):
                               if key == "runs-on":
                                   ro, ro_line = body(lines, k, inline), lines[k]
                               elif key == "if":
                                   cond = body(lines, k, inline)
-                          where = f"{path}:{job}"
+                              elif key == "uses":
+                                  uses = True
+                          if ro is None and not uses:
+                              bad.append(f"{where}: (g) has neither a runs-on nor a uses this step can read")
+                              continue
                           if ro is not None and not names_release(ro):
                               # v1.43 (ruling 833): hosted first.
                               if LARGER.search(ro) and re.search(r"ubuntu|windows|macos", ro):
@@ -1426,15 +1446,15 @@ jobs:
                               if w:
                                   continue
                               off = []
-                              for ev, ref, head in HOSTED_CTX:
-                                  try:
-                                      got = runs_on_labels(ro, ev, ref, head)
-                                  except ValueError as e:
-                                      off.append(f"{ev} ({ref}): cannot be read ({e})")
-                                      continue
-                                  if got is None or len(got) != 1 or not STANDARD.fullmatch(got[0]):
-                                      what = "an unknown label" if got is None else ", ".join(got)
-                                      off.append(f"{ev} ({ref}{', fork' if head == 'fork/r' else ''}): {what}")
+                              try:
+                                  got = runs_on_labels(ro)
+                              except ValueError as e:
+                                  off.append(f"a runs-on this step cannot read ({e})")
+                              else:
+                                  if got is None:
+                                      off.append("a runner this step cannot know: the expression tests an event, ref or value it does not pin")
+                                  elif len(got) != 1 or not STANDARD.fullmatch(got[0]):
+                                      off.append(", ".join(got))
                               if off and BARE.search(ro_line):
                                   bad.append(f"{where}: (e) its `# self-hosted:` reason names no category; ruling 999 allows a self-hosted job "
                                              f"only as `# self-hosted: hardware: <reason>` or `# self-hosted: oversize: <reason>`; it runs on " + "; ".join(dict.fromkeys(off)))
@@ -1467,6 +1487,8 @@ jobs:
                           if rest:
                               bad.append(f"{where}: (b) names `release` and its `if:` does not restrict it to {ALLOWED}; it can run on "
                                          + ", ".join(dict.fromkeys(f"{ev} ({ref})" for ev, ref in rest)))
+              if not seen:
+                  bad.append(f"{path}: (g) has no top-level `jobs:` this step can read")
               return bad
 
 
