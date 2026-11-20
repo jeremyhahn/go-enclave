@@ -69,6 +69,17 @@ var runnerLabelsCases = []struct {
 	{"fail-release-pull-request-unsampled-ref", true},
 	{"fail-release-issue-comment-unsampled-ref", true},
 	{"fail-release-unsampled-event", true},
+	// A release job is a self-hosted job first: it names a category and a
+	// reason, and the credential category stays on code-review.yml's review
+	// job, before its `if:` is read at all.
+	{"fail-release-push-main-no-reason", true},
+	{"fail-release-credential-on-ci", true},
+	{"pass-release-hardware-reason", false},
+	// Actions compares arrays and objects by instance, so two fromJSON
+	// results are never equal; the step cannot know identity and treats
+	// the comparison as unknown.
+	{"fail-fromjson-array-equality", true},
+	{"fail-fromjson-object-inequality", true},
 	{"pass-release-push-main", false},
 	{"pass-release-push-tag", false},
 	{"pass-release-push-main-or-tag", false},

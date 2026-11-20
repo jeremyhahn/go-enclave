@@ -1,7 +1,7 @@
 on: [push, pull_request]
 jobs:
   publish:
-    runs-on: [self-hosted, release]
+    runs-on: [self-hosted, release]  # self-hosted: hardware: the signing device this job drives
     if: ${{ success() && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') }}
     steps:
       - run: "true"
