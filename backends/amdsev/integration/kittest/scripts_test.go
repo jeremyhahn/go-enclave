@@ -188,8 +188,20 @@ func TestAmdSev_GuestImageRefusesAMismatchedInput(t *testing.T) {
 			}
 		}
 	}
-	sh(t, "guest-image.sh", []string{"AMDSEV_CACHE=" + t.TempDir(), "AMDSEV_SNAPSHOT=file://" + snap}, "inputs").
-		want(t, 2, hex.EncodeToString(sum[:]), "refusing it")
+	// The kit checks for dpkg-deb before it fetches. A stand-in on PATH lets
+	// the test run where the host has none, and fails if extraction is reached
+	// past the refused digest.
+	tools := t.TempDir()
+	write(t, filepath.Join(tools, "dpkg-deb"), "#!/bin/sh\necho \"dpkg-deb reached past a refused digest: $*\" >&2\nexit 3\n")
+	if err := os.Chmod(filepath.Join(tools, "dpkg-deb"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := "PATH=" + tools + string(os.PathListSeparator) + os.Getenv("PATH")
+	r = sh(t, "guest-image.sh", []string{"AMDSEV_CACHE=" + t.TempDir(), "AMDSEV_SNAPSHOT=file://" + snap, path}, "inputs")
+	r.want(t, 2, hex.EncodeToString(sum[:]), "refusing it")
+	if strings.Contains(r.stderr, "dpkg-deb reached") {
+		t.Errorf("the kit extracted a package after refusing its digest:\n%s", r.stderr)
+	}
 }
 
 // kit is a fake kit directory with the files guest.sh wants.
