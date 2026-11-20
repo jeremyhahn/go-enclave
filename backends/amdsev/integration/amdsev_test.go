@@ -1,6 +1,7 @@
 //go:build amdsev
 
-// Package amdsev_test is the SEV-SNP hardware suite. Its TestAmdSev_Guest
+// Package amdsev_test is the AMD SEV hardware suite: SEV, SEV-ES and SEV-SNP
+// guests, and the plain KVM control. Its TestAmdSev_Guest
 // tests run inside a guest the kit boots (scripts/amd-sev-snp/guest.sh, with
 // guestinit as /init); its TestAmdSev_Host tests run on the host, as root,
 // under scripts/amd-sev-snp/run.sh. A test run in the wrong place fails. The
@@ -17,6 +18,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -84,10 +86,14 @@ func refused(t *testing.T, where string) {
 	}
 }
 
-// TestAmdSev_GuestRefusal: in a plain KVM guest the backend refuses.
+// TestAmdSev_GuestRefusal: in an SEV, SEV-ES or plain KVM guest the backend
+// refuses, since only SEV-SNP gives it what it needs.
 func TestAmdSev_GuestRefusal(t *testing.T) {
-	inGuest(t, guestcfg.ModePlain)
-	refused(t, "a plain KVM guest")
+	cfg := inGuest(t, "")
+	if cfg.Mode == guestcfg.ModeSNP {
+		t.Fatalf("the refusal runs in an SEV, SEV-ES or plain KVM guest, not in mode %s", cfg.Mode)
+	}
+	refused(t, "a "+cfg.Mode+" guest")
 }
 
 // TestAmdSev_HostRefusal: on the host the backend refuses.
@@ -133,8 +139,8 @@ func env(t *testing.T, name string) string {
 }
 
 // TestAmdSev_HostScan boots a fresh guest per mode, waits for the guest's
-// needle, and scans the guest's QEMU process for it as root: the SEV-SNP
-// guest's memory must not yield it, the plain KVM control's must. Each guest
+// needle, and scans the guest's QEMU process for it as root: for each guest
+// AMDSEV_GUESTS lists (sev, sev-es, snp) the encrypted memory must not yield it, the plain KVM control's must. Each guest
 // also runs its in-guest tests, and the guest's status must be 0.
 func TestAmdSev_HostScan(t *testing.T) {
 	onHost(t)
@@ -142,13 +148,25 @@ func TestAmdSev_HostScan(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Fatal("the host scan reads another process's memory: run it as root")
 	}
-	for _, tc := range []struct {
+	type guestRun struct {
 		mode      string
 		wantFound bool
-	}{
-		{guestcfg.ModeSNP, false},
-		{guestcfg.ModePlain, true},
-	} {
+	}
+	var runs []guestRun
+	for _, m := range strings.Fields(env(t, "AMDSEV_GUESTS")) {
+		if !slices.Contains(guestcfg.SEVModes(), m) {
+			t.Fatalf("AMDSEV_GUESTS names %q; want words from %v", m, guestcfg.SEVModes())
+		}
+		// The host must not find the needle in an encrypted guest's memory.
+		runs = append(runs, guestRun{m, false})
+	}
+	if len(runs) == 0 {
+		t.Fatalf("AMDSEV_GUESTS lists no guest; want words from %v", guestcfg.SEVModes())
+	}
+	// The plain KVM control: here the scan must find the needle, or it proves
+	// nothing about the encrypted guests.
+	runs = append(runs, guestRun{guestcfg.ModePlain, true})
+	for _, tc := range runs {
 		t.Run(tc.mode, func(t *testing.T) {
 			serial := filepath.Join(results, "guest-"+tc.mode+".log")
 			pidfile := filepath.Join(t.TempDir(), "qemu.pid")
@@ -186,7 +204,7 @@ func TestAmdSev_HostScan(t *testing.T) {
 			case tc.wantFound && code != 1:
 				t.Errorf("the control failed: the plain KVM guest's needle was not found in its QEMU process, so the scan proves nothing")
 			case !tc.wantFound && code != 0:
-				t.Errorf("the SEV-SNP guest's needle was found in its QEMU process: guest memory is readable from the host")
+				t.Errorf("the %s guest's needle was found in its QEMU process: guest memory is readable from the host", tc.mode)
 			}
 			if err := <-done; err != nil {
 				t.Errorf("%s guest exited: %v (its console: %s)", tc.mode, err, serial)
