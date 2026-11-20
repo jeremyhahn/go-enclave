@@ -1,25 +1,24 @@
 package amdsev_test
 
 import (
-	"errors"
-
 	enclave "github.com/jeremyhahn/go-enclave"
+	"github.com/jeremyhahn/go-enclave/backends/amdsev"
 	"github.com/jeremyhahn/go-enclave/backendtest"
 )
 
-// This file is the one seam to the amd-sev backend module. Until this module
-// requires it, newBackend fails with errBackendNotLinked, so every test that
-// needs the backend fails, never skips. Linking it is the one-line change:
-// require the module and make newBackend return its constructor's result.
+// allocatorSize is the locked arena newBackend gives the backend: room for the
+// conformance suite's handles.
+const allocatorSize = 1 << 20
 
-// errBackendNotLinked is newBackend's error until the backend is required.
-var errBackendNotLinked = errors.New("amdsev: the amd-sev backend module is not required by backends/amdsev/integration yet; require it and return its constructor from newBackend")
-
-// newBackend constructs the amd-sev backend: inside an SEV-SNP guest a
-// backend whose ConfinesProcess is true, elsewhere an error that is
-// enclave.ErrBackendUnavailable.
+// newBackend constructs the amd-sev backend with amdsev.New over a fresh
+// allocator: inside an SEV-SNP guest a backend whose ConfinesProcess is true,
+// elsewhere no backend and an error that is amdsev.ErrSNPGuestUnavailable.
 func newBackend() (enclave.Backend, error) {
-	return nil, errBackendNotLinked
+	a, err := enclave.NewAllocator(allocatorSize)
+	if err != nil {
+		return nil, err
+	}
+	return amdsev.New(a)
 }
 
 // conformance is backendtest's configuration for the amd-sev backend: the
