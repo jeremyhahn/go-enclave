@@ -520,6 +520,14 @@ integration-test-arm-trustzone: docker-build
 	  docker start -a "$$name"; \
 	fi
 
+## integration-test-amd-sev: the SEV-SNP hardware run on the host: records the host, builds the guest kit from pinned inputs, boots a fresh SEV-SNP guest and a plain KVM control, runs the TestAmdSev_ tests in and around them; fails naming what is missing where SNP is absent
+# scripts/amd-sev-snp/run.sh drives it; test/integration/amdsev is its own
+# module, so neither make test nor the root module sees it.
+# AMDSEV_CACHE and AMDSEV_RESULTS place the kit and the consoles.
+.PHONY: integration-test-amd-sev
+integration-test-amd-sev:
+	@sh scripts/amd-sev-snp/run.sh
+
 ## SWTPM_PORT=<port>: integration-test-tpm: the swtpm command port on 127.0.0.1 (default 2321)
 ## SWTPM_CTRL_PORT=<port>: integration-test-tpm: the swtpm control port on 127.0.0.1 (default 2322)
 SWTPM_PORT      ?= 2321
