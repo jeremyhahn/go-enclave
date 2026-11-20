@@ -11,7 +11,7 @@
 // the scan internal/memscan does in-process, and exits 0 when the needle is
 // not found, 1 when it is (naming each mapping that holds it), and 2 on an
 // error, including when a readable mapping could not be read: that scan is
-// incomplete, never "not found". scripts/amdsev-host-scan.sh builds
+// incomplete, never "not found". scripts/amd-sev-snp/amdsev-host-scan.sh builds
 // and runs it.
 package main
 

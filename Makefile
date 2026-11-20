@@ -239,10 +239,14 @@ lint-actions:
 # from it; each names its own shell on its first line.
 CI_BASH_SCRIPTS := scripts/apk-index-sum.sh scripts/ci-image-cache.sh scripts/in-toolchain-image.sh scripts/in-toolchain-image_test.sh scripts/reap-stale-ci-stacks.sh scripts/trim-ci-caches.sh
 .PHONY: lint-scripts
+# The amd-sev guest kit and host scan moved under scripts/amd-sev-snp/ and
+# are checked as they were under scripts/.
+AMDSEV_KIT_SCRIPTS := scripts/amd-sev-snp/amdsev-guest.sh scripts/amd-sev-snp/amdsev-host-scan.sh
+
 lint-scripts:
 	@sc=$(call tool,shellcheck,SHELLCHECK) && \
-	echo "shellcheck $(SHELLCHECK_VERSION) -x --shell=sh scripts/*.sh build/docker/devcontainer/*.sh build/fuzz/*.sh; $(CI_BASH_SCRIPTS) build/ci/*.sh" && \
-	"$$sc" -x --source-path=SCRIPTDIR --shell=sh $(filter-out $(CI_BASH_SCRIPTS),$(sort $(wildcard scripts/*.sh))) build/docker/devcontainer/*.sh build/fuzz/*.sh && \
+	echo "shellcheck $(SHELLCHECK_VERSION) -x --shell=sh $(AMDSEV_KIT_SCRIPTS) scripts/*.sh build/docker/devcontainer/*.sh build/fuzz/*.sh; $(CI_BASH_SCRIPTS) build/ci/*.sh" && \
+	"$$sc" -x --source-path=SCRIPTDIR --shell=sh $(AMDSEV_KIT_SCRIPTS) $(filter-out $(CI_BASH_SCRIPTS),$(sort $(wildcard scripts/*.sh))) build/docker/devcontainer/*.sh build/fuzz/*.sh && \
 	"$$sc" -x --source-path=SCRIPTDIR $(CI_BASH_SCRIPTS) build/ci/*.sh
 
 ## staticcheck: staticcheck (golangci-lint's, the one implementation, lint-go)

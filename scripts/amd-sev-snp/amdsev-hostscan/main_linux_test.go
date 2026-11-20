@@ -196,7 +196,7 @@ func TestHostScan_AnUnreadableMappingIsAnIncompleteScan(t *testing.T) {
 	}
 }
 
-// scripts/amdsev-host-scan.sh passes the helper's status through: 1 found,
+// scripts/amd-sev-snp/amdsev-host-scan.sh passes the helper's status through: 1 found,
 // 0 not found, and 2 for its own refusals.
 func TestHostScan_ScriptPassesTheStatusThrough(t *testing.T) {
 	script, err := filepath.Abs("../amdsev-host-scan.sh")

@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-// amdsevGuest runs scripts/amdsev-guest.sh with args and an empty OVMF,
+// amdsevGuest runs scripts/amd-sev-snp/amdsev-guest.sh with args and an empty OVMF,
 // kernel and initrd in a temporary directory, and returns its combined output
 // and whether it exited zero.
 func amdsevGuest(t *testing.T, args ...string) (string, bool) {
@@ -19,7 +19,7 @@ func amdsevGuest(t *testing.T, args ...string) (string, bool) {
 			t.Fatal(err)
 		}
 	}
-	argv := append([]string{filepath.Join(repoRoot(t), "scripts", "amdsev-guest.sh"),
+	argv := append([]string{filepath.Join(repoRoot(t), "scripts", "amd-sev-snp", "amdsev-guest.sh"),
 		"--ovmf", filepath.Join(dir, "OVMF.fd"),
 		"--kernel", filepath.Join(dir, "bzImage"),
 		"--initrd", filepath.Join(dir, "initrd.img"),
@@ -125,17 +125,17 @@ func TestAMDSEVGuest_RefusesWithoutTheDevices(t *testing.T) {
 // scan helper builds with the module proxy off.
 func TestAMDSEVGuest_ScriptsDownloadNothing(t *testing.T) {
 	for _, s := range []string{"amdsev-guest.sh", "amdsev-host-scan.sh"} {
-		src, err := os.ReadFile(filepath.Join(repoRoot(t), "scripts", s))
+		src, err := os.ReadFile(filepath.Join(repoRoot(t), "scripts", "amd-sev-snp", s))
 		if err != nil {
-			t.Fatalf("read scripts/%s: %v", s, err)
+			t.Fatalf("read scripts/amd-sev-snp/%s: %v", s, err)
 		}
 		for _, w := range []string{"curl", "wget", "http://", "https://", "git clone", "go get", "go install"} {
 			if strings.Contains(string(src), w) {
-				t.Errorf("scripts/%s contains %q", s, w)
+				t.Errorf("scripts/amd-sev-snp/%s contains %q", s, w)
 			}
 		}
 		if s == "amdsev-host-scan.sh" && !strings.Contains(string(src), "GOPROXY=off") {
-			t.Errorf("scripts/%s does not build its helper with GOPROXY=off", s)
+			t.Errorf("scripts/amd-sev-snp/%s does not build its helper with GOPROXY=off", s)
 		}
 	}
 }

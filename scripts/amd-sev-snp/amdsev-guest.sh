@@ -1,7 +1,7 @@
 #!/bin/sh
 # amdsev-guest.sh — one guest of the amd-sev test plan on the real hardware.
 #
-# Usage: scripts/amdsev-guest.sh [--dry-run] [flags] snp|sev-es|plain
+# Usage: scripts/amd-sev-snp/amdsev-guest.sh [--dry-run] [flags] snp|sev-es|plain
 #
 # Launches one QEMU/KVM guest on the SEV host (docs/backends/confidential-vm.md, "Test
 # plan on the real hardware", steps 2, 5 and 6) and exits with the status of
@@ -44,8 +44,8 @@
 # A real run refuses unless /dev/kvm exists, and for snp and sev-es also
 # /dev/sev.
 set -eu
-# shellcheck source=lib.sh
-. "${0%/*}/lib.sh"
+# shellcheck source=../lib.sh
+. "${0%/*}/../lib.sh"
 
 fail() { echo "$prog: $*" >&2; exit 2; }
 
