@@ -1,0 +1,6 @@
+on: [push, pull_request]
+jobs:
+  build:
+    runs-on: "self-\" # self-hosted: hardware: example"
+    steps:
+      - run: "true"

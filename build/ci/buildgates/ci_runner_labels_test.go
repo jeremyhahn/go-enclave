@@ -85,6 +85,12 @@ var runnerLabelsCases = []struct {
 	{"fail-format-number-string", true},
 	{"fail-format-null-string", true},
 	{"fail-format-escaped-brace", true},
+	// A waiver is a real trailing YAML comment. The same text inside a
+	// quoted scalar or an expression string is data, not a reason.
+	{"fail-waiver-in-quoted-expression", true},
+	{"fail-waiver-in-plain-expression", true},
+	{"fail-waiver-in-double-quoted-escape", true},
+	{"pass-waiver-after-quoted-expression", false},
 	{"pass-release-push-main", false},
 	{"pass-release-push-tag", false},
 	{"pass-release-push-main-or-tag", false},
@@ -115,6 +121,15 @@ var runnerLabelsWant = map[string][]string{
 	},
 	"fail-unknown-or-in-comparison": {
 		"build: (b) names `release` and its `if:` does not prove it runs only on",
+	},
+	"fail-waiver-in-quoted-expression": {
+		"build: (c) does not run on a standard GitHub-hosted image",
+	},
+	"fail-waiver-in-plain-expression": {
+		"build: (c) does not run on a standard GitHub-hosted image",
+	},
+	"fail-waiver-in-double-quoted-escape": {
+		"build: (c) does not run on a standard GitHub-hosted image",
 	},
 }
 
