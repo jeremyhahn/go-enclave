@@ -1121,6 +1121,24 @@ jobs:
               return float("nan")
 
 
+          def tostr(v):
+              # A value as Actions writes it as a string, or unknown where this
+              # step does not model the conversion exactly: a fraction, a large
+              # or negative-zero number, NaN, an array or an object.
+              if unk(v):
+                  return U
+              if isinstance(v, str):
+                  return v
+              if v is None:
+                  return ""
+              if v is True or v is False:
+                  return "true" if v else "false"
+              if (isinstance(v, (int, float)) and v == v and abs(v) < 2 ** 53
+                      and float(v).is_integer() and str(float(v)) != "-0.0"):
+                  return str(int(v))
+              return U
+
+
           def eq(a, b):
               if unk(a) or unk(b):
                   return U
@@ -1257,15 +1275,37 @@ jobs:
                           return U
                       if f == "contains" and isinstance(a[0], list):
                           return any(eq(x, a[1]) is True for x in a[0])
-                      x, y = (str(s).lower() if s is not None else "" for s in a)
+                      x, y = (tostr(s) for s in a)
+                      if unk(x) or unk(y):
+                          return U
+                      x, y = x.lower(), y.lower()
                       return x.startswith(y) if f == "startswith" else x.endswith(y) if f == "endswith" else y in x
                   if f == "fromjson" and len(a) == 1 and isinstance(a[0], str):
                       try:
                           return json.loads(a[0])
                       except ValueError:
                           return U
-                  if f == "format" and a and not any(unk(x) for x in a) and isinstance(a[0], str):
-                      return re.sub(r"\{(\d+)\}", lambda m: str(a[int(m.group(1)) + 1]) if int(m.group(1)) + 1 < len(a) else m.group(0), a[0])
+                  if f == "format" and a and isinstance(a[0], str):
+                      # `{{` and `}}` write a brace, `{N}` argument N as a string;
+                      # a stray brace or a missing argument is unknown.
+                      args, s, i, out = [tostr(x) for x in a[1:]], a[0], 0, []
+                      while i < len(s):
+                          if s.startswith("{{", i) or s.startswith("}}", i):
+                              out.append(s[i])
+                              i += 2
+                              continue
+                          if s[i] == "}":
+                              return U
+                          if s[i] != "{":
+                              out.append(s[i])
+                              i += 1
+                              continue
+                          m = re.compile(r"\{(\d+)\}").match(s, i)
+                          if not m or int(m.group(1)) >= len(args) or unk(args[int(m.group(1))]):
+                              return U
+                          out.append(args[int(m.group(1))])
+                          i = m.end()
+                      return "".join(out)
                   return U  # success(), failure(), hashFiles(), ...: unknown
 
 
@@ -1484,9 +1524,11 @@ jobs:
               # A runs-on value's labels: a string, a list, or an expression's result.
               if unk(value) or value is None:
                   return None
-              if isinstance(value, list):
-                  return [str(x) for x in value]
-              return [str(value)]
+              # A label that is not a string is one this step cannot name.
+              value = value if isinstance(value, list) else [value]
+              if not all(isinstance(x, str) for x in value):
+                  return None
+              return value
 
 
           def runs_on_labels(text):
