@@ -1023,9 +1023,11 @@ jobs:
       # GitHub-hosted image on every event (c), or its runs-on line says why
       # it cannot, `# self-hosted: <reason>`; a larger runner is refused (d).
       # v1.46 (ruling 999): the reason names its category, hardware: or
-      # oversize: (credential: for the one Codex review job); a reason with
-      # no category is (e).
-      # Its tests: testdata/runner-labels-tests.py.
+      # oversize: (credential: for the one Codex review job, code-review.yml's
+      # `review`); a reason with no category is (e), a credential reason on
+      # any other job (f). A runs-on expression that may yield a value the
+      # step cannot know names an unknown runner (c).
+      # Its tests: build/ci/buildgates/ci_runner_labels_test.go.
       - name: Runner labels (ruling 633)
         run: |
           python3 -I - <<'PY'
@@ -1124,8 +1126,10 @@ jobs:
 
 
           class P:
-              def __init__(self, toks, get):
-                  self.t, self.i, self.get = toks, 0, get
+              # value=True reads a runs-on: there the result is a runner label, not a
+              # truth, so `||` and `&&` with an unknown operand give an unknown value.
+              def __init__(self, toks, get, value=False):
+                  self.t, self.i, self.get, self.value = toks, 0, get, value
 
               def peek(self):
                   return self.t[self.i] if self.i < len(self.t) else (None, None)
@@ -1154,7 +1158,7 @@ jobs:
                       elif ta is False:
                           a = b
                       else:
-                          a = b if truthy(b) is True else U
+                          a = b if truthy(b) is True and not self.value else U
                   return a
 
               def andx(self):
@@ -1168,7 +1172,7 @@ jobs:
                       elif ta is True:
                           a = b
                       else:
-                          a = b if truthy(b) is False else U
+                          a = b if truthy(b) is False and not self.value else U
                   return a
 
               def cmp(self):
@@ -1333,6 +1337,7 @@ jobs:
           LARGER = re.compile(r"(cores|xlarge|large|gpu)", re.I)
           WAIVER = re.compile(r"#\s*self-hosted:\s*(hardware|oversize|credential)\s*:\s*\S")
           BARE = re.compile(r"#\s*self-hosted:")  # v1.46: a waiver whose reason names no category
+          CREDENTIAL_JOB = ("code-review.yml", "review")  # the one job a credential reason may name
           GH = "https://github.com"
           HOSTED_CTX = [  # (event, ref, head repo) on github.com; o/r is this repository
               ("push", "refs/heads/main", None), ("push", "refs/heads/feature", None),
@@ -1372,7 +1377,7 @@ jobs:
                   t = m.group(1) if m else ""
               m = re.fullmatch(r"\$\{\{(.*)\}\}", unquote(t), re.S)
               if m:
-                  return labels(P(lex(m.group(1)), hosted_get(ev, ref, head)).parse())
+                  return labels(P(lex(m.group(1)), hosted_get(ev, ref, head), value=True).parse())
               if t.startswith("["):
                   return [unquote(x) for x in re.split(r"\s*,\s*", t.strip("[] ")) if x]
               if t.startswith("- "):
@@ -1413,7 +1418,12 @@ jobs:
                               if LARGER.search(ro) and re.search(r"ubuntu|windows|macos", ro):
                                   bad.append(f"{where}: (d) names a larger GitHub-hosted runner ({ro}); it bills on a public repository")
                                   continue
-                              if WAIVER.search(ro_line):
+                              w = WAIVER.search(ro_line)
+                              if w and w.group(1) == "credential" and (path.rsplit("/", 1)[-1], job) != CREDENTIAL_JOB:
+                                  bad.append(f"{where}: (f) its `# self-hosted: credential:` reason is allowed only on code-review.yml's job "
+                                             f"`review`; any other job runs on a standard GitHub-hosted image or names a hardware or oversize reason")
+                                  continue
+                              if w:
                                   continue
                               off = []
                               for ev, ref, head in HOSTED_CTX:
