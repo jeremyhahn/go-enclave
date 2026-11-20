@@ -5,4 +5,7 @@ module github.com/jeremyhahn/go-enclave/backends/amdsev
 
 go 1.27.4
 
-require golang.org/x/sys v0.50.0
+require (
+	github.com/jeremyhahn/go-enclave v0.12.0-alpha
+	golang.org/x/sys v0.50.0
+)
