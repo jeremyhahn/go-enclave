@@ -60,7 +60,7 @@ func deriveKey(ctx context.Context, device string, r keyRequest, dst []byte) err
 
 	conn, err := f.SyscallConn()
 	if err != nil {
-		return &DerivedKeyError{Op: "derived-key", Cause: err}
+		return &DerivedKeyError{Op: opDerivedKey, Cause: err}
 	}
 	// The response, which carries the derived key, lands in locked memory
 	// outside the Go heap, so it needs no pin.
@@ -75,10 +75,10 @@ func deriveKey(ctx context.Context, device string, r keyRequest, dst []byte) err
 			_, _, errno = unix.Syscall(unix.SYS_IOCTL, fd, snpGetDerivedKey,
 				uintptr(unsafe.Pointer(&g))) //nolint:gosec // G103: the ioctl's argument struct
 		}); err != nil {
-			return &DerivedKeyError{Op: "derived-key", Cause: err}
+			return &DerivedKeyError{Op: opDerivedKey, Cause: err}
 		}
 		if errno != 0 {
-			return &DerivedKeyError{Op: "derived-key", Cause: firmwareError(g.exitInfo2, os.NewSyscallError("ioctl", errno))}
+			return &DerivedKeyError{Op: opDerivedKey, Cause: firmwareError(g.exitInfo2, os.NewSyscallError("ioctl", errno))}
 		}
 		return ctxErr(ctx)
 	})

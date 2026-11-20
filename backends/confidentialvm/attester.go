@@ -108,7 +108,7 @@ func (a *Attester) Attest(ctx context.Context, nonce []byte) (enclave.Evidence, 
 		return enclave.Evidence{}, err
 	}
 	if a == nil || a.format == "" {
-		return enclave.Evidence{}, &TSMReportError{Op: "provider", Cause: errors.New("attester not made by NewAttester")}
+		return enclave.Evidence{}, &TSMReportError{Op: opProvider, Cause: errors.New("attester not made by NewAttester")}
 	}
 	type result struct {
 		data []byte
@@ -151,7 +151,7 @@ func formatFor(provider string) (string, error) {
 	case providerTDXGuest:
 		return FormatTDXQuote, nil
 	}
-	return "", &TSMReportError{Op: "provider", Cause: fmt.Errorf("provider %q, want %q or %q",
+	return "", &TSMReportError{Op: opProvider, Cause: fmt.Errorf("provider %q, want %q or %q",
 		provider, providerSEVGuest, providerTDXGuest)}
 }
 
@@ -161,10 +161,10 @@ func formatFor(provider string) (string, error) {
 func checkGeneration(raw []byte) error {
 	got, err := strconv.ParseUint(strings.TrimSuffix(string(raw), "\n"), 10, 64)
 	if err != nil {
-		return &TSMReportError{Op: "generation", Cause: err}
+		return &TSMReportError{Op: opGeneration, Cause: err}
 	}
 	if got != ownWrites {
-		return &TSMReportError{Op: "generation", Cause: ErrTSMReportConflict}
+		return &TSMReportError{Op: opGeneration, Cause: ErrTSMReportConflict}
 	}
 	return nil
 }
@@ -191,7 +191,7 @@ func withEntry(root string, fn func(dir string) error) (err error) {
 func readProvider(dir string) (string, error) {
 	raw, err := os.ReadFile(filepath.Join(dir, "provider")) //nolint:gosec // under the report entry this call made
 	if err != nil {
-		return "", &TSMReportError{Op: "provider", Cause: err}
+		return "", &TSMReportError{Op: opProvider, Cause: err}
 	}
 	return strings.TrimSuffix(string(raw), "\n"), nil
 }
@@ -214,7 +214,7 @@ func request(root, want string, rd *[reportDataSize]byte) (out []byte, err error
 			return err
 		}
 		if got != want {
-			return &TSMReportError{Op: "provider", Cause: fmt.Errorf("provider %q, want %q", got, want)}
+			return &TSMReportError{Op: opProvider, Cause: fmt.Errorf("provider %q, want %q", got, want)}
 		}
 		if err := writeAttr(filepath.Join(dir, "inblob"), rd[:]); err != nil {
 			return &TSMReportError{Op: "inblob", Cause: err}
@@ -228,7 +228,7 @@ func request(root, want string, rd *[reportDataSize]byte) (out []byte, err error
 		}
 		gen, err := os.ReadFile(filepath.Join(dir, "generation")) //nolint:gosec // under the report entry this call made
 		if err != nil {
-			return &TSMReportError{Op: "generation", Cause: err}
+			return &TSMReportError{Op: opGeneration, Cause: err}
 		}
 		if err := checkGeneration(gen); err != nil {
 			return err

@@ -22,6 +22,15 @@ var ErrTSMReportConflict = errors.New("confidentialvm: configfs-tsm report entry
 
 // TSMReportError is a refused step of a configfs-tsm report request. It
 // matches [ErrTSMReportUnavailable], and unwraps to Cause.
+// Op values the errors below carry more than once.
+const (
+	opProvider   = "provider"
+	opGeneration = "generation"
+	opReport     = "report"
+	opDerivedKey = "derived-key"
+	opMemory     = "memory"
+)
+
 type TSMReportError struct {
 	// Op is the refused step: "stat", "mkdir", "provider", "inblob",
 	// "outblob", "generation" or "rmdir".
