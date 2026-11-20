@@ -1,7 +1,7 @@
 on: [push, pull_request]
 jobs:
   publish:
-    runs-on: release
+    runs-on: release  # self-hosted: hardware: the signing device this job drives
     if: github.event_name == 'pull_request' && github.ref == 'refs/pull/7/merge'
     steps:
       - run: "true"

@@ -80,6 +80,11 @@ var runnerLabelsCases = []struct {
 	// the comparison as unknown.
 	{"fail-fromjson-array-equality", true},
 	{"fail-fromjson-object-inequality", true},
+	// Actions writes a number without a fraction when it is integral, null
+	// as the empty string, and `{{` in a format string as `{`.
+	{"fail-format-number-string", true},
+	{"fail-format-null-string", true},
+	{"fail-format-escaped-brace", true},
 	{"pass-release-push-main", false},
 	{"pass-release-push-tag", false},
 	{"pass-release-push-main-or-tag", false},
@@ -88,6 +93,29 @@ var runnerLabelsCases = []struct {
 	{"pass-hardware-waiver", false},
 	{"pass-oversize-waiver", false},
 	{"pass-credential-on-review", false},
+}
+
+// runnerLabelsWant names, for a fixture that must be reported, text the
+// step's output must hold. The release fixtures carry a hardware reason, so
+// only the release-condition check can report them; each must report the
+// condition, not merely fail.
+var runnerLabelsWant = map[string][]string{
+	"fail-release-push-other-branch": {
+		"publish: (b) names `release` and its `if:` does not prove it runs only on",
+	},
+	"fail-release-pull-request-unsampled-ref": {
+		"publish: (a) names `release` and a pull_request event can run it",
+		"publish: (b) names `release` and its `if:` does not prove it runs only on",
+	},
+	"fail-release-issue-comment-unsampled-ref": {
+		"publish: (b) names `release` and its `if:` does not prove it runs only on",
+	},
+	"fail-release-unsampled-event": {
+		"publish: (b) names `release` and its `if:` does not prove it runs only on",
+	},
+	"fail-unknown-or-in-comparison": {
+		"build: (b) names `release` and its `if:` does not prove it runs only on",
+	},
 }
 
 // runnerLabelsScript returns the step's script from ci.yml.
@@ -130,6 +158,18 @@ func TestCIRunnerLabelsStep(t *testing.T) {
 	root := repoRoot(t)
 	script := runnerLabelsScript(t, root)
 
+	// A diagnostic named for a fixture the table does not run, or one that
+	// must pass, would assert nothing.
+	for dir := range runnerLabelsWant {
+		found := false
+		for _, c := range runnerLabelsCases {
+			found = found || (c.dir == dir && c.findings)
+		}
+		if !found {
+			t.Errorf("runnerLabelsWant names %s, which is not a fixture the step must report", dir)
+		}
+	}
+
 	for _, c := range runnerLabelsCases {
 		t.Run(c.dir, func(t *testing.T) {
 			src := filepath.Join("testdata", "runner_labels", c.dir)
@@ -158,6 +198,11 @@ func TestCIRunnerLabelsStep(t *testing.T) {
 				t.Errorf("the step passed %s/%s (failed: %v), want a finding; output:\n%s", c.dir, name, failed, out)
 			case !c.findings && failed:
 				t.Errorf("the step reported %s/%s, want no finding; output:\n%s", c.dir, name, out)
+			}
+			for _, want := range runnerLabelsWant[c.dir] {
+				if !strings.Contains(out, "::error::.github/workflows/"+name+":"+want) {
+					t.Errorf("the step on %s/%s does not report %q; output:\n%s", c.dir, name, want, out)
+				}
 			}
 		})
 	}
