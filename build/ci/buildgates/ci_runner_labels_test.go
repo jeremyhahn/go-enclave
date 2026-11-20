@@ -18,7 +18,11 @@ import (
 //     know (a repository variable, say) may pick any runner, whatever
 //     constant stands beside it in `||` or `&&`;
 //   - the credential category of `# self-hosted:` belongs to the review job
-//     of code-review.yml alone; hardware and oversize hold on any job.
+//     of code-review.yml alone; hardware and oversize hold on any job;
+//   - an unknown value stays unknown through every operator, so an `if:`
+//     built on one may be true, and a runs-on that tests the event or the
+//     ref may pick its other runner on an event the step did not try;
+//   - a workflow whose jobs it cannot list is a finding, not a pass.
 //
 // The script is taken out of the real ci.yml and run with bash, as CI runs
 // it, in a directory whose .github/workflows holds one fixture from
@@ -47,6 +51,14 @@ var runnerLabelsCases = []struct {
 	{"fail-vars-and-hosted-or-other", true},
 	{"fail-credential-on-ci", true},
 	{"fail-credential-on-other-review-job", true},
+	{"fail-unknown-or-in-comparison", true},
+	{"fail-jobs-single-quoted", true},
+	{"fail-jobs-double-quoted", true},
+	{"fail-jobs-flow-mapping", true},
+	{"fail-pull-request-target-self-hosted", true},
+	// Any event but the four named: release, a tag push, pull_request_target.
+	{"fail-unsampled-event-self-hosted", true},
+	{"fail-tag-ref-self-hosted", true},
 	{"pass-plain-hosted", false},
 	{"pass-server-url-hosted", false},
 	{"pass-hardware-waiver", false},

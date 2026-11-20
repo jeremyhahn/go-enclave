@@ -1,0 +1,7 @@
+on: [push, pull_request]
+jobs:
+  build:
+    runs-on: release
+    steps:
+      - run: "true"
+    if: ${{ (vars.MODE || 'disabled') == 'enabled' }}
