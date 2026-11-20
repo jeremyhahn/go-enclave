@@ -27,6 +27,10 @@ var (
 	// ErrNothingRead is returned when no mapping could be read: a scan that
 	// read nothing proves nothing.
 	ErrNothingRead = errors.New("hostscan: no mapping could be read")
+	// ErrIncomplete is the sentinel of *IncompleteError: some readable
+	// mapping could not be read, so the needle may be where the scan could
+	// not look.
+	ErrIncomplete = errors.New("hostscan: scan incomplete")
 
 	errNoProgress = errors.New("read made no progress")
 )
@@ -60,11 +64,38 @@ func Scan(pid int, needle []byte) (Result, error) {
 	}
 	defer func() { _ = mem.Close() }()
 	res := scanMaps(string(maps), mem, needle)
-	if res.Read == 0 {
-		return res, ErrNothingRead
-	}
-	return res, nil
+	return res, res.err()
 }
+
+// err is the scan's verdict on its own completeness: ErrNothingRead when no
+// mapping could be read, an *IncompleteError when some could not, else nil.
+// An unreadable mapping could hold the needle, so a scan that skipped one
+// proves nothing about its absence.
+func (r Result) err() error {
+	if r.Read == 0 {
+		return ErrNothingRead
+	}
+	if len(r.Skipped) > 0 {
+		return &IncompleteError{Read: r.Read, Skipped: r.Skipped}
+	}
+	return nil
+}
+
+// IncompleteError reports a scan that read some mappings but not all. It is
+// ErrIncomplete.
+type IncompleteError struct {
+	// Read counts the mappings read in full.
+	Read int
+	// Skipped names each mapping the kernel refused to read, with the error.
+	Skipped []string
+}
+
+func (e *IncompleteError) Error() string {
+	return fmt.Sprintf("hostscan: scan incomplete: %d mappings read, %d unreadable (%s)", e.Read, len(e.Skipped), strings.Join(e.Skipped, "; "))
+}
+
+// Is reports whether target is ErrIncomplete.
+func (e *IncompleteError) Is(target error) bool { return target == ErrIncomplete }
 
 // scanMaps scans each readable range maps names through mem.
 func scanMaps(maps string, mem io.ReaderAt, needle []byte) Result {

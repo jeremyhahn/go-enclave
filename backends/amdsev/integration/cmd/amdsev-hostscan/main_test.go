@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/hex"
 	"os"
@@ -35,8 +36,12 @@ func TestAmdSev_RunRefusesBadArguments(t *testing.T) {
 // TestRunFoundAndNotFound scans a child shell whose $0 is a marker string.
 func TestAmdSev_RunFoundAndNotFound(t *testing.T) {
 	marker := "amdsev-hostscan-test-marker-5e1f"
-	cmd := exec.Command("sh", "-c", "read -r x", marker)
+	cmd := exec.Command("sh", "-c", "echo ready; read -r x", marker)
 	in, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	childOut, err := cmd.StdoutPipe()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,8 +49,13 @@ func TestAmdSev_RunFoundAndNotFound(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = in.Close(); _ = cmd.Wait() })
+	// Scan only once the shell is running its script: while the loader still
+	// maps and unmaps files, a mapping can vanish under the scan, which the
+	// scan rightly reports as incomplete. The marker is in the child's argv.
+	if line, err := bufio.NewReader(childOut).ReadString('\n'); err != nil || line != "ready\n" {
+		t.Fatalf("child: %q, %v", line, err)
+	}
 	pid := strconv.Itoa(cmd.Process.Pid)
-	// The child's maps exist once exec is done; the marker is in its argv.
 	var out, errOut bytes.Buffer
 	rc := run([]string{pid, hex.EncodeToString([]byte(marker))}, &out, &errOut)
 	if rc != 1 || !strings.Contains(out.String(), "found in pid "+pid) {
