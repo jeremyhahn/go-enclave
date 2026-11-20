@@ -7,9 +7,10 @@
 # the needle the guest holds (docs/backends/confidential-vm.md, "Test plan on the real
 # hardware"): in an SNP guest it must not be found; in the plain KVM control it
 # must be. Exits 0 when the needle is not found, 1 when it is found, 2 on an
-# error. The scan is scripts/amd-sev-snp/amdsev-hostscan, a small Go helper: the script
-# runs $AMDSEV_HOSTSCAN when it is set, and otherwise builds the helper from
-# this tree with the module proxy off, so it downloads nothing.
+# error. The scan is backends/amdsev/integration/cmd/amdsev-hostscan, the
+# scanner host-scan.sh runs: the script runs $AMDSEV_HOSTSCAN when it is set,
+# and otherwise builds the helper from this tree with the module proxy off,
+# so it downloads nothing.
 set -eu
 # shellcheck source=../lib.sh
 . "${0%/*}/../lib.sh"
@@ -30,12 +31,12 @@ esac
 
 helper=${AMDSEV_HOSTSCAN:-}
 if [ -z "$helper" ]; then
-  root=$(cd "${0%/*}/../.." && pwd)
+  module=$(cd "${0%/*}/../../backends/amdsev/integration" && pwd)
   tmp=$(mktemp -d)
   trap 'rm -rf "$tmp"' EXIT
   helper=$tmp/amdsev-hostscan
-  (cd "$root" && GOPROXY=off GOFLAGS=-mod=readonly go build -o "$helper" ./scripts/amd-sev-snp/amdsev-hostscan) ||
-    fail "cannot build scripts/amd-sev-snp/amdsev-hostscan"
+  (cd "$module" && GOWORK=off GOPROXY=off GOFLAGS=-mod=readonly go build -o "$helper" ./cmd/amdsev-hostscan) ||
+    fail "cannot build backends/amdsev/integration/cmd/amdsev-hostscan"
 fi
 rc=0
 "$helper" "$pid" "$needle" || rc=$?
