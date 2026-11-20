@@ -239,3 +239,27 @@ func TestAmdSev_RunStopsAtTheHostRecord(t *testing.T) {
 	sh(t, "run.sh", []string{"AMDSEV_ROOT=" + root, "AMDSEV_KLOG=" + klog, "AMDSEV_CACHE=" + cache}).
 		want(t, 2, "step 1", "cannot run the SEV-SNP tests", "sev_snp", "/dev/sev")
 }
+
+// Step 4 runs under sudo when the caller is not root, and sudo's secure_path
+// need not hold go: run.sh must build amdsev-hostscan before that step and
+// hand host-scan.sh its absolute path in AMDSEV_HOSTSCAN, so nothing under
+// sudo builds. Reaching step 4 needs the hardware, so this reads the script.
+func TestAmdSev_RunBuildsTheScannerBeforeSudo(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join(scripts(t), "run.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(b)
+	build := strings.Index(src, "go build -o \"$scanner\" ./cmd/amdsev-hostscan")
+	sudo := strings.Index(src, "sudo -n --")
+	if build < 0 || sudo < 0 || build > sudo {
+		t.Fatalf("run.sh must build ./cmd/amdsev-hostscan into $scanner before its sudo step (build at %d, sudo at %d)", build, sudo)
+	}
+	if !strings.Contains(src, "scanner=$cache/amdsev-hostscan") {
+		t.Error("run.sh must build the scanner to an absolute path under the cache")
+	}
+	pass := strings.Index(src, "AMDSEV_HOSTSCAN=\"$scanner\"")
+	if pass < 0 || pass > sudo {
+		t.Error("run.sh must pass the scanner to the step-4 environment as AMDSEV_HOSTSCAN=\"$scanner\"")
+	}
+}
