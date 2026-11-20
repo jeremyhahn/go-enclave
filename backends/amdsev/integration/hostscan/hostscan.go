@@ -54,11 +54,11 @@ func Scan(pid int, needle []byte) (Result, error) {
 		return Result{}, ErrEmptyNeedle
 	}
 	dir := "/proc/" + strconv.Itoa(pid)
-	maps, err := os.ReadFile(dir + "/maps")
+	maps, err := os.ReadFile(dir + "/maps") //nolint:gosec // /proc/<int>/maps
 	if err != nil {
 		return Result{}, err
 	}
-	mem, err := os.Open(dir + "/mem")
+	mem, err := os.Open(dir + "/mem") //nolint:gosec // /proc/<int>/mem
 	if err != nil {
 		return Result{}, err
 	}
@@ -155,7 +155,7 @@ func contains(mem io.ReaderAt, lo, hi uint64, needle, buf []byte) (bool, error) 
 		if bytes.Contains(buf[:total], needle) {
 			return true, nil
 		}
-		if err != nil && !(errors.Is(err, io.EOF) && got == int(n)) { //nolint:gosec // n <= len(buf)
+		if err != nil && (!errors.Is(err, io.EOF) || got != int(n)) { //nolint:gosec // n <= len(buf)
 			return false, err
 		}
 		if got == 0 {

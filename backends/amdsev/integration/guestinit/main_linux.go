@@ -7,6 +7,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -38,7 +39,7 @@ func run() int {
 		return 2
 	}
 	for _, m := range mounts {
-		if err := os.MkdirAll(m.dir, 0o755); err != nil {
+		if err := os.MkdirAll(m.dir, 0o750); err != nil {
 			return fail("mkdir %s: %v", m.dir, err)
 		}
 		if err := unix.Mount(m.source, m.dir, m.fstype, 0, ""); err != nil && err != unix.EBUSY {
@@ -67,7 +68,9 @@ func run() int {
 		return fail("%v", err)
 	}
 	fmt.Printf("guestinit: mode %s, %d modules, running %s\n", cfg.Mode, len(mods), cfg.Run)
-	cmd := exec.Command("/amdsev.test", testArgs(cfg)...)
+	// The binary is the initrd's own; its arguments are flag/value pairs from
+	// the command line guest.sh writes, passed as argv without a shell.
+	cmd := exec.CommandContext(context.Background(), "/amdsev.test", testArgs(cfg)...) //nolint:gosec // fixed binary, argv only
 	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stdout
 	cmd.Env = []string{"PATH=/", "HOME=/tmp", "TMPDIR=/tmp", "GOTRACEBACK=all"}
 	cmd.Dir = "/tmp"
@@ -96,7 +99,7 @@ func loadModule(path string) error {
 		return err
 	}
 	defer func() { _ = f.Close() }()
-	return unix.FinitModule(int(f.Fd()), "", moduleInitCompressedFile) //nolint:gosec // an open file's descriptor
+	return unix.FinitModule(int(f.Fd()), "", moduleInitCompressedFile)
 }
 
 // testArgs are /amdsev.test's arguments for cfg.

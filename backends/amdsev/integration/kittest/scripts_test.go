@@ -270,7 +270,7 @@ func TestAmdSev_HostScanRefusesBadArguments(t *testing.T) {
 func TestAmdSev_HostScanPassesTheHelpersStatus(t *testing.T) {
 	for _, code := range []int{0, 1, 2} {
 		helper := filepath.Join(t.TempDir(), "scan")
-		if err := os.WriteFile(helper, []byte("#!/bin/sh\necho \"helper $*\"\nexit "+strconv.Itoa(code)+"\n"), 0o700); err != nil { //nolint:gosec // an executable helper
+		if err := os.WriteFile(helper, []byte("#!/bin/sh\necho \"helper $*\"\nexit "+strconv.Itoa(code)+"\n"), 0o700); err != nil {
 			t.Fatal(err)
 		}
 		pid := os.Getpid()
