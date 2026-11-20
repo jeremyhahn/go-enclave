@@ -177,7 +177,7 @@ func isUniform(b []byte) bool {
 // stack, which lives in the Go heap and is never cleared: the sweep after the
 // end would find the harness's own copy and blame the backend.
 func copyByByte(dst, src []byte) {
-	for i := range src {
+	for i := range src { //nolint:staticcheck // copy stages the material in vector registers that a signal can spill to the heap, so the loop moves one byte at a time
 		dst[i] = src[i]
 	}
 }
