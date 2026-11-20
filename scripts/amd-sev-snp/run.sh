@@ -1,18 +1,22 @@
 #!/bin/sh
-# run.sh: the SEV-SNP hardware run behind make integration-test-amd-sev.
+# run.sh: the AMD SEV hardware run behind make integration-test-amd-sev.
 #
-# Usage: scripts/amd-sev-snp/run.sh
+# Usage: AMDSEV_GUESTS='sev sev-es' scripts/amd-sev-snp/run.sh
+#
+# AMDSEV_GUESTS lists the encrypted guests to boot, from sev, sev-es and snp
+# (default "sev sev-es"); the plain KVM control always boots too.
 #
 #   1. host-record.sh: record the host, and fail naming what is missing when
-#      it cannot run an SEV-SNP guest
+#      it cannot run the listed guests
 #   2. the kit's own tests, which need no hardware (the host-scan logic
 #      against a local process, the guest init, the scripts' argument handling)
 #   3. guest-image.sh: the guest kit from the pinned inputs
 #   4. the host tests of backends/amdsev/integration (TestAmdSev_Host...), as
-#      root: the backend's refusal on the host, then a fresh SEV-SNP guest and a
-#      fresh plain KVM guest of the same image, each running its in-guest tests
-#      (backendtest in SNP, the refusal in plain KVM, the held needle in both),
-#      with the host scan of each guest's QEMU process
+#      root: the backend's refusal on the host, then a fresh guest for each
+#      listed mode and a fresh plain KVM guest of the same image, each running
+#      its in-guest tests (backendtest in SNP, the refusal in SEV, SEV-ES and
+#      plain KVM, the held needle in all), with the host scan of each guest's
+#      QEMU process
 #
 # The consoles and the host record land in $AMDSEV_RESULTS (default
 # $AMDSEV_CACHE/results), emptied at the start of each run. Step 4 runs under
@@ -38,9 +42,10 @@ export AMDSEV_CACHE="$cache"
 
 mkdir -p "$results"
 rm -f -- "$results"/*
-sh "$here/host-record.sh" >"$results/host-record.txt" 2>&1 || {
+guests=${AMDSEV_GUESTS-sev sev-es}
+AMDSEV_GUESTS=$guests sh "$here/host-record.sh" >"$results/host-record.txt" 2>&1 || {
   cat -- "$results/host-record.txt" >&2
-  fail "step 1, the host record, failed: this host cannot run the SEV-SNP tests"
+  fail "step 1, the host record, failed: this host cannot run the guests '$guests'"
 }
 cat -- "$results/host-record.txt"
 
@@ -56,10 +61,10 @@ bin=$cache/amdsev-host.test
 # whose secure_path need not hold go.
 scanner=$cache/amdsev-hostscan
 (cd "$module" && GOWORK=off CGO_ENABLED=0 go build -o "$scanner" ./cmd/amdsev-hostscan) || fail "cannot build the host scanner"
-set -- env AMDSEV_KIT="$cache/kit" AMDSEV_RESULTS="$results" AMDSEV_SCRIPTS="$here" AMDSEV_HOSTSCAN="$scanner" \
+set -- env AMDSEV_KIT="$cache/kit" AMDSEV_RESULTS="$results" AMDSEV_SCRIPTS="$here" AMDSEV_HOSTSCAN="$scanner" AMDSEV_GUESTS="$guests" \
   "$bin" -test.run '^TestAmdSev_Host' -test.v -test.count=1 -test.timeout=80m
 if [ "$(id -u)" -ne 0 ]; then
   command -v sudo >/dev/null 2>&1 || fail "not root and no sudo: the host scan reads QEMU's memory and needs root"
   set -- sudo -n -- "$@"
 fi
-(cd "$results" && "$@") || fail "step 4, the SEV-SNP guest tests and the host scan, failed; the consoles are in $results"
+(cd "$results" && "$@") || fail "step 4, the guest tests and the host scan, failed; the consoles are in $results"

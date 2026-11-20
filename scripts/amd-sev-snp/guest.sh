@@ -1,9 +1,13 @@
 #!/bin/sh
-# guest.sh: boot one fresh guest of the SEV-SNP kit and exit with the status
+# guest.sh: boot one fresh guest of the AMD SEV kit and exit with the status
 # of the tests it ran.
 #
-# Usage: scripts/amd-sev-snp/guest.sh [--dry-run] [flags] snp|plain
+# Usage: scripts/amd-sev-snp/guest.sh [--dry-run] [flags] sev|sev-es|snp|plain
 #
+#   sev    an SEV guest: the sev-guest object with policy 0x1 (debug off) and
+#          kernel-hashes=on; memory is encrypted, the register state is not
+#   sev-es an SEV-ES guest: as sev, with policy 0x5, so the register state is
+#          encrypted too
 #   snp    an SEV-SNP guest: the sev-snp-guest object with policy 0x30000
 #          (debug off, migration agent off, SMT allowed) and kernel-hashes=on,
 #          so the launch measurement covers the kernel, initrd and command line
@@ -33,7 +37,8 @@
 # the tests run as root with their output on ttyS0, then one line
 # `amdsev-guest: exit <status>`, then power off. The script prints the console
 # and exits with <status>; without that line, or on its own errors, it exits 2.
-# A real run refuses unless /dev/kvm exists, and for snp also /dev/sev.
+# A real run refuses unless /dev/kvm exists, and for sev, sev-es and snp also
+# /dev/sev.
 set -eu
 # shellcheck source=../lib.sh
 . "${0%/*}/../lib.sh"
@@ -56,7 +61,7 @@ timeout=${AMDSEV_TIMEOUT:-1800}
 dry=
 mode=
 
-usage="usage: $prog [--dry-run] [--kit DIR ...] snp|plain"
+usage="usage: $prog [--dry-run] [--kit DIR ...] sev|sev-es|snp|plain"
 while [ "$#" -gt 0 ]; do
   case $1 in
     --dry-run) dry=1; shift; continue ;;
@@ -88,9 +93,9 @@ while [ "$#" -gt 0 ]; do
 done
 
 case $mode in
-  snp | plain) ;;
+  sev | sev-es | snp | plain) ;;
   '') fail "$usage" ;;
-  *) fail "unknown mode '$mode': want snp or plain" ;;
+  *) fail "unknown mode '$mode': want sev, sev-es, snp or plain" ;;
 esac
 whole() {
   case $2 in
@@ -121,11 +126,20 @@ machine=q35
 set -- -accel kvm -cpu "$cpu" -smp "$smp" -m "$mem" -nodefaults -no-reboot \
   -display none -vga none -monitor none -nic none -serial "file:$serial"
 [ -z "$pidfile" ] || set -- "$@" -pidfile "$pidfile"
-if [ "$mode" = snp ]; then
-  machine=$machine,confidential-guest-support=sev0,memory-backend=ram0
-  set -- "$@" -object "memory-backend-memfd,id=ram0,size=$mem,share=true,prealloc=false" \
+case $mode in
+  sev | sev-es)
+    # Policy bit 0 forbids debugging; bit 2 asks for SEV-ES.
+    policy=0x1
+    [ "$mode" = sev ] || policy=0x5
+    machine=$machine,confidential-guest-support=sev0
+    set -- "$@" -object "sev-guest,id=sev0,cbitpos=$cbitpos,reduced-phys-bits=1,policy=$policy,kernel-hashes=on"
+    ;;
+  snp)
+    machine=$machine,confidential-guest-support=sev0,memory-backend=ram0
+    set -- "$@" -object "memory-backend-memfd,id=ram0,size=$mem,share=true,prealloc=false" \
     -object "sev-snp-guest,id=sev0,cbitpos=$cbitpos,reduced-phys-bits=1,policy=0x30000,kernel-hashes=on"
-fi
+    ;;
+esac
 set -- timeout --kill-after=30 "$timeout" "$qemu" -machine "$machine" "$@" \
   -bios "$ovmf" -kernel "$kernel" -initrd "$initrd" \
   -append "console=ttyS0 panic=-1 amdsev.mode=$mode${append:+ $append}"
@@ -143,8 +157,8 @@ if [ -n "$dry" ]; then
 fi
 
 [ -e /dev/kvm ] || fail "/dev/kvm is missing: the guest needs KVM on the host CPU"
-if [ "$mode" = snp ]; then
-  [ -e /dev/sev ] || fail "/dev/sev is missing: an SEV-SNP guest needs the host's SEV firmware (BIOS SEV-SNP on, kvm_amd sev_snp=Y)"
+if [ "$mode" != plain ]; then
+  [ -e /dev/sev ] || fail "/dev/sev is missing: an $mode guest needs the host's SEV firmware (the BIOS SEV setting on, and kvm_amd loaded with $mode enabled)"
 fi
 [ -x "$qemu" ] || fail "$qemu: not an executable; build the kit with scripts/amd-sev-snp/guest-image.sh"
 

@@ -1,18 +1,23 @@
 #!/bin/sh
-# host-record.sh: record the SEV-SNP host and refuse one that cannot run the
-# kit.
+# host-record.sh: record the AMD SEV host and refuse one that cannot run the
+# kit's guests.
 #
-# Usage: scripts/amd-sev-snp/host-record.sh
+# Usage: AMDSEV_GUESTS='sev sev-es' scripts/amd-sev-snp/host-record.sh
 #
-# Prints one `key: value` line each for the CPU (vendor, family, model, model
-# name), the SNP firmware API version from the kernel log, the host kernel, and
-# the QEMU and OVMF versions the kit runs. Then it checks what an SEV-SNP guest
-# needs and exits 2 naming every missing piece:
-#   - an AMD CPU with the sev_snp flag in /proc/cpuinfo
+# AMDSEV_GUESTS lists the encrypted guests the run boots, from sev, sev-es and
+# snp (default "sev sev-es"); any other word, or an empty list, exits 2.
+# Prints one `key: value` line each for the guests, the CPU (vendor, family,
+# model, model name), the SEV and SNP firmware API versions from the kernel
+# log, the host kernel, and the QEMU and OVMF versions the kit runs. Then it
+# checks what those guests need and exits 2 naming every missing piece:
+#   - an AMD CPU, with the sev, sev_es or sev_snp flag in /proc/cpuinfo for
+#     each listed guest
 #   - /dev/kvm
-#   - kvm_amd loaded with sev_snp=Y (/sys/module/kvm_amd/parameters/sev_snp)
+#   - kvm_amd loaded with sev=Y, sev_es=Y or sev_snp=Y for each listed guest
+#     (/sys/module/kvm_amd/parameters/)
 #   - /dev/sev, the SEV firmware device QEMU opens
-# Exit 0 means all are present. Nothing is skipped: a host without SNP fails.
+# Exit 0 means all are present. Nothing is skipped: a host without a listed
+# guest's support fails.
 #
 # For tests, AMDSEV_ROOT prefixes /proc, /sys and /dev, and AMDSEV_KLOG names a
 # file read in place of the kernel log.
@@ -27,6 +32,18 @@ here=${0%/*}
 
 root=${AMDSEV_ROOT:-}
 cpuinfo=$root/proc/cpuinfo
+
+guests=${AMDSEV_GUESTS-sev sev-es}
+# shellcheck disable=SC2086 # split the list into words
+set -- $guests
+[ "$#" -gt 0 ] || { echo "$prog: AMDSEV_GUESTS is empty; list one or more of sev, sev-es, snp" >&2; exit 2; }
+for g in "$@"; do
+  case $g in
+    sev | sev-es | snp) ;;
+    *) echo "$prog: AMDSEV_GUESTS names '$g'; want sev, sev-es or snp" >&2; exit 2 ;;
+  esac
+done
+guests=$*
 
 field() {
   # the first value of a /proc/cpuinfo field
@@ -46,11 +63,12 @@ klog() {
   fi
 }
 
-snp_api() {
-  # the ccp driver logs "SEV-SNP API:<major>.<minor> build:<n>" at init
+api() {
+  # the ccp driver logs "SEV API:<major>.<minor> build:<n>" at init, and
+  # "SEV-SNP API:..." when it starts SNP
   klog | while IFS= read -r l; do
     case $l in
-      *SEV-SNP\ API:*) v=${l#*SEV-SNP API:}; printf '%s\n' "$v"; exit 0 ;;
+      *"$1 API:"*) v=${l#*"$1 API:"}; printf '%s\n' "$v"; exit 0 ;;
     esac
   done
 }
@@ -63,8 +81,11 @@ if [ -r "$cpuinfo" ]; then
 else
   echo "cpu: $cpuinfo is not readable"
 fi
-api=$(snp_api)
-echo "snp firmware api: ${api:-not in the kernel log (unreadable, or the ccp driver did not start SNP)}"
+echo "guests: $guests"
+v=$(api SEV)
+echo "sev firmware api: ${v:-not in the kernel log (unreadable, or the ccp driver did not start SEV)}"
+v=$(api SEV-SNP)
+echo "snp firmware api: ${v:-not in the kernel log (unreadable, or the ccp driver did not start SNP)}"
 echo "host kernel: $(uname -r)"
 if [ -n "${AMDSEV_QEMU:-}" ] && command -v "$AMDSEV_QEMU" >/dev/null 2>&1; then
   echo "qemu: $("$AMDSEV_QEMU" --version 2>/dev/null | { IFS= read -r l || true; printf '%s' "$l"; }) (pinned $QEMU_VERSION)"
@@ -78,27 +99,45 @@ missing=
 miss() { missing="$missing
   - $*"; }
 
+flag_on() {
+  case " $(field flags) " in
+    *" $1 "*) return 0 ;;
+  esac
+  return 1
+}
+
+# param NAME WHAT: kvm_amd must be loaded with NAME=Y.
+param() {
+  p=$root/sys/module/kvm_amd/parameters/$1
+  if [ -r "$p" ]; then
+    v=$(cat -- "$p")
+    [ "$v" = Y ] || [ "$v" = 1 ] || miss "kvm_amd $1=Y: $p is $v (the host kernel or firmware did not enable $2)"
+  else
+    miss "kvm_amd $1=Y: $p does not exist (kvm_amd is not loaded, or the host kernel has no $2 host support)"
+  fi
+}
+
 if [ ! -r "$cpuinfo" ]; then
   miss "$cpuinfo: cannot read the CPU flags"
 else
-  [ "$(field vendor_id)" = AuthenticAMD ] || miss "an AMD CPU: vendor_id is $(field vendor_id), SEV-SNP needs AMD EPYC (Milan or later)"
-  case " $(field flags) " in
-    *" sev_snp "*) ;;
-    *) miss "the sev_snp CPU flag: the CPU lacks SEV-SNP or the BIOS has it off (SEV-SNP, SNP memory coverage, SMEE)" ;;
-  esac
+  [ "$(field vendor_id)" = AuthenticAMD ] || miss "an AMD CPU: vendor_id is $(field vendor_id), SEV needs AMD EPYC"
 fi
 [ -e "$root/dev/kvm" ] || miss "/dev/kvm: KVM is not available (kvm_amd not loaded, or virtualization off in the BIOS)"
-param=$root/sys/module/kvm_amd/parameters/sev_snp
-if [ -r "$param" ]; then
-  v=$(cat -- "$param")
-  [ "$v" = Y ] || [ "$v" = 1 ] || miss "kvm_amd sev_snp=Y: $param is $v (the host kernel or firmware did not enable SNP)"
-else
-  miss "kvm_amd sev_snp=Y: $param does not exist (kvm_amd is not loaded, or the host kernel has no SNP host support)"
-fi
+for g in $guests; do
+  case $g in
+    sev) f=sev; what=SEV; bios="SEV, SMEE, SEV ASID count" ;;
+    sev-es) f=sev_es; what=SEV-ES; bios="SEV-ES ASID space limit above 1" ;;
+    snp) f=sev_snp; what=SEV-SNP; bios="SEV-SNP, SNP memory coverage, SMEE" ;;
+  esac
+  if [ -r "$cpuinfo" ] && ! flag_on "$f"; then
+    miss "the $f CPU flag: the CPU lacks $what or the BIOS has it off ($bios)"
+  fi
+  param "$f" "$what"
+done
 [ -e "$root/dev/sev" ] || miss "/dev/sev: the SEV firmware device is missing (the ccp driver did not initialise the PSP)"
 
 if [ -n "$missing" ]; then
-  echo "$prog: this host cannot run an SEV-SNP guest; missing:$missing" >&2
+  echo "$prog: this host cannot run the guests '$guests'; missing:$missing" >&2
   exit 2
 fi
-echo "sev-snp: ready"
+echo "amd-sev: ready"
