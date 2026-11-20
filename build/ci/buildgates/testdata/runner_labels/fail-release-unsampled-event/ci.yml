@@ -1,0 +1,7 @@
+on: [push, deployment]
+jobs:
+  publish:
+    runs-on: release
+    if: ${{ github.event_name == 'deployment' }}
+    steps:
+      - run: "true"

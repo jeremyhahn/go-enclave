@@ -1,0 +1,7 @@
+on: [push, pull_request]
+jobs:
+  publish:
+    runs-on: release
+    if: github.event_name == 'pull_request' && github.ref == 'refs/pull/7/merge'
+    steps:
+      - run: "true"

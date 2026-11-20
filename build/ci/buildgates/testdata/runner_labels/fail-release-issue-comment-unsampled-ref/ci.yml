@@ -1,0 +1,7 @@
+on: [push, issue_comment]
+jobs:
+  publish:
+    runs-on: release
+    if: github.event_name == 'issue_comment' && github.ref == 'refs/heads/dev'
+    steps:
+      - run: "true"

@@ -59,6 +59,19 @@ var runnerLabelsCases = []struct {
 	// Any event but the four named: release, a tag push, pull_request_target.
 	{"fail-unsampled-event-self-hosted", true},
 	{"fail-tag-ref-self-hosted", true},
+	// A runner group routes the job off the hosted pool, whatever labels
+	// stand beside it.
+	{"fail-runner-group-hosted-labels", true},
+	// A release job's `if:` must prove push to main or a tag, or
+	// workflow_dispatch on main; a branch, ref or event outside that is
+	// a finding, however it is spelled.
+	{"fail-release-push-other-branch", true},
+	{"fail-release-pull-request-unsampled-ref", true},
+	{"fail-release-issue-comment-unsampled-ref", true},
+	{"fail-release-unsampled-event", true},
+	{"pass-release-push-main", false},
+	{"pass-release-push-tag", false},
+	{"pass-release-push-main-or-tag", false},
 	{"pass-plain-hosted", false},
 	{"pass-server-url-hosted", false},
 	{"pass-hardware-waiver", false},
