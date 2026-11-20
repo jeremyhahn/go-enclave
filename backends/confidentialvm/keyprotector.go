@@ -96,7 +96,7 @@ func decodeKeyRequest(b []byte) (keyRequest, bool) {
 // most that of b: the firmware derives only for a TCB not above its own.
 func tcbAtMost(a, b uint64) bool {
 	for i := 0; i < 64; i += 8 {
-		if byte(a>>i) > byte(b>>i) {
+		if (a>>i)&0xff > (b>>i)&0xff {
 			return false
 		}
 	}
@@ -142,11 +142,11 @@ func NewKeyProtector() (*KeyProtector, error) {
 	}
 	var rd [reportDataSize]byte
 	if _, err := rand.Read(rd[:]); err != nil {
-		return nil, &DerivedKeyError{Op: "report", Cause: err}
+		return nil, &DerivedKeyError{Op: opReport, Cause: err}
 	}
 	report, err := request(tsmReportRoot, providerSEVGuest, &rd)
 	if err != nil {
-		return nil, &DerivedKeyError{Op: "report", Cause: err}
+		return nil, &DerivedKeyError{Op: opReport, Cause: err}
 	}
 	req, err := requestFromReport(report)
 	if err != nil {
@@ -163,7 +163,7 @@ func NewKeyProtector() (*KeyProtector, error) {
 // SVN and committed TCB version.
 func requestFromReport(report []byte) (keyRequest, error) {
 	if len(report) < snpReportSize {
-		return keyRequest{}, &DerivedKeyError{Op: "report",
+		return keyRequest{}, &DerivedKeyError{Op: opReport,
 			Cause: fmt.Errorf("report of %d bytes, want %d", len(report), snpReportSize)}
 	}
 	return keyRequest{
@@ -184,7 +184,7 @@ func (kp *KeyProtector) Protect(ctx context.Context, key []byte) ([]byte, error)
 		return nil, err
 	}
 	if kp == nil || kp.req.fields != sealFields {
-		return nil, &DerivedKeyError{Op: "derived-key", Cause: errors.New("key protector not made by NewKeyProtector")}
+		return nil, &DerivedKeyError{Op: opDerivedKey, Cause: errors.New("key protector not made by NewKeyProtector")}
 	}
 	if len(key) == 0 {
 		return nil, fmt.Errorf("%w: confidentialvm: empty key", enclave.ErrInvalidSize)
@@ -212,7 +212,7 @@ func (kp *KeyProtector) Unprotect(ctx context.Context, blob []byte, key []byte) 
 		return err
 	}
 	if kp == nil || kp.req.fields != sealFields {
-		return &DerivedKeyError{Op: "derived-key", Cause: errors.New("key protector not made by NewKeyProtector")}
+		return &DerivedKeyError{Op: opDerivedKey, Cause: errors.New("key protector not made by NewKeyProtector")}
 	}
 	req, err := kp.blobRequest(blob, len(key))
 	if err != nil {
@@ -292,11 +292,11 @@ func openBlob(dk, blob, key []byte) error {
 func (kp *KeyProtector) withKey(ctx context.Context, req keyRequest, fn func(dk []byte) error) (err error) {
 	mem, err := enclave.NewMemorySized(derivedKeySize)
 	if err != nil {
-		return &DerivedKeyError{Op: "memory", Cause: err}
+		return &DerivedKeyError{Op: opMemory, Cause: err}
 	}
 	defer func() {
 		if derr := mem.Destroy(); derr != nil && err == nil {
-			err = &DerivedKeyError{Op: "memory", Cause: derr}
+			err = &DerivedKeyError{Op: opMemory, Cause: derr}
 		}
 	}()
 	return mem.WithBytes(func(dk []byte) error {
@@ -313,25 +313,25 @@ func (kp *KeyProtector) withKey(ctx context.Context, req keyRequest, fn func(dk 
 func receiveKey(dst []byte, fill func(resp *[keyResponseSize]byte) error) (err error) {
 	mem, err := enclave.NewMemorySized(keyResponseSize)
 	if err != nil {
-		return &DerivedKeyError{Op: "memory", Cause: err}
+		return &DerivedKeyError{Op: opMemory, Cause: err}
 	}
 	defer func() {
 		if derr := mem.Destroy(); derr != nil && err == nil {
 			clear(dst)
-			err = &DerivedKeyError{Op: "memory", Cause: derr}
+			err = &DerivedKeyError{Op: opMemory, Cause: derr}
 		}
 	}()
 	return mem.WithBytes(func(b []byte) error {
 		defer clear(b)
 		if len(b) != keyResponseSize || len(dst) != derivedKeySize {
-			return &DerivedKeyError{Op: "memory", Cause: enclave.ErrInvalidSize}
+			return &DerivedKeyError{Op: opMemory, Cause: enclave.ErrInvalidSize}
 		}
 		resp := (*[keyResponseSize]byte)(b)
 		if err := fill(resp); err != nil {
 			return err
 		}
 		if err := decodeKeyResponse(resp, dst); err != nil {
-			return &DerivedKeyError{Op: "derived-key", Cause: err}
+			return &DerivedKeyError{Op: opDerivedKey, Cause: err}
 		}
 		return nil
 	})
