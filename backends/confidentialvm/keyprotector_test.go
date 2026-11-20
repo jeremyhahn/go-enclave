@@ -262,7 +262,6 @@ func TestKeyProtector_ChecksContextAndItsMakingBeforeAnyRequest(t *testing.T) {
 	if err := kp.Unprotect(context.Background(), []byte{1}, make([]byte, 32)); !errors.Is(err, enclave.ErrSealedAuthentication) {
 		t.Fatalf("Unprotect(1 byte) = %v, want ErrSealedAuthentication", err)
 	}
-	//nolint:staticcheck // a nil ctx is the background context
 	_, err := kp.Protect(nil, make([]byte, 32))
 	if supported {
 		wantDerived(t, err, "open")

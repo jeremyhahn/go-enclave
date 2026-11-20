@@ -177,7 +177,6 @@ func TestAttest_ChecksTheNonceAndContextBeforeAnyRequest(t *testing.T) {
 	if _, err := a.Attest(ctx, []byte{1}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Attest(canceled) = %v, want context.Canceled", err)
 	}
-	//nolint:staticcheck // a nil ctx is documented as the background context
 	ev, err := a.Attest(nil, []byte{1})
 	wantStep(t, err, "stat")
 	if ev.Format != "" || ev.Data != nil {
