@@ -109,7 +109,7 @@ func checkCaseResidue(r *report, property string, cfg Config, hc HandleCase, who
 			return aerr
 		}
 		return ba.WithBytes(func(m []byte) error {
-			copy(n, m)
+			copyByByte(n, m)
 			uniform = isUniform(n)
 			return nil
 		})
@@ -168,6 +168,18 @@ func isUniform(b []byte) bool {
 		}
 	}
 	return true
+}
+
+// copyByByte copies src into dst without ever holding more than one byte of
+// the material in a register. copy is a memmove, which holds a short material
+// whole in vector registers, and a signal that lands while they still hold it
+// has the kernel save them, byte-exact, into a frame on the thread's signal
+// stack, which lives in the Go heap and is never cleared: the sweep after the
+// end would find the harness's own copy and blame the backend.
+func copyByByte(dst, src []byte) {
+	for i := range src {
+		dst[i] = src[i]
+	}
 }
 
 // residueHandle makes hc's handle without leaving a copy of its material
