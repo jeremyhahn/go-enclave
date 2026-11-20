@@ -524,14 +524,16 @@ integration-test-arm-trustzone: docker-build
 	  docker start -a "$$name"; \
 	fi
 
-## integration-test-amd-sev: the SEV-SNP hardware run on the host: records the host, builds the guest kit from pinned inputs, boots a fresh SEV-SNP guest and a plain KVM control, runs the TestAmdSev_ tests in and around them; fails naming what is missing where SNP is absent
+## integration-test-amd-sev: the AMD SEV hardware run on the host: records the host, builds the guest kit from pinned inputs, boots a fresh guest for each mode AMDSEV_GUESTS lists and a plain KVM control, runs the TestAmdSev_ tests of backends/amdsev/integration in and around them; fails naming what is missing where a listed mode is absent
+## AMDSEV_GUESTS='<modes>': integration-test-amd-sev: the encrypted guests to boot, from sev, sev-es and snp (default "sev sev-es"); the SEV-SNP tests run only when snp is listed
 # scripts/amd-sev-snp/run.sh drives it. The suite is backends/amdsev/integration,
 # in the backends/amdsev module behind the amdsev build tag, so neither the
 # root module nor make test-backends builds a test that needs the hardware.
 # AMDSEV_CACHE and AMDSEV_RESULTS place the kit and the consoles.
+AMDSEV_GUESTS ?= sev sev-es
 .PHONY: integration-test-amd-sev
 integration-test-amd-sev:
-	@sh scripts/amd-sev-snp/run.sh
+	@AMDSEV_GUESTS='$(AMDSEV_GUESTS)' sh scripts/amd-sev-snp/run.sh
 
 ## SWTPM_PORT=<port>: integration-test-tpm: the swtpm command port on 127.0.0.1 (default 2321)
 ## SWTPM_CTRL_PORT=<port>: integration-test-tpm: the swtpm control port on 127.0.0.1 (default 2322)
