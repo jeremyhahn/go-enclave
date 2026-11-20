@@ -1452,6 +1452,36 @@ jobs:
               return s.rstrip()
 
 
+          def trailing_comment(s):
+              """The line's YAML comment: the first `#` after whitespace that is outside a
+              single- or double-quoted scalar and outside an Actions expression, or "".
+              A waiver is read only from here; the same text inside a value is data."""
+              opener = "$" + "{" + "{"  # spelled apart so actionlint does not parse it
+              q, depth, i = None, 0, 0
+              while i < len(s):
+                  c = s[i]
+                  if q == '"':
+                      if c == "\\":
+                          i += 1
+                      elif c == '"':
+                          q = None
+                  elif q == "'":
+                      if c == "'":
+                          q = None
+                  elif s.startswith(opener, i):
+                      depth += 1
+                      i += 2
+                  elif depth and s.startswith("}}", i):
+                      depth -= 1
+                      i += 1
+                  elif c in "'\"":
+                      q = c
+                  elif c == "#" and not depth and (i == 0 or s[i - 1] in " \t"):
+                      return s[i:]
+                  i += 1
+              return ""
+
+
           def ind(line):
               return len(line) - len(line.lstrip(" "))
 
@@ -1618,7 +1648,7 @@ jobs:
                           uses = False
                           for k, key, inline in keys_under(lines, j):
                               if key == "runs-on":
-                                  ro, ro_line = body(lines, k, inline), lines[k]
+                                  ro, ro_line = body(lines, k, inline), trailing_comment(lines[k])
                               elif key == "if":
                                   cond = body(lines, k, inline)
                               elif key == "uses":
