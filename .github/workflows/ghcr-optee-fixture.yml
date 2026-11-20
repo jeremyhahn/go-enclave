@@ -57,7 +57,7 @@ env:
 jobs:
   publish:
     name: Publish (${{ inputs.mode }})
-    runs-on: [self-hosted, linux, x64, fixture-push]  # dispatch-only, outside CI Gate: reads the OP-TEE fixture archive built on that host, mounted read-only at /fixture
+    runs-on: [self-hosted, linux, x64, fixture-push]  # self-hosted: hardware: the dedicated host that holds the OP-TEE fixture archive, mounted read-only at /fixture
     timeout-minutes: 120
     permissions:
       contents: read
