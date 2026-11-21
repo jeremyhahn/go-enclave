@@ -106,6 +106,8 @@ var runnerLabelsCases = []struct {
 	{"fail-release-list-format-label", true},
 	{"fail-release-block-list-label", true},
 	{"fail-release-labels-mapping", true},
+	{"fail-release-flow-mapping-label", true},
+	{"fail-release-flow-mapping-group", true},
 	{"pass-list-hosted-expression", false},
 	{"pass-release-push-main", false},
 	{"pass-release-push-tag", false},
@@ -169,6 +171,12 @@ var runnerLabelsWant = map[string][]string{
 		"publish: (a) names `release` in a workflow with a pull_request trigger",
 	},
 	"fail-release-labels-mapping": {
+		"publish: (a) names `release` in a workflow with a pull_request trigger",
+	},
+	"fail-release-flow-mapping-label": {
+		"publish: (a) names `release` in a workflow with a pull_request trigger",
+	},
+	"fail-release-flow-mapping-group": {
 		"publish: (a) names `release` in a workflow with a pull_request trigger",
 	},
 }
