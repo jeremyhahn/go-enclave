@@ -117,3 +117,24 @@ func TestKeyProtectorConformance_OnOPTEE(t *testing.T) {
 		t.Fatalf("the arm-trustzone KeyProtector fails conformance: %v", err)
 	}
 }
+
+// opteeConnect returns a Connect on the fixture's endpoint; a missing
+// endpoint fails the benchmark.
+func opteeConnect(b *testing.B) func() (*Backend, error) {
+	b.Helper()
+	endpoint := os.Getenv(opteeEndpointVar)
+	if endpoint == "" {
+		b.Fatalf("the arm-trustzone benchmark cannot run: %v", &backendtest.EndpointError{Variable: opteeEndpointVar})
+	}
+	return func() (*Backend, error) { return Connect(endpoint) }
+}
+
+// BenchmarkOpenUseClose records open/use/close cycles per second and the
+// time per cycle on the OP-TEE endpoint. On the QEMU fixture the figures
+// are fixture figures, not hardware figures.
+func BenchmarkOpenUseClose(b *testing.B) { benchOpenUseClose(b, opteeConnect(b)) }
+
+// BenchmarkAccess records GET_RANDOM accesses per second and the latency
+// per access on one open session on the OP-TEE endpoint. On the QEMU
+// fixture the figures are fixture figures, not hardware figures.
+func BenchmarkAccess(b *testing.B) { benchAccess(b, opteeConnect(b)) }

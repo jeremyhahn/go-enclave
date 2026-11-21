@@ -1,6 +1,6 @@
 # Backends — engineering contract
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-11-12
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-11-21
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 This contract covers the seam and its wiring into sealing: `WithBackend`,
@@ -316,7 +316,13 @@ TEE in conformance: `conformance_optee_test.go` (tag `optee`) registers the
 backend and runs `backendtest.TestBackend` with the probe and an `rng` handle
 case, and `providertest.TestProvider` against the `KeyProtector`, on OP-TEE
 at `GO_ENCLAVE_OPTEE_ENDPOINT`. `make integration-test-arm-trustzone` runs it
-in the fixture's guest. `make lint-go`, `tidy-check`, `govulncheck`,
+in the fixture's guest, then `BenchmarkOpenUseClose` and `BenchmarkAccess`
+(same file and tag), which report `ops/s` and `ns/access` for open/use/close
+cycles and for one GET_RANDOM on an open session; a benchmark failure fails
+the target. Their body is `bench_test.go`, and `TestBenchHarness_Fake` runs
+it once against the fake in the untagged build, as a check of the harness,
+not a measurement. Fixture figures are not hardware figures
+([design](arm-trustzone-design.md#benchmark)). `make lint-go`, `tidy-check`, `govulncheck`,
 `test-backends` and `cross-build` run in the module (`BACKEND_MODULES`);
 `make coverage` runs its tests but does not measure its coverage.
 
