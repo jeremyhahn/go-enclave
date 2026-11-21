@@ -1628,9 +1628,44 @@ jobs:
               return out
 
 
+          def flow_mapping_labels(t):
+              """The `labels` value of a flow mapping `{labels: ..., group: ...}`.
+              Any other key, a repeated or missing `labels`, or a mapping this step
+              cannot split raises ValueError, which counts as a release label."""
+              if not t.endswith("}"):
+                  raise ValueError("a flow mapping with no closing brace")
+              nest = [0]
+
+              def comma(s, i):
+                  if s[i] in "[{":
+                      nest[0] += 1
+                  elif s[i] in "]}":
+                      nest[0] -= 1
+                  return s[i] == "," and nest[0] == 0
+
+              value = None
+              for pair in split_top(t[1:-1], comma):
+                  kv = split_top(pair, lambda s, i: s[i] == ":" and (i + 1 == len(s) or s[i + 1].isspace()))
+                  if len(kv) != 2:
+                      raise ValueError("a flow mapping entry that is not one key and one value")
+                  key = unquote(kv[0])
+                  if key == "group":
+                      continue
+                  if key != "labels" or value is not None:
+                      raise ValueError(f"a flow mapping key this step does not read: {key!r}")
+                  value = kv[1]
+              if nest[0] != 0:
+                  raise ValueError("a flow mapping with unbalanced brackets")
+              if value is None or value.startswith("{"):
+                  raise ValueError("a flow mapping with no label list")
+              return value
+
+
           def runs_on_labels(text):
               t = text.strip()
-              if t.startswith("group:") or t.startswith("labels:") or " labels:" in t:
+              if t.startswith("{"):
+                  t = flow_mapping_labels(t)
+              elif t.startswith("group:") or t.startswith("labels:") or " labels:" in t:
                   m = re.search(r"labels:\s*(.*)$", t, re.S)
                   t = m.group(1) if m else ""
                   g = re.search(r"\s['\"]?group['\"]?\s*:", t)
