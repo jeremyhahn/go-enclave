@@ -140,7 +140,7 @@ func newSigRepo(t *testing.T) *sigRepo {
 		}
 	}
 	for name, body := range map[string]string{"ssh-keygen": signaturesFakeKeygen, "curl": signaturesFakeCurl} {
-		if err := os.WriteFile(filepath.Join(r.bin, name), []byte(body), 0o755); err != nil { //nolint:gosec // a test stand-in on PATH must be executable
+		if err := os.WriteFile(filepath.Join(r.bin, name), []byte(body), 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
