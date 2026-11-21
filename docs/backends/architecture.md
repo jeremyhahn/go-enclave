@@ -166,7 +166,8 @@ Two backends ship beside the locked-memory default:
   `Prober` ranks 2. Its handles are `ByteAccess` memory enclaves filled with
   random bytes from the secure world by its native `Random`. It is no
   `Importer`, so `OpenIn` and `WithBackend` refuse it with a
-  `*CapabilityError`. Its key sealing is a separate `KeyProtector`.
+  `*CapabilityError`. It seals no keys: key sealing in the secure world
+  belongs to go-xkms.
 
 ### Opaque operations
 
