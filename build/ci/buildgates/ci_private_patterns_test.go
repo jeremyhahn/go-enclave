@@ -31,7 +31,7 @@ import (
 // what it does by running its script in a repository that tracks one private
 // value (privatePatternRuns).
 const (
-	ciTemplateHeader     = "# ci-template: v1.49 — canonical CI for all first-party Go repos."
+	ciTemplateHeader     = "# ci-template: v1.51 — canonical CI for all first-party Go repos."
 	privatePatternStep   = "Releasability (private patterns)"
 	privatePatternSecret = "${{ secrets.RELEASABILITY_PATTERNS }}"
 	privatePatternSearch = `git grep -n -I -i -E -f "$pf" -- .`
