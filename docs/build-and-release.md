@@ -335,16 +335,20 @@ repository's volumes on that host exceed `CI_CACHE_MAX_GIB` (32).
 | Publish CI images | push to `main` | Off github.com only (a self-hosted forge's runners): publishes the toolchain image to the CI image registry (`CI_IMAGE_NAMESPACE`) when the registry lacks its hash. It skips on github.com |
 
 The **PR tier** runs on every event. The **full tier** runs on every event
-but a pull request (a push to `main`, the nightly schedule, `workflow_dispatch`
-on `main`) and on a pull request labelled `ci:full`. The **nightly tier** runs
-on the schedule (Wednesdays, 04:00 UTC) and on `workflow_dispatch` on `main`. Label a PR
-`ci:full` when it changes the API or fixes the integration suite. The label
-takes effect on the PR's next push or update-branch, because a label change
-starts no run (`pull_request` lists only `opened`, `synchronize` and
-`reopened`). A manual `workflow_dispatch` runs only on `main`: on any other
-ref the schedule guard refuses the run, no job that checks out the branch
-starts and CI Gate fails, so a dispatch cannot put a pull request on the full
-tier. A pull request whose every changed file is markdown or under
+but a `workflow_dispatch` off `main` and `ci/deps-bump`: every pull request
+(a non-draft one; a draft runs none of the full jobs), a push to `main`, the
+nightly schedule and a dispatch on `main` or `ci/deps-bump`. The **nightly
+tier** runs on the schedule (Wednesdays, 04:00 UTC) and on a `workflow_dispatch`
+on `main` or `ci/deps-bump`. The `ci:full` label selects no tier: on a pull
+request it turns off the docs-only scope and the Lint Gates path scope, so
+every job runs whatever the PR changes. Label a PR `ci:full` when it changes
+the API or fixes the integration suite. The label takes effect on the PR's
+next push or update-branch, because a label change starts no run
+(`pull_request` lists only `opened`, `synchronize` and `reopened`). A manual
+`workflow_dispatch` runs only on `main` and on `ci/deps-bump`, which the
+dependency scan dispatches because the pull request it opens starts no
+`pull_request` run: on any other ref the schedule guard refuses the run, no
+job that checks out the branch starts and CI Gate fails. A pull request whose every changed file is markdown or under
 `docs/` (a docs-only pull request) runs the Lint job without `make gosec`, and
 the Lint Gates job; the Devcontainer image and Integration jobs skip, and CI
 Gate accepts those skips. On the full tier the build and test steps always run.
