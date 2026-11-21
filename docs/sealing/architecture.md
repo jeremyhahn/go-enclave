@@ -1,6 +1,6 @@
 # Sealing and the provider seam — architecture
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-12
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-11-21
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Problem
@@ -152,9 +152,9 @@ points carry the [backend seam](../backends/architecture.md) into sealing:
   enclave that is destroyed once the import returns, so plaintext still never
   lands on the heap.
 
-The TPM and secure-element `KeyProtector` providers, which keep the protect
-key in a device and live in nested modules of their own, are designed in
-[Hardware KeyProtector providers](hardware-providers.md).
+`KeyProtector` providers that keep the protect key in a device (TPM,
+TrustZone, secure element) are not part of go-enclave; they live in go-xkms
+([Hardware KeyProtector providers](hardware-providers.md)).
 
 ## Data flow
 
@@ -205,7 +205,7 @@ flowchart LR
 | `cipher.NewGCM` with caller-supplied nonces (and with it `GOEXPERIMENT=boringcrypto`) | FIPS 140-only mode refuses GCM with arbitrary IVs. `NewGCMWithRandomNonce` removes caller-managed nonces; random 96-bit nonces can still collide, so collision risk is bounded by per-key usage limits: at most 2^31 DEK wraps per KEK generation before rotation (`kekMessageLimit`, [hierarchy.go](../../hierarchy.go); `WithKEKRotationLimit` can only lower it), at most 2^31 KEK generations per sealer wrapping key (`maxKEKGenerations`; past it a seal fails with `ErrSealerExhausted`) — a key each sealer derives from the provider's root with HKDF-SHA256 under its own random salt, so sealers sharing a root, or restarts unsealing the same one, never share it — and 2^31 `Protect` calls per `SoftwareProvider` Protect key, itself HKDF-SHA256 of the root under its own info so it is never the root `UnsealRoot` exports (`softwareProtectLimit`, [provider_software.go](../../provider_software.go)), half of crypto/cipher's documented 2^32 bound. boringcrypto builds therefore cannot seal; Go's native FIPS 140-3 module is the supported route. |
 | XSalsa20-Poly1305 / ChaCha20-Poly1305 (no key schedule) | Not FIPS-approved. |
 | A hand-written AES whose schedule lives in locked memory | Unvalidated, unreviewed cryptography; a worse class of defect than the bounded heap exposure it removes. |
-| Shipping a `crypto.Decrypter` + signer composition | A generic adapter cannot know a device's guarantees. Each device gets its own provider, in its own module under `backends/` or outside go-enclave, held to the conformance suite. Confidentiality-only providers (bare RSA-OAEP) do not satisfy the seam. |
+| Shipping a `crypto.Decrypter` + signer composition | A generic adapter cannot know a device's guarantees. Each device gets its own provider, outside go-enclave, held to the conformance suite. Confidentiality-only providers (bare RSA-OAEP) do not satisfy the seam. |
 | Unmarshalling foreign sealed bytes | Would make an internal, unversioned, process-scoped format accidentally permanent. There is no constructor that accepts sealed bytes. |
 | Re-keying silently after a shutdown sweep | The next seal would succeed and old values would fail as `ErrSealedAuthentication`, presenting a lifecycle bug as an attack. The sealer fails closed with `ErrSealerWiped`. |
 | Sweeping `Sealed` values in `WipeAll` | They hold no locked pages; in `ModePerOperation` they remain legitimately openable. `Openable` reports the state instead. |
@@ -227,18 +227,13 @@ flowchart LR
 | Error shaping (`contextFailure`, `providerFailure`) and key cleanup (`destroyOnFailure`) | [errors.go](../../errors.go) |
 | Conformance suite for providers | [providertest](../../providertest/providertest.go) — see [provider-conformance](../provider-conformance/architecture.md) |
 
-Three providers behind the `KeyProtector` seam ship in go-enclave: memory
-(`SoftwareProvider`), TPM ([`backends/tpm`](../../backends/tpm), its own
-module) and the TrustZone host side
-([`backends/armtrustzone`](../../backends/armtrustzone), whose other half is
-the OP-TEE trusted application). The TPM and TrustZone providers are nested
-modules, so the root package gains no dependency from them. The
-secure-element provider is designed
-([hardware providers](hardware-providers.md#secure-element-provider-outline))
-and not yet built. HSM and KMS providers come from outside go-enclave and are
-injected through `NewSealer(WithKeyProtector(p))`,
-`NewSealer(WithRootUnsealer(p))`, or `SetSealer`; the
-[keyprotector-providers](../SPEC.md#features) row lists them.
+One provider behind the `KeyProtector` seam ships in go-enclave: memory
+(`SoftwareProvider`). Hardware providers (TPM, TrustZone, secure element),
+HSM and KMS providers come from outside go-enclave, from go-xkms
+([hardware providers](hardware-providers.md)), and are injected through
+`NewSealer(WithKeyProtector(p))`, `NewSealer(WithRootUnsealer(p))`, or
+`SetSealer`; the [keyprotector-providers](../SPEC.md#features) row records
+this.
 
 Sealing is built on go-enclave's
 [locked memory](../memory-enclave/architecture.md#component-boundaries), so a

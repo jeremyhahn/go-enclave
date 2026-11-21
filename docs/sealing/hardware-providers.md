@@ -12,7 +12,7 @@ crypto library above go-enclave
 
 Two hardware providers used to ship here, and both were removed:
 
-- **TPM 2.0**: the nested module `backends/tpm` (`tpm.Open`, sealing a data
+- **TPM 2.0**: a nested module of its own (`tpm.Open`, sealing a data
   key under a TPM storage key). It now lives in
   [go-xkms](https://github.com/jeremyhahn/go-xkms).
 - **TrustZone**: `(*armtrustzone.Backend).KeyProtector`, over the OP-TEE
