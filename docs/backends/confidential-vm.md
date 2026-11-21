@@ -2,7 +2,7 @@
 
 > **Status: REFERENCE** · Scope: go-enclave · Last verified: 2026-11-21
 > Superseded for AMD SEV-SNP by [amd-sev-snp.md](amd-sev-snp.md), the design of SPEC row `confiner-sev-snp`; this page stays the record of the earlier proposal. Its Attester and KeyProtector sections are superseded by the go-xkms scope: attestation and hardware key protectors belong to go-xkms ([SPEC scope](../SPEC.md#scope)).
-> Proposal — not implemented. A design for the future feature in [SPEC](../SPEC.md#features) row `confidential-vm`. No code exists, and every identifier here is a proposal, not an API you can call. The [open questions](#open-questions) mark a recommended answer; none is decided.
+> Proposal — not implemented. The [SPEC](../SPEC.md#features) has no `confidential-vm` row: SEV-SNP is row `confiner-sev-snp` (design [amd-sev-snp.md](amd-sev-snp.md), code `backends/amdsev`), and the other platforms are row `confiner`. No code implements this page, and every identifier here is a proposal, not an API you can call. The [open questions](#open-questions) mark a recommended answer; none is decided.
 
 ## Problem
 

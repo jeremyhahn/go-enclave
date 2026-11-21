@@ -1,11 +1,11 @@
 #!/bin/sh
-# amdsev-host-scan.sh — the host-side scan of the amd-sev test plan, step 5.
+# amdsev-host-scan.sh — the host-side scan of the amd-sev test plan, item 4.
 #
 # Usage: scripts/amd-sev-snp/amdsev-host-scan.sh <qemu-pid> <hex-needle>   (as root)
 #
 # Scans the readable ranges of /proc/<pid>/maps through /proc/<pid>/mem for
-# the needle the guest holds (docs/backends/confidential-vm.md, "Test plan on the real
-# hardware"): in an SNP guest it must not be found; in the plain KVM control it
+# the needle the guest holds (docs/backends/amd-sev-snp.md, "Test plan",
+# item 4): in an SNP guest it must not be found; in the plain KVM control it
 # must be. Exits 0 when the needle is not found, 1 when it is found, 2 on an
 # error. The scan is backends/amdsev/integration/cmd/amdsev-hostscan, the
 # scanner host-scan.sh runs: the script runs $AMDSEV_HOSTSCAN when it is set,

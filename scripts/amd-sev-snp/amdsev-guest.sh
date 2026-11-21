@@ -3,8 +3,8 @@
 #
 # Usage: scripts/amd-sev-snp/amdsev-guest.sh [--dry-run] [flags] snp|sev-es|plain
 #
-# Launches one QEMU/KVM guest on the SEV host (docs/backends/confidential-vm.md, "Test
-# plan on the real hardware", steps 2, 5 and 6) and exits with the status of
+# Launches one QEMU/KVM guest on the SEV host (docs/backends/amd-sev-snp.md, "Test
+# plan", items 2, 4 and 5) and exits with the status of
 # the test binary the guest ran. QEMU drives KVM on the real CPU; nothing the
 # backend touches is emulated. The guest boots the pinned OVMF build and a
 # direct-boot kernel, initrd and command line, all from local paths: the
@@ -14,8 +14,8 @@
 #           and migration agent off), kernel-hashes=on, so the launch
 #           measurement covers the kernel, initrd and command line
 #   sev-es  an SEV-ES guest: the sev-guest object, policy 0x5 (NODBG, ES),
-#           kernel-hashes=on (step 6's refusal)
-#   plain   a plain KVM guest, no SEV object (step 6's refusal, and step 5's
+#           kernel-hashes=on (item 5's refusal)
+#   plain   a plain KVM guest, no SEV object (item 5's refusal, and item 4's
 #           control, where the host scan must find the needle)
 #
 # Flags (or the environment variable after each):
