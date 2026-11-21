@@ -91,6 +91,15 @@ var runnerLabelsCases = []struct {
 	{"fail-waiver-in-plain-expression", true},
 	{"fail-waiver-in-double-quoted-escape", true},
 	{"pass-waiver-after-quoted-expression", false},
+	// Relational operators bind tighter than == and !=, as in Actions:
+	// 0 == 2 < 3 is 0 == true, which is false.
+	{"fail-mixed-comparison-precedence", true},
+	{"pass-mixed-comparison-precedence", false},
+	// A release label counts after YAML decoding and expression
+	// evaluation, and a label the step cannot evaluate counts as one.
+	{"fail-release-escaped-label", true},
+	{"fail-release-format-label", true},
+	{"fail-release-unknown-label", true},
 	{"pass-release-push-main", false},
 	{"pass-release-push-tag", false},
 	{"pass-release-push-main-or-tag", false},
@@ -130,6 +139,18 @@ var runnerLabelsWant = map[string][]string{
 	},
 	"fail-waiver-in-double-quoted-escape": {
 		"build: (c) does not run on a standard GitHub-hosted image",
+	},
+	"fail-mixed-comparison-precedence": {
+		"build: (c) does not run on a standard GitHub-hosted image",
+	},
+	"fail-release-escaped-label": {
+		"publish: (a) names `release` in a workflow with a pull_request trigger",
+	},
+	"fail-release-format-label": {
+		"publish: (a) names `release` in a workflow with a pull_request trigger",
+	},
+	"fail-release-unknown-label": {
+		"publish: (a) names `release` in a workflow with a pull_request trigger",
 	},
 }
 
