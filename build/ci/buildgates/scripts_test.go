@@ -2581,7 +2581,7 @@ func TestScriptsMakefile_AHostileCheckoutPathIsOneLiteralOperand(t *testing.T) {
 	// TOOL_INSTALL=0 requires it to hash to the pin, so the fake's hash is the pin.
 	sum := sha256Hex(t, filepath.Join(fakes, "shellcheck"))
 	out, ok = makeIn(withFakes, "lint-scripts", "SHELLCHECK_BIN_SHA256_LINUX_AMD64="+sum, "SHELLCHECK_BIN_SHA256_LINUX_ARM64="+sum)
-	if logged := readLog(t, log); !ok || !strings.Contains(logged, "<--shell=sh>\n<scripts/amd-sev-snp/amdsev-guest.sh>\n<scripts/amd-sev-snp/amdsev-host-scan.sh>\n<scripts/assert-build-tags.sh>\n<scripts/changelog-assemble.sh>\n") || !strings.Contains(logged, "<scripts/tool.sh>\n") {
+	if logged := readLog(t, log); !ok || !strings.Contains(logged, "<--shell=sh>\n<scripts/amd-sev-snp/amdsev-guest.sh>\n<scripts/amd-sev-snp/amdsev-host-scan.sh>\n<scripts/amd-sev-snp/guest-image.sh>\n<scripts/amd-sev-snp/guest.sh>\n<scripts/amd-sev-snp/host-record.sh>\n<scripts/amd-sev-snp/host-scan.sh>\n<scripts/amd-sev-snp/pins.sh>\n<scripts/amd-sev-snp/run.sh>\n<scripts/assert-build-tags.sh>\n<scripts/changelog-assemble.sh>\n") || !strings.Contains(logged, "<scripts/tool.sh>\n") {
 		t.Fatalf("lint-scripts (ok=%v) passed shellcheck:\n%s\noutput:\n%s", ok, logged, out)
 	}
 
