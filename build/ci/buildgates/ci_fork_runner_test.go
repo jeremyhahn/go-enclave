@@ -415,29 +415,19 @@ type forkJob struct {
 }
 
 // selectionRefusesForks reports whether the preflight job's runner step
-// emits the hosted default for a fork pull_request before any overflow: an
-// env value that is true for a fork, and a test of it that emits
-// "$HOSTED" "$HOSTED" ahead of the first overflow label.
+// emits the hosted default for a fork pull_request before any overflow: a
+// shell test that is true for a fork (see forkGuards), outside any case arm
+// a pull_request cannot take, whose branch emits "$HOSTED" "$HOSTED" and
+// exits ahead of the first overflow label.
 func selectionRefusesForks(pre forkJob) bool {
 	for _, st := range pre.Steps {
 		if st.ID != "runner" {
 			continue
 		}
-		for k, v := range st.Env {
-			if !strings.Contains(v, forkGuardExpr) {
-				continue
-			}
-			vs, err := evalField(v, forkCands(true))
-			if err != nil || len(vs) == 0 {
-				continue
-			}
-			allTrue := true
-			for _, x := range vs {
-				allTrue = allTrue && exprString(x) == "true"
-			}
-			guard := strings.Index(st.Run, `[ "$`+k+`" = true ]`)
-			over := strings.Index(st.Run, `emit "$(overflow`)
-			if !allTrue || guard < 0 || over >= 0 && guard > over {
+		over := strings.Index(st.Run, `emit "$(overflow`)
+		for _, g := range forkGuards(st.Env) {
+			guard := strings.Index(st.Run, g)
+			if guard < 0 || over >= 0 && guard > over || !armTakesPullRequest(st.Run[:guard]) {
 				continue
 			}
 			rest := st.Run[guard:]
@@ -449,6 +439,63 @@ func selectionRefusesForks(pre forkJob) bool {
 			if strings.Contains(rest, `emit "$HOSTED" "$HOSTED"`) && strings.Contains(rest, "exit 0") {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+// forkGuards lists the shell tests on a step's env that hold for every fork
+// pull_request: `[ "$K" = true ]` for a value that holds forkGuardExpr and is
+// true for a fork, and `[ "$H" != "$R" ]` for a value that is the head
+// repository and one that is this repository.
+func forkGuards(env map[string]string) []string {
+	only := func(v string) (string, bool) {
+		vs, err := evalField(v, forkCands(true))
+		if err != nil || len(vs) != 1 {
+			return "", false
+		}
+		return exprString(vs[0]), true
+	}
+	var out, heads, repos []string
+	for k, v := range env {
+		got, ok := only(v)
+		switch {
+		case !ok:
+		case strings.Contains(v, forkGuardExpr) && got == "true":
+			out = append(out, `[ "$`+k+`" = true ]`)
+		case got == forkContext["github.event.pull_request.head.repo.full_name"]:
+			heads = append(heads, k)
+		case got == forkContext["github.repository"]:
+			repos = append(repos, k)
+		}
+	}
+	for _, h := range heads {
+		for _, r := range repos {
+			out = append(out, `[ "$`+h+`" != "$`+r+`" ]`, `[ "$`+r+`" != "$`+h+`" ]`)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// armTakesPullRequest reports whether a shell test after the script text
+// before runs for a pull_request: it sits in no open `case`, or in an arm
+// whose patterns name pull_request or match anything.
+func armTakesPullRequest(before string) bool {
+	open := strings.LastIndex(before, "case ")
+	if open < 0 || strings.LastIndex(before, "esac") > open {
+		return true
+	}
+	arm := ""
+	for _, line := range strings.Split(before[open:], "\n")[1:] {
+		line = strings.TrimSpace(line)
+		if pats, ok := strings.CutSuffix(line, ")"); ok && !strings.ContainsAny(pats, " ;") {
+			arm = pats
+		}
+	}
+	for _, p := range strings.Split(arm, "|") {
+		if p == "pull_request" || p == "*" {
+			return true
 		}
 	}
 	return false
@@ -589,6 +636,40 @@ func TestCIForkRunner_RefusesWhatItMustRefuse(t *testing.T) {
         run: |
           emit "$(overflow bigdisk)" "$(overflow bigdisk-docker)"
 `
+	template := func(arm string) string {
+		return `  preflight:
+    runs-on: ubuntu-latest
+    steps:
+      - id: runner
+        env:
+          EVENT: ${{ github.event_name }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          case "$EVENT" in
+            ` + arm + `)
+              if [ "$HEAD_REPO" != "$REPO" ]; then
+                emit "$HOSTED" "$HOSTED"
+                exit 0
+              fi ;;
+          esac
+          emit "$(overflow bigdisk)" "$(overflow bigdisk-docker)"
+`
+	}
+	late := `  preflight:
+    runs-on: ubuntu-latest
+    steps:
+      - id: runner
+        env:
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          emit "$(overflow bigdisk)" "$(overflow bigdisk-docker)"
+          if [ "$HEAD_REPO" != "$REPO" ]; then
+            emit "$HOSTED" "$HOSTED"
+            exit 0
+          fi
+`
 	docker := `  build:
     runs-on: ${{ github.server_url == 'https://github.com' && fromJSON(needs.preflight.outputs.runner_docker) || 'bigdisk' }}
 `
@@ -603,6 +684,11 @@ func TestCIForkRunner_RefusesWhatItMustRefuse(t *testing.T) {
 		{"variable, forks hosted", "  a:\n    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || fromJSON(vars.X || '[\"self-hosted\"]') }}\n", 0},
 		{"selection without a fork guard", unguarded + docker, 1},
 		{"selection with a fork guard", guarded + docker, 0},
+		{"selection with the template's fork guard", template("pull_request|pull_request_target") + docker, 0},
+		{"template guard on pull_request_target only", template("pull_request_target") + docker, 1},
+		{"template guard after the overflow", late + docker, 1},
+		{"template preflight on the variable for a fork", "  preflight:\n    runs-on: ${{ github.server_url == 'https://github.com' && (!startsWith(github.event_name, 'pull_request') || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON(vars.X || '[\\\"self-hosted\\\"]') || 'ubuntu-latest' }}\n", 0},
+		{"preflight on the variable without the fork clause", "  preflight:\n    runs-on: ${{ github.server_url == 'https://github.com' && fromJSON(vars.X || '[\\\"self-hosted\\\"]') || 'ubuntu-latest' }}\n", 1},
 		{"unknown reference", "  a:\n    runs-on: ${{ needs.other.outputs.runner }}\n", 1},
 	}
 	for _, c := range cases {
