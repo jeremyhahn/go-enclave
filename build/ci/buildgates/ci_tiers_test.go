@@ -697,6 +697,86 @@ func TestCIGateTiersMatchTheJobs(t *testing.T) {
 
 // TestCIGateTiers_RefusesWhatItMustRefuse pins the checks against edits of
 // the real ci.yml, so a rewrite that stops looking cannot pass.
+// statusFunc is an Actions status-check function in an `if:`.
+var statusFunc = regexp.MustCompile(`\b(always|success|failure|cancelled)\(\)`) //nolint:misspell // the Actions function's spelling
+
+// fullNeedsSkippableViolations reports each job CI Gate checks as `full` that
+// needs a job its tier lets skip (code, scoped or nightly) and has no status
+// function in its `if:`. Actions skips such a job whenever that need skips,
+// before any of its steps reports, so on a docs-only PR the gate sees a full
+// job skipped while the full tier is selected, and fails.
+func fullNeedsSkippableViolations(src []byte) ([]string, error) {
+	var wf tieredWorkflow
+	if err := yaml.Unmarshal(src, &wf); err != nil {
+		return nil, err
+	}
+	tier := map[string]string{}
+	for _, st := range wf.Jobs[ciGateJob].Steps {
+		for line := range strings.SplitSeq(st.Run, "\n") {
+			if m := gateCheckLine.FindStringSubmatch(line); m != nil {
+				tier[m[2]] = m[3]
+			}
+		}
+	}
+	var bad []string
+	for name, t := range tier {
+		if t != "full" {
+			continue
+		}
+		job := wf.Jobs[name]
+		if statusFunc.MatchString(fmt.Sprint(job.If)) {
+			continue
+		}
+		for _, n := range job.Needs {
+			if nt := tier[n]; nt == "code" || nt == "scoped" || nt == "nightly" {
+				bad = append(bad, fmt.Sprintf("job %s is checked as full but needs %s, which skips in its %s scope, and its if has no status function: the job skips before it reports", name, n, nt))
+			}
+		}
+	}
+	slices.Sort(bad)
+	return bad, nil
+}
+
+func TestCIGateFullJobsReportWhenANeedSkips(t *testing.T) {
+	src := []byte(readFile(t, filepath.Join(repoRoot(t), ciWorkflowFile)))
+	bad, err := fullNeedsSkippableViolations(src)
+	if err != nil {
+		t.Fatalf("parse %s: %v", ciWorkflowFile, err)
+	}
+	for _, b := range bad {
+		t.Errorf("%s: %s", ciWorkflowFile, b)
+	}
+	// A full job that needs the code-tier image job is refused without a
+	// status function and passes with one.
+	const wfFmt = `jobs:
+  image:
+    if: ${{ needs.preflight.outputs.docs_only != 'true' }}
+  optee:
+    needs: [preflight, image]
+    if: ${{ %s }}
+  ci-gate:
+    steps:
+      - run: |
+          check image       "${{ needs.image.result }}" code
+          check optee       "${{ needs.optee.result }}" full
+`
+	for _, tc := range []struct {
+		cond   string
+		wantOK bool
+	}{
+		{"needs.preflight.outputs.verdict == 'run'", false},
+		{"!cancelled() && needs.image.result != 'failure'", true}, //nolint:misspell // the Actions function's spelling
+	} {
+		bad, err := fullNeedsSkippableViolations(fmt.Appendf(nil, wfFmt, tc.cond))
+		if err != nil {
+			t.Fatalf("parse the %q case: %v", tc.cond, err)
+		}
+		if (len(bad) == 0) != tc.wantOK {
+			t.Errorf("if: %s: violations %v, want ok = %v", tc.cond, bad, tc.wantOK)
+		}
+	}
+}
+
 func TestCIGateTiers_RefusesWhatItMustRefuse(t *testing.T) {
 	src, err := os.ReadFile(filepath.Join(repoRoot(t), ciWorkflowFile))
 	if err != nil {
