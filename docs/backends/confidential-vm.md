@@ -1,6 +1,6 @@
 # Confidential VM support — architecture (proposal)
 
-> **Status: REFERENCE** · Scope: go-enclave · Last verified: 2026-11-20
+> **Status: REFERENCE** · Scope: go-enclave · Last verified: 2026-11-21
 > Superseded for AMD SEV-SNP by [amd-sev-snp.md](amd-sev-snp.md), the design of SPEC row `confiner-sev-snp`; this page stays the record of the earlier proposal. Its Attester and KeyProtector sections are superseded by the go-xkms scope: attestation and hardware key protectors belong to go-xkms ([SPEC scope](../SPEC.md#scope)).
 > Proposal — not implemented. A design for the future feature in [SPEC](../SPEC.md#features) row `confidential-vm`. No code exists, and every identifier here is a proposal, not an API you can call. The [open questions](#open-questions) mark a recommended answer; none is decided.
 
@@ -73,16 +73,15 @@ encrypted boundary in whatever form the program wrote it.
 
 ```mermaid
 flowchart LR
-  main -->|"NewAttester()"| att[confidentialvm.Attester]
-  main -->|"NewKeyProtector(), SEV-SNP only"| kp[confidentialvm.KeyProtector]
+  main -->|"NewAttester()"| att[Attester]
+  main -->|"NewKeyProtector(), SEV-SNP only"| kp[KeyProtector]
   att -->|"Attest: configfs-tsm inblob, outblob"| ev[Evidence: sev-snp-report or tdx-quote]
   kp -->|"SNP_GET_DERIVED_KEY on /dev/sev-guest"| asp[AMD Secure Processor]
   kp -->|"WithKeyProtector(kp)"| sealer[enclave.Sealer]
   main -->|"Detect, as today"| be[memory enclave or linux-secretmem]
 ```
 
-- **A nested module, `backends/confidentialvm`** (package `confidentialvm`),
-  requiring the root module and `golang.org/x/sys`, never the reverse
+- **A nested module under `backends/`**, requiring the root module and `golang.org/x/sys`, never the reverse
   ([Q1](#q1-where-the-module-lives)). It sits beside `backends/tpm`, which
   likewise ships a `KeyProtector` and no backend.
 - **Linux on amd64 only.** On any other target a stub compiles whose
@@ -346,7 +345,7 @@ the nonce checks, and error texts and unwrapping.
 
 ### Q1: where the module lives
 
-- **A nested module, `backends/confidentialvm`** (recommended), beside
+- **A nested module under `backends/`** (recommended), beside
   `backends/tpm` and `backends/armtrustzone`, released with the repository.
 - **A repository of its own:** released on its own, but split from the
   conformance suites it is tested against.
