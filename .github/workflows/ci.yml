@@ -1202,16 +1202,20 @@ jobs:
                   return a
 
               def cmp(self):
+                  # Actions binds <, <=, > and >= tighter than == and !=.
+                  a = self.rel()
+                  while self.peek()[0] == "op" and self.peek()[1] in ("==", "!="):
+                      op = self.take()[1]
+                      r = eq(a, self.rel())
+                      a = r if op == "==" or r is U else not r
+                  return a
+
+              def rel(self):
                   a = self.unary()
-                  while self.peek()[0] == "op" and self.peek()[1] in ("==", "!=", "<", "<=", ">", ">="):
+                  while self.peek()[0] == "op" and self.peek()[1] in ("<", "<=", ">", ">="):
                       op = self.take()[1]
                       b = self.unary()
-                      if op == "==":
-                          a = eq(a, b)
-                      elif op == "!=":
-                          r = eq(a, b)
-                          a = U if r is U else not r
-                      elif unk(a) or unk(b):
+                      if unk(a) or unk(b):
                           a = U
                       else:
                           x, y = (a.lower(), b.lower()) if isinstance(a, str) and isinstance(b, str) else (num(a), num(b))
@@ -1352,11 +1356,20 @@ jobs:
                   return a
 
               def cmp(self):
-                  a = self.unary()
-                  while self.peek()[0] == "op" and self.peek()[1] in ("==", "!=", "<", "<=", ">", ">="):
+                  # Actions binds <, <=, > and >= tighter than == and !=.
+                  a = self.rel()
+                  while self.peek()[0] == "op" and self.peek()[1] in ("==", "!="):
                       op = self.take()[1]
-                      b = self.unary()
+                      b = self.rel()
                       a = ("w", self.atom(a, b) if op == "==" else ALL)
+                  return a
+
+              def rel(self):
+                  a = self.unary()
+                  while self.peek()[0] == "op" and self.peek()[1] in ("<", "<=", ">", ">="):
+                      self.take()
+                      self.unary()
+                      a = ("w", ALL)  # an ordering proves nothing about the event or ref
                   return a
 
               @staticmethod
@@ -1577,7 +1590,16 @@ jobs:
 
 
           def names_release(text):
-              return re.search(r"(?<![\w.-])['\"]?release['\"]?(?![\w-])", text) is not None
+              """Whether the runs-on may select the `release` label: in the raw text, in
+              the decoded YAML scalars, or in the value of an expression. A label this
+              step cannot read or evaluate may be `release`, so it counts as one."""
+              if re.search(r"(?<![\w.-])['\"]?release['\"]?(?![\w-])", text):
+                  return True
+              try:
+                  got = runs_on_labels(text)
+              except ValueError:
+                  return True
+              return got is None or any(x.strip().lower() == "release" for x in got)
 
 
           def condition(text):
