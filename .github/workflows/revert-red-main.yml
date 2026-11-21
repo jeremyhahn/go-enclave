@@ -1,4 +1,9 @@
 # revert-red-main v1.3 (2026-11-13): a timeout-minutes on its job (ruling 580), so a hung run ends itself.
+# CUSTOMIZE (this repository, against v1.3): the repository is on GitHub, so
+# REPO_API is GitHub's REST API, and step 4 creates the revert commit and its
+# branch through the Git Data API, which GitHub signs as web-flow, in place of
+# a local commit with commit.gpgSign off pushed by git: signatures.yml rejects
+# an unsigned commit, so v1.3's revert PR could never merge.
 # revert-red-main v1.2 (2026-11-08, Tenant Agent m2101 item 2): AGENT_DOMAIN
 # and AGENT_LOGIN are repository Actions variables, as in automerge v13; no
 # login or domain is written here.
@@ -79,7 +84,8 @@ jobs:
       - name: Revert, reland, report
         env:
           BOT: ${{ secrets.AGENT_TOKEN }}
-          REPO_API: ${{ github.server_url }}/api/v1/repos/${{ github.repository }}
+          # CUSTOMIZE: GitHub's REST API (v1.3 has the Gitea path).
+          REPO_API: ${{ github.api_url }}/repos/${{ github.repository }}
           GIT_URL: ${{ github.server_url }}/${{ github.repository }}.git
           SERVER: ${{ github.server_url }}
           REPOSITORY: ${{ github.repository }}
@@ -176,13 +182,17 @@ jobs:
 
           # 4. The revert, onto main's tip, in a fresh repository. Config by
           # environment keeps the token out of argv (automerge.yml's form).
+          # CUSTOMIZE (deviation from v1.3): git computes the revert with
+          # --no-commit and no commit is made here; the commit is created
+          # through the Git Data API (blobs, a tree checked against the local
+          # one, the commit, the ref), so GitHub signs it as web-flow and
+          # signatures.yml accepts it. v1.3 disabled signing instead.
           repo=/tmp/revert-repo
           rm -rf "$repo"; git init -q "$repo"
           auth=$(printf '%s:%s' "$me" "$BOT" | base64 -w0)
-          export GIT_CONFIG_COUNT=3 \
+          export GIT_CONFIG_COUNT=2 \
             GIT_CONFIG_KEY_0=http.extraHeader GIT_CONFIG_VALUE_0="Authorization: Basic $auth" \
             GIT_CONFIG_KEY_1=core.hooksPath GIT_CONFIG_VALUE_1=/dev/null \
-            GIT_CONFIG_KEY_2=commit.gpgSign GIT_CONFIG_VALUE_2=false \
             GIT_AUTHOR_NAME="$me" GIT_AUTHOR_EMAIL="$me_email" \
             GIT_COMMITTER_NAME="$me" GIT_COMMITTER_EMAIL="$me_email"
           git -C "$repo" fetch -q --no-tags "$GIT_URL" "+refs/heads/main:refs/red/main" "+refs/pull/$pr/head:refs/red/pr" \
@@ -194,11 +204,42 @@ jobs:
           if [ "$(api GET "/branches/revert/$short")" = 200 ]; then leave "revert/$short already exists"; fi
           git -C "$repo" checkout -q --detach refs/red/main
           mflag=(); [ "$parents" -gt 1 ] && mflag=(-m 1)
-          if ! git -C "$repo" revert --no-edit "${mflag[@]}" "$sha" >/tmp/revert.log 2>&1; then
+          if ! git -C "$repo" revert --no-commit "${mflag[@]}" "$sha" >/tmp/revert.log 2>&1; then
             comment "$pr" "Main went red after this merged ($run_url: $hit), and $short does not revert cleanly onto main's tip. Left to the coordinator."
             die "$short does not revert cleanly onto main"
           fi
-          git -C "$repo" push -q "$GIT_URL" "HEAD:refs/heads/revert/$short" || die "cannot push revert/$short"
+          tip=$(git -C "$repo" rev-parse refs/red/main)
+          want_tree=$(git -C "$repo" write-tree)
+          : > /tmp/tree.jsonl
+          while IFS= read -r -d '' p; do
+            entry=$(git -C "$repo" ls-files -s -z -- ":(literal)$p" | tr -d '\0')
+            if [ -z "$entry" ]; then
+              jq -nc --arg p "$p" '{path: $p, mode: "100644", type: "blob", sha: null}' >> /tmp/tree.jsonl
+              continue
+            fi
+            read -r mode bsha _ <<< "$entry"
+            if [ "$mode" = 160000 ]; then
+              jq -nc --arg p "$p" --arg s "$bsha" '{path: $p, mode: "160000", type: "commit", sha: $s}' >> /tmp/tree.jsonl
+              continue
+            fi
+            git -C "$repo" cat-file blob "$bsha" | base64 -w0 > /tmp/blob.b64
+            jq -n --rawfile c /tmp/blob.b64 '{content: $c, encoding: "base64"}' > /tmp/blob.json
+            [ "$(api POST /git/blobs @/tmp/blob.json)" = 201 ] || die "cannot upload a blob of the revert"
+            [ "$(jq -r '.sha' /tmp/api.json)" = "$bsha" ] || die "the uploaded blob of $p does not match"
+            jq -nc --arg p "$p" --arg m "$mode" --arg s "$bsha" '{path: $p, mode: $m, type: "blob", sha: $s}' >> /tmp/tree.jsonl
+          done < <(git -C "$repo" diff --cached --no-renames --name-only -z "$tip")
+          base_tree=$(git -C "$repo" rev-parse "$tip^{tree}")
+          jq -s --arg b "$base_tree" '{base_tree: $b, tree: .}' /tmp/tree.jsonl > /tmp/tree.json
+          [ "$(api POST /git/trees @/tmp/tree.json)" = 201 ] || die "cannot create the revert tree"
+          [ "$(jq -r '.sha' /tmp/api.json)" = "$want_tree" ] || die "the revert tree GitHub built differs from git's"
+          # No author or committer: GitHub commits as the token's identity and
+          # signs as web-flow.
+          jq -n --rawfile msg "$repo/.git/MERGE_MSG" --arg t "$want_tree" --arg p "$tip" \
+            '{message: $msg, tree: $t, parents: [$p]}' > /tmp/commit.json
+          [ "$(api POST /git/commits @/tmp/commit.json)" = 201 ] || die "cannot create the revert commit"
+          rsha=$(jq -r '.sha' /tmp/api.json)
+          [ "$(api POST /git/refs "$(jq -n --arg r "refs/heads/revert/$short" --arg s "$rsha" '{ref: $r, sha: $s}')")" = 201 ] \
+            || die "cannot create revert/$short"
           body=$(printf 'Reverts %s (#%s): main went red at that merge.\n\nRun: %s\nFailed: %s\nParent %s was green (%s).\n\nOpened by revert-red-main.yml (ci-template v1.23, owner item 101). It merges on the PR tier like any PR.' \
             "$short" "$pr" "$run_url" "$hit" "${parent:0:12}" "$GATE_CONTEXT")
           code=$(api POST /pulls "$(jq -n --arg t "Revert \"$title\" (#$pr)" --arg b "$body" --arg h "revert/$short" \
