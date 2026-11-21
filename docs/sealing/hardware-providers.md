@@ -26,3 +26,9 @@ never implemented in go-enclave; it belongs to go-xkms as well.
 Callers migrate as the [Upgrading notes](../README.md#upgrading) describe:
 move to go-xkms, or seal with `SoftwareProvider`. No sealed value needs
 converting: a `Sealed` lives only in the memory of the process that sealed it.
+
+## Open questions
+
+None. The questions this page held about the hardware providers were closed
+by their removal; the providers, and any question about them, now belong to
+[go-xkms](https://github.com/jeremyhahn/go-xkms).
