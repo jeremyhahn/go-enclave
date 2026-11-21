@@ -33,10 +33,9 @@
 //
 // [Sealed] holds material encrypted at rest with AES-256-GCM and
 // decrypts it into a new memory enclave on [Sealed.Open]. A [Sealer]
-// protects the keys through a provider: the built-in [SoftwareProvider], the
-// TPM and TrustZone providers in the nested modules backends/tpm and
-// backends/armtrustzone, or any other provider implementing [KeyProtector] or
-// [RootUnsealer], injected with [NewSealer] or [SetSealer]. Read [Mode] before
+// protects the keys through a provider: the built-in [SoftwareProvider], or
+// any other provider implementing [KeyProtector] or [RootUnsealer], such as a
+// hardware provider from go-xkms, injected with [NewSealer] or [SetSealer]. Read [Mode] before
 // choosing one.
 //
 // A [Backend] makes and holds the material behind a [Handle]. Locked memory

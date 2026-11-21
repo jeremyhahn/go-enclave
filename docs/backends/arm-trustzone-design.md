@@ -13,30 +13,26 @@ Trusted Execution Environment (TEE) such as OP-TEE. Code and keys in the
 secure world are out of reach of the normal-world kernel and of every process.
 
 The `arm-trustzone` backend connects go-enclave to a Trusted Application (TA)
-in OP-TEE. It provides two things:
+in OP-TEE. It provides random bytes from the secure world: `Random(ctx, n)`
+fills a memory enclave handle with bytes the TA's random number generator
+produced.
 
-- **Random bytes from the secure world.** `Random(ctx, n)` fills a memory
-  enclave handle with bytes the TA's random number generator produced.
-- **Key sealing in the secure world.** `KeyProtector()` returns an
-  `enclave.KeyProtector` whose sealing key lives in the TA, so a sealer's
-  data-encryption keys are wrapped by a key the normal world never holds.
-
-Neither keeps the caller's bytes in the secure world. A handle from `Random`
+It does not keep the caller's bytes in the secure world. A handle from `Random`
 is normal-world memory from `enclave.NewMemorySized`, readable by the
 normal-world process and kernel like any memory enclave. Holding material in
 secure-world RAM through trusted-firmware's vault trusted application is
-planned ([SPEC](../SPEC.md#features)); the `KeyProtector` is to move to
-go-xkms ([removal](../SPEC.md#key-operation-api-removal)).
+planned ([SPEC](../SPEC.md#features)). The TrustZone `KeyProtector` this
+backend once offered lives in go-xkms
+([removal](../SPEC.md#key-operation-api-removal)).
 
 ## Shape
 
 | Piece | What it is |
 |---|---|
 | `Connect(endpoint) (*Backend, error)` | Opens the TEE device, checks it is a GlobalPlatform TEE, opens a session with the TA by UUID and checks its interface with GET_INFO. |
-| `*Backend` | An `enclave.Backend` and `enclave.Prober` named `arm-trustzone`, rank 2. Its native API is `Random`, `KeyProtector` and `Close`. |
+| `*Backend` | An `enclave.Backend` and `enclave.Prober` named `arm-trustzone`, rank 2. Its native API is `Random` and `Close`. |
 | `Connector` | A value to register by name before connecting. Its `Connect` returns the backend as an `enclave.Backend`. It is no `Prober`. |
 | handles from `Random` | Memory enclaves (`ByteAccess`) whose `Backend()` is the `*Backend` that filled them. |
-| `*KeyProtector` | An `enclave.KeyProtector` and `enclave.HealthReporter` for `ModePerOperation`, over the TA's SEAL and UNSEAL commands. |
 
 The backend implements `Prober`, so [`Detect`](../backend-detection/architecture.md)
 can select it. Rank 2 places it above secretmem (1) and locked memory (0):
@@ -56,16 +52,11 @@ drives, is fixed by its header `tfw_ta.h` at the release the fixture pins
 | UUID | `23751b49-3a76-4e49-b63c-e5853742fa1f` (RFC 9562, version 4) | – |
 | `GET_INFO` | `0x00000001` | param 0 `VALUE_OUTPUT`: `a` the interface version, `b` the flags |
 | `GET_RANDOM` | `0x00000002` | param 0 `MEMREF_OUTPUT`: 1 to 4096 bytes |
-| `SEAL` | `0x00000003` | param 0 `MEMREF_INPUT`: plaintext; param 1 `MEMREF_INPUT`: associated data, may be empty; param 2 `MEMREF_OUTPUT`: the sealed blob |
-| `UNSEAL` | `0x00000004` | param 0 `MEMREF_INPUT`: the sealed blob; param 1 `MEMREF_INPUT`: associated data; param 2 `MEMREF_OUTPUT`: the plaintext |
 | Interface version | `1` | – |
 | Info flags | `0` | – |
 | Random size | `1` to `4096` | – |
 
-SEAL and UNSEAL return `TEE_ERROR_SHORT_BUFFER` (`0xFFFF0010`) with the size
-they needed in param 2's size; UNSEAL returns `TEE_ERROR_MAC_INVALID`
-(`0xFFFF3071`) for a tampered blob. A TA release without SEAL answers it as
-it answers any command it does not define.
+This client drives GET_INFO and GET_RANDOM only.
 
 The client accepts only interface version 1 with flags 0, at `Connect` and in
 `Probe`. Anything else is an `*InterfaceError`, so a newer TA is never driven
@@ -109,57 +100,15 @@ before it writes that buffer is the TA's to wipe. On the go-enclave side:
 `Random` keeps nothing in the secure world. The bytes leave it as soon as
 they are produced, and the handle in the normal world is their only holder.
 
-## KeyProtector
-
-`(*Backend).KeyProtector()` returns an `enclave.KeyProtector` and
-`enclave.HealthReporter` for `ModePerOperation`: `Protect` runs SEAL on the
-key and `Unprotect` runs UNSEAL on the blob. The key the blob is sealed under
-lives in the TA; the blob is a generic provider blob, opaque to go-enclave.
-
-- **Associated data.** Both commands carry the fixed ASCII label
-  `go-enclave v1 TrustZone KeyProtector`, so a blob the TA sealed for another
-  client never opens as a go-enclave key.
-- **SEAL's output.** The output buffer starts at `len(key) + 64` bytes. On
-  `TEE_ERROR_SHORT_BUFFER` it is retried once, at the size the TA reported,
-  and refused above 4096 bytes. Any other failure, or a reported size of zero
-  or above the buffer, is a `*CommandError` (`ErrCommandFailed`).
-- **UNSEAL's output.** When the driver registers memory, the TA writes into
-  the caller's `key` directly. Otherwise the plaintext lands in driver shared
-  memory, is copied into `key`, and the shared memory is wiped.
-- **Error mapping.** On UNSEAL, `TEE_ERROR_MAC_INVALID`,
-  `TEE_ERROR_BAD_FORMAT` (`0xFFFF0005`), `TEE_ERROR_SHORT_BUFFER` and a
-  plaintext of a length other than `len(key)` all match
-  `enclave.ErrSealedAuthentication`. So do an empty blob, a blob above 4096
-  bytes and an empty `key`, which are refused before the TA is called. Any
-  other result, `TEE_ERROR_BAD_PARAMETERS` among them, is a `*CommandError`.
-  Driver failures are a `*DeviceError`, and a closed backend is
-  `ErrBackendClosed`. `key` is zeroed on every failure.
-
-It meets the [provider contract](../sealing/engineering.md#provider-contract):
-
-- UNSEAL authenticates every blob.
-- `Unprotect` writes exactly `len(key)` bytes into the caller's `key`.
-- `Protect` keeps no key, and its copy in driver shared memory is wiped.
-- The blob is copied, never kept or changed.
-- An ended context is refused before the TA is called, and one ending during
-  the call cancels it.
-- Infrastructure failures are the backend's own typed errors.
-- Concurrent calls are serialized by the session lock.
-- `Health` returns nil without blocking: a failure to reach the TA is
-  reported by the call that needs it.
-
-A blob opens only on the device and TA that sealed it.
-
 ## Testing
 
 ### Testing without the fixture
 
 The client reaches the kernel through a small driver seam: open, ioctl,
 shared-memory register, mmap, munmap and close. An ordinary `go test`
-replaces it with a fake TEE driver (`faketee_linux_test.go`) whose TA seals
-with AES-GCM. The fake runs the provider suite, the parameter wiring of SEAL
-and UNSEAL, the short-buffer retry, tampered blobs and cancellation. It runs
-each with registered memory and with driver shared memory, and fails if any
+replaces it with a fake TEE driver (`faketee_linux_test.go`) whose TA answers
+GET_INFO and GET_RANDOM. The fake runs the parameter wiring of both commands
+and cancellation. It runs each with registered memory and with driver shared memory, and fails if any
 shared memory or session outlives the call.
 
 Other unit tests check the ioctl struct layouts, offsets and numbers against
@@ -171,12 +120,9 @@ acceptance, and `Connect` on a missing device and off Linux.
 
 The fake proves the client's use of the driver ABI. Conformance runs against
 a real OP-TEE secure world. `conformance_optee_test.go` (build tag `optee`)
-connects to `GO_ENCLAVE_OPTEE_ENDPOINT` and runs:
-
-- `TestBackendConformance_OnOPTEE`: `backendtest.TestBackend` with the probe
-  and a random-filled handle case;
-- `TestKeyProtectorConformance_OnOPTEE`: `providertest.TestProvider` against
-  the `KeyProtector`.
+connects to `GO_ENCLAVE_OPTEE_ENDPOINT` and runs
+`TestBackendConformance_OnOPTEE`: `backendtest.TestBackend` with the probe and
+a random-filled handle case.
 
 `make integration-test-arm-trustzone` builds the test as a static
 `linux/arm64` binary with `CGO_ENABLED=0`, shares it with the guest of the
@@ -184,26 +130,6 @@ pinned OP-TEE fixture (TF-A, OP-TEE OS and Linux on QEMU `virt`), and runs it
 there. The fixture image is pinned by digest (`OPTEE_FIXTURE_IMAGE` in
 [`scripts/tool-pins.sh`](../../scripts/tool-pins.sh)), so CI uses its prebuilt
 stack and never builds it. A missing endpoint fails the run; it never skips.
-
-### SEAL on the pinned TA
-
-GET_INFO cannot tell whether a TA has SEAL: a TA reports interface version 1
-and flags 0 with SEAL and without it, and no error code proves SEAL absent,
-since a TA with SEAL can answer `TEE_ERROR_BAD_PARAMETERS` to a malformed SEAL
-call and to an unknown command alike. The fixture therefore declares it in
-`GO_ENCLAVE_OPTEE_SEAL`:
-
-| Value the test sees | Behavior of `TestKeyProtectorConformance_OnOPTEE` on a SEAL error |
-|---|---|
-| empty or `required` | Fails. |
-| `absent:<release>` | Skips on `TEE_ERROR_BAD_PARAMETERS` or `TEE_ERROR_NOT_SUPPORTED` from SEAL, only when `<release>` is `v0.4.2-alpha` (`opteeSealAbsentRelease`), the pinned release known to lack SEAL. Fails otherwise. A new pin without SEAL must raise both. |
-| anything else | Fails. |
-
-`make integration-test-arm-trustzone` with `GO_ENCLAVE_OPTEE_SEAL` empty, the
-default, makes the fixture pass `absent:<TRUSTED_FIRMWARE_TAG>`; set it to
-`required` to turn the skip into a failure. A SEAL that works runs the suite
-under every value. `TestSealDecision` runs this decision against the fake
-TEE.
 
 ## Benchmark
 
@@ -312,8 +238,8 @@ first run.
 
 ## What it does not do
 
-- A `RootUnsealer`: the `KeyProtector` serves `ModePerOperation` only, and no
-  key is kept in the secure world for go-enclave beyond the TA's sealing key.
+- A `KeyProtector` or `RootUnsealer`: key sealing in the secure world belongs
+  to go-xkms, and no key is kept in the secure world for go-enclave.
 - `Importer`, `Sweeper`, `Attester` or `Confiner`.
 - Run on any platform but Linux: elsewhere `Connect` returns a
   `*PlatformError` before any I/O.

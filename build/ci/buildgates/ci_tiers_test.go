@@ -120,16 +120,15 @@ var tierTerms = map[string][]string{
 	"nightly": {termNightly},
 }
 
-// ciJobTimeouts is every ci.yml job's timeout-minutes (#277): the measured
-// jobs at ceil(1.5 x p95), publish-images at the template's value, the swtpm
-// and OP-TEE jobs at the values they had before the template, preflight at
+// ciJobTimeouts is every ci.yml job's timeout-minutes: the measured jobs at
+// ceil(1.5 x p95), publish-images at the template's value, the OP-TEE job at the value it had before the template, preflight at
 // the template's 10 (v1.34), the rest at 5. Lint on a cold self-hosted runner
 // builds the toolchain image before make lint: ceil(1.5 x (19 + 8)) = 41, the
 // cold-cache run of main fc58102.
 var ciJobTimeouts = map[string]int{
 	preflightJob: 10, publishJob: 60, lintJob: 41, "image": 32,
 	lintGatesJob: 20, "fips": 11, "integration": 22, "soak": 56, ciGateJob: 5,
-	"tpm-swtpm": 30, "optee": 180,
+	"optee": 180,
 }
 
 // lintSteps are go-enclave's four lint steps, which v1.30 moved from the
@@ -716,7 +715,7 @@ func TestCIGateTiers_RefusesWhatItMustRefuse(t *testing.T) {
 		{"full job tagged nightly", `needs.fips.result }}" full`, `needs.fips.result }}" nightly`},
 		{"code job tagged pr", `needs.image.result }}" code`, `needs.image.result }}" pr`},
 		{"untagged check", `needs.image.result }}" code`, `needs.image.result }}"`},
-		{"gate misses a need", "needs: [preflight, lint, image, lint-gates, fips, integration, soak, tpm-swtpm, optee]", "needs: [preflight, lint, image, lint-gates, fips, integration, tpm-swtpm, optee]"},
+		{"gate misses a need", "needs: [preflight, lint, image, lint-gates, fips, integration, soak, optee]", "needs: [preflight, lint, image, lint-gates, fips, integration, optee]"},
 		{"gate misses lint-gates", "lint, image, lint-gates, fips,", "lint, image, fips,"},
 		{"gate needs publish-images", "lint, image, lint-gates, fips,", "lint, image, lint-gates, publish-images, fips,"},
 		{"lint-gates tagged pr", `needs.lint-gates.result }}" scoped`, `needs.lint-gates.result }}" pr`},
@@ -736,7 +735,6 @@ func TestCIGateTiers_RefusesWhatItMustRefuse(t *testing.T) {
 		{"full job runs a refused dispatch", fullIf, "    if: ${{ (" + termFull + ") && " + termDraft + " }}\n"},
 		{"full job's run verdict ored away", fullIf, "    if: ${{ ((" + termFull + ") && " + termDraft + ") || " + termRun + " }}\n"},
 		{"fips without the guard in needs", "    name: FIPS\n    needs: preflight   # v1.34\n", "    name: FIPS\n"},
-		{"swtpm without the guard in needs", fullIf + "    needs: preflight   # v1.34\n", fullIf + "    needs: lint\n"},
 		{"optee guarded through the image job only", "    needs: [preflight, image]   # v1.34\n", "    needs: [image]\n"},
 		{"lint without the guard in needs", lintHead, "    name: Lint [lint, gosec, build tags]\n" + lintRunsOn + lintIf},
 		{"lint runs a refused dispatch", lintHead, lintNeeds + "    if: " + draftIf + "\n"},

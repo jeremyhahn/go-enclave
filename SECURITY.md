@@ -18,9 +18,8 @@ bump, so upgrading to get a fix can require the steps in
 | Latest release | Yes |
 | Anything older | No, upgrade |
 
-This covers the root module and the two modules in this repository under
-`backends/`: the TPM provider (`backends/tpm`) and the arm-trustzone backend
-and provider (`backends/armtrustzone`). Reports against the BSDs and Windows
+This covers the root module and the one module in this repository under
+`backends/`: the arm-trustzone backend (`backends/armtrustzone`). Reports against the BSDs and Windows
 are in scope, though they are build-only
 ([test status](docs/memory-enclave/engineering.md#test-status)).
 
@@ -37,7 +36,7 @@ This is the repository's **Security** tab, then **Report a vulnerability**.
 
 Please include:
 
-- the go-enclave version (tag or commit), the module (root, `backends/tpm` or
+- the go-enclave version (tag or commit), the module (root or
   `backends/armtrustzone`), Go version, GOOS/GOARCH, and whether FIPS mode
   (`GOFIPS140`, `GODEBUG=fips140=only`) was in use;
 - the affected API, the sealing mode (`ModeRootKey` or `ModePerOperation`) and
@@ -68,10 +67,9 @@ In scope:
   enclave the provider writes into, span `UnsealRoot` by design); silent
   re-keying after a sweep; a conformance-suite check that can pass a provider
   or backend that violates the contract.
-- **The in-repo hardware modules.** The TPM provider (`backends/tpm`) and the
-  arm-trustzone backend and provider (`backends/armtrustzone`): key material
-  left outside locked memory, a blob accepted after tampering or under another
-  parent, or a device response that is trusted without being checked.
+- **The in-repo hardware module.** The arm-trustzone backend
+  (`backends/armtrustzone`): key material left outside locked memory, or a
+  device response that is trusted without being checked.
 - **Admission-control bypass.** Admitting allocations past an `Allocator`
   budget beyond what its documentation allows (the over-subscription
   `ForceLimit` reports, and `OpenIn`'s unadmitted transient key pages), or one
@@ -99,7 +97,7 @@ A report that shows the documentation understates one is in scope.
   per-mapping exclusion is available; and copies the caller makes itself
   (bytes taken out of a `WithBytes` borrow, and `NewMemoryCopy` sources).
 - `GOEXPERIMENT=boringcrypto` builds refusing to seal.
-- Defects in the TPM, the trusted application or the secure-world firmware
+- Defects in the trusted application or the secure-world firmware
   itself, and in providers or backends maintained outside this repository:
   report those to their authors, unless this package or a conformance suite
   is at fault.
@@ -136,5 +134,4 @@ What each type protects against, and what it does not:
 - [docs/shutdown-sweep/architecture.md](docs/shutdown-sweep/architecture.md#trust-boundaries): who may call `WipeAll`.
 - [docs/provider-conformance/architecture.md](docs/provider-conformance/architecture.md#trust-boundaries): what a passing conformance run proves.
 - [docs/backend-conformance/architecture.md](docs/backend-conformance/architecture.md#trust-boundaries): what a passing backend conformance run proves.
-- [docs/sealing/hardware-providers.md](docs/sealing/hardware-providers.md): the TPM provider's design.
 - [docs/backends/arm-trustzone-design.md](docs/backends/arm-trustzone-design.md): the arm-trustzone backend's design.

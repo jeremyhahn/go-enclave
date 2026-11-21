@@ -15,7 +15,7 @@ import (
 // The changed-files step (ci.yml, job changes, step `diff`) decides what a
 // pull request may skip: docs_only=true skips the build and test steps of the
 // PR tier, lint_gates=false skips the lint-gates job (CI Gate reads that skip
-// as passed) and tpm=false skips the TPM suite. Each answer is a search of
+// as passed). Each answer is a search of
 // the changed files for a pattern, so only a search that ran and selected no
 // file may give the answer that skips. A search that could not run (a
 // pattern that is no regular expression, or an empty one) must keep the
@@ -37,13 +37,12 @@ const (
 	// the workflow's values do.
 	changesDocsPattern = `(\.md$|^docs/)`
 	changesLintPattern = `^(scripts/|Makefile$)`
-	changesTPMPattern  = `^backends/tpm/`
 	// unusablePattern is no regular expression: grep exits 2 on it.
 	unusablePattern = "["
 )
 
 // changesOutputs are the step's answers, in the order of changesRun.want.
-var changesOutputs = [3]string{"docs_only", "lint_gates", "tpm"}
+var changesOutputs = [2]string{"docs_only", "lint_gates"}
 
 // changesEnv is what the step must read from the run.
 var changesEnv = [][2]string{
@@ -106,10 +105,10 @@ type changesRun struct {
 	files    []string
 	noDiff   bool
 	fullTier bool
-	// The patterns: DOCS_ONLY_PATTERN, LINT_GATES_PATTERN, TPM_PATTERN.
-	docs, lint, tpm string
-	// want is docs_only, lint_gates and tpm, in changesOutputs' order.
-	want [3]string
+	// The patterns: DOCS_ONLY_PATTERN, LINT_GATES_PATTERN.
+	docs, lint string
+	// want is docs_only and lint_gates, in changesOutputs' order.
+	want [2]string
 	// unusable names the pattern variable the row's search cannot run with;
 	// "" when every search runs. On such a row the step may fail instead of
 	// answering, and an answer needs a warning that names the variable.
@@ -120,7 +119,7 @@ type changesRun struct {
 // remaining files are many: grep -q stops reading at the first line, and a
 // search that stopped early is not a search that failed.
 func longChangedList() []string {
-	files := []string{"backends/tpm/tpm.go"}
+	files := []string{"backends/armtrustzone/backend.go"}
 	for i := 0; i < 20000; i++ {
 		files = append(files, "docs/reference/page-"+strconv.Itoa(i)+".md")
 	}
@@ -131,33 +130,29 @@ func longChangedList() []string {
 // answers of searches that run; the last rows are searches that cannot.
 var changesRuns = []changesRun{
 	{"a changed file matches the lint-gates pattern", "pull_request", []string{"enclave.go", "scripts/lib.sh"}, false, false,
-		changesDocsPattern, changesLintPattern, changesTPMPattern, [3]string{"false", "true", "false"}, ""},
+		changesDocsPattern, changesLintPattern, [2]string{"false", "true"}, ""},
 	{"no changed file matches the lint-gates pattern", "pull_request", []string{"enclave.go", "backends/memory/memory.go"}, false, false,
-		changesDocsPattern, changesLintPattern, changesTPMPattern, [3]string{"false", "false", "false"}, ""},
+		changesDocsPattern, changesLintPattern, [2]string{"false", "false"}, ""},
 	{"every changed file is docs or markdown", "pull_request", []string{"README.md", "docs/build-and-release.md"}, false, false,
-		changesDocsPattern, changesLintPattern, changesTPMPattern, [3]string{"true", "false", "false"}, ""},
+		changesDocsPattern, changesLintPattern, [2]string{"true", "false"}, ""},
 	{"one changed file is neither docs nor markdown", "pull_request", []string{"README.md", "enclave.go"}, false, false,
-		changesDocsPattern, changesLintPattern, changesTPMPattern, [3]string{"false", "false", "false"}, ""},
-	{"a changed file matches the TPM pattern", "pull_request", []string{"backends/tpm/tpm.go"}, false, false,
-		changesDocsPattern, changesLintPattern, changesTPMPattern, [3]string{"false", "false", "true"}, ""},
+		changesDocsPattern, changesLintPattern, [2]string{"false", "false"}, ""},
 	{"the full tier is never docs only and never skips lint-gates", "pull_request", []string{"README.md"}, false, true,
-		changesDocsPattern, changesLintPattern, changesTPMPattern, [3]string{"false", "true", "false"}, ""},
+		changesDocsPattern, changesLintPattern, [2]string{"false", "true"}, ""},
 	{"a diff that cannot be taken skips nothing", "pull_request", nil, true, false,
-		changesDocsPattern, changesLintPattern, changesTPMPattern, [3]string{"false", "true", "true"}, ""},
+		changesDocsPattern, changesLintPattern, [2]string{"false", "true"}, ""},
 	{"an empty diff", "pull_request", nil, false, false,
-		changesDocsPattern, changesLintPattern, changesTPMPattern, [3]string{"false", "true", "false"}, ""},
+		changesDocsPattern, changesLintPattern, [2]string{"false", "true"}, ""},
 	{"a push takes no diff", "push", nil, true, false,
-		changesDocsPattern, changesLintPattern, changesTPMPattern, [3]string{"false", "true", "false"}, ""},
+		changesDocsPattern, changesLintPattern, [2]string{"false", "true"}, ""},
 	{"a long diff whose first file decides every search", "pull_request", longChangedList(), false, false,
-		changesDocsPattern, `^backends/`, changesTPMPattern, [3]string{"false", "true", "true"}, ""},
+		changesDocsPattern, `^backends/`, [2]string{"false", "true"}, ""},
 	{"a lint-gates pattern that is no regular expression", "pull_request", []string{"enclave.go"}, false, false,
-		changesDocsPattern, unusablePattern, changesTPMPattern, [3]string{"false", "true", "false"}, "LINT_GATES_PATTERN"},
+		changesDocsPattern, unusablePattern, [2]string{"false", "true"}, "LINT_GATES_PATTERN"},
 	{"a docs-only pattern that is no regular expression", "pull_request", []string{"README.md"}, false, false,
-		unusablePattern, changesLintPattern, changesTPMPattern, [3]string{"false", "false", "false"}, "DOCS_ONLY_PATTERN"},
-	{"a TPM pattern that is no regular expression", "pull_request", []string{"enclave.go"}, false, false,
-		changesDocsPattern, changesLintPattern, unusablePattern, [3]string{"false", "false", "true"}, "TPM_PATTERN"},
+		unusablePattern, changesLintPattern, [2]string{"false", "false"}, "DOCS_ONLY_PATTERN"},
 	{"an empty docs-only pattern", "pull_request", []string{"enclave.go"}, false, false,
-		"", changesLintPattern, changesTPMPattern, [3]string{"false", "false", "false"}, "DOCS_ONLY_PATTERN"},
+		"", changesLintPattern, [2]string{"false", "false"}, "DOCS_ONLY_PATTERN"},
 }
 
 // changesFixture is where the step's script runs: a directory holding the
@@ -200,7 +195,7 @@ func (fx changesFixture) violations(t *testing.T, script string) []string {
 			"EVENT=" + r.event,
 			"BASE=0123456789abcdef0123456789abcdef01234567", "HEAD=89abcdef0123456789abcdef0123456789abcdef",
 			"CI_FULL_TIER=" + strconv.FormatBool(r.fullTier),
-			"DOCS_ONLY_PATTERN=" + r.docs, "LINT_GATES_PATTERN=" + r.lint, "TPM_PATTERN=" + r.tpm,
+			"DOCS_ONLY_PATTERN=" + r.docs, "LINT_GATES_PATTERN=" + r.lint,
 		}
 		if !r.noDiff {
 			list := filepath.Join(tmp, "changed-files")
@@ -272,21 +267,17 @@ func TestChangedFilesStepSkipsOnlyOnASearchThatRan(t *testing.T) {
 // changesNegatedSearches is a script that answers each search by negating or
 // taking grep's status as it stands, so a search that cannot run reads as one
 // that selected no file. The check must refuse it.
-const changesNegatedSearches = `docs_only=false lint_gates=true tpm=false
+const changesNegatedSearches = `docs_only=false lint_gates=true
 if [ "$EVENT" = pull_request ]; then
   if files=$(git diff --name-only --no-renames "$BASE...$HEAD"); then
     if [ -n "$files" ]; then
       if [ "$CI_FULL_TIER" != true ] && ! grep -qvE "$DOCS_ONLY_PATTERN" <<< "$files"; then docs_only=true; fi
       if [ "$CI_FULL_TIER" != true ] && ! grep -qE "$LINT_GATES_PATTERN" <<< "$files"; then lint_gates=false; fi
-      if grep -qE "$TPM_PATTERN" <<< "$files"; then tpm=true; fi
     fi
-  else
-    tpm=true
   fi
 fi
 echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
 echo "lint_gates=$lint_gates" >> "$GITHUB_OUTPUT"
-echo "tpm=$tpm" >> "$GITHUB_OUTPUT"
 `
 
 // TestChangedFilesStepSkipsOnlyOnASearchThatRan_RefusesWhatItMustRefuse pins
@@ -304,8 +295,6 @@ func TestChangedFilesStepSkipsOnlyOnASearchThatRan_RefusesWhatItMustRefuse(t *te
 		{"the docs-only answer is another step's", "docs_only: ${{ steps.diff.outputs.docs_only }}", "docs_only: ${{ steps.optee.outputs.optee }}"},
 		{"the script writes docs only whatever it found", `echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"`, `echo "docs_only=true" >> "$GITHUB_OUTPUT"`},
 		{"the script skips lint-gates whatever it found", `echo "lint_gates=$lint_gates" >> "$GITHUB_OUTPUT"`, `echo "lint_gates=false" >> "$GITHUB_OUTPUT"`},
-		{"the script writes no TPM answer", `echo "tpm=$tpm" >> "$GITHUB_OUTPUT"`, ":"},
-		{"a diff that cannot be taken skips the TPM suite", "tpm=true   # an unknown diff runs", "tpm=false   # an unknown diff runs"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if n := strings.Count(wf, tc.old); n != 1 {
@@ -333,7 +322,7 @@ func TestChangedFilesStepSkipsOnlyOnASearchThatRan_RefusesWhatItMustRefuse(t *te
 			t.Skip(skip)
 		}
 		bad := fx.violations(t, changesNegatedSearches)
-		for _, variable := range []string{"LINT_GATES_PATTERN", "DOCS_ONLY_PATTERN", "TPM_PATTERN"} {
+		for _, variable := range []string{"LINT_GATES_PATTERN", "DOCS_ONLY_PATTERN"} {
 			named := false
 			for _, b := range bad {
 				named = named || strings.Contains(b, variable)

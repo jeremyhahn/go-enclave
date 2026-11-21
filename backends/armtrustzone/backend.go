@@ -14,7 +14,7 @@ const Name = "arm-trustzone"
 const rank = 2
 
 // The trusted application's interface (tfw_ta.h). The backend calls GET_INFO
-// and GET_RANDOM; SEAL and UNSEAL are used by the KeyProtector in protector.go.
+// and GET_RANDOM.
 const (
 	taUUID             = "23751b49-3a76-4e49-b63c-e5853742fa1f"
 	taCmdGetInfo       = 0x00000001 // TFW_TA_CMD_GET_INFO

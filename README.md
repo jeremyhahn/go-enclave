@@ -28,9 +28,9 @@ library that handles key material can share one implementation.
   allocator and libraries draw on it.
 - **Sealing.** `Sealed` holds an AES-256-GCM envelope and opens it only into a
   fresh, frozen memory enclave. A `Sealer` seals under a key provider, in
-  `ModeRootKey` or `ModePerOperation`. Providers ship for software
-  (`NewSoftwareProvider`), TPM 2.0 ([`backends/tpm`](backends/tpm)) and
-  OP-TEE on Arm TrustZone ([`backends/armtrustzone`](backends/armtrustzone)).
+  `ModeRootKey` or `ModePerOperation`. The memory provider
+  (`NewSoftwareProvider`) ships here; hardware providers (TPM, TrustZone) live
+  in [go-xkms](https://github.com/jeremyhahn/go-xkms).
 - **Backends.** A small `Backend` and `Handle` core with optional
   capabilities, found with `As`. Backends are registered by name with
   `Register`; importing the package registers nothing. `Detect` probes the
@@ -58,11 +58,10 @@ go get github.com/jeremyhahn/go-enclave
 ```
 
 Requires Go 1.27.4 or later. The root module depends only on
-`golang.org/x/sys`. The hardware providers are separate modules with their own
-dependencies, so the root module never pulls them in:
+`golang.org/x/sys`. The arm-trustzone backend is a separate module, so the
+root module never pulls it in:
 
 ```sh
-go get github.com/jeremyhahn/go-enclave/backends/tpm           # adds github.com/google/go-tpm
 go get github.com/jeremyhahn/go-enclave/backends/armtrustzone  # pure Go, no cgo
 ```
 

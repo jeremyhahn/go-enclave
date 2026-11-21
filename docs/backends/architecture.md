@@ -1,6 +1,6 @@
 # Backends — architecture
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-11-12
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-11-21
 > The backend seam. The declarations in [backend.go](../../backend.go) and [errors.go](../../errors.go) are canonical; exact signatures are in [engineering.md](engineering.md#interface-signatures) and the conformance suite is [backend-conformance](../backend-conformance/architecture.md). Conflicts with this document are defects.
 
 ## Problem
@@ -151,9 +151,9 @@ its `ByteAccess`.
 | `Confiner` | backend | no | yes, when this process runs inside the TEE | no: the process is outside the device |
 | `Prober` | backend | yes: rank 0, always usable | yes: ranks itself, probes for the TEE | yes: ranks itself, probes for the device |
 
-[^tpm]: no TPM backend ships. The column says what one would provide. The
-    TPM support in this repository is a `KeyProtector` provider, the nested
-    module `backends/tpm` ([hardware providers](../sealing/hardware-providers.md#tpm-provider)).
+[^tpm]: no TPM backend ships. The column says what one would provide. A TPM
+    `KeyProtector` provider lives in go-xkms, not in this repository
+    ([hardware providers](../sealing/hardware-providers.md)).
 
 Two backends ship beside the locked-memory default:
 
@@ -166,7 +166,8 @@ Two backends ship beside the locked-memory default:
   `Prober` ranks 2. Its handles are `ByteAccess` memory enclaves filled with
   random bytes from the secure world by its native `Random`. It is no
   `Importer`, so `OpenIn` and `WithBackend` refuse it with a
-  `*CapabilityError`. Its key sealing is a separate `KeyProtector`.
+  `*CapabilityError`. It seals no keys: key sealing in the secure world
+  belongs to go-xkms.
 
 ### Opaque operations
 
@@ -667,14 +668,13 @@ errors and use are in [backend-conformance](../backend-conformance/architecture.
 | `Detect`, `ProbeResult` | [detection.go](../../detection.go) |
 | The secretmem backend | [secretmem.go](../../secretmem.go), [secretmem_linux.go](../../secretmem_linux.go) |
 | Conformance suite | [backendtest](../../backendtest/doc.go) |
-| Hardware backends and providers | nested modules under [backends/](../../backends), never the root module |
+| Hardware backends | nested modules under [backends/](../../backends), never the root module |
 
 go-enclave owns this seam (the `Backend`, `Handle` and capability interfaces)
 along with [locked memory](../memory-enclave/architecture.md#component-boundaries).
-Hardware support ships as nested modules, each with its own `go.mod` that
+Hardware support ships as a nested module with its own `go.mod` that
 requires the root module and never the reverse:
-[`backends/armtrustzone`](../../backends/armtrustzone) (a backend and a
-`KeyProtector`) and [`backends/tpm`](../../backends/tpm) (a `KeyProtector`).
+[`backends/armtrustzone`](../../backends/armtrustzone), a backend.
 A hardware module implements this seam rather than extending it. This module
 carries attestation evidence as `Evidence` and never parses or appraises it.
 

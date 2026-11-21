@@ -1,6 +1,6 @@
 # Provider conformance — architecture
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-12
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-11-21
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Problem
@@ -116,9 +116,9 @@ runs.
 | Residue sweep | [providertest/residue.go](../../providertest/residue.go); the `/proc/self/mem` scan it shares with the root package's tests is [internal/memscan](../../internal/memscan/memscan_linux.go) |
 
 The provider under test is the author's; the suite runs in the author's
-repository and test binary. go-enclave's own TPM and TrustZone providers
-(`backends/tpm`, `backends/armtrustzone`) run it in their module's tests, and
-HSM and KMS providers written elsewhere run it the same way
+repository and test binary. go-enclave runs it against `SoftwareProvider`;
+the hardware providers in go-xkms, and HSM and KMS providers written
+elsewhere, run it the same way
 ([sealing](../sealing/architecture.md#component-boundaries)).
 
 ## Trust boundaries

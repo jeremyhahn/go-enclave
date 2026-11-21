@@ -1,6 +1,6 @@
 # Backend conformance — engineering contract
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-14
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-11-21
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 The suite holds a backend to the contract in
@@ -233,8 +233,8 @@ config is refused.
 
 ### The arm-trustzone harness
 
-`make integration-test-arm-trustzone` runs the arm-trustzone conformance tests,
-`TestBackendConformance_OnOPTEE` and `TestKeyProtectorConformance_OnOPTEE` in
+`make integration-test-arm-trustzone` runs the arm-trustzone conformance test,
+`TestBackendConformance_OnOPTEE` in
 `backends/armtrustzone/conformance_optee_test.go`, against the backend on
 OP-TEE. The backend and its design are in
 [arm-trustzone-design.md](../backends/arm-trustzone-design.md). The tests are
@@ -248,7 +248,7 @@ it into a fresh share directory and runs the pinned checkout's
 `make optee-run OPTEE_SHARE=<dir> OPTEE_GUEST_CMD=<binary>`, in the
 [prebuilt image](#fixture-image-contract) when `OPTEE_FIXTURE_IMAGE` is set
 and on the host otherwise. The guest runs `TestBackendConformance_OnOPTEE`
-and `TestKeyProtectorConformance_OnOPTEE` with `GO_ENCLAVE_OPTEE_ENDPOINT` set (default `/dev/tee0`, the guest's TEE
+with `GO_ENCLAVE_OPTEE_ENDPOINT` set (default `/dev/tee0`, the guest's TEE
 device), and `optee-run`'s status, the binary's, is the target's. It refuses
 while `TRUSTED_FIRMWARE_TAG` is empty, and the script refuses a missing
 binary.
@@ -289,13 +289,7 @@ binary.
   for a fresh backend per check. The connected backend claims
   `CapabilityProbe`, behind the TA's version command (0x1). Its one handle case,
   `rng`, is `Random(ctx, 32)`: a `CapabilityBytes` handle filled by the TA's
-  rng command (0x2). `TestKeyProtectorConformance_OnOPTEE` runs the provider
-  suite (`providertest.TestProvider`, `ModePerOperation`) against
-  `(*Backend).KeyProtector()`, which uses the TA's SEAL and UNSEAL commands
-  (0x3 and 0x4), on the same fixture. It skips only when SEAL answers
-  `TEE_ERROR_NOT_SUPPORTED` or `TEE_ERROR_BAD_PARAMETERS`, which means the
-  pinned TA does not implement SEAL yet. `GO_ENCLAVE_OPTEE_SEAL=required`
-  turns that skip into a failure.
+  rng command (0x2).
 - **Fails, never skips.** An empty `GO_ENCLAVE_OPTEE_ENDPOINT` is a
   `*backendtest.EndpointError` (`ErrNoEndpoint`). A failed registration or
   lookup, or a backend without `Connect`, fails the test. A skipped run would
