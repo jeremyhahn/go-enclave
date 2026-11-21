@@ -1262,7 +1262,7 @@ jobs:
       # commit otherwise. v1.41: every PR run, ci:full or not. No credential is left in the checkout.
       # CUSTOMIZE: the optee step diffs every pull request and push, so both
       # take the full history.
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7   CUSTOMIZE: newer than the template's v6.1.0; never downgraded
         with:
           fetch-depth: ${{ (github.event_name == 'pull_request' || github.event_name == 'push') && '0' || '1' }}   # CUSTOMIZE
           persist-credentials: false
@@ -1960,7 +1960,7 @@ jobs:
     env:
       CI_IMAGE_NAMESPACE: ${{ vars.CI_IMAGE_NAMESPACE }}   # m2101: a repository variable; ci-standard.md §9 (ruling 217(4))
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7   CUSTOMIZE: newer than the template's v6.1.0; never downgraded
 
       # v1.21.1: mask the forge credentials before any other step (as above).
       - name: Mask the forge credentials
@@ -2010,7 +2010,7 @@ jobs:
       CI_CACHE_CLASS: ${{ (github.event_name == 'push' || github.event_name == 'schedule') && 'main' || 'pr' }}
       CI_IMAGE_NAMESPACE: ${{ vars.CI_IMAGE_NAMESPACE }}
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7   CUSTOMIZE: newer than the template's v6.1.0; never downgraded
 
       # v1.21.1: mask the forge credentials before any other step (as above).
       - name: Mask the forge credentials
@@ -2281,7 +2281,7 @@ jobs:
       # on main, so it writes main's set too.
       CI_CACHE_CLASS: ${{ (github.event_name == 'push' || github.event_name == 'schedule') && 'main' || 'pr' }}
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7   CUSTOMIZE: newer than the template's v6.1.0; never downgraded
 
       # v1.21.1 (Tenant Agent m605 item 8): mask the forge credentials before
       # any other step. The runner injects them as plain environment
@@ -2514,7 +2514,7 @@ jobs:
       CI_CACHE_CLASS: ${{ (github.event_name == 'push' || github.event_name == 'schedule') && 'main' || 'pr' }}
       CI_IMAGE_NAMESPACE: ${{ vars.CI_IMAGE_NAMESPACE }}   # v1.30; m2101
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7   CUSTOMIZE: newer than the template's v6.1.0; never downgraded
 
       # v1.21.1: mask the forge credentials before any other step (as above).
       - name: Mask the forge credentials
@@ -2608,7 +2608,7 @@ jobs:
       CI_STACK_PREFIX: ${{ github.event.repository.name }}-ci-
       IT_PROJECT: ${{ github.event.repository.name }}-ci-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7   CUSTOMIZE: newer than the template's v6.1.0; never downgraded
 
       # v1.21.1 (Tenant Agent m605 item 8): mask the forge credentials before
       # any other step. The runner injects them as plain environment
@@ -2773,7 +2773,7 @@ jobs:
       CI_STACK_PREFIX: ${{ github.event.repository.name }}-ci-
       IT_PROJECT: ${{ github.event.repository.name }}-ci-${{ github.run_id }}-${{ github.run_attempt }}-soak
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7   CUSTOMIZE: newer than the template's v6.1.0; never downgraded
 
       # v1.21.1: mask the forge credentials before any other step (as above).
       - name: Mask the forge credentials
@@ -2972,7 +2972,7 @@ jobs:
     env:
       CI_STACK_PREFIX: ${{ github.event.repository.name }}-ci-
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7   CUSTOMIZE: newer than the template's v6.1.0; never downgraded
 
       - name: Mask the forge credentials
         run: |
@@ -3039,7 +3039,7 @@ jobs:
             echo "TPM suite not selected: this pull request changes no file under backends/tpm/, scripts/swtpm-fixture.sh or .github/workflows/ci.yml"
           fi
 
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7   CUSTOMIZE: newer than the template's v6.1.0; never downgraded
         if: ${{ env.TPM_SELECTED == 'true' }}
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
@@ -3108,7 +3108,7 @@ jobs:
             echo "run=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7   CUSTOMIZE: newer than the template's v6.1.0; never downgraded
         if: steps.select.outputs.run == 'true'
 
       # v1.21.1: mask the forge credentials before any other step (as in the
