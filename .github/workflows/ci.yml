@@ -876,7 +876,7 @@ on:
   # and its bigdisk jobs skip while a main push run is in flight (the
   # schedule-guard job).
   schedule:
-    - cron: '0 4 * * 3'
+    - cron: '0 4 * * 3'   # CUSTOMIZE: weekly, Wednesday 04:00 UTC, not daily
 
 # v1.26.2: on main the group is the workflow, the event and the commit sha,
 # so each main run is its own group and a merge never cancels the main run in
