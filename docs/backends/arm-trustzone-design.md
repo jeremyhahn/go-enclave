@@ -1,6 +1,6 @@
 # arm-trustzone backend — design
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-11-13
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-11-21
 > Conflicts with this document are defects. The code in [`backends/armtrustzone`](../../backends/armtrustzone) is canonical: fix this document to match it.
 > The design of the backend that reaches OP-TEE through the [backend seam](architecture.md). Its API is in [user](user.md#arm-trustzone) and [engineering](engineering.md#arm-trustzone); its integration harness is [backend-conformance](../backend-conformance/engineering.md#the-arm-trustzone-harness).
 
@@ -205,6 +205,66 @@ default, makes the fixture pass `absent:<TRUSTED_FIRMWARE_TAG>`; set it to
 under every value. `TestSealDecision` runs this decision against the fake
 TEE.
 
+## Benchmark
+
+The backend is for short-lived open/use/close of material, not hot bulk
+buffers, so the benchmark measures that pattern. The harness is in
+`bench_test.go` and has two bodies, each reporting operations per second
+(`ops/s`) and time per operation (`ns/access`):
+
+| Benchmark | One iteration |
+|---|---|
+| `BenchmarkOpenUseClose` | `Connect` (open session on the pinned TA, then `GET_INFO`), one `Random` of 32 bytes into locked memory, `Destroy` of the handle, `Close` (close session, close the device) |
+| `BenchmarkAccess` | One `GET_RANDOM` of 32 bytes into a locked buffer, on one session opened before the loop |
+
+The session calls are those of the GlobalPlatform TEE Client API as the
+client already drives them (open session, invoke, close), over the TEE
+subsystem's ioctls ([copy](../reference/linux-uapi-tee.h)), with the TA
+named by its `TEEC_UUID` ([RFC 9562](../reference/rfc9562.txt)). The
+benchmarks drive only commands the pinned TA has; the vault path, once it
+exists, joins the same harness.
+
+Where it runs:
+
+- `TestBenchHarness_Fake`, in the untagged unit build, runs both bodies once
+  through `testing.Benchmark` against the fake TEE, with and without
+  registered memory. It checks the harness (iterations run, both metrics
+  reported, no device fd, session or shared-memory object left); its timings
+  are not results.
+- `BenchmarkOpenUseClose` and `BenchmarkAccess` in `conformance_optee_test.go`
+  (build tag `optee`) run on `GO_ENCLAVE_OPTEE_ENDPOINT`; a missing endpoint
+  fails them. `make integration-test-arm-trustzone` runs them in the guest
+  after the conformance tests, with `-test.benchtime=2s`, and a benchmark
+  failure fails the target. The output records the figures.
+
+The fixture is OP-TEE on QEMU `virt`, emulated: its figures are fixture
+figures and say nothing about any hardware. The SPEC's targets (thousands of
+open/use/close operations per second, microseconds per access) are for an
+i.MX 95, and no figure from one is recorded yet.
+
+## Vault storage
+
+The SPEC plans material held in secure-world RAM by trusted-firmware's vault
+trusted application, reached over OP-TEE. No vault TA interface is
+published at the pinned release or anywhere this repository can cite, and
+go-enclave designs nothing in place of an interface trusted-firmware owns.
+The client is not written until that interface fixes each of these, and
+none has a value here yet:
+
+| Open item | What the interface must fix |
+|---|---|
+| UUID | The vault TA's UUID, or that the vault commands live in the TA above |
+| Commands | The command IDs: store, use (read or operate), destroy, and any list or query |
+| Parameters | Each command's parameter types and layout, which side allocates, and how material is named (an ID the TA returns or one the caller gives) |
+| Limits | The largest item, the most items per session and per TA, and what the TA answers past them |
+| Version and flags | The `GET_INFO` interface version and flags that announce the vault, so the client keeps refusing an interface it does not know |
+| Error codes | The result codes for unknown item, full store, short buffer and bad parameters |
+| Lifetime | Whether stored material is wiped when its session closes, when the TA instance ends, or only on destroy, and what survives a client crash |
+
+When it is published, its text goes into
+[docs/reference/](../reference/README.md) with an index row, and the client,
+its fake-TEE tests and its benchmark path follow.
+
 ## Design choices
 
 ### A nested module
@@ -258,6 +318,8 @@ first run.
 - Run on any platform but Linux: elsewhere `Connect` returns a
   `*PlatformError` before any I/O.
 - Run conformance on a hardware board in CI. CI runs OP-TEE on QEMU `virt`.
+- Store material in secure-world RAM: the vault TA interface is not yet
+  published ([Vault storage](#vault-storage)).
 
 ## References
 
