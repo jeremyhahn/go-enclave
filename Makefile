@@ -232,20 +232,20 @@ lint-actions:
 	@sc=$(call tool,shellcheck,SHELLCHECK) && \
 	bin=$(call tool,actionlint,ACTIONLINT) && "$$bin" -shellcheck "$$sc"
 
-## lint-scripts: shellcheck (pinned) over scripts/*.sh, build/docker/devcontainer/*.sh, build/fuzz/*.sh and build/ci/*.sh
+## lint-scripts: shellcheck (pinned) over scripts/*.sh, scripts/amd-sev-snp/*.sh, build/docker/devcontainer/*.sh, build/fuzz/*.sh and build/ci/*.sh
 # The scripts are POSIX sh, and release.yml runs them with a write token. -x
 # follows the `. lib.sh` every script sources. build/ci/*.sh are the workflows'
 # scripts, and CI_BASH_SCRIPTS the ci-template's bash ones, taken unchanged
 # from it; each names its own shell on its first line.
 CI_BASH_SCRIPTS := scripts/apk-index-sum.sh scripts/ci-image-cache.sh scripts/in-toolchain-image.sh scripts/in-toolchain-image_test.sh scripts/reap-stale-ci-stacks.sh scripts/trim-ci-caches.sh
 .PHONY: lint-scripts
-# The amd-sev guest kit and host scan moved under scripts/amd-sev-snp/ and
-# are checked as they were under scripts/.
-AMDSEV_KIT_SCRIPTS := scripts/amd-sev-snp/amdsev-guest.sh scripts/amd-sev-snp/amdsev-host-scan.sh
+# The amd-sev kit, scripts/amd-sev-snp/*.sh, is POSIX sh like scripts/*.sh;
+# $(wildcard scripts/*.sh) does not reach the subdirectory, so it is named here.
+AMDSEV_KIT_SCRIPTS := $(sort $(wildcard scripts/amd-sev-snp/*.sh))
 
 lint-scripts:
 	@sc=$(call tool,shellcheck,SHELLCHECK) && \
-	echo "shellcheck $(SHELLCHECK_VERSION) -x --shell=sh $(AMDSEV_KIT_SCRIPTS) scripts/*.sh build/docker/devcontainer/*.sh build/fuzz/*.sh; $(CI_BASH_SCRIPTS) build/ci/*.sh" && \
+	echo "shellcheck $(SHELLCHECK_VERSION) -x --shell=sh scripts/amd-sev-snp/*.sh scripts/*.sh build/docker/devcontainer/*.sh build/fuzz/*.sh; $(CI_BASH_SCRIPTS) build/ci/*.sh" && \
 	"$$sc" -x --source-path=SCRIPTDIR --shell=sh $(AMDSEV_KIT_SCRIPTS) $(filter-out $(CI_BASH_SCRIPTS),$(sort $(wildcard scripts/*.sh))) build/docker/devcontainer/*.sh build/fuzz/*.sh && \
 	"$$sc" -x --source-path=SCRIPTDIR $(CI_BASH_SCRIPTS) build/ci/*.sh
 
