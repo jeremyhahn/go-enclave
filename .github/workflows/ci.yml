@@ -2675,8 +2675,13 @@ jobs:
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
           df -h /
 
+      # CUSTOMIZE (go-enclave): the suites' own compose projects (go-enclave-it-*,
+      # go-enclave-userns-*) are reaped beside the repo's CI prefix.
       - name: Reap stale CI stacks
-        run: scripts/reap-stale-ci-stacks.sh "$CI_STACK_PREFIX"
+        run: |
+          scripts/reap-stale-ci-stacks.sh "$CI_STACK_PREFIX"
+          scripts/reap-stale-ci-stacks.sh go-enclave-it
+          scripts/reap-stale-ci-stacks.sh go-enclave-userns-
 
       # v1.29: the Alpine package index checksum (as in the image job).
       - name: Read the Alpine package index
@@ -2836,8 +2841,13 @@ jobs:
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
           df -h /
 
+      # CUSTOMIZE (go-enclave): the suites' own compose projects (go-enclave-it-*,
+      # go-enclave-userns-*) are reaped beside the repo's CI prefix.
       - name: Reap stale CI stacks
-        run: scripts/reap-stale-ci-stacks.sh "$CI_STACK_PREFIX"
+        run: |
+          scripts/reap-stale-ci-stacks.sh "$CI_STACK_PREFIX"
+          scripts/reap-stale-ci-stacks.sh go-enclave-it
+          scripts/reap-stale-ci-stacks.sh go-enclave-userns-
 
       # v1.29: the Alpine package index checksum (as in the image job).
       - name: Read the Alpine package index
