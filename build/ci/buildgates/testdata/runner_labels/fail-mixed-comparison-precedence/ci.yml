@@ -1,0 +1,6 @@
+on: [push, pull_request]
+jobs:
+  build:
+    runs-on: ${{ 0 == 2 < 3 && 'ubuntu-latest' || 'self-hosted' }}
+    steps:
+      - run: "true"

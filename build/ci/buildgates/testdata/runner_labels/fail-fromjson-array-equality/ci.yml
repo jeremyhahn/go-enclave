@@ -1,0 +1,6 @@
+on: [push, pull_request]
+jobs:
+  build:
+    runs-on: ${{ fromJSON('[]') == fromJSON('[]') && 'ubuntu-latest' || 'self-hosted' }}
+    steps:
+      - run: "true"

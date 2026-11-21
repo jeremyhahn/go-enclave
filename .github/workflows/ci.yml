@@ -1005,6 +1005,780 @@ jobs:
           fi
           echo "OK: no go-objstore import outside the storage seam"
 
+      # v1.38 (owner ruling 633, decision 219(d)): a job that names the
+      # `release` label runs only on a push to refs/heads/main or a tag, or a
+      # workflow_dispatch on main, and never for a pull request. This step
+      # reads every .github/workflows/*.yml and *.yaml of the repository as
+      # text, takes each job whose runs-on names `release` (plain, in a list,
+      # or as a quoted string inside an expression), and evaluates its `if:`
+      # under every other event: a pull_request or pull_request_target event
+      # in a workflow that has that trigger (a), and the push of another
+      # branch, a dispatch off main or on a tag, schedule, workflow_run,
+      # merge_group, release, create, issue_comment and repository_dispatch
+      # (b). A value it cannot know (vars, needs, secrets, the server) may
+      # hold anything, so the `if:` must be false whatever it holds; an `if:`
+      # it cannot read fails. It prints each file:job and the reason. A lint,
+      # not the gate: the runner side refuses such a job as well.
+      # v1.43 (ruling 833): on github.com every other job runs on a standard
+      # GitHub-hosted image on every event (c), or its runs-on line says why
+      # it cannot, `# self-hosted: <reason>`; a larger runner is refused (d).
+      # v1.46 (ruling 999): the reason names its category, hardware: or
+      # oversize: (credential: for the one Codex review job, code-review.yml's
+      # `review`); a reason with no category is (e), a credential reason on
+      # any other job (f). A runs-on expression that may yield a value the
+      # step cannot know names an unknown runner (c): only the server is
+      # pinned, and the event, the ref and every other context are unknown.
+      # A workflow whose jobs, or a job whose runs-on, it cannot read is (g).
+      # Its tests: build/ci/buildgates/ci_runner_labels_test.go.
+      - name: Runner labels (ruling 633)
+        run: |
+          python3 -I - <<'PY'
+          import glob, json, re, sys
+
+          # Reads .github/workflows/*.yml|yaml as text (no YAML library): the
+          # top-level `on:` keys, and each job's `runs-on` and `if`. A job names
+          # `release` when that label appears in its runs-on, plain, in a list or as a
+          # quoted string in an expression. Its `if` is proved, not sampled: the job
+          # passes only when the `if` can be true on no event and ref outside the
+          # release allow-list, with every value this step cannot know (vars,
+          # needs, secrets, the event, the ref, ...) unknown. A runs-on that routes
+          # by runner group leaves the GitHub-hosted pool whatever labels stand
+          # beside it.
+          class Unk:  # a value this step cannot know; t is its truthiness when that is known
+              def __init__(self, t=None):
+                  self.t = t
+
+
+          U, UT, UF = Unk(), Unk(True), Unk(False)  # unknown; unknown but truthy; unknown but falsy
+
+
+          def unk(v):
+              return isinstance(v, Unk)
+
+
+          OPEN = "$" "{{"  # split, so the runner does not read it as an expression
+          ALLOWED = "push to refs/heads/main or refs/tags/*, or workflow_dispatch on main"
+          PR = {"pull_request", "pull_request_target"}
+          # The (event, ref) classes a release job's `if` may be true on: the event is
+          # one of EV or any other ("*"); the ref is refs/heads/main, under
+          # refs/tags/, or any other ("*"). The job may run only on OK_RUNS.
+          EV = ("push", "workflow_dispatch", "pull_request", "pull_request_target", "*")
+          RF = ("main", "tag", "*")
+          ALL = frozenset((e, r) for e in EV for r in RF)
+          OK_RUNS = frozenset({("push", "main"), ("push", "tag"), ("workflow_dispatch", "main")})
+          EV_NAME = {"*": "any other event"}
+          RF_NAME = {"main": "refs/heads/main", "tag": "refs/tags/*", "*": "any other ref"}
+
+
+          def ref_class(v):
+              v = v.lower()
+              return "main" if v == "refs/heads/main" else "tag" if v.startswith("refs/tags/") else "*"
+
+
+          TOK = re.compile(r"\s*(?:(?P<s>'(?:[^']|'')*')|(?P<n>-?\d+(?:\.\d+)?)|(?P<op>&&|\|\||==|!=|<=|>=|[!<>()\[\],.])|(?P<id>[A-Za-z_][\w-]*|\*))")
+
+
+          def lex(s):
+              out, i = [], 0
+              while i < len(s):
+                  if s[i:].strip() == "":
+                      break
+                  m = TOK.match(s, i)
+                  if not m:
+                      raise ValueError(f"cannot read the expression at {s[i:i+20]!r}")
+                  i = m.end()
+                  if m.group("s"):
+                      out.append(("s", m.group("s")[1:-1].replace("''", "'")))
+                  elif m.group("n"):
+                      out.append(("v", float(m.group("n"))))
+                  elif m.group("op"):
+                      out.append(("op", m.group("op")))
+                  else:
+                      out.append(("id", m.group("id")))
+              return out
+
+
+          def truthy(v):
+              if unk(v):
+                  return U if v.t is None else v.t
+              if isinstance(v, float) and v != v:
+                  return False
+              return v not in (None, False, 0, "", 0.0)
+
+
+          def num(v):
+              if v is None or v is False:
+                  return 0.0
+              if v is True:
+                  return 1.0
+              if isinstance(v, (int, float)):
+                  return float(v)
+              if isinstance(v, str):
+                  try:
+                      return float(v.strip() or 0)
+                  except ValueError:
+                      return float("nan")
+              return float("nan")
+
+
+          def tostr(v):
+              # A value as Actions writes it as a string, or unknown where this
+              # step does not model the conversion exactly: a fraction, a large
+              # or negative-zero number, NaN, an array or an object.
+              if unk(v):
+                  return U
+              if isinstance(v, str):
+                  return v
+              if v is None:
+                  return ""
+              if v is True or v is False:
+                  return "true" if v else "false"
+              if (isinstance(v, (int, float)) and v == v and abs(v) < 2 ** 53
+                      and float(v).is_integer() and str(float(v)) != "-0.0"):
+                  return str(int(v))
+              return U
+
+
+          def eq(a, b):
+              if unk(a) or unk(b):
+                  return U
+              # Actions compares arrays and objects by instance, which this
+              # step cannot track, so their equality is unknown.
+              if isinstance(a, (list, dict)) or isinstance(b, (list, dict)):
+                  return U
+              if isinstance(a, str) and isinstance(b, str):
+                  return a.lower() == b.lower()
+              if type(a) is type(b) and not isinstance(a, (int, float)):
+                  return a == b
+              return num(a) == num(b)
+
+
+          class P:
+              def __init__(self, toks, get):
+                  self.t, self.i, self.get = toks, 0, get
+
+              def peek(self):
+                  return self.t[self.i] if self.i < len(self.t) else (None, None)
+
+              def take(self, want=None):
+                  k, v = self.peek()
+                  if want is not None and v != want:
+                      raise ValueError(f"expected {want!r}, found {v!r}")
+                  self.i += 1
+                  return k, v
+
+              def parse(self):
+                  v = self.orx()
+                  if self.i != len(self.t):
+                      raise ValueError(f"unexpected {self.peek()[1]!r}")
+                  return v
+
+              def orx(self):
+                  a = self.andx()
+                  while self.peek() == ("op", "||"):
+                      self.take()
+                      b = self.andx()
+                      ta = truthy(a)
+                      if ta is True:
+                          pass
+                      elif ta is False:
+                          a = b
+                      else:
+                          a = UT if truthy(b) is True else U  # the unknown or b: truthy, value unknown
+                  return a
+
+              def andx(self):
+                  a = self.cmp()
+                  while self.peek() == ("op", "&&"):
+                      self.take()
+                      b = self.cmp()
+                      ta = truthy(a)
+                      if ta is False:
+                          pass
+                      elif ta is True:
+                          a = b
+                      else:
+                          a = UF if truthy(b) is False else U  # the unknown or b: falsy, value unknown
+                  return a
+
+              def cmp(self):
+                  # Actions binds <, <=, > and >= tighter than == and !=.
+                  a = self.rel()
+                  while self.peek()[0] == "op" and self.peek()[1] in ("==", "!="):
+                      op = self.take()[1]
+                      r = eq(a, self.rel())
+                      a = r if op == "==" or r is U else not r
+                  return a
+
+              def rel(self):
+                  a = self.unary()
+                  while self.peek()[0] == "op" and self.peek()[1] in ("<", "<=", ">", ">="):
+                      op = self.take()[1]
+                      b = self.unary()
+                      if unk(a) or unk(b):
+                          a = U
+                      else:
+                          x, y = (a.lower(), b.lower()) if isinstance(a, str) and isinstance(b, str) else (num(a), num(b))
+                          a = {"<": x < y, "<=": x <= y, ">": x > y, ">=": x >= y}[op]
+                  return a
+
+              def unary(self):
+                  if self.peek() == ("op", "!"):
+                      self.take()
+                      t = truthy(self.unary())
+                      return U if t is U else not t
+                  return self.primary()
+
+              def primary(self):
+                  k, v = self.take()
+                  if k == "s" or k == "v":
+                      return v
+                  if (k, v) == ("op", "("):
+                      r = self.orx()
+                      self.take(")")
+                      return r
+                  if k != "id":
+                      raise ValueError(f"unexpected {v!r}")
+                  lv = v.lower()
+                  if lv in ("true", "false"):
+                      return lv == "true"
+                  if lv == "null":
+                      return None
+                  if self.peek() == ("op", "("):
+                      self.take()
+                      args = []
+                      if self.peek() != ("op", ")"):
+                          args.append(self.orx())
+                          while self.peek() == ("op", ","):
+                              self.take()
+                              args.append(self.orx())
+                      self.take(")")
+                      return self.call(lv, args)
+                  path, exact = v, True
+                  while self.peek() in (("op", "."), ("op", "[")):
+                      if self.take()[1] == ".":
+                          k2, v2 = self.take()
+                          if k2 != "id":
+                              raise ValueError(f"unexpected {v2!r} after '.'")
+                          path += "." + v2
+                          exact = exact and v2 != "*"
+                      else:
+                          idx = self.orx()
+                          self.take("]")
+                          if isinstance(idx, str):
+                              path += "." + idx
+                          else:
+                              exact = False
+                  return self.get(path) if exact else U
+
+              def call(self, f, a):
+                  if f == "always":
+                      return True
+                  if f in ("startswith", "endswith", "contains") and len(a) == 2:
+                      if any(unk(x) for x in a):
+                          return U
+                      if f == "contains" and isinstance(a[0], list):
+                          return any(eq(x, a[1]) is True for x in a[0])
+                      x, y = (tostr(s) for s in a)
+                      if unk(x) or unk(y):
+                          return U
+                      x, y = x.lower(), y.lower()
+                      return x.startswith(y) if f == "startswith" else x.endswith(y) if f == "endswith" else y in x
+                  if f == "fromjson" and len(a) == 1 and isinstance(a[0], str):
+                      try:
+                          return json.loads(a[0])
+                      except ValueError:
+                          return U
+                  if f == "format" and a and isinstance(a[0], str):
+                      # `{{` and `}}` write a brace, `{N}` argument N as a string;
+                      # a stray brace or a missing argument is unknown.
+                      args, s, i, out = [tostr(x) for x in a[1:]], a[0], 0, []
+                      while i < len(s):
+                          if s.startswith("{{", i) or s.startswith("}}", i):
+                              out.append(s[i])
+                              i += 2
+                              continue
+                          if s[i] == "}":
+                              return U
+                          if s[i] != "{":
+                              out.append(s[i])
+                              i += 1
+                              continue
+                          m = re.compile(r"\{(\d+)\}").match(s, i)
+                          if not m or int(m.group(1)) >= len(args) or unk(args[int(m.group(1))]):
+                              return U
+                          out.append(args[int(m.group(1))])
+                          i = m.end()
+                      return "".join(out)
+                  return U  # success(), failure(), hashFiles(), ...: unknown
+
+
+          class Prove:
+              """Reads an `if` as P does, and returns the (event, ref) classes it may be true on.
+
+              Only `==` between github.event_name or github.ref and a string,
+              startsWith(github.ref, '...'), `&&`, `||` and parentheses narrow the
+              set; any other part may be true on every class, so a condition this
+              step cannot prove is a finding, never a pass. A node is ("w", classes),
+              ("path", context), ("s", string) or ("lit", constant).
+              """
+              def __init__(self, toks):
+                  self.t, self.i = toks, 0
+
+              peek, take = P.peek, P.take
+
+              def parse(self):
+                  v = self.ws(self.orx())
+                  if self.i != len(self.t):
+                      raise ValueError(f"unexpected {self.peek()[1]!r}")
+                  return v
+
+              @staticmethod
+              def ws(n):
+                  if n[0] == "w":
+                      return n[1]
+                  if n[0] in ("s", "lit"):
+                      return ALL if truthy(n[1]) else frozenset()
+                  return ALL
+
+              def orx(self):
+                  a = self.andx()
+                  while self.peek() == ("op", "||"):
+                      self.take()
+                      a = ("w", self.ws(a) | self.ws(self.andx()))
+                  return a
+
+              def andx(self):
+                  a = self.cmp()
+                  while self.peek() == ("op", "&&"):
+                      self.take()
+                      a = ("w", self.ws(a) & self.ws(self.cmp()))
+                  return a
+
+              def cmp(self):
+                  # Actions binds <, <=, > and >= tighter than == and !=.
+                  a = self.rel()
+                  while self.peek()[0] == "op" and self.peek()[1] in ("==", "!="):
+                      op = self.take()[1]
+                      b = self.rel()
+                      a = ("w", self.atom(a, b) if op == "==" else ALL)
+                  return a
+
+              def rel(self):
+                  a = self.unary()
+                  while self.peek()[0] == "op" and self.peek()[1] in ("<", "<=", ">", ">="):
+                      self.take()
+                      self.unary()
+                      a = ("w", ALL)  # an ordering proves nothing about the event or ref
+                  return a
+
+              @staticmethod
+              def atom(a, b):
+                  if a[0] == "s":
+                      a, b = b, a
+                  if a[0] != "path" or b[0] != "s":
+                      return ALL
+                  if a[1] == "github.event_name":
+                      e = b[1].lower()
+                      e = e if e in EV else "*"
+                      return frozenset((e, r) for r in RF)
+                  if a[1] == "github.ref":
+                      r = ref_class(b[1])
+                      return frozenset((e, r) for e in EV)
+                  return ALL
+
+              def unary(self):
+                  if self.peek() == ("op", "!"):
+                      self.take()
+                      self.unary()
+                      return ("w", ALL)  # a negation proves nothing
+                  return self.primary()
+
+              def primary(self):
+                  k, v = self.take()
+                  if k == "s":
+                      return ("s", v)
+                  if k == "v":
+                      return ("lit", v)
+                  if (k, v) == ("op", "("):
+                      r = self.orx()
+                      self.take(")")
+                      return r
+                  if k != "id":
+                      raise ValueError(f"unexpected {v!r}")
+                  lv = v.lower()
+                  if lv in ("true", "false", "null"):
+                      return ("lit", {"true": True, "false": False}.get(lv))
+                  if self.peek() == ("op", "("):
+                      self.take()
+                      args = []
+                      if self.peek() != ("op", ")"):
+                          args.append(self.orx())
+                          while self.peek() == ("op", ","):
+                              self.take()
+                              args.append(self.orx())
+                      self.take(")")
+                      if lv == "startswith" and len(args) == 2 and args[0] == ("path", "github.ref") and args[1][0] == "s":
+                          p = args[1][1].lower()
+                          if p.startswith("refs/tags/"):
+                              return ("w", frozenset((e, "tag") for e in EV))
+                          if not ("refs/heads/main".startswith(p) or "refs/tags/".startswith(p)):
+                              return ("w", frozenset((e, "*") for e in EV))
+                      return ("w", ALL)
+                  path, exact = v, True
+                  while self.peek() in (("op", "."), ("op", "[")):
+                      if self.take()[1] == ".":
+                          k2, v2 = self.take()
+                          if k2 != "id":
+                              raise ValueError(f"unexpected {v2!r} after '.'")
+                          path += "." + v2
+                          exact = exact and v2 != "*"
+                      else:
+                          idx = self.orx()
+                          self.take("]")
+                          if idx[0] == "s":
+                              path += "." + idx[1]
+                          else:
+                              exact = False
+                  return ("path", path.lower()) if exact else ("w", ALL)
+
+
+          def unquote(s):
+              s = s.strip()
+              if len(s) >= 2 and s[0] == s[-1] == "'":
+                  return s[1:-1].replace("''", "'")
+              if len(s) >= 2 and s[0] == s[-1] == '"':
+                  return json.loads(s)
+              return s
+
+
+          def strip_comment(s):
+              q = None
+              for i, c in enumerate(s):
+                  if q:
+                      if c == q:
+                          q = None
+                  elif c in "'\"":
+                      q = c
+                  elif c == "#" and (i == 0 or s[i - 1] in " \t"):
+                      return s[:i].rstrip()
+              return s.rstrip()
+
+
+          def trailing_comment(s):
+              """The line's YAML comment: the first `#` after whitespace that is outside a
+              single- or double-quoted scalar and outside an Actions expression, or "".
+              A waiver is read only from here; the same text inside a value is data."""
+              opener = "$" + "{" + "{"  # spelled apart so actionlint does not parse it
+              q, depth, i = None, 0, 0
+              while i < len(s):
+                  c = s[i]
+                  if q == '"':
+                      if c == "\\":
+                          i += 1
+                      elif c == '"':
+                          q = None
+                  elif q == "'":
+                      if c == "'":
+                          q = None
+                  elif s.startswith(opener, i):
+                      depth += 1
+                      i += 2
+                  elif depth and s.startswith("}}", i):
+                      depth -= 1
+                      i += 1
+                  elif c in "'\"":
+                      q = c
+                  elif c == "#" and not depth and (i == 0 or s[i - 1] in " \t"):
+                      return s[i:]
+                  i += 1
+              return ""
+
+
+          def ind(line):
+              return len(line) - len(line.lstrip(" "))
+
+
+          def body(lines, i, inline):
+              """The value text of the key on line i: the inline part plus every deeper line."""
+              base, parts = ind(lines[i]), []
+              j = i + 1
+              while j < len(lines) and (not lines[j].strip() or ind(lines[j]) > base):
+                  if lines[j].strip() and not lines[j].lstrip().startswith("#"):
+                      parts.append(strip_comment(lines[j]).strip())
+                  j += 1
+              inline = strip_comment(inline).strip()
+              if inline[:1] in ("|", ">"):
+                  return (" " if inline[0] == ">" else "\n").join(parts)
+              return " ".join([inline] + parts).strip()
+
+
+          def keys_under(lines, i):
+              """(line, key) for each direct child key of the block opened on line i."""
+              base, out, child = ind(lines[i]), [], None
+              for j in range(i + 1, len(lines)):
+                  s = lines[j]
+                  if not s.strip() or s.lstrip().startswith("#"):
+                      continue
+                  if ind(s) <= base:
+                      break
+                  child = ind(s) if child is None else child
+                  if ind(s) == child:
+                      m = re.match(r"\s*(?:-\s+)?(['\"]?)([^'\":#]+)\1\s*(?::\s*(.*))?$", s)
+                      if m:
+                          out.append((j, m.group(2).strip(), m.group(3) or ""))
+              return out
+
+
+          def triggers(lines):
+              for i, s in enumerate(lines):
+                  m = re.match(r"(['\"]?)(on|true)\1\s*:\s*(.*)$", s)
+                  if m:
+                      v = strip_comment(m.group(3)).strip()
+                      if v.startswith("{"):  # a flow mapping: its keys, nested ones too
+                          return set(re.findall(r"([A-Za-z_]+)['\"]?\s*:", v))
+                      if v:
+                          return {unquote(x) for x in re.split(r"[\s,\[\]]+", v) if x}
+                      return {k for _, k, _ in keys_under(lines, i)}
+              return set()
+
+
+          # v1.43 (ruling 833): the standard GitHub-hosted images, free on a public
+          # repository; a larger runner (cores, large, xlarge, gpu) bills even there.
+          STANDARD = re.compile(r"(ubuntu-(latest|24\.04|22\.04)(-arm)?|ubuntu-slim)")
+          LARGER = re.compile(r"(cores|xlarge|large|gpu)", re.I)
+          WAIVER = re.compile(r"#\s*self-hosted:\s*(hardware|oversize|credential)\s*:\s*\S")
+          BARE = re.compile(r"#\s*self-hosted:")  # v1.46: a waiver whose reason names no category
+          GROUP = re.compile(r"(?:^|[\s{,])['\"]?group['\"]?\s*:")  # runner-group routing: never the hosted pool
+          CREDENTIAL_JOB = ("code-review.yml", "review")  # the one job a credential reason may name
+          GH = "https://github.com"
+
+
+
+          def hosted_get(path):
+              # Only the server is pinned, github.com; every other context (the
+              # event, the ref, vars, ...) is unknown, so a runs-on that tests one
+              # may pick its other runner on some event, and no sample of events
+              # stands in for all of them.
+              return GH if path.lower() == "github.server_url" else U
+
+
+          def labels(value):
+              # A runs-on value's labels: a string, a list, or an expression's result.
+              if unk(value) or value is None:
+                  return None
+              # A label that is not a string is one this step cannot name.
+              value = value if isinstance(value, list) else [value]
+              if not all(isinstance(x, str) for x in value):
+                  return None
+              return value
+
+
+          def split_top(t, sep):
+              """Split t where sep(t, i) holds outside quoted scalars and expressions."""
+              out, cur, q, depth, i = [], [], None, 0, 0
+              while i < len(t):
+                  c = t[i]
+                  if q:
+                      if q == '"' and c == "\\" and i + 1 < len(t):
+                          cur.append(t[i:i + 2])
+                          i += 2
+                          continue
+                      if c == q:
+                          q = None
+                  elif t.startswith(OPEN, i):
+                      depth += 1
+                      cur.append(OPEN)
+                      i += len(OPEN)
+                      continue
+                  elif depth and t.startswith("}}", i):
+                      depth -= 1
+                      cur.append("}}")
+                      i += 2
+                      continue
+                  elif c in "'\"":
+                      q = c
+                  elif not depth and sep(t, i):
+                      out.append("".join(cur))
+                      cur = []
+                      i += 1
+                      continue
+                  cur.append(c)
+                  i += 1
+              out.append("".join(cur))
+              return [x.strip() for x in out if x.strip()]
+
+
+          def label_values(items):
+              """Each label decoded and, where it is an expression, evaluated; None when
+              any label is a value this step cannot know, which may be any label."""
+              out = []
+              for x in items:
+                  s = unquote(x)
+                  m = re.fullmatch(r"\s*\$\{\{(.*)\}\}\s*", s, re.S)
+                  if m:
+                      v = labels(P(lex(m.group(1)), hosted_get).parse())
+                      if v is None:
+                          return None
+                      out.extend(v)
+                  elif OPEN in s:
+                      return None  # text around an expression builds a string this step does not
+                  else:
+                      out.append(s)
+              return out
+
+
+          def runs_on_labels(text):
+              t = text.strip()
+              if t.startswith("group:") or t.startswith("labels:") or " labels:" in t:
+                  m = re.search(r"labels:\s*(.*)$", t, re.S)
+                  t = m.group(1) if m else ""
+                  g = re.search(r"\s['\"]?group['\"]?\s*:", t)
+                  t = (t[:g.start()] if g else t).strip()
+              if t.startswith("["):
+                  if not t.endswith("]"):
+                      raise ValueError("a label list with no closing bracket")
+                  return label_values(split_top(t[1:-1], lambda s, i: s[i] == ","))
+              if t.startswith("- "):
+                  return label_values(split_top(t, lambda s, i: s[i] == "-" and (i == 0 or s[i - 1].isspace())
+                                                and (i + 1 == len(s) or s[i + 1].isspace())))
+              return label_values([t])
+
+
+          def names_release(text):
+              """Whether the runs-on may select the `release` label: in the raw text, in
+              the decoded YAML scalars, or in the value of an expression. A label this
+              step cannot read or evaluate may be `release`, so it counts as one."""
+              if re.search(r"(?<![\w.-])['\"]?release['\"]?(?![\w-])", text):
+                  return True
+              try:
+                  got = runs_on_labels(text)
+              except ValueError:
+                  return True
+              return got is None or any(x.strip().lower() == "release" for x in got)
+
+
+          def condition(text):
+              t = unquote(text) if text else ""
+              m = re.fullmatch(r"\s*\$\{\{(.*)\}\}\s*", t, re.S)
+              if m and OPEN not in m.group(1):
+                  return m.group(1)
+              if OPEN in t:
+                  raise ValueError("text around the expression makes it a string, which is always true")
+              return t
+
+
+          def hosted_or_reasoned(where, path, job, ro, ro_line, bad):
+              # v1.43 (ruling 833): hosted first.
+              if LARGER.search(ro) and re.search(r"ubuntu|windows|macos", ro):
+                  bad.append(f"{where}: (d) names a larger GitHub-hosted runner ({ro}); it bills on a public repository")
+                  return
+              w = WAIVER.search(ro_line)
+              if w and w.group(1) == "credential" and (path.rsplit("/", 1)[-1], job) != CREDENTIAL_JOB:
+                  bad.append(f"{where}: (f) its `# self-hosted: credential:` reason is allowed only on code-review.yml's job "
+                             f"`review`; any other job runs on a standard GitHub-hosted image or names a hardware or oversize reason")
+                  return
+              if w:
+                  return
+              off = []
+              if GROUP.search(ro):
+                  off.append("a runner group, which routes the job off the GitHub-hosted pool whatever its labels")
+              try:
+                  got = runs_on_labels(ro)
+              except ValueError as e:
+                  off.append(f"a runs-on this step cannot read ({e})")
+              else:
+                  if got is None:
+                      off.append("a runner this step cannot know: the expression tests an event, ref or value it does not pin")
+                  elif len(got) != 1 or not STANDARD.fullmatch(got[0]):
+                      off.append(", ".join(got))
+              if off and BARE.search(ro_line):
+                  bad.append(f"{where}: (e) its `# self-hosted:` reason names no category; ruling 999 allows a self-hosted job "
+                             f"only as `# self-hosted: hardware: <reason>` or `# self-hosted: oversize: <reason>`; it runs on " + "; ".join(dict.fromkeys(off)))
+              elif off:
+                  bad.append(f"{where}: (c) does not run on a standard GitHub-hosted image on github.com and its runs-on "
+                             f"line gives no `# self-hosted: hardware|oversize: <reason>`; it runs on " + "; ".join(dict.fromkeys(off)))
+
+
+          def check(path):
+              lines = open(path, encoding="utf-8").read().splitlines()
+              on = triggers(lines)
+              bad = []
+              seen = False
+              for i, s in enumerate(lines):
+                  m = re.match(r"(['\"]?)jobs\1\s*:(.*)$", s)
+                  if m:
+                      # Fail closed: jobs this step cannot list are a finding, not a pass.
+                      seen = True
+                      if strip_comment(m.group(2)).strip():
+                          bad.append(f"{path}: (g) its `jobs:` value is not a block mapping, so this step cannot list its jobs; "
+                                     f"write `jobs:` on its own line and each job as a block under it")
+                          continue
+                      jobs = keys_under(lines, i)
+                      if not jobs:
+                          bad.append(f"{path}: (g) its `jobs:` holds no job this step can read")
+                      for j, job, jinline in jobs:
+                          where = f"{path}:{job}"
+                          if strip_comment(jinline).strip():
+                              bad.append(f"{where}: (g) is not a block mapping, so this step cannot read its runs-on")
+                              continue
+                          ro = cond = ro_line = None
+                          uses = False
+                          for k, key, inline in keys_under(lines, j):
+                              if key == "runs-on":
+                                  ro, ro_line = body(lines, k, inline), trailing_comment(lines[k])
+                              elif key == "if":
+                                  cond = body(lines, k, inline)
+                              elif key == "uses":
+                                  uses = True
+                          if ro is None and not uses:
+                              bad.append(f"{where}: (g) has neither a runs-on nor a uses this step can read")
+                              continue
+                          if ro is None:
+                              continue
+                          # Every job, release-labelled or not, runs on a standard
+                          # GitHub-hosted image or names a category and a reason; a
+                          # release job's event and ref checks apply on top.
+                          hosted_or_reasoned(where, path, job, ro, ro_line, bad)
+                          if not names_release(ro):
+                              continue
+                          if cond is None:
+                              if on & PR:
+                                  bad.append(f"{where}: (a) names `release` in a workflow with a pull_request trigger, and has no `if:`")
+                              bad.append(f"{where}: (b) names `release` and has no `if:` restricting it to {ALLOWED}")
+                              continue
+                          try:
+                              runs = Prove(lex(condition(cond))).parse()
+                          except ValueError as e:
+                              bad.append(f"{where}: (b) names `release` and its `if:` cannot be read ({e})")
+                              continue
+                          rest = sorted(runs - OK_RUNS, key=lambda c: (EV.index(c[0]), RF.index(c[1])))
+                          pr = [ev for ev, _ in rest if ev in PR and ev in on]
+                          if pr:
+                              bad.append(f"{where}: (a) names `release` and a {pr[0]} event can run it")
+                          if rest:
+                              bad.append(f"{where}: (b) names `release` and its `if:` does not prove it runs only on {ALLOWED}; it may run on "
+                                         + ", ".join(f"{EV_NAME.get(ev, ev)} ({RF_NAME[ref]})" for ev, ref in rest))
+              if not seen:
+                  bad.append(f"{path}: (g) has no top-level `jobs:` this step can read")
+              return bad
+
+
+          files = sorted(glob.glob(".github/workflows/*.yml") + glob.glob(".github/workflows/*.yaml"))
+          bad = []
+          for f in files:
+              try:
+                  bad += check(f)
+              except (OSError, UnicodeError) as e:
+                  bad.append(f"{f}: cannot be read ({e})")
+          for b in bad:
+              print(f"::error::{b}")
+          if bad:
+              print(f"{len(bad)} runner-label finding(s) in {len(files)} workflow file(s): a `release` job runs only on {ALLOWED}, never for a pull request (ruling 633); every other job runs on a standard GitHub-hosted image, or its runs-on line names a hardware or oversize reason (rulings 833, 999)")
+              sys.exit(1)
+          print(f"OK: {len(files)} workflow file(s); every job that names `release` runs only on {ALLOWED}, and every other job on a standard GitHub-hosted image or with a hardware or oversize reason")
+          PY
+
   # v1.30 (fix 1): the toolchain image is built once per content hash, here,
   # and every other job pulls it (scripts/ci-image-cache.sh v1, ships beside
   # this file). On a push to main only: when the forge's registry lacks
@@ -1016,8 +1790,7 @@ jobs:
   # CUSTOMIZE (go-enclave, #277): the template's server_url condition is kept
   # as written, so the job skips on github.com, where go-enclave lives and
   # scripts/ci-image-cache.sh has no registry to publish to. A skipped job
-  # takes no runner; runs-on is ubuntu-latest like every job but lint and
-  # lint-gates, and the
+  # takes no runner; runs-on is ubuntu-latest like every job, and the
   # build takes GO_BUILD_PROXY and no forge credential, as the image job does.
   publish-images:
     name: Publish CI images

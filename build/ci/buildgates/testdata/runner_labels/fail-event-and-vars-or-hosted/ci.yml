@@ -1,0 +1,6 @@
+on: [push, pull_request]
+jobs:
+  build:
+    runs-on: ${{ github.event_name == 'push' && vars.RUNNER || 'ubuntu-latest' }}
+    steps:
+      - run: "true"

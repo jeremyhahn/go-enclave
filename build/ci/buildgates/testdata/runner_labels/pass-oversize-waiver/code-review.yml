@@ -1,0 +1,6 @@
+on: [push, pull_request]
+jobs:
+  gate:
+    runs-on: [self-hosted, linux]  # self-hosted: oversize: the build needs more disk than a hosted image has
+    steps:
+      - run: "true"
