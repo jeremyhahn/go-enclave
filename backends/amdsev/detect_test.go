@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"syscall"
 	"testing"
 )
@@ -18,12 +19,15 @@ const testDebugPolicy uint64 = 1<<19 | 1<<17
 // policy is the POLICY field of the report both paths return.
 type fakeGuest struct {
 	openErr, reportErr, mkdirErr, readErr, rmdirErr error
+	writeErr                                        error
 	status, size                                    uint32
 	provider                                        string
 	policy                                          uint64
+	blobLen                                         int
 
 	closed, removed int
 	vmpl            uint32
+	written         []string
 }
 
 // successGuest is an SEV-SNP guest whose device answers.
@@ -63,9 +67,16 @@ func (f *fakeGuest) os() guestOS {
 				return nil, f.readErr
 			}
 			if filepath.Base(path) == "outblob" {
+				if f.blobLen > 0 {
+					return f.report()[:f.blobLen], nil
+				}
 				return f.report(), nil
 			}
 			return []byte(f.provider + "\n"), nil
+		},
+		writeFile: func(path string, data []byte) error {
+			f.written = append(f.written, filepath.Base(path)+"="+string(data))
+			return f.writeErr
 		},
 		rmdir:     func(string) error { f.removed++; return f.rmdirErr },
 		entryName: func() string { return "entry" },
@@ -103,6 +114,10 @@ func TestDetectFallsBackToTSM(t *testing.T) {
 			if f.removed != 1 {
 				t.Fatalf("entry removed %d times, want 1", f.removed)
 			}
+			want := []string{"privlevel=3\n", "inblob=" + string(make([]byte, reportDataSize))}
+			if !slices.Equal(f.written, want) {
+				t.Fatalf("written %q, want %q", f.written, want)
+			}
 		})
 	}
 }
@@ -124,6 +139,10 @@ func TestDetectRefuses(t *testing.T) {
 			"report", "provider", ErrReportRefused, ErrWrongProvider},
 		{"short report, rmdir fails", &fakeGuest{size: 100, provider: sevGuestProvider, rmdirErr: syscall.EBUSY},
 			"report", "rmdir", ErrReportRefused, syscall.EBUSY},
+		{"device absent, privlevel refused", &fakeGuest{openErr: syscall.ENOENT, provider: sevGuestProvider, writeErr: syscall.EINVAL},
+			"open", "privlevel", syscall.ENOENT, syscall.EINVAL},
+		{"device absent, short outblob", &fakeGuest{openErr: syscall.ENOENT, provider: sevGuestProvider, blobLen: 100},
+			"open", "outblob", syscall.ENOENT, ErrReportRefused},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

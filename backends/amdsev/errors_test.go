@@ -60,6 +60,16 @@ func TestReportErrorContract(t *testing.T) {
 	}
 }
 
+func TestPolicyErrorContract(t *testing.T) {
+	err := error(&PolicyError{Policy: 0xa0000})
+	if !errors.Is(err, ErrDebugPolicy) || errors.Is(err, ErrReportRefused) {
+		t.Fatal("PolicyError matches the wrong sentinel")
+	}
+	if got, want := err.Error(), "amdsev: the SEV-SNP guest policy allows debugging: policy 0xa0000"; got != want {
+		t.Fatalf("Error() = %q, want %q", got, want)
+	}
+}
+
 func TestProviderErrorContract(t *testing.T) {
 	err := error(&ProviderError{Provider: "tdx_guest"})
 	if !errors.Is(err, ErrWrongProvider) || errors.Is(err, ErrReportRefused) {

@@ -36,6 +36,24 @@ func TestHostOSOnFiles(t *testing.T) {
 	}
 }
 
+func TestWriteAttribute(t *testing.T) {
+	path := t.TempDir() + "/inblob"
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeAttribute(path, []byte("3\n")); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(path); err != nil || string(got) != "3\n" {
+		t.Fatalf("attribute = %q, %v; want \"3\\n\"", got, err)
+	}
+	err := writeAttribute(path+"-absent", []byte("3\n"))
+	var pe *os.PathError
+	if !errors.As(err, &pe) || pe.Op != "open" || !errors.Is(err, syscall.ENOENT) {
+		t.Fatalf("err = %v, want open refused with ENOENT", err)
+	}
+}
+
 func TestHostOSDeviceAbsent(t *testing.T) {
 	dir := t.TempDir()
 	err := hostOS().detect(dir+"/absent", dir+"/absent")

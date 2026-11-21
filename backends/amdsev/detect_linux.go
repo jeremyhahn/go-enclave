@@ -33,16 +33,37 @@ func hostOS() guestOS {
 		closeDevice: unix.Close,
 		mkdir:       func(path string) error { return os.Mkdir(path, 0o700) },
 		readFile:    os.ReadFile,
+		writeFile:   writeAttribute,
 		rmdir:       os.Remove,
 		entryName:   entryName,
 	}
+}
+
+// writeAttribute writes data to an existing configfs attribute in one write,
+// without creating or truncating it.
+func writeAttribute(path string, data []byte) error {
+	fd, err := unix.Open(path, unix.O_WRONLY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return &os.PathError{Op: opOpen, Path: path, Err: err}
+	}
+	n, werr := unix.Write(fd, data)
+	cerr := unix.Close(fd)
+	switch {
+	case werr != nil:
+		return &os.PathError{Op: "write", Path: path, Err: werr}
+	case n != len(data):
+		return &os.PathError{Op: "write", Path: path, Err: unix.EIO}
+	case cerr != nil:
+		return &os.PathError{Op: "close", Path: path, Err: cerr}
+	}
+	return nil
 }
 
 // openDevice opens the guest device read-write, as its ioctls require.
 func openDevice(path string) (int, error) {
 	fd, err := unix.Open(path, unix.O_RDWR|unix.O_CLOEXEC, 0)
 	if err != nil {
-		return -1, &os.PathError{Op: "open", Path: path, Err: err}
+		return -1, &os.PathError{Op: opOpen, Path: path, Err: err}
 	}
 	return fd, nil
 }

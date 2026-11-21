@@ -23,17 +23,26 @@ var ErrWrongProvider = errors.New("amdsev: the configfs-tsm provider is not sev_
 // matches it.
 var ErrReportRefused = errors.New("amdsev: the SEV-SNP firmware refused the report request")
 
+// ErrDebugPolicy reports an SEV-SNP guest whose attestation report has the
+// POLICY DEBUG bit set: the guest was launched to allow host debugging, which
+// decrypts its memory, so it confines nothing. It is the Cause of a
+// [GuestError]; every [PolicyError] matches it.
+var ErrDebugPolicy = errors.New("amdsev: the SEV-SNP guest policy allows debugging")
+
 // GuestError is the error behind [ErrSNPGuestUnavailable]. It names the step
 // that failed and wraps the OS error. When the guest device fails, detection
-// also tries configfs-tsm, and Next is that step's GuestError.
+// also tries configfs-tsm, and Next is that step's GuestError; a device
+// report refused for its policy is final and has no Next.
 type GuestError struct {
 	// Path is the device or configfs path the step used.
 	Path string
-	// Op is the failed step: "platform" (not Linux), "open" and "report"
-	// for /dev/sev-guest; "mkdir", "provider" and "rmdir" for configfs-tsm.
+	// Op is the failed step: "platform" (not Linux); "open", "report" and
+	// "policy" for /dev/sev-guest; "mkdir", "provider", "privlevel",
+	// "inblob", "outblob", "policy" and "rmdir" for configfs-tsm.
 	Op string
 	// Cause is the refused call's *os.PathError or *os.SyscallError, a
-	// [*ProviderError], a [*ReportError], or errors.ErrUnsupported.
+	// [*ProviderError], a [*ReportError], a [*PolicyError], or
+	// errors.ErrUnsupported.
 	Cause error
 	// Next is the configfs-tsm step's error after the device failed, or nil.
 	Next error
@@ -100,3 +109,17 @@ func (e *ReportError) Error() string {
 
 // Is reports every ReportError as [ErrReportRefused].
 func (e *ReportError) Is(target error) bool { return target == ErrReportRefused }
+
+// PolicyError is the error behind [ErrDebugPolicy].
+type PolicyError struct {
+	// Policy is the report's 64-bit POLICY field.
+	Policy uint64
+}
+
+// Error is [ErrDebugPolicy]'s text with the policy in hexadecimal.
+func (e *PolicyError) Error() string {
+	return ErrDebugPolicy.Error() + ": policy 0x" + strconv.FormatUint(e.Policy, 16)
+}
+
+// Is reports every PolicyError as [ErrDebugPolicy].
+func (e *PolicyError) Is(target error) bool { return target == ErrDebugPolicy }
