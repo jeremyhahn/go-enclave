@@ -289,7 +289,7 @@ func evalExpr(n *exprNode, env map[string]any) (any, error) {
 		switch n.name {
 		case "always", "success":
 			return true, nil
-		case "cancelled", "failure":
+		case "cancelled", "failure": //nolint:misspell // the GitHub Actions function's name
 			return false, nil
 		}
 		var args []any

@@ -14,7 +14,7 @@ import (
 
 // The scripts that start the integration suites' compose projects. Each
 // names its project `project="<prefix>$..."`; a CI job that runs one of them
-// must reap that prefix before it starts, or a stack a cancelled run left
+// must reap that prefix before it starts, or a stack a canceled run left
 // behind keeps its containers and volumes on the runner host.
 var suiteScripts = []string{"scripts/integration-test.sh", "scripts/userns-test.sh"}
 
