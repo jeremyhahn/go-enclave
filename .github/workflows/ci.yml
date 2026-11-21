@@ -1,4 +1,23 @@
-# ci-template: v1.51 — canonical CI for all first-party Go repos.
+# ci-template: v1.52 — canonical CI for all first-party Go repos.
+# v1.52 (2026-11-21, Tenant Agent order, defect fix): a fork's pull request
+# under pull_request reached a self-hosted runner. preflight's runs-on had
+# no fork check, so on github.com it took the Dells' bigdisk pool for a
+# fork's head, and `Hosted or overflow runner (ruling 1024)` could overflow
+# every other job of that run to the Dells. A pull request whose head
+# repository is not this repository, a deleted fork included, now runs
+# every job on ubuntu-latest: preflight's runs-on adds the clause
+# `(!startsWith(github.event_name, 'pull_request') ||
+# github.event.pull_request.head.repo.full_name == github.repository)`
+# before the variable, so a fork takes `ubuntu-latest` whatever
+# CI_PREFLIGHT_RUNS_ON holds, and the selection step outputs the hosted
+# default for a fork's head with a ::notice and no API call. `Runner labels
+# (ruling 633)` gives a fork's head under pull_request, as under
+# pull_request_target since v1.51, no unset-variable exemption, and reads
+# the selection outputs for it at their hosted default, as the step emits.
+# Same-repository pull requests, pushes and Gitea are unchanged.
+# testdata/runner-labels-tests.py part H and testdata/runner-select-tests.py
+# part E hold the cases. Adopt as a one-file bump that keeps the CUSTOMIZE
+# blocks.
 # v1.51 (2026-11-21, ruling 633 hardening): `Runner labels (ruling 633)`
 # also checks every runs-on under pull_request_target, same-repository and
 # fork. code-review.yml and signatures.yml run on that base-defined event, so
@@ -1030,8 +1049,10 @@ jobs:
     # seconds of work; the repository variable CI_PREFLIGHT_RUNS_ON, runs-on
     # JSON, overrides it (Fleet Ops sets `"ubuntu-latest"`, quotes included,
     # while the Dells are down). Off github.com the forge label, as before.
-    # CUSTOMIZE (go-enclave): a fork's pull request runs its own scripts here, so it never takes the self-hosted pool or the variable.
-    runs-on: ${{ github.server_url == 'https://github.com' && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || fromJSON(vars.CI_PREFLIGHT_RUNS_ON || '["self-hosted","linux","x64","bigdisk"]')) || 'ubuntu-latest' }}   # v1.49
+    # v1.52 (Tenant Agent order): a pull request from a fork (its head
+    # repository is not this one) takes ubuntu-latest whatever the variable
+    # holds; a fork never reaches a self-hosted runner.
+    runs-on: ${{ github.server_url == 'https://github.com' && (!startsWith(github.event_name, 'pull_request') || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON(vars.CI_PREFLIGHT_RUNS_ON || '["self-hosted","linux","x64","bigdisk"]') || 'ubuntu-latest' }}   # v1.52
     # v1.26: a draft PR runs no CI; every job that needs this one skips with it.
     if: ${{ !github.event.pull_request.draft }}
     timeout-minutes: 10       # v1.34: the three jobs had 5 each
@@ -1194,17 +1215,22 @@ jobs:
       # of the run takes it. Off github.com it makes no call, and each job's
       # runs-on keeps its forge label (bigdisk, ci-gate) as before v1.48. It
       # runs before the checkout, beside no repository code.
+      # v1.52 (Tenant Agent order): on a pull request whose head repository is
+      # not this repository (a fork, or a fork since deleted), it makes no call
+      # and outputs the hosted default with a ::notice: a fork never reaches a
+      # self-hosted runner. Its tests: testdata/runner-select-tests.py.
       - name: Hosted or overflow runner (ruling 1024)
         id: runner
         env:
           SERVER: ${{ github.server_url }}
+          EVENT: ${{ github.event_name }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          REPO: ${{ github.repository }}
           API: ${{ github.api_url }}/repos/${{ github.repository }}/actions
           RUN_ID: ${{ github.run_id }}
           JOB_TOKEN: ${{ github.token }}
           LIMIT: ${{ env.HOSTED_JOBS_PER_REPO }}
           GRACE: ${{ env.HOSTED_QUEUE_GRACE_SECONDS }}
-          # CUSTOMIZE (go-enclave): true for a pull request from a fork.
-          FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
         run: |
           set -uo pipefail
           HOSTED='"ubuntu-latest"'
@@ -1224,13 +1250,15 @@ jobs:
             emit "$HOSTED" "$HOSTED"
             exit 0
           fi
-          # CUSTOMIZE (go-enclave): a fork's pull request runs code its author
-          # controls; every job of its run stays on the GitHub-hosted default.
-          if [ "$FORK" = true ]; then
-            echo "a pull request from a fork: every job takes the GitHub-hosted default, ubuntu-latest"
-            emit "$HOSTED" "$HOSTED"
-            exit 0
-          fi
+          # v1.52: a fork's pull request runs every job on GitHub-hosted runners.
+          case "$EVENT" in
+            pull_request|pull_request_target)
+              if [ "$HEAD_REPO" != "$REPO" ]; then
+                echo "::notice::runner selection: this pull request's head repository is not this repository (a fork); every job of this run takes the GitHub-hosted default, ubuntu-latest, and none reaches a self-hosted runner (ci-template v1.52)"
+                emit "$HOSTED" "$HOSTED"
+                exit 0
+              fi ;;
+          esac
           case "$LIMIT:$GRACE" in
             *[!0-9:]*|:*|*:) hosted "HOSTED_JOBS_PER_REPO='$LIMIT' or HOSTED_QUEUE_GRACE_SECONDS='$GRACE' is not a whole number" ;;
           esac
@@ -1341,6 +1369,9 @@ jobs:
       # vars.CI_PREFLIGHT_RUNS_ON, is checked with the variable unset, where
       # exactly [self-hosted, linux, x64, bigdisk] passes too, and set to
       # `"ubuntu-latest"`, where it must give a standard image.
+      # v1.52 (Tenant Agent order): a fork's head under pull_request, as under
+      # pull_request_target (v1.51), gets no unset-variable exemption, and the
+      # selection outputs read for it are the hosted default the step emits.
       # Its tests: testdata/runner-labels-tests.py.
       - name: Runner labels (ruling 633)
         run: |
@@ -1688,7 +1719,9 @@ jobs:
               def get(path):
                   p = path.lower()
                   if sel and p in SEL_OUT:  # v1.48: the selection output, as JSON text
-                      return json.dumps("ubuntu-latest" if sel == "default" else ["self-hosted", "linux", "x64", SEL_OUT[p]])
+                      # v1.52: the step outputs the hosted default for a fork's head under pull_request.
+                      fork_pr = ev == "pull_request" and head == "fork/r"
+                      return json.dumps("ubuntu-latest" if sel == "default" or fork_pr else ["self-hosted", "linux", "x64", SEL_OUT[p]])
                   if sel in ("unset", "set") and p == PRE_VAR:  # v1.49: unset, or the fallback switch
                       return None if sel == "unset" else json.dumps("ubuntu-latest")
                   if p == "github.server_url":
@@ -1807,7 +1840,8 @@ jobs:
                               for ev, ref, head in HOSTED_CTX:
                                   # v1.51: under pull_request_target, a fork's head never
                                   # reaches a self-hosted runner, overflow or not.
-                                  fork_target = ev == "pull_request_target" and head == "fork/r" and "pull_request_target" in on
+                                  # v1.52: under pull_request too.
+                                  fork_target = ev in PR and head == "fork/r" and ev in on
                                   for sel in sels:
                                       try:
                                           got = runs_on_labels(ro, ev, ref, head, sel)
@@ -1824,7 +1858,7 @@ jobs:
                                           if sel in ("unset", "set"):
                                               note = ", CI_PREFLIGHT_RUNS_ON " + ("unset" if sel == "unset" else 'set to "ubuntu-latest"')
                                           if fork_target and got is not None:
-                                              note += ", pull_request_target: a fork never reaches a self-hosted runner"
+                                              note += f", {ev}: a fork never reaches a self-hosted runner"
                                           off.append(f"{ev} ({ref}{', fork' if head == 'fork/r' else ''}{note}): {what}")
                               if off and BARE.search(ro_line):
                                   bad.append(f"{where}: (e) its `# self-hosted:` reason names no category; ruling 999 allows a self-hosted job "
