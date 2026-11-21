@@ -3088,8 +3088,10 @@ jobs:
   # step is skipped, so the job succeeds without running the harness.
   optee:
     name: OP-TEE [arm-trustzone harness, fixture image]
-    # The guard is named here too, not only reached through the image job.
-    needs: [preflight, image]   # v1.34
+    # The guard is named here, as in fips and tpm-swtpm. Not image: a
+    # docs-only PR skips image, and optee must still run its select step and
+    # report, since CI Gate checks it as full.
+    needs: preflight   # v1.34; optee reports on a docs-only PR
     if: ${{ (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/ci/deps-bump') && !github.event.pull_request.draft && needs.preflight.outputs.verdict == 'run' }}
     runs-on: ubuntu-latest
     timeout-minutes: 180      # CUSTOMIZE: the fixture image pull and the QEMU boot

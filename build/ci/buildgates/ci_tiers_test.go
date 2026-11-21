@@ -822,7 +822,7 @@ func TestCIGateTiers_RefusesWhatItMustRefuse(t *testing.T) {
 		{"full job's run verdict ored away", fullIf, "    if: ${{ ((" + termFull + ") && " + termDraft + ") || " + termRun + " }}\n"},
 		{"fips without the guard in needs", "    name: FIPS\n    needs: preflight   # v1.34\n", "    name: FIPS\n"},
 		{"swtpm without the guard in needs", fullIf + "    needs: preflight   # v1.34\n", fullIf + "    needs: lint\n"},
-		{"optee guarded through the image job only", "    needs: [preflight, image]   # v1.34\n", "    needs: [image]\n"},
+		{"optee guarded through the image job only", "    needs: preflight   # v1.34; optee reports on a docs-only PR\n", "    needs: [image]\n"},
 		{"lint without the guard in needs", lintHead, "    name: Lint [lint, gosec, build tags]\n" + lintRunsOn + lintIf},
 		{"lint runs a refused dispatch", lintHead, lintNeeds + "    if: " + draftIf + "\n"},
 		{"gate does not fail on a draft", gateDraftCheck, `[ "${DRAFT}" = never ]`},
