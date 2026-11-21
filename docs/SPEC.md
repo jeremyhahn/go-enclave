@@ -1,6 +1,6 @@
 # go-enclave specification
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-11-15
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-11-21
 > What the project is and every feature it has. [ROADMAP.md](../ROADMAP.md) carries what is complete and what remains; the two agree.
 > A feature listed here, in any status, is never deleted: not its docs, code or issues. Removing or re-scoping one is a change to this file.
 
@@ -35,12 +35,15 @@ Two design limits govern every feature:
 
 ### Key-operation API removal
 
-**Planned.** The key-operation API is to be removed from go-enclave, and its
-callers move to go-xkms: the hardware `KeyProtector` providers (`backends/tpm`
-and `(*armtrustzone.Backend).KeyProtector`) and attestation (`Attester`,
-`Evidence`). No code has changed yet; the rows that remove it follow this
-scope change, and each ships its migration in
-[Upgrading](README.md#key-operation-api-removal-planned).
+The key-operation API is removed from go-enclave, and its callers move to
+go-xkms. **Done**: the hardware `KeyProtector` providers, the TPM provider
+(formerly the nested module `backends/tpm`) and the TrustZone provider
+(formerly `(*armtrustzone.Backend).KeyProtector`), are removed; their
+migration is in
+[Upgrading](README.md#hardware-keyprotector-providers-removed). **Planned**:
+attestation (`Attester`, `Evidence`) is still in the tree and is to be
+removed by a later row, which ships its migration in
+[Upgrading](README.md#attestation-removal-planned).
 
 ## Boundaries
 
@@ -52,9 +55,9 @@ go-enclave owns:
   ([budget](locked-memory-budget/architecture.md#component-boundaries)).
 - **The sealing envelope and the provider seam** (`KeyProtector`,
   `RootUnsealer`), with the memory provider `SoftwareProvider` in the root
-  module ([sealing](sealing/architecture.md#component-boundaries)). The TPM
-  and TrustZone providers still in the nested modules are key operations and
-  are to move to go-xkms ([removal](#key-operation-api-removal)).
+  module ([sealing](sealing/architecture.md#component-boundaries)). Hardware
+  providers are key operations and live in go-xkms
+  ([removal](#key-operation-api-removal)).
 - **The backend seam**: the `Backend`, `Handle` and capability interfaces
   every backend implements, in this repository or out of tree
   ([backends](backends/architecture.md#component-boundaries)). Attestation
@@ -76,12 +79,13 @@ go-enclave never:
   typed error and never touches another enclave.
 - **Adds a dependency to the root module.** The root module requires only
   `golang.org/x/sys`. Device code that needs more lives in a nested module
-  (`backends/tpm`, `backends/armtrustzone`) or out of tree, which requires the
+  (`backends/armtrustzone`, the only one) or out of tree, which requires the
   root and never the reverse.
 - **Holds keys, performs key operations or attests.** Keys, key operations
   on a device (signing, decryption, key wrapping) and attestation belong to
-  go-xkms ([scope](#scope)); the hardware providers and `Attester` still in
-  the tree are to be removed ([removal](#key-operation-api-removal)).
+  go-xkms ([scope](#scope)); the hardware providers are removed, and
+  `Attester`, still in the tree, is to be removed
+  ([removal](#key-operation-api-removal)).
 - **Keeps material on anything that wears out**, such as persistent
   secure-element or flash-backed storage ([design limits](#scope)).
 - **Persists or transports material.** No persistence or transport format, no
@@ -102,7 +106,7 @@ go-enclave never:
 | memory-enclave | shipped | The default software backend. The memory enclave (a `ByteAccess` from `NewMemory`, `NewMemoryCopy` or `NewMemorySized`) keeps material in `mlock`'d pages between guard pages with a canary, out of core dumps and `fork` children where the OS allows, read only through the `WithBytes` borrow, read-only after `Freeze` through the `Freezer` capability, and wiped before release. Every failure is a typed error that touches no other enclave. Opt-in `HardenProcess`. Compiles on every GOOS in the [platform contract](memory-enclave/engineering.md#platform-contract). | [memory-enclave/](memory-enclave/user.md) |
 | locked-memory-budget | shipped | `Allocator` admits against a budget in page-rounded locked bytes before allocating, by compare-and-swap; refunds failed constructions; discovers `RLIMIT_MEMLOCK`; retunes at runtime; one process allocator installed by the binary and drawn on by libraries. | [locked-memory-budget/](locked-memory-budget/user.md) |
 | sealing | shipped | `Sealed` holds a versioned AES-256-GCM envelope at rest and decrypts only into a fresh, frozen memory enclave on `Open`. `Sealer` (from `NewSealer`) has modes `ModeRootKey` and `ModePerOperation`, selected by the typed `KeyProtector` / `RootUnsealer` options; provider calls take a context. Works under FIPS 140-only mode; opt-in strict key-schedule erasure. | [sealing/](sealing/user.md) |
-| keyprotector-providers | in progress | The memory provider behind the `KeyProtector` seam, meeting [blob contract v1](sealing/engineering.md#blob-contract-v1): **Memory** (`SoftwareProvider`) and the seam itself ship. Hardware key-protector providers are not part of go-enclave ([scope](#scope)); the TPM provider (`backends/tpm`) and the TrustZone provider (`(*armtrustzone.Backend).KeyProtector`) still in the tree are to be removed, and their callers move to go-xkms ([removal](#key-operation-api-removal), planned). Named consumer: go-xkms's `EnclaveBackend`. [#264](../../../issues/264). | [sealing/](sealing/hardware-providers.md) |
+| keyprotector-providers | shipped | The memory provider behind the `KeyProtector` seam, meeting [blob contract v1](sealing/engineering.md#blob-contract-v1): **Memory** (`SoftwareProvider`) and the seam itself ship. Hardware key-protector providers are not part of go-enclave ([scope](#scope)): the TPM provider (formerly `backends/tpm`) and the TrustZone provider (formerly `(*armtrustzone.Backend).KeyProtector`) are removed, and their callers are on go-xkms ([removal](#key-operation-api-removal)). Named consumer: go-xkms's `EnclaveBackend`. [#264](../../../issues/264). | [sealing/](sealing/hardware-providers.md) |
 | shutdown-sweep | shipped | `WipeAll(ctx)` reclaims every live enclave and orphaned mapping, never unmapping one a reader holds, waiting only as long as `ctx` allows, then sweeps registered `Sweeper` backends; findings are one typed `*SweepError`. | [shutdown-sweep/](shutdown-sweep/user.md) |
 | provider-conformance | shipped | `providertest.TestProvider(ctx, cfg)` checks that a provider retains nothing, refuses tampered and forged blobs, honors its context and implements only the modes it claims; it fails closed where it cannot measure. | [provider-conformance/](provider-conformance/user.md) |
 | backends | shipped | A small core (`Handle`, `Backend`) plus optional capabilities found by type assertion; a named registry beside explicit injection, with nothing registered at import; a missing capability is a `*CapabilityError`, never a fallback. Sealing opens into and seals from any backend. | [backends/](backends/user.md) |
@@ -121,8 +125,8 @@ go-enclave never:
 - **SDK**: the Go package `github.com/jeremyhahn/go-enclave` (package
   `enclave`); [documentation index](README.md), API reference on
   [pkg.go.dev](https://pkg.go.dev/github.com/jeremyhahn/go-enclave).
-- **SDK, nested modules**: `backends/tpm` (package `tpm`) and
-  `backends/armtrustzone` (package `armtrustzone`), each its own Go module.
+- **SDK, nested module**: `backends/armtrustzone` (package `armtrustzone`),
+  its own Go module.
 - **SDK, provider authors**: `providertest`;
   [provider-conformance](provider-conformance/api.md).
 - **SDK, backend authors**: `backendtest`;
