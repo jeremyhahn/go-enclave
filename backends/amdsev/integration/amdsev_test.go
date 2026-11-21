@@ -21,6 +21,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -172,19 +173,26 @@ func TestAmdSev_HostScan(t *testing.T) {
 			pidfile := filepath.Join(t.TempDir(), "qemu.pid")
 			guest := exec.Command("sh", filepath.Join(scripts, "guest.sh"), "--kit", kit, "--serial", serial, "--pidfile", pidfile, tc.mode) //nolint:gosec // the kit's own script
 			guest.Stdout, guest.Stderr = os.Stdout, os.Stderr
+			// The launcher starts timeout and QEMU as descendants: its own
+			// process group lets the cleanup end all of them, on every path.
+			guest.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 			if err := guest.Start(); err != nil {
 				t.Fatal(err)
 			}
+			pgid := guest.Process.Pid
+			t.Cleanup(func() {
+				if err := terminateGroup(pgid, 30*time.Second); err != nil {
+					t.Error(err)
+				}
+			})
 			done := make(chan error, 1)
 			go func() { done <- guest.Wait() }()
 			needle, err := awaitNeedle(serial, done, 20*time.Minute)
 			if err != nil {
-				_ = guest.Process.Kill()
 				t.Fatalf("%s guest: %v", tc.mode, err)
 			}
 			pid, err := readPid(pidfile)
 			if err != nil {
-				_ = guest.Process.Kill()
 				t.Fatal(err)
 			}
 			scan := exec.Command("sh", filepath.Join(scripts, "host-scan.sh"), strconv.Itoa(pid), needle) //nolint:gosec // the kit's own script

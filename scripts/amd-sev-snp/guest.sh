@@ -140,7 +140,9 @@ case $mode in
     -object "sev-snp-guest,id=sev0,cbitpos=$cbitpos,reduced-phys-bits=1,policy=0x30000,kernel-hashes=on"
     ;;
 esac
-set -- timeout --kill-after=30 "$timeout" "$qemu" -machine "$machine" "$@" \
+# --foreground keeps timeout, and so QEMU, in the caller's process group,
+# which the caller signals as a whole to end the guest.
+set -- timeout --foreground --kill-after=30 "$timeout" "$qemu" -machine "$machine" "$@" \
   -bios "$ovmf" -kernel "$kernel" -initrd "$initrd" \
   -append "console=ttyS0 panic=-1 amdsev.mode=$mode${append:+ $append}"
 
