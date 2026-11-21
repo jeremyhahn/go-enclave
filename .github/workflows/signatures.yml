@@ -25,7 +25,10 @@
 # Adoption (one CI-file PR per repository): this file as
 # .github/workflows/signatures.yml, .github/allowed_signers, and ci.yml
 # v1.35.2 (no `signatures` job). That PR has no Signatures run, because the
-# workflow is not on the base yet. Once it lands, every later pull request
+# workflow is not on the base yet. Its merge's push to main finds no registry
+# at the before commit, so it takes the one that commit adds, and passes only
+# when that commit passes against it (see adopted() in the step). Once it
+# lands, every later pull request
 # and push to main gets the `Signatures / Signatures` check, and the
 # repository ruleset requires that context beside CI Gate (a ruleset change,
 # made by its owner, not by the adoption PR).
@@ -92,6 +95,21 @@ jobs:
             git fetch -q --no-tags origin "$REG" 2>/dev/null || true
             isrev "$REG" || { echo "FAIL the base ${REG:0:12} cannot be read, so neither the registry nor the range can be checked"; exit 1; }
           fi
+          # adopted: on a push whose before commit has never had a registry
+          # (the push that adopts this gate), the first pushed commit that adds
+          # one. Nothing is trusted on its word: that commit is in the range,
+          # so it, and every other pushed commit, must pass against the
+          # registry it adds (signed by a key it names to the committer, or
+          # made and verified by GitHub). A registry once on main and then
+          # removed is never adopted again.
+          adopted() {
+            local b
+            [ "$EVENT" = push ] && isrev "$REG" || return 1
+            [ -z "$(git log -1 --format=%H "$REG" -- .github/allowed_signers)" ] || return 1
+            b=$(git rev-list --reverse "$REG..$HEAD_SHA" -- .github/allowed_signers) || return 1
+            b=${b%%$'\n'*}
+            [ -n "$b" ] && git cat-file -e "$b:.github/allowed_signers" 2>/dev/null && printf '%s' "$b"
+          }
           # The registry comes from the base, so a pull request cannot add the
           # key that signs it. No head fallback: under pull_request_target the
           # head is untrusted input.
@@ -103,6 +121,9 @@ jobs:
             # on main, so its own registry is the trusted one.
             git show "$HEAD_SHA:.github/allowed_signers" > "$ASF"
             echo "registry: .github/allowed_signers at ${HEAD_SHA:0:12} (no before)"
+          elif BOOT=$(adopted); then
+            git show "$BOOT:.github/allowed_signers" > "$ASF"
+            echo "registry: .github/allowed_signers at ${BOOT:0:12}, the pushed commit that adds it (none before ${REG:0:12}); it must pass against it"
           else
             echo "FAIL no .github/allowed_signers at the base ${REG:0:12}"; exit 1
           fi
