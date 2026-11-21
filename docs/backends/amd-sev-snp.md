@@ -1,6 +1,6 @@
 # amd-sev-snp backend — design
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-11-20
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-11-21
 > Conflicts with this document are defects. The module `backends/amdsev` is canonical: where it and this document disagree, fix this document to match it.
 > The design and test plan of SPEC row [confiner-sev-snp](../SPEC.md#features): a backend that implements the [backend seam](architecture.md) and `Confiner` for a process inside an AMD SEV-SNP guest. It supersedes the Attester and KeyProtector parts of the earlier [confidential-vm proposal](confidential-vm.md).
 
@@ -156,9 +156,17 @@ refusal cases (item 5) and the host scan in those guests; the SEV-SNP tests
 listed. A host that cannot run a listed mode fails the run naming what is
 missing.
 
-The workflow `.github/workflows/amd-sev.yml` runs the target on the
-self-hosted runner labelled `amd-sev`, and starts only while the repository
-variable `AMD_SEV_RUNNER` is `online`.
+The workflow `.github/workflows/amd-sev.yml` is the SEV and SEV-ES hardware
+job. It runs the target on the self-hosted runner labelled `amd-sev`, and
+starts only while the repository variable `AMD_SEV_RUNNER` is `online`. That
+host has SEV and SEV-ES and no SEV-SNP, so the job's SEV-SNP step, which
+runs the target with `AMDSEV_GUESTS=snp` where `kvm_amd` reports `sev_snp`,
+reports "SNP not available on this runner" there and fails nothing; every
+SEV and SEV-ES check still runs.
+
+**Open:** the SNP hardware acceptance, items 3 and 4 in an SNP guest, has
+not run. It needs an SEV-SNP host, and until one runs it the row stays in
+progress.
 
 ## What it does not do
 

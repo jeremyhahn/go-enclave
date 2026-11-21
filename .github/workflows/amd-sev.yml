@@ -1,15 +1,21 @@
-# The AMD SEV hardware job: the amd-sev tests on a self-hosted runner whose
-# host is an AMD EPYC with SEV enabled in firmware and in kvm_amd.
+# The SEV and SEV-ES hardware job: the amd-sev tests on a self-hosted runner
+# whose host is an AMD EPYC with SEV and SEV-ES enabled in firmware and in
+# kvm_amd. The host has no SEV-SNP, so this job does not prove the SNP row's
+# hardware acceptance; that stays open until an SEV-SNP host runs it.
 #
-# make integration-test-amd-sev records the host (CPU family and model, SEV
-# firmware API version, host kernel, QEMU and OVMF versions), builds the guest
-# kit from pinned inputs (scripts/amd-sev-snp/pins.sh, each by version and
-# sha256), boots a fresh guest for each mode AMDSEV_GUESTS lists (default
-# "sev sev-es"; the SEV-SNP tests run where "snp" is listed) and a plain-KVM
+# The first test step runs make integration-test-amd-sev for the guests
+# AMDSEV_GUESTS lists ("sev sev-es"): it records the host (CPU family and
+# model, SEV firmware API version, host kernel, QEMU and OVMF versions),
+# builds the guest kit from pinned inputs (scripts/amd-sev-snp/pins.sh, each
+# by version and sha256), boots a fresh guest for each mode and a plain-KVM
 # control guest from the same image, runs the in-guest tests as root, and
 # scans each QEMU process from the host. A runner that cannot run a listed
-# mode fails the job with a message naming what is missing; nothing here
-# skips.
+# mode fails the job with a message naming what is missing.
+#
+# The SEV-SNP step runs the SNP guest (backendtest and the host scan in an
+# SNP guest) only where kvm_amd reports sev_snp; elsewhere it reports "SNP
+# not available on this runner" and fails nothing. Every SEV and SEV-ES
+# check runs either way.
 #
 # The repository variable AMD_SEV_RUNNER is 'online' while the hardware
 # runner is registered; unset, the job does not start, so no run waits on a
@@ -19,7 +25,7 @@
 # request. It runs on dispatch, on a push to main, and on a pull request from
 # this repository that touches the backend, the kit or its tests; a fork's head
 # never reaches the hardware runner.
-name: AMD SEV
+name: AMD SEV and SEV-ES hardware
 
 on:
   workflow_dispatch:
@@ -44,7 +50,7 @@ concurrency:
 
 jobs:
   amd-sev:
-    name: AMD SEV guests
+    name: SEV and SEV-ES guests
     if: ${{ vars.AMD_SEV_RUNNER == 'online' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: [self-hosted, amd-sev] # self-hosted: hardware: AMD SEV host
     # A cold cache builds QEMU from source (about 15 minutes) and fetches the
@@ -54,7 +60,8 @@ jobs:
     permissions:
       contents: read
     env:
-      # The host provides SEV and SEV-ES; add snp where SEV-SNP is available.
+      # The host provides SEV and SEV-ES; the SEV-SNP step adds the SNP guest
+      # where the host runs SNP.
       AMDSEV_GUESTS: sev sev-es
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -66,18 +73,31 @@ jobs:
           cache: false
       - name: Record the host
         run: sh scripts/amd-sev-snp/host-record.sh
-      - name: SEV guest tests and the host scan
+      - name: SEV and SEV-ES guest tests and the host scan
         env:
-          AMDSEV_CACHE: ${{ runner.temp }}/amd-sev-snp-cache
-          AMDSEV_RESULTS: ${{ runner.temp }}/amd-sev-snp-results
+          AMDSEV_CACHE: ${{ runner.temp }}/amd-sev-cache
+          AMDSEV_RESULTS: ${{ runner.temp }}/amd-sev-results
         run: make integration-test-amd-sev
+      - name: SEV-SNP guest tests, where the host runs SNP
+        env:
+          AMDSEV_CACHE: ${{ runner.temp }}/amd-sev-cache
+          AMDSEV_RESULTS: ${{ runner.temp }}/amd-sev-results-snp
+        run: |
+          set -eu
+          p=/sys/module/kvm_amd/parameters/sev_snp
+          v=$(cat -- "$p" 2>/dev/null || true)
+          if [ "$v" != Y ] && [ "$v" != 1 ]; then
+            echo "::notice title=SEV-SNP::SNP not available on this runner ($p is '${v:-absent}'): the SNP guest tests need an SEV-SNP host"
+            exit 0
+          fi
+          AMDSEV_GUESTS=snp make integration-test-amd-sev
       - name: Guest consoles
         if: always()
         env:
-          AMDSEV_RESULTS: ${{ runner.temp }}/amd-sev-snp-results
+          AMDSEV_RESULTS: ${{ runner.temp }}/amd-sev-results
         run: |
           set -eu
-          for f in "$AMDSEV_RESULTS"/*; do
+          for f in "$AMDSEV_RESULTS"/* "$AMDSEV_RESULTS"-snp/*; do
             [ -f "$f" ] || continue
             echo "::group::$(basename "$f")"
             cat -- "$f"
