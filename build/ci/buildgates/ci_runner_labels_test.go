@@ -100,6 +100,13 @@ var runnerLabelsCases = []struct {
 	{"fail-release-escaped-label", true},
 	{"fail-release-format-label", true},
 	{"fail-release-unknown-label", true},
+	// An expression is evaluated in every label of a list or a labels:
+	// mapping, not only as the whole runs-on value.
+	{"fail-release-list-vars-label", true},
+	{"fail-release-list-format-label", true},
+	{"fail-release-block-list-label", true},
+	{"fail-release-labels-mapping", true},
+	{"pass-list-hosted-expression", false},
 	{"pass-release-push-main", false},
 	{"pass-release-push-tag", false},
 	{"pass-release-push-main-or-tag", false},
@@ -150,6 +157,18 @@ var runnerLabelsWant = map[string][]string{
 		"publish: (a) names `release` in a workflow with a pull_request trigger",
 	},
 	"fail-release-unknown-label": {
+		"publish: (a) names `release` in a workflow with a pull_request trigger",
+	},
+	"fail-release-list-vars-label": {
+		"publish: (a) names `release` in a workflow with a pull_request trigger",
+	},
+	"fail-release-list-format-label": {
+		"publish: (a) names `release` in a workflow with a pull_request trigger",
+	},
+	"fail-release-block-list-label": {
+		"publish: (a) names `release` in a workflow with a pull_request trigger",
+	},
+	"fail-release-labels-mapping": {
 		"publish: (a) names `release` in a workflow with a pull_request trigger",
 	},
 }
