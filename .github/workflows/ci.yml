@@ -1030,7 +1030,8 @@ jobs:
     # seconds of work; the repository variable CI_PREFLIGHT_RUNS_ON, runs-on
     # JSON, overrides it (Fleet Ops sets `"ubuntu-latest"`, quotes included,
     # while the Dells are down). Off github.com the forge label, as before.
-    runs-on: ${{ github.server_url == 'https://github.com' && fromJSON(vars.CI_PREFLIGHT_RUNS_ON || '["self-hosted","linux","x64","bigdisk"]') || 'ubuntu-latest' }}   # v1.49
+    # CUSTOMIZE (go-enclave): a fork's pull request runs its own scripts here, so it never takes the self-hosted pool or the variable.
+    runs-on: ${{ github.server_url == 'https://github.com' && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || fromJSON(vars.CI_PREFLIGHT_RUNS_ON || '["self-hosted","linux","x64","bigdisk"]')) || 'ubuntu-latest' }}   # v1.49
     # v1.26: a draft PR runs no CI; every job that needs this one skips with it.
     if: ${{ !github.event.pull_request.draft }}
     timeout-minutes: 10       # v1.34: the three jobs had 5 each
@@ -1202,6 +1203,8 @@ jobs:
           JOB_TOKEN: ${{ github.token }}
           LIMIT: ${{ env.HOSTED_JOBS_PER_REPO }}
           GRACE: ${{ env.HOSTED_QUEUE_GRACE_SECONDS }}
+          # CUSTOMIZE (go-enclave): true for a pull request from a fork.
+          FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
         run: |
           set -uo pipefail
           HOSTED='"ubuntu-latest"'
@@ -1218,6 +1221,13 @@ jobs:
           }
           if [ "$SERVER" != https://github.com ]; then
             echo "not github.com: each job keeps its forge label (bigdisk, ci-gate); no selection"
+            emit "$HOSTED" "$HOSTED"
+            exit 0
+          fi
+          # CUSTOMIZE (go-enclave): a fork's pull request runs code its author
+          # controls; every job of its run stays on the GitHub-hosted default.
+          if [ "$FORK" = true ]; then
+            echo "a pull request from a fork: every job takes the GitHub-hosted default, ubuntu-latest"
             emit "$HOSTED" "$HOSTED"
             exit 0
           fi

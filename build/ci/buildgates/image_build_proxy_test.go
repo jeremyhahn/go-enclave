@@ -34,8 +34,9 @@ const hostedRunner = "ubuntu-latest"
 // The runs-on expressions of the CI template's own jobs (v1.48, v1.49). On
 // github.com preflight picks the runner: GitHub-hosted, or the bigdisk pool
 // when the hosted pool is full; off github.com each takes its forge label.
+// A pull request from a fork runs preflight GitHub-hosted, never on the pool.
 const (
-	preflightRunner = `${{ github.server_url == 'https://github.com' && fromJSON(vars.CI_PREFLIGHT_RUNS_ON || '["self-hosted","linux","x64","bigdisk"]') || 'ubuntu-latest' }}`
+	preflightRunner = `${{ github.server_url == 'https://github.com' && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || fromJSON(vars.CI_PREFLIGHT_RUNS_ON || '["self-hosted","linux","x64","bigdisk"]')) || 'ubuntu-latest' }}`
 	dockerRunner    = `${{ github.server_url == 'https://github.com' && fromJSON(needs.preflight.outputs.runner_docker) || 'bigdisk' }}`
 	gateRunner      = `${{ github.server_url == 'https://github.com' && fromJSON(needs.preflight.outputs.runner || '"ubuntu-latest"') || 'ci-gate' }}`
 	// releaseRunner is publish-images' label list; its if runs it on
