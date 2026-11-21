@@ -1574,19 +1574,75 @@ jobs:
               return value
 
 
+          def split_top(t, sep):
+              """Split t where sep(t, i) holds outside quoted scalars and expressions."""
+              out, cur, q, depth, i = [], [], None, 0, 0
+              while i < len(t):
+                  c = t[i]
+                  if q:
+                      if q == '"' and c == "\\" and i + 1 < len(t):
+                          cur.append(t[i:i + 2])
+                          i += 2
+                          continue
+                      if c == q:
+                          q = None
+                  elif t.startswith(OPEN, i):
+                      depth += 1
+                      cur.append(OPEN)
+                      i += len(OPEN)
+                      continue
+                  elif depth and t.startswith("}}", i):
+                      depth -= 1
+                      cur.append("}}")
+                      i += 2
+                      continue
+                  elif c in "'\"":
+                      q = c
+                  elif not depth and sep(t, i):
+                      out.append("".join(cur))
+                      cur = []
+                      i += 1
+                      continue
+                  cur.append(c)
+                  i += 1
+              out.append("".join(cur))
+              return [x.strip() for x in out if x.strip()]
+
+
+          def label_values(items):
+              """Each label decoded and, where it is an expression, evaluated; None when
+              any label is a value this step cannot know, which may be any label."""
+              out = []
+              for x in items:
+                  s = unquote(x)
+                  m = re.fullmatch(r"\s*\$\{\{(.*)\}\}\s*", s, re.S)
+                  if m:
+                      v = labels(P(lex(m.group(1)), hosted_get).parse())
+                      if v is None:
+                          return None
+                      out.extend(v)
+                  elif OPEN in s:
+                      return None  # text around an expression builds a string this step does not
+                  else:
+                      out.append(s)
+              return out
+
+
           def runs_on_labels(text):
               t = text.strip()
               if t.startswith("group:") or t.startswith("labels:") or " labels:" in t:
-                  m = re.search(r"labels:\s*(\[[^\]]*\]|\S+)", t)
+                  m = re.search(r"labels:\s*(.*)$", t, re.S)
                   t = m.group(1) if m else ""
-              m = re.fullmatch(r"\$\{\{(.*)\}\}", unquote(t), re.S)
-              if m:
-                  return labels(P(lex(m.group(1)), hosted_get).parse())
+                  g = re.search(r"\s['\"]?group['\"]?\s*:", t)
+                  t = (t[:g.start()] if g else t).strip()
               if t.startswith("["):
-                  return [unquote(x) for x in re.split(r"\s*,\s*", t.strip("[] ")) if x]
+                  if not t.endswith("]"):
+                      raise ValueError("a label list with no closing bracket")
+                  return label_values(split_top(t[1:-1], lambda s, i: s[i] == ","))
               if t.startswith("- "):
-                  return [unquote(x) for x in re.split(r"\s*-\s+", " " + t) if x.strip()]
-              return [unquote(t)]
+                  return label_values(split_top(t, lambda s, i: s[i] == "-" and (i == 0 or s[i - 1].isspace())
+                                                and (i + 1 == len(s) or s[i + 1].isspace())))
+              return label_values([t])
 
 
           def names_release(text):
