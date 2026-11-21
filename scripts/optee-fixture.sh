@@ -11,9 +11,9 @@
 # is refused, never followed. check runs the checkout's
 # `make integration-test-optee` (xtest and the TA's version and rng commands;
 # no go-enclave code). harness takes backends/armtrustzone's optee-tagged
-# conformance tests and benchmarks, a static linux/arm64 test binary the make
+# conformance test and benchmarks, a static linux/arm64 test binary the make
 # target compiled in the toolchain image ($ARM_TRUSTZONE_BIN), shares it with
-# the aarch64 guest, runs the conformance tests then BenchmarkOpenUseClose and
+# the aarch64 guest, runs the conformance test then BenchmarkOpenUseClose and
 # BenchmarkAccess, and exits with
 # the status of `make optee-run`, which is the binary's.
 set -eu
