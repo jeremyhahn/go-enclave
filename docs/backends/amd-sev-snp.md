@@ -28,7 +28,8 @@ it, and only where it is true.
 - **Out:** attestation of the guest (SNP attestation reports, certificate
   chains, verification) and hardware key protectors (the SNP derived key).
   Both belong to go-xkms ([SPEC scope](../SPEC.md#scope)). The backend
-  requests no report and derives no key.
+  requests a report only during detection, to read its own guest's policy;
+  it verifies no signature, returns no report and derives no key.
 - **Out:** Intel SGX, Intel TDX and Arm CCA, which stay in the `confiner` row.
 
 ## Shape
@@ -37,44 +38,59 @@ it, and only where it is true.
   `go.mod`. It requires a released root module and `golang.org/x/sys`, never
   the reverse, as `backends/armtrustzone` does
   ([out-of-tree backend](architecture.md#an-out-of-tree-backend)).
-- **`New() (enclave.Backend, error)`** returns the backend only inside an SNP
-  guest. Nothing happens at import, and nothing is registered: `main` calls
+- **`New(a enclave.Allocator) (enclave.Backend, error)`** returns the backend
+  only inside an SNP guest whose policy forbids debugging. Its handles draw
+  on `a`; a nil `a` is `enclave.ErrAllocatorNotConstructed`. Nothing happens at import, and nothing is registered: `main` calls
   `enclave.Register` with the value `New` returned.
 - **Capabilities, exactly:** `CapabilityConfine` and `CapabilityImport`.
-  `ConfinesProcess()` returns true: `New` succeeded only inside an SNP guest,
-  whose private memory holds the whole process. The answer is fixed for the
+  `ConfinesProcess()` returns true: `New` succeeded only inside an SNP guest
+  the host cannot debug, whose private memory holds the whole process. The answer is fixed for the
   backend's life and never blocks, as `Confiner` requires.
 - **Handles are the root's locked-memory enclaves** (`enclave.NewMemorySized`
-  and `enclave.NewMemoryCopy`, drawn on the process allocator). SNP adds
+  and `enclave.NewMemoryCopy`, drawn on the allocator `New` was given). SNP adds
   nothing per handle inside the guest: the guest kernel and guest root read
   the process's memory as they would outside a CVM
   ([why not a backend](confidential-vm.md#why-not-a-backend)). What the
   backend adds is the claim, which a caller can require with
   `enclave.As[enclave.Confiner]`.
-- **Linux on amd64 only.** On any other target a stub compiles whose `New`
-  returns the typed error below, so a cross-platform `main` that links the
-  module builds everywhere.
+- **Linux only.** On any other OS a stub compiles whose `New` returns the
+  typed error below, so a cross-platform `main` that links the module builds
+  everywhere. On Linux off amd64 no SNP guest interface exists, and `New`
+  refuses as it does on a host.
 
 ## Detecting an SNP guest from userspace
 
 `New` accepts the environment only when the guest kernel itself has enabled
-SNP, and reads that decision from two kernel interfaces:
+SNP and the firmware reports a guest policy that forbids debugging. It asks
+two kernel interfaces for an attestation report, in order, and the first that
+returns one decides:
 
 1. **`/dev/sev-guest`** (`CONFIG_SEV_GUEST`, Linux 5.19). The kernel registers
    the `sev-guest` platform device only when SNP is active in the guest, and
    the driver binds only then: it needs the secrets page and the VM platform
    communication keys that the AMD Secure Processor places in an SNP guest at
-   launch. `New` checks with `stat` that the path is a character device and
-   that `/sys/class/misc/sev-guest/dev` names the same major and minor
-   number. It does not open the device, which is root-only by default, and
-   sends it no request.
+   launch. `New` opens the device read-write, as its ioctls require (the
+   device is root-only by default), and issues `SNP_GET_REPORT` at VMPL 3,
+   the least privileged level, with zero report data. The firmware's
+   `MSG_REPORT_RSP` must carry status 0 and a report of 1184 bytes; `New`
+   then closes the device.
 2. **The configfs-tsm `sev_guest` provider** (`CONFIG_TSM_REPORTS`, Linux 6.7,
-   `/sys/kernel/config/tsm/report`). Where the directory exists, `New` creates
-   a report entry, reads its `provider` attribute, which must be `sev_guest`,
-   and removes the entry. It writes no `inblob` and reads no `outblob`, so no
-   report is generated. A TDX guest reads `tdx_guest` here and is refused. A
-   kernel without configfs-tsm, or with configfs not mounted, skips this step;
-   a refused `mkdir` (`EACCES`, `EPERM`) is a refusal, never a skip.
+   `/sys/kernel/config/tsm/report`), tried when the device step fails. `New`
+   creates a report entry, reads its `provider` attribute, which must be
+   `sev_guest` (a TDX guest reads `tdx_guest` here and is refused), writes
+   `privlevel` 3 and 64 zero bytes to `inblob`, reads the 1184-byte report
+   from `outblob`, and removes the entry. A failed `mkdir`, whether configfs
+   is missing or refuses (`ENOENT`, `EACCES`, `EPERM`), is a refusal, never a
+   skip.
+
+**The guest policy.** Whichever interface returns the report, `New` reads its
+64-bit `POLICY` field (offset `08h` of `ATTESTATION_REPORT`) and refuses when
+the `DEBUG` bit, bit 19, is set: a guest launched with it allows the host to
+debug it, which decrypts its memory. The report reaches the guest through the
+firmware's encrypted guest messages, so the host cannot rewrite the policy in
+it. A device report with `DEBUG` set is final; `New` does not try configfs-tsm
+after it. The report's signature is not verified, and the report is not kept
+or returned: verifying evidence is attestation, which is go-xkms's.
 
 **Why a CPUID flag alone does not prove SNP.** CPUID leaf `0x8000001F`
 reports what the processor supports (SME, SEV, SEV-ES, SEV-SNP), not what this
@@ -94,14 +110,17 @@ the root uses ([errors.go](../../errors.go)):
 
 | Failure | Error |
 |---|---|
-| No `/dev/sev-guest`, or not the `sev-guest` misc device: the host, a plain KVM guest, an SEV or SEV-ES guest without SNP | `*GuestError{Op: "sev-guest", Cause}` matching `ErrSNPGuestUnavailable`; `Cause` the errno (`ENOENT`) or a mismatch |
-| The configfs-tsm `provider` is not `sev_guest` | `*GuestError{Op: "tsm-provider", Cause}` matching `ErrSNPGuestUnavailable`; `Cause` names the provider read |
-| configfs-tsm present but refused (`EACCES`, `EPERM`) or failing | `*GuestError{Op: "tsm-report", Cause}` matching `ErrSNPGuestUnavailable`; `Cause` the errno |
-| Not Linux on amd64 | `ErrSNPGuestUnavailable` with no cause |
+| `/dev/sev-guest` cannot be opened: the host, a plain KVM guest, an SEV or SEV-ES guest without SNP (`ENOENT`), or a process the device refuses (`EACCES`) | `*GuestError{Path: "/dev/sev-guest", Op: "open", Cause}` matching `ErrSNPGuestUnavailable`; `Cause` the `*os.PathError` |
+| `SNP_GET_REPORT` fails, or the firmware answers with a non-zero status or a report of the wrong size | `*GuestError{Op: "report", Cause}`; `Cause` the `*os.SyscallError`, or a `*ReportError` matching `ErrReportRefused` |
+| The report's `POLICY` has `DEBUG` set, from either interface | `*GuestError{Op: "policy", Cause}`; `Cause` a `*PolicyError` matching `ErrDebugPolicy`, carrying the policy |
+| configfs-tsm missing or refused (`mkdir`), its `provider` unreadable or not `sev_guest` (`provider`, `Cause` a `*ProviderError` matching `ErrWrongProvider`), a refused `privlevel` or `inblob` write, an unreadable or short `outblob` (`outblob`, a `*ReportError`), or an entry it cannot remove (`rmdir`) | `*GuestError` with that `Op` and the configfs path; it is the device step's `Next` |
+| Not Linux | `*GuestError{Op: "platform", Cause: errors.ErrUnsupported}` matching `ErrSNPGuestUnavailable` |
+| A nil allocator | `enclave.ErrAllocatorNotConstructed` |
 | A handle failure (budget, `mlock`, invalid spec) | the root's typed error, unchanged |
 
-`*GuestError` has `Is` and `Unwrap`, so `errors.Is` matches the sentinel and
-the errno. A refused `New` returns a nil backend and claims nothing: no
+Every `*GuestError` matches `ErrSNPGuestUnavailable`. It has `Is` and
+`Unwrap`, which returns `Cause` and `Next`, so `errors.Is` also matches the
+errno and the cause's own sentinel. A refused `New` returns a nil backend and claims nothing: no
 `Confiner` value ever exists outside an SNP guest. A refusal never falls back
 to another backend; the program's `Detect` or its own code chooses.
 
@@ -111,8 +130,9 @@ The backend is proven inside a real SEV-SNP guest on an AMD EPYC host with
 SEV-SNP (Zen 3 or later). No simulator or emulated platform stands in for it.
 QEMU is the VMM driving KVM on that CPU, never TCG. The plan runs as the
 self-hosted hardware job, `make integration-test-amd-sev`; unit tests cover
-only what touches no device (the device and provider checks against a fake
-root directory, error texts and unwrapping).
+only what touches no device: every detection step and refusal, including a
+report with the `DEBUG` policy bit from each interface, through a fake of the
+kernel calls, and the error texts and unwrapping.
 
 1. **Record the host.** Each run records the CPU family, model and stepping,
    the AMD Secure Processor firmware's SNP API version, the host kernel
@@ -128,8 +148,8 @@ root directory, error texts and unwrapping).
 3. **`backendtest` in the guest.** `backendtest.TestBackend` runs inside the
    SNP guest as root, with `BackendCapabilities` exactly `CapabilityConfine`
    and `CapabilityImport`. It passes, `ConfinesProcess()` is true and stable,
-   and the same run as a non-root user gets the `tsm-report` refusal where
-   configfs-tsm denies it.
+   and the same run as a non-root user gets the `open` refusal, with the
+   configfs-tsm step's refusal as its `Next`, where both deny it.
 4. **The host scan and its control.** In the SNP guest the test holds a fresh
    random needle in an enclave from the backend, and signals readiness over
    the serial console without writing the needle anywhere. On the host, as
@@ -180,9 +200,16 @@ progress.
 ## References
 
 - [AMD SEV-SNP firmware ABI specification](https://www.amd.com/en/developer/sev.html)
-  (AMD publication 56860): the guest messages and the `SEV_STATUS` MSR.
+  (AMD publication 56860, revision 1.58, pinned in the
+  [reference index](../reference/README.md#amd-sev-snp)): the guest messages,
+  `MSG_REPORT_RSP`, the `ATTESTATION_REPORT` and its `POLICY` field, the
+  guest policy's `DEBUG` bit and the `SEV_STATUS` MSR.
+- Linux `include/uapi/linux/sev-guest.h`
+  ([copy](../reference/linux-uapi-sev-guest.h)): `SNP_GET_REPORT` and its
+  request and response structs.
 - Linux `Documentation/virt/coco/sev-guest.rst`: `/dev/sev-guest`.
 - Linux `Documentation/ABI/testing/configfs-tsm`: the configfs-tsm report
-  interface and its `provider` attribute.
+  interface and its `provider`, `privlevel`, `inblob` and `outblob`
+  attributes.
 - [confidential-vm proposal](confidential-vm.md): the earlier design, whose
   kernel-interface and threat-model sections still apply.
