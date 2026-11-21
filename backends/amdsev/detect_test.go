@@ -4,16 +4,23 @@ import (
 	"encoding/binary"
 	"errors"
 	"os"
+	"path/filepath"
 	"syscall"
 	"testing"
 )
 
+// testDebugPolicy is a guest POLICY with DEBUG (bit 19) set, beside the
+// reserved bit 17 the firmware requires to be one.
+const testDebugPolicy uint64 = 1<<19 | 1<<17
+
 // fakeGuest drives detection through the seam. Each field is the error the
-// matching call returns; provider is what the configfs entry names.
+// matching call returns; provider is what the configfs entry names, and
+// policy is the POLICY field of the report both paths return.
 type fakeGuest struct {
 	openErr, reportErr, mkdirErr, readErr, rmdirErr error
 	status, size                                    uint32
 	provider                                        string
+	policy                                          uint64
 
 	closed, removed int
 	vmpl            uint32
@@ -22,6 +29,13 @@ type fakeGuest struct {
 // successGuest is an SEV-SNP guest whose device answers.
 func successGuest() *fakeGuest {
 	return &fakeGuest{size: attestationReportSize, provider: sevGuestProvider}
+}
+
+// report is an attestation report carrying f's policy.
+func (f *fakeGuest) report() []byte {
+	r := make([]byte, attestationReportSize)
+	binary.LittleEndian.PutUint64(r[8:16], f.policy)
+	return r
 }
 
 func (f *fakeGuest) os() guestOS {
@@ -39,13 +53,17 @@ func (f *fakeGuest) os() guestOS {
 			}
 			binary.LittleEndian.PutUint32(resp.data[0:4], f.status)
 			binary.LittleEndian.PutUint32(resp.data[4:8], f.size)
+			copy(resp.data[32:], f.report())
 			return nil
 		},
 		closeDevice: func(int) error { f.closed++; return nil },
 		mkdir:       func(string) error { return f.mkdirErr },
-		readFile: func(string) ([]byte, error) {
+		readFile: func(path string) ([]byte, error) {
 			if f.readErr != nil {
 				return nil, f.readErr
+			}
+			if filepath.Base(path) == "outblob" {
+				return f.report(), nil
 			}
 			return []byte(f.provider + "\n"), nil
 		},
@@ -129,6 +147,55 @@ func TestDetectRefuses(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestDetectRefusesDebugPolicy checks that a guest launched with the POLICY
+// DEBUG bit, whose memory the host can decrypt, is refused on both paths.
+func TestDetectRefusesDebugPolicy(t *testing.T) {
+	policyRefused := func(t *testing.T, err error, path string) {
+		t.Helper()
+		var ge *GuestError
+		if !errors.As(err, &ge) || ge.Op != "policy" || ge.Path != path {
+			t.Fatalf("err = %#v, want op policy on %s", err, path)
+		}
+		var pe *PolicyError
+		if !errors.Is(ge.Cause, ErrDebugPolicy) || !errors.As(ge.Cause, &pe) || pe.Policy != testDebugPolicy {
+			t.Fatalf("cause = %v, want a PolicyError for %#x", ge.Cause, testDebugPolicy)
+		}
+	}
+
+	t.Run("device report", func(t *testing.T) {
+		f := successGuest()
+		f.policy = testDebugPolicy
+		err := f.detect()
+		if !errors.Is(err, ErrSNPGuestUnavailable) {
+			t.Fatalf("err = %v, want ErrSNPGuestUnavailable", err)
+		}
+		policyRefused(t, err, devicePath)
+		var ge *GuestError
+		if errors.As(err, &ge) && ge.Next != nil {
+			t.Fatalf("configfs-tsm tried after a debug report: %v", ge.Next)
+		}
+		if f.removed != 0 {
+			t.Fatal("configfs-tsm tried after a debug report")
+		}
+	})
+
+	t.Run("configfs report", func(t *testing.T) {
+		f := &fakeGuest{openErr: syscall.ENOENT, provider: sevGuestProvider, policy: testDebugPolicy}
+		err := f.detect()
+		if !errors.Is(err, ErrSNPGuestUnavailable) {
+			t.Fatalf("err = %v, want ErrSNPGuestUnavailable", err)
+		}
+		var ge *GuestError
+		if !errors.As(err, &ge) || ge.Op != "open" {
+			t.Fatalf("err = %#v, want the device's open step first", err)
+		}
+		policyRefused(t, ge.Next, filepath.Join(tsmRoot, "entry", "outblob"))
+		if f.removed != 1 {
+			t.Fatalf("entry removed %d times, want 1", f.removed)
+		}
+	})
 }
 
 func TestDetectNoDriverPlatform(t *testing.T) {
