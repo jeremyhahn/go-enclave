@@ -2,9 +2,7 @@ package armtrustzone
 
 import (
 	"bytes"
-	"crypto/aes"
-	"crypto/cipher"
-	"crypto/rand"
+	"context"
 	"crypto/sha256"
 	"fmt"
 	"sync"
@@ -39,30 +37,27 @@ const (
 // one and TEE_ERROR_MAC_INVALID for one that does not open.
 type fakeTEE struct {
 	regMem bool
-	aead   cipher.AEAD
 
-	mu         sync.Mutex
-	devs       map[int]bool   // open device fds
-	sessions   map[uint32]int // session → its device fd
-	shms       map[int32]*fakeShm
-	nextFD     int
-	nextID     int32
-	nextSess   uint32
-	invokes    []fakeInvoke
-	failures   map[uint32]uint32 // command → the code it answers with
-	shortSeals int               // SEALs still to answer TEE_ERROR_SHORT_BUFFER
-	shortSize  uint64            // the size those answers ask for
-	blockCmd   uint32            // a command that waits for its cancel
-	blockSkip  int               // blockCmd calls still to let through first
-	nthCmd     uint32            // a command whose nth call fails
-	nthLeft    int               // nthCmd calls still to let through first
-	nthCode    uint32            // the code that call answers, when nthErr is nil
-	nthErr     error             // the errno the INVOKE ioctl of that call returns
-	randoms    int               // GET_RANDOM calls answered
-	entered    chan struct{}     // closed when blockCmd arrives
-	cancels    map[uint32]chan struct{}
-	canceled   map[uint32]bool
-	faults     []string
+	mu        sync.Mutex
+	devs      map[int]bool   // open device fds
+	sessions  map[uint32]int // session → its device fd
+	shms      map[int32]*fakeShm
+	nextFD    int
+	nextID    int32
+	nextSess  uint32
+	invokes   []fakeInvoke
+	failures  map[uint32]uint32 // command → the code it answers with
+	blockCmd  uint32            // a command that waits for its cancel
+	blockSkip int               // blockCmd calls still to let through first
+	nthCmd    uint32            // a command whose nth call fails
+	nthLeft   int               // nthCmd calls still to let through first
+	nthCode   uint32            // the code that call answers, when nthErr is nil
+	nthErr    error             // the errno the INVOKE ioctl of that call returns
+	randoms   int               // GET_RANDOM calls answered
+	entered   chan struct{}     // closed when blockCmd arrives
+	cancels   map[uint32]chan struct{}
+	canceled  map[uint32]bool
+	faults    []string
 }
 
 // fakeShm is a shared-memory object: driver memory from TEE_IOC_SHM_ALLOC,
@@ -103,21 +98,8 @@ var _ teeDriver = (*fakeTEE)(nil)
 // saw, and for any device fd, session or shared memory still open.
 func newFakeTEE(t testing.TB, regMem bool) *fakeTEE {
 	t.Helper()
-	key := make([]byte, 32)
-	if _, err := rand.Read(key); err != nil {
-		t.Fatal(err)
-	}
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	aead, err := cipher.NewGCM(block)
-	if err != nil {
-		t.Fatal(err)
-	}
 	f := &fakeTEE{
 		regMem:   regMem,
-		aead:     aead,
 		devs:     map[int]bool{},
 		sessions: map[uint32]int{},
 		shms:     map[int32]*fakeShm{},
@@ -144,6 +126,36 @@ func newFakeTEE(t testing.TB, regMem bool) *fakeTEE {
 		}
 	})
 	return f
+}
+
+// dialFake connects a Backend to f as Connect does to a device, and closes
+// it when the test ends.
+func dialFake(t *testing.T, f *fakeTEE) (*Backend, error) {
+	uuid, err := parseUUID(taUUID)
+	if err != nil {
+		return nil, err
+	}
+	c, err := openClientOn(f, fakeEndpoint, uuid)
+	if err != nil {
+		return nil, err
+	}
+	b := &Backend{c: c}
+	t.Cleanup(func() { _ = b.Close() })
+	if err := b.Probe(context.Background()); err != nil {
+		return nil, err
+	}
+	return b, nil
+}
+
+// forEachDriver runs fn against a driver that registers user memory and
+// against one that does not, so shared memory takes both paths.
+func forEachDriver(t *testing.T, fn func(t *testing.T, f *fakeTEE)) {
+	for _, tc := range []struct {
+		name   string
+		regMem bool
+	}{{"registered memory", true}, {"driver memory", false}} {
+		t.Run(tc.name, func(t *testing.T) { fn(t, newFakeTEE(t, tc.regMem)) })
+	}
 }
 
 // live is the number of shared-memory objects not yet released.
@@ -175,14 +187,6 @@ func (f *fakeTEE) fail(cmd, code uint32) {
 		return
 	}
 	f.failures[cmd] = code
-}
-
-// shortSeal makes the next times SEALs answer TEE_ERROR_SHORT_BUFFER, asking
-// for size bytes.
-func (f *fakeTEE) shortSeal(times int, size uint64) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.shortSeals, f.shortSize = times, size
 }
 
 // blockOn makes the next cmd wait for TEE_IOC_CANCEL on its cancel id and
@@ -439,53 +443,12 @@ func (f *fakeTEE) ta(cmd uint32, params *[teeNumParams]teeParam, mems [teeNumPar
 	for i := range params {
 		types[i] = params[i].Attr
 	}
-	sealTypes := [teeNumParams]uint64{teeParamAttrTypeMemrefInput, teeParamAttrTypeMemrefInput, teeParamAttrTypeMemrefOutput, teeParamAttrTypeNone}
-	ns, tag := f.aead.NonceSize(), f.aead.Overhead()
 	switch cmd {
 	case taCmdGetInfo:
 		if types != [teeNumParams]uint64{teeParamAttrTypeValueOutput} {
 			return fakeErrBadParameters
 		}
 		params[0].A, params[0].B = taInterfaceVersion, taInfoFlags
-		return teecSuccess
-	case taCmdSeal:
-		in, ad, out := mems[0], mems[1], mems[2]
-		if types != sealTypes || len(in) == 0 {
-			return fakeErrBadParameters
-		}
-		if f.shortSeals > 0 {
-			f.shortSeals--
-			params[2].B = f.shortSize
-			return teecErrorShortBuffer
-		}
-		need := ns + len(in) + tag
-		params[2].B = uint64(need)
-		if len(out) < need {
-			return teecErrorShortBuffer
-		}
-		if _, err := rand.Read(out[:ns]); err != nil {
-			return fakeErrGeneric
-		}
-		f.aead.Seal(out[ns:ns], out[:ns], in, ad)
-		return teecSuccess
-	case taCmdUnseal:
-		blob, ad, out := mems[0], mems[1], mems[2]
-		if types != sealTypes {
-			return fakeErrBadParameters
-		}
-		if len(blob) < ns+tag {
-			return teecErrorBadFormat
-		}
-		pt, err := f.aead.Open(nil, blob[:ns], blob[ns:], ad)
-		if err != nil {
-			return teecErrorMACInvalid
-		}
-		defer clear(pt)
-		params[2].B = uint64(len(pt))
-		if len(out) < len(pt) {
-			return teecErrorShortBuffer
-		}
-		copy(out, pt)
 		return teecSuccess
 	case taCmdGetRandom:
 		// The kth call fills its window with the byte k, so a test can
