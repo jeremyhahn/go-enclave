@@ -1,4 +1,17 @@
-# ci-template: v1.52 — canonical CI for all first-party Go repos.
+# ci-template: v1.53 — canonical CI for all first-party Go repos.
+# v1.53 (2026-11-21, Tenant Agent ruling 1087, owner order: remove the
+# bottlenecks): main has one concurrency group per event again, `main-{event}`,
+# so a newer push to main cancels the older main run still queued or in
+# progress, and the newest run validates every merge under it. This
+# supersedes v1.26.2's `main-{event}-{sha}` (ruling 145): with hosted
+# concurrency at 20 jobs on the Free plan, nothing cancelled a superseded
+# main run, and trusted-firmware had 40 main runs queued ahead of PR work.
+# A schedule run keeps `schedule-{repository}` and a workflow_dispatch run
+# keeps `main-workflow_dispatch`, so neither shares a group with a push run.
+# cancel-in-progress stays a literal `true`. Only the group changes. Adopt as
+# a ci.yml-only PR that keeps the CUSTOMIZE blocks, together with v1.52's
+# runner selection (internal pull requests run on our runners), separately
+# from code-review.yml.
 # v1.52 (2026-11-21, Tenant Agent order, defect fix): a fork's pull request
 # under pull_request reached a self-hosted runner. preflight's runs-on had
 # no fork check, so on github.com it took the Dells' bigdisk pool for a
@@ -921,6 +934,8 @@ on:
   schedule:
     - cron: '0 4 * * 3'   # CUSTOMIZE: weekly, Wednesday 04:00 UTC, not daily
 
+# v1.53 (ruling 1087): on main the group is the workflow and the event,
+# `main-{event}`, so a newer main run cancels the older one. Before v1.53:
 # v1.26.2: on main the group is the workflow, the event and the commit sha,
 # so each main run is its own group and a merge never cancels the main run in
 # progress; a schedule or workflow_dispatch run is in its own event's group
@@ -935,7 +950,7 @@ on:
 # at a time. It is tested first, so a schedule run never takes a main group.
 # The push, pull_request and workflow_dispatch groups do not change.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name == 'schedule' && format('schedule-{0}', github.repository) || github.ref == 'refs/heads/main' && format('main-{0}-{1}', github.event_name, github.sha) || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'schedule' && format('schedule-{0}', github.repository) || github.ref == 'refs/heads/main' && format('main-{0}', github.event_name) || github.ref }}
   cancel-in-progress: true
 
 permissions:
