@@ -114,7 +114,7 @@ $(call raw_bind,$(EXTERNAL_VARS))
 # CI VARIABLES: ci.yml passes them, so they are
 # data from a workflow and raw-bound like EXTERNAL_VARS.
 ## MODULE_ENV_FILE=<file>: integration-test: the forge module variables; never read here or printed
-## GO_BUILD_PROXY=<url>: docker-build: the Go module proxy the image build fetches through, passed as --build-arg when set (CI: the hosted runner's GOPROXY, unset, #293); default the Dockerfile's public proxy
+## GO_BUILD_PROXY=<url>: docker-build: the Go module proxy the image build fetches through, passed as the goproxy BuildKit secret when set, so the image history never records it (CI: the hosted runner's GOPROXY, unset, #293); default the Dockerfile's public proxy
 ## IT_IMAGE=<tag>: docker-build, ci-integration: the integration image's tag (default `make -s it-image`)
 ## APK_INDEX_SUM=<sum>: docker-build, it-image: the Alpine package index checksum (scripts/apk-index-sum.sh); it-image hashes it, docker-build passes it as --build-arg
 ## IT_PROJECT=<name>: integration-test: accepted; each suite names its own compose project (go-enclave-it-*, go-enclave-userns-*)
@@ -235,9 +235,9 @@ lint-actions:
 ## lint-scripts: shellcheck (pinned) over scripts/*.sh, build/docker/devcontainer/*.sh, build/fuzz/*.sh and build/ci/*.sh
 # The scripts are POSIX sh, and release.yml runs them with a write token. -x
 # follows the `. lib.sh` every script sources. build/ci/*.sh are the workflows'
-# scripts, and CI_BASH_SCRIPTS the ci-template's bash ones, taken unchanged
-# from it; each names its own shell on its first line.
-CI_BASH_SCRIPTS := scripts/apk-index-sum.sh scripts/ci-image-cache.sh scripts/in-toolchain-image.sh scripts/in-toolchain-image_test.sh scripts/reap-stale-ci-stacks.sh scripts/trim-ci-caches.sh
+# scripts, and CI_BASH_SCRIPTS the ci-template's ones, taken unchanged from
+# it; each names its own shell (bash or sh) on its first line.
+CI_BASH_SCRIPTS := scripts/apk-index-sum.sh scripts/apk-mirror.sh scripts/ci-image-cache.sh scripts/ci-image-history.sh scripts/ci-mask-lan.sh scripts/in-toolchain-image.sh scripts/in-toolchain-image_test.sh scripts/install-trivy.sh scripts/reap-stale-ci-stacks.sh scripts/trim-ci-caches.sh
 .PHONY: lint-scripts
 lint-scripts:
 	@sc=$(call tool,shellcheck,SHELLCHECK) && \
@@ -576,7 +576,7 @@ docker-build:
 docker-build-toolchain:
 	@ref=$$(sh scripts/devcontainer.sh tag) && repo=$${ref%%:*} && \
 	set -- -f build/docker/devcontainer/Dockerfile --target toolchain -t "$$ref" -t "$$repo:latest" && \
-	if [ -n "$${GO_BUILD_PROXY:-}" ]; then set -- "$$@" --build-arg "GO_BUILD_PROXY=$$GO_BUILD_PROXY"; fi && \
+	if [ -n "$${GO_BUILD_PROXY:-}" ]; then set -- "$$@" --secret id=goproxy,env=GO_BUILD_PROXY; fi && \
 	if docker image inspect "$$ref" >/dev/null 2>&1; then docker tag "$$ref" "$$repo:latest" && echo "$$ref is already held; tagged $$repo:latest"; \
 	elif ! DOCKER_BUILDKIT=1 docker build "$$@" .; then docker image inspect "$$ref" >/dev/null 2>&1 || { echo "building $$ref failed" >&2; exit 1; }; docker tag "$$ref" "$$repo:latest"; fi
 

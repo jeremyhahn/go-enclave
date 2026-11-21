@@ -12,36 +12,6 @@ handle plus its capabilities, and never a concrete type. `Detect` selects the
 most secure backend the program registered. It is the base layer of its stack:
 go-quicraft and every project above it consume and re-export this interface.
 
-## Scope
-
-go-enclave backends hold arbitrary bytes in protected memory outside the
-normal world, at RAM speed, on nothing that wears out. Any hardware that does
-so is a go-enclave backend. Keys, key operations and attestation are out of
-scope: they belong to [go-xkms](https://github.com/jeremyhahn/go-xkms).
-Persistent secure-element storage (for example NXP SE05x) wears and is slow,
-so keys on it belong to go-xkms only. The NXP i.MX 95 EdgeLock Enclave holds
-keys only and gives applications no protected memory, so it moved to go-xkms
-(owner ruling 697). On the i.MX 95, TrustZone/OP-TEE (`backends/armtrustzone`)
-stays go-enclave's backend, but today it holds bytes in normal-world memory,
-readable by the process and kernel; secure-world storage (the vault trusted
-application) is planned.
-
-Two design limits govern every feature:
-
-- **Nothing that wears out.** No backend keeps material in persistent
-  secure-element or flash-backed storage.
-- **Thousands of calls per second.** Every backend performs at thousands of
-  calls per second.
-
-### Key-operation API removal
-
-**Planned.** The key-operation API is to be removed from go-enclave, and its
-callers move to go-xkms: the hardware `KeyProtector` providers (`backends/tpm`
-and `(*armtrustzone.Backend).KeyProtector`) and attestation (`Attester`,
-`Evidence`). No code has changed yet; the rows that remove it follow this
-scope change, and each ships its migration in
-[Upgrading](README.md#key-operation-api-removal-planned).
-
 ## Boundaries
 
 go-enclave owns:
@@ -94,6 +64,36 @@ go-enclave never:
 - **Builds where it cannot lock memory**: an unsupported GOOS fails to compile.
 - **Names types for their contents**: no `Secret`, `SecureString`,
   `SecureBytes` or `ProtectedBuffer`.
+
+### Scope
+
+go-enclave backends hold arbitrary bytes in protected memory outside the
+normal world, at RAM speed, on nothing that wears out. Any hardware that does
+so is a go-enclave backend. Keys, key operations and attestation are out of
+scope: they belong to [go-xkms](https://github.com/jeremyhahn/go-xkms).
+Persistent secure-element storage (for example NXP SE05x) wears and is slow,
+so keys on it belong to go-xkms only. The NXP i.MX 95 EdgeLock Enclave holds
+keys only and gives applications no protected memory, so it moved to go-xkms.
+On the i.MX 95, TrustZone/OP-TEE (`backends/armtrustzone`) stays go-enclave's
+backend, but today it holds bytes in normal-world memory, readable by the
+process and kernel; secure-world storage (the vault trusted application) is
+planned.
+
+Two design limits govern every feature:
+
+- **Nothing that wears out.** No backend keeps material in persistent
+  secure-element or flash-backed storage.
+- **Thousands of calls per second.** Every backend performs at thousands of
+  calls per second.
+
+### Key-operation API removal
+
+**Planned.** The key-operation API is to be removed from go-enclave, and its
+callers move to go-xkms: the hardware `KeyProtector` providers (`backends/tpm`
+and `(*armtrustzone.Backend).KeyProtector`) and attestation (`Attester`,
+`Evidence`). No code has changed yet; the rows that remove it follow this
+scope change, and each ships its migration in
+[Upgrading](README.md#key-operation-api-removal-planned).
 
 ## Features
 
