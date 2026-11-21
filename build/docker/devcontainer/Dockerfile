@@ -193,7 +193,7 @@ ENV HOME=/tmp
 # safe.directory: a checkout copied or mounted in is owned by whoever ran it,
 # and the releasability gates read its .git as any uid.
 RUN apk add --no-cache \
-        bash make git curl jq nodejs \
+        bash make git curl jq nodejs python3 \
         coreutils grep sed gawk findutils diffutils tar xz; \
     git config --system --add safe.directory '*'
 
