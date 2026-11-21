@@ -314,7 +314,13 @@ proves the client's handling of the driver ABI. It does not stand in for the
 TEE in conformance: `conformance_optee_test.go` (tag `optee`) registers the
 backend and runs `backendtest.TestBackend` with the probe and an `rng` handle
 case on OP-TEE at `GO_ENCLAVE_OPTEE_ENDPOINT`. `make integration-test-arm-trustzone` runs it
-in the fixture's guest. `make lint-go`, `tidy-check`, `govulncheck`,
+in the fixture's guest, then `BenchmarkOpenUseClose` and `BenchmarkAccess`
+(same file and tag), which report `ops/s` and `ns/access` for open/use/close
+cycles and for one GET_RANDOM on an open session; a benchmark failure fails
+the target. Their body is `bench_test.go`, and `TestBenchHarness_Fake` runs
+it once against the fake in the untagged build, as a check of the harness,
+not a measurement. Fixture figures are not hardware figures
+([design](arm-trustzone-design.md#benchmark)). `make lint-go`, `tidy-check`, `govulncheck`,
 `test-backends` and `cross-build` run in the module (`BACKEND_MODULES`);
 `make coverage` runs its tests but does not measure its coverage.
 

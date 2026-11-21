@@ -11,9 +11,10 @@
 # is refused, never followed. check runs the checkout's
 # `make integration-test-optee` (xtest and the TA's version and rng commands;
 # no go-enclave code). harness takes backends/armtrustzone's optee-tagged
-# conformance test, a static linux/arm64 test binary the make target compiled
-# in the toolchain image ($ARM_TRUSTZONE_BIN), shares it with the aarch64 guest
-# and exits with
+# conformance tests and benchmarks, a static linux/arm64 test binary the make
+# target compiled in the toolchain image ($ARM_TRUSTZONE_BIN), shares it with
+# the aarch64 guest, runs the conformance tests then BenchmarkOpenUseClose and
+# BenchmarkAccess, and exits with
 # the status of `make optee-run`, which is the binary's.
 set -eu
 # shellcheck source=lib.sh
@@ -99,5 +100,5 @@ out=${ARM_TRUSTZONE_BIN:-}
 cp "$out" "$share/$bin"
 rc=0
 tfmake optee-run OPTEE_SHARE="$share" \
-  OPTEE_GUEST_CMD="GO_ENCLAVE_OPTEE_ENDPOINT=$endpoint ./$bin -test.v -test.run='^TestBackendConformance_OnOPTEE'" || rc=$?
+  OPTEE_GUEST_CMD="GO_ENCLAVE_OPTEE_ENDPOINT=$endpoint ./$bin -test.v -test.run='^TestBackendConformance_OnOPTEE' -test.bench='^Benchmark(OpenUseClose|Access)' -test.benchtime=2s" || rc=$?
 exit "$rc"
