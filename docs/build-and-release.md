@@ -1,6 +1,6 @@
 # Build and release
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-11-16
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-11-21
 > Conflicts with this document are defects. For shipped behavior the Makefile, `scripts/` and `build/ci/` are canonical: fix this document to match them.
 
 How a change is built and gated, and how a signed release is cut, verified and
@@ -243,7 +243,7 @@ its own. Each target runs `vet-buildgates` first and selects tests by prefix.
 | `make check-changelog-assembly` | `^TestChangelogAssemble` | `changelog-assemble.sh` folds fragments into the shape `release-check-tag.sh` accepts |
 | `make check-scripts` | `^TestScripts` | The release, publish, tool-resolution, feature and devcontainer scripts and the Makefile entry points, driven on scratch inputs, refuse what they must; needs `jq` |
 | `make check-buildgates` | every other test | Actions pinned to commit SHAs and images to digests; least-privilege workflow permissions; checkouts that write do not persist credentials; publish waits on every gate; the CI Gate's tiers match the jobs; every source file, integration test and docs folder belongs to one feature in `scripts/features.map`; the toolchain image's Go matches `go.mod`; shipped source cites no issue numbers; the integration image is scanned before any suite runs on it; every relative Markdown link resolves |
-| `make check-project-scripts` | `scripts/project-scripts_test.sh` | `swtpm-fixture.sh`, `test-runtimesecret.sh`, `cross-build.sh`, `lint-integration.sh` and `release-verify.sh` refuse bad input, make exactly their calls and report every failure; stub tools on PATH, offline |
+| `make check-project-scripts` | `scripts/project-scripts_test.sh` | `test-runtimesecret.sh`, `cross-build.sh`, `lint-integration.sh` and `release-verify.sh` refuse bad input, make exactly their calls and report every failure; stub tools on PATH, offline |
 | `make check-it-runner` | `build/docker/devcontainer/run-integration-tests_test.sh` | The integration runner refuses bad input with status 2 and fails a merged profile below the floor or missing a cover package; a stub `go`, offline |
 | `make check-fuzz-runner` | `build/fuzz/fuzz_test.sh` | `make fuzz` finds every target in every module, honours `FUZZ`, `FUZZ_PKG` and `FUZZTIME`, and stops at the first failure naming its input; a stub `go`, offline |
 | `make lint-gates` | the rows above | Runs `check-buildgates`, `check-releasability`, `check-changelog-assembly`, `check-scripts`, `check-in-toolchain-image`, `check-project-scripts`, `check-it-runner` and `check-fuzz-runner`: the repository's own gates beside lint. CI runs it as the Lint Gates job; `make lint` does not list it |
@@ -305,14 +305,13 @@ repository's volumes on that host exceed `CI_CACHE_MAX_GIB` (32).
 
 | Job | Tier | Runs |
 |---|---|---|
-| Preflight | PR | One job on `ubuntu-latest` and the first of every run: the schedule guard (it refuses a `workflow_dispatch` off `main` and a pull request from a reserved checkpoint branch), the changed-files step that sets the docs-only, Lint Gates, TPM and OP-TEE path scopes, and an import-boundary check that has nothing to enforce in this repository, on the runner's shell |
+| Preflight | PR | One job on `ubuntu-latest` and the first of every run: the schedule guard (it refuses a `workflow_dispatch` off `main` and a pull request from a reserved checkpoint branch), the changed-files step that sets the docs-only, Lint Gates and OP-TEE path scopes, and an import-boundary check that has nothing to enforce in this repository, on the runner's shell |
 | Lint | PR | One job on `ubuntu-latest`, beside the image job. It takes the toolchain image from the registry cache or builds it alone (`make docker-build-toolchain`), and each stage is a step in it: `make lint`; the `Releasability (private patterns)` search ([below](#releasability)); the static checks `make ci-lint` adds beside the Lint Gates job's (`tidy-check lint-runtimesecret lint-integration`); `make gosec`, off the full tier and not on a docs-only pull request, with no network; `make deps-check`, a lint-class gate on every event, with a network for the module proxy. A failed step does not stop the later ones. `deps-check` reports, and does not fail on, a module behind a latest release published under 7 days ago without a `// held: <reason>` comment |
 | Devcontainer image | PR | One job on `ubuntu-latest`. It builds the images (`make docker-build`), and each stage is a step in the toolchain image: `make build`; `make cross-build`; `make coverage`; `make test-runtimesecret`; then, on the full tier only, `make security` (gosec included) and `trivy image` on the integration image. A failed step does not stop the later ones. `security` and `trivy image` get a network for the vulnerability databases and the module proxy. The job skips on a docs-only pull request |
 | Lint Gates | PR | `make lint-gates` in the toolchain image on `ubuntu-latest`, beside the Lint job, so lint's wall time is the longer of the two. No `-k`: the first failing gate ends the step. It builds the toolchain image alone, and only when the Makefile defines the target; the gates get no network. On a pull request off the full tier it runs only when a changed file matches `LINT_GATES_PATTERN`. Here the pattern is `.`, which every path matches, so it runs on every pull request. A pattern that cannot be searched skips nothing |
 | FIPS | full | `make test-fips` in the toolchain image |
 | Integration | full | `make ci-integration` on `ubuntu-latest`: the user-namespace, default and FIPS strict suites, on one scanned integration image |
 | Soak | nightly | `make ci-integration` looped on `ubuntu-latest` for 30 minutes, each iteration its own compose project |
-| TPM swtpm Conformance | full | `make integration-test-tpm` on the runner host, with `swtpm` from the runner's package manager and Go from `setup-go`. On a pull request it runs only when a file under `backends/tpm/`, `scripts/swtpm-fixture.sh` or `ci.yml` changed |
 | OP-TEE | full | `make integration-test-arm-trustzone` in the OP-TEE fixture image pinned by digest in `scripts/tool-pins.sh`; it fails when the pin is empty. It runs only when an OP-TEE path changed |
 | Publish CI images | push to `main` | Off github.com only (a self-hosted forge's runners): publishes the toolchain image to the CI image registry (`CI_IMAGE_NAMESPACE`) when the registry lacks its hash. It skips on github.com |
 
@@ -463,7 +462,6 @@ rules.
 | `release.sh`, `release-tag.sh`, `release-ci-gate.sh`, `release-version-check.sh`, `release-check-tag.sh`, `changelog-assemble.sh`, `release-notes.sh` | Cutting a release ([above](#what-releasesh-refuses)) |
 | `release-verify.sh`, `consumer-check.sh` | The [post-tag targets](#post-tag-targets) |
 | `deps-check.sh`, `deps-latest.sh` | `make deps-check`: fail on a module behind its latest release; `make deps-latest`: bump every direct `github.com/jeremyhahn/` dependency to its latest tag, then tidy |
-| `swtpm-fixture.sh` | `make integration-test-tpm`: a throwaway `swtpm` on loopback TCP for `backends/tpm`'s swtpm-tagged tests |
 | `optee-fixture.sh`, `optee-selected.sh` | `make optee-fixture-check` and `make integration-test-arm-trustzone`: the pinned trusted-firmware OP-TEE fixture; whether a change reaches it |
 | `ci-image-cache.sh`, `apk-index-sum.sh`, `in-toolchain-image_test.sh` | CI only: the toolchain image's registry cache; a checksum of the Alpine package indexes the integration image's tag hashes; the tests of `in-toolchain-image.sh` (`make check-in-toolchain-image`) |
 | `in-toolchain-image.sh`, `reap-stale-ci-stacks.sh`, `trim-ci-caches.sh`, `assert-build-tags.sh` | CI only, shared unchanged with other repositories that use the same CI layout: run a command in the toolchain image on a copy of the checkout; remove this repository's stale CI containers and compose stacks; bound this repository's CI cache volumes on the host; fail when a `GO_BUILD_TAGS` tag selects no file |

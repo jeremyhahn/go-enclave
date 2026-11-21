@@ -1,6 +1,6 @@
 # Backends — engineering contract
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-11-12
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-11-21
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 This contract covers the seam and its wiring into sealing: `WithBackend`,
@@ -281,7 +281,6 @@ root module never requires it
 | `Backend.Random(ctx, n) (enclave.Handle, error)` | A `ByteAccess` memory enclave of `n` bytes filled by GET_RANDOM (0x2) in chunks of at most 4096 bytes. `n < 1` is a `*SizeError` before the TA is called. A cancelled `ctx` issues `TEE_IOC_CANCEL` and returns `ctx.Err()`; on any failure the handle is destroyed. |
 | `Backend.Close()` | Closes the session and the device; idempotent; afterwards every call returns `ErrBackendClosed`. |
 | `Connector` | A registrable `Backend` whose `Connect(endpoint) (enclave.Backend, error)` is `Connect`. It is no `Prober`, so `Detect` passes it over. |
-| `Backend.KeyProtector() *KeyProtector` | An `enclave.KeyProtector` and `enclave.HealthReporter` for `ModePerOperation`: `Protect` runs SEAL (0x3), `Unprotect` runs UNSEAL (0x4), both under the associated data `go-enclave v1 TrustZone KeyProtector`. A failed or unauthenticated open matches `enclave.ErrSealedAuthentication`; calls after `Close` return `ErrBackendClosed` ([design](arm-trustzone-design.md#keyprotector)). |
 | `OriginAPI` … `OriginTrustedApp` | The GP return origins a `SessionError` or `CommandError` reports. |
 
 Shared memory follows the [trust boundary](arm-trustzone-design.md#trust-boundary):
@@ -307,15 +306,14 @@ UUID's byte order is [RFC 9562](../reference/rfc9562.txt).
 Unit tests cover the struct layouts, offsets and ioctl numbers against
 `tee.h`, the `TEEC_UUID` byte order, the chunk plan, the `n < 1` refusal,
 GET_INFO's acceptance, and `Connect` on a missing device and off Linux. The
-`KeyProtector`'s transport runs against a fake TEE driver
+client's transport runs against a fake TEE driver
 (`faketee_linux_test.go`) that replaces the client's driver calls in an
 ordinary `go test`
 ([design](arm-trustzone-design.md#testing-without-the-fixture)). The fake
 proves the client's handling of the driver ABI. It does not stand in for the
 TEE in conformance: `conformance_optee_test.go` (tag `optee`) registers the
 backend and runs `backendtest.TestBackend` with the probe and an `rng` handle
-case, and `providertest.TestProvider` against the `KeyProtector`, on OP-TEE
-at `GO_ENCLAVE_OPTEE_ENDPOINT`. `make integration-test-arm-trustzone` runs it
+case on OP-TEE at `GO_ENCLAVE_OPTEE_ENDPOINT`. `make integration-test-arm-trustzone` runs it
 in the fixture's guest. `make lint-go`, `tidy-check`, `govulncheck`,
 `test-backends` and `cross-build` run in the module (`BACKEND_MODULES`);
 `make coverage` runs its tests but does not measure its coverage.
