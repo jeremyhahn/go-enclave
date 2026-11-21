@@ -1,6 +1,6 @@
 # Reference standards
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-11-14
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-11-21
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 Standards first: where a standard exists, go-enclave implements it as written
@@ -11,7 +11,10 @@ go-enclave implements no draft.
 
 The NIST publications are works of the US government. The RFCs are
 redistributed verbatim under the IETF Trust's legal provisions. The Linux
-header carries Linaro's BSD-2-Clause notice, which it keeps.
+TEE header carries Linaro's BSD-2-Clause notice, and the SEV guest header its
+GPL-2.0-only WITH Linux-syscall-note identifier; each keeps its notice. One
+standard is pinned without a copy, because its licence forbids one
+([AMD SEV-SNP](#amd-sev-snp)).
 
 | File | Title | Revision | Implemented by |
 |---|---|---|---|
@@ -22,6 +25,8 @@ header carries Linaro's BSD-2-Clause notice, which it keeps.
 | [NIST.FIPS.140-3.pdf](NIST.FIPS.140-3.pdf) | Security Requirements for Cryptographic Modules | FIPS 140-3, March 2019 | `enclave`: sealing uses only approved algorithms and runs under Go's FIPS 140-3 module in strict mode, `make test-fips` ([FIPS 140-3](../sealing/engineering.md#fips-140-3)) |
 | [rfc9562.txt](rfc9562.txt) | Universally Unique IDentifiers (UUIDs) | RFC 9562, May 2024 | `armtrustzone`: `parseUUID` and `teecUUID.octets` ([client.go](../../backends/armtrustzone/client.go)), the TA UUID's text form and its network-order octets |
 | [linux-uapi-tee.h](linux-uapi-tee.h) | Linux TEE subsystem user API, `include/uapi/linux/tee.h` | linaro-swg/linux tag `optee-4.11.0` (commit `cf6e3218c25183cbc45551e85d0dd531f00fcc3d`), the kernel OP-TEE 4.11.0's `qemu_v8.xml` manifest pins | `armtrustzone`: the ioctl structs and numbers in [tee_linux.go](../../backends/armtrustzone/tee_linux.go), used by [client_linux.go](../../backends/armtrustzone/client_linux.go) |
+| [linux-uapi-sev-guest.h](linux-uapi-sev-guest.h) | Linux AMD SEV guest driver user API, `include/uapi/linux/sev-guest.h` | Linux tag `v6.18` (commit `7d0a66e4bb9081d75c82ec4957c50034cb0ea449`); sha256 `5d59ad10380e462d92cbb5c1d9d4773e2a0c126e7876db38e8814c9d38a082a5` | `amdsev`: `reportRequest`, `reportResponse` ([detect.go](../../backends/amdsev/detect.go)), `guestRequest` and `SNP_GET_REPORT` ([detect_linux.go](../../backends/amdsev/detect_linux.go)) |
+| (not copied, see [AMD SEV-SNP](#amd-sev-snp)) | SEV Secure Nested Paging Firmware ABI Specification, AMD publication 56860 | Revision 1.58, May 2025; sha256 `771b330961d8aa95892813cee82b782756a2943cebd33a371858c206001b6faf` | `amdsev`: `MSG_REPORT_RSP` and the `ATTESTATION_REPORT` `POLICY` field's `DEBUG` bit in `deviceReport`, `tsmEntryReport` and `checkPolicy` ([detect.go](../../backends/amdsev/detect.go)) |
 | [TCG_TPM2_r1p59_Part1_Architecture_pub.pdf](TCG_TPM2_r1p59_Part1_Architecture_pub.pdf) | Trusted Platform Module Library, Part 1: Architecture | Family 2.0, Level 00, Revision 01.59, November 2019 (see [TCG TPM 2.0](#tcg-tpm-20)); sha256 `18e393ef8f61d4c5deebb578cc4220b025fdaff2c28a7e3264f16e37796c3d9b` | `tpm`: the salted, parameter-encrypted session in `startSession` ([protector.go](../../backends/tpm/protector.go)) and the `KDFa` and CFB parameter encryption it relies on |
 | [TCG_TPM2_r1p59_Part2_Structures_pub.pdf](TCG_TPM2_r1p59_Part2_Structures_pub.pdf) | Trusted Platform Module Library, Part 2: Structures | Family 2.0, Level 00, Revision 01.59, November 2019; sha256 `95b27445c8a3302bffaf0eed0e729f228698d0296a91161f51320fbe4d7c5121` | `tpm`: `TPMT_PUBLIC` in `parentTemplate`, `storageTemplate` ([blob.go](../../backends/tpm/blob.go)); the format-one response codes the error mapping reads |
 | [TCG_TPM2_r1p59_Part3_Commands_pub.pdf](TCG_TPM2_r1p59_Part3_Commands_pub.pdf) | Trusted Platform Module Library, Part 3: Commands | Family 2.0, Level 00, Revision 01.59, November 2019; sha256 `d2e5e7187574d383b00ff966c33b30a96e3f5165cbfae20a4d094e5794f3b9bb` | `tpm`: `TPM2_Create` in `create` and `TPM2_Unseal` in `unseal` ([unseal.go](../../backends/tpm/unseal.go)), marshaled by the provider; `TPM2_CreatePrimary`, `TPM2_StartAuthSession`, `TPM2_Load`, `TPM2_FlushContext` in `createPrimary`, `startSession`, `load`, `flush` ([protector.go](../../backends/tpm/protector.go)) |
@@ -52,3 +57,16 @@ renamed to drop the download suffix. Its licence (page ii, "Disclaimers,
 Notices, and License Terms") permits a copy for examining or implementing TCG
 specifications, distributed with its disclaimers; the file is unaltered and
 carries them.
+
+## AMD SEV-SNP
+
+The amd-sev-snp backend follows the SEV Secure Nested Paging Firmware ABI
+Specification at revision 1.58, May 2025: `MSG_REPORT_RSP` carries the
+status, the report size and, at offset `20h`, the `ATTESTATION_REPORT`, whose
+64-bit `POLICY` at offset `08h` is the guest policy, and the policy's bit 19 is
+`DEBUG`. The publisher's file is
+<https://www.amd.com/content/dam/amd/en/documents/developer/56860.pdf>; a
+later reader verifies a download against the sha256 in its row. Its licence
+(the specification agreement at the front of the document) does not let a
+reader duplicate any part of it or give it to a third party, so, unlike the
+other standards here, it has no copy in this directory.
