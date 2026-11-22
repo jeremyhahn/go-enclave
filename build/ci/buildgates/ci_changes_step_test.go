@@ -103,9 +103,11 @@ type changesRun struct {
 	event string
 	// files is what `git diff --name-only` lists. noDiff is a diff git
 	// cannot take: the stub fails.
-	files    []string
-	noDiff   bool
-	fullTier bool
+	files  []string
+	noDiff bool
+	// fullLabel is a ci:full PR (CI_FULL_LABEL). Since v1.41 the full tier
+	// (CI_FULL_TIER) is true on every event, a pull request included.
+	fullLabel bool
 	// The patterns: DOCS_ONLY_PATTERN, LINT_GATES_PATTERN, TPM_PATTERN.
 	docs, lint, tpm string
 	// want is docs_only, lint_gates and tpm, in changesOutputs' order.
@@ -140,7 +142,7 @@ var changesRuns = []changesRun{
 		changesDocsPattern, changesLintPattern, changesTPMPattern, [3]string{"false", "false", "false"}, ""},
 	{"a changed file matches the TPM pattern", "pull_request", []string{"backends/tpm/tpm.go"}, false, false,
 		changesDocsPattern, changesLintPattern, changesTPMPattern, [3]string{"false", "false", "true"}, ""},
-	{"the full tier is never docs only and never skips lint-gates", "pull_request", []string{"README.md"}, false, true,
+	{"a ci:full PR is never docs only and never skips lint-gates", "pull_request", []string{"README.md"}, false, true,
 		changesDocsPattern, changesLintPattern, changesTPMPattern, [3]string{"false", "true", "false"}, ""},
 	{"a diff that cannot be taken skips nothing", "pull_request", nil, true, false,
 		changesDocsPattern, changesLintPattern, changesTPMPattern, [3]string{"false", "true", "true"}, ""},
@@ -199,7 +201,7 @@ func (fx changesFixture) violations(t *testing.T, script string) []string {
 			"GITHUB_OUTPUT=" + output, "RUNNER_TEMP=" + tmp,
 			"EVENT=" + r.event,
 			"BASE=0123456789abcdef0123456789abcdef01234567", "HEAD=89abcdef0123456789abcdef0123456789abcdef",
-			"CI_FULL_TIER=" + strconv.FormatBool(r.fullTier),
+			"CI_FULL_TIER=true", "CI_FULL_LABEL=" + strconv.FormatBool(r.fullLabel),
 			"DOCS_ONLY_PATTERN=" + r.docs, "LINT_GATES_PATTERN=" + r.lint, "TPM_PATTERN=" + r.tpm,
 		}
 		if !r.noDiff {
@@ -276,8 +278,8 @@ const changesNegatedSearches = `docs_only=false lint_gates=true tpm=false
 if [ "$EVENT" = pull_request ]; then
   if files=$(git diff --name-only --no-renames "$BASE...$HEAD"); then
     if [ -n "$files" ]; then
-      if [ "$CI_FULL_TIER" != true ] && ! grep -qvE "$DOCS_ONLY_PATTERN" <<< "$files"; then docs_only=true; fi
-      if [ "$CI_FULL_TIER" != true ] && ! grep -qE "$LINT_GATES_PATTERN" <<< "$files"; then lint_gates=false; fi
+      if [ "$CI_FULL_LABEL" != true ] && ! grep -qvE "$DOCS_ONLY_PATTERN" <<< "$files"; then docs_only=true; fi
+      if [ "$CI_FULL_LABEL" != true ] && ! grep -qE "$LINT_GATES_PATTERN" <<< "$files"; then lint_gates=false; fi
       if grep -qE "$TPM_PATTERN" <<< "$files"; then tpm=true; fi
     fi
   else
