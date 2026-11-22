@@ -1,6 +1,6 @@
 # Build and release
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-11-21
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-11-22
 > Conflicts with this document are defects. For shipped behavior the Makefile, `scripts/` and `build/ci/` are canonical: fix this document to match them.
 
 How a change is built and gated, and how a signed release is cut, verified and
@@ -246,7 +246,8 @@ its own. Each target runs `vet-buildgates` first and selects tests by prefix.
 | `make check-project-scripts` | `scripts/project-scripts_test.sh` | `swtpm-fixture.sh`, `test-runtimesecret.sh`, `cross-build.sh`, `lint-integration.sh` and `release-verify.sh` refuse bad input, make exactly their calls and report every failure; stub tools on PATH, offline |
 | `make check-it-runner` | `build/docker/devcontainer/run-integration-tests_test.sh` | The integration runner refuses bad input with status 2 and fails a merged profile below the floor or missing a cover package; a stub `go`, offline |
 | `make check-fuzz-runner` | `build/fuzz/fuzz_test.sh` | `make fuzz` finds every target in every module, honours `FUZZ`, `FUZZ_PKG` and `FUZZTIME`, and stops at the first failure naming its input; a stub `go`, offline |
-| `make lint-gates` | the rows above | Runs `check-buildgates`, `check-releasability`, `check-changelog-assembly`, `check-scripts`, `check-in-toolchain-image`, `check-project-scripts`, `check-it-runner` and `check-fuzz-runner`: the repository's own gates beside lint. CI runs it as the Lint Gates job; `make lint` does not list it |
+| `make check-ci-python-suites` | `testdata/ci-mask-lan-tests.py`, `testdata/job-output-handoff-tests.py` | The CI template's carried suites, each under `python3 -I`: the LAN mask masks what it must, and every job that builds masks before its first build step and hands its outputs on as the template does; offline |
+| `make lint-gates` | the rows above | Runs `check-buildgates`, `check-releasability`, `check-changelog-assembly`, `check-scripts`, `check-in-toolchain-image`, `check-project-scripts`, `check-it-runner`, `check-fuzz-runner` and `check-ci-python-suites`: the repository's own gates beside lint. CI runs it as the Lint Gates job; `make lint` does not list it |
 | `make tidy-check` | — | `go.mod` and `go.sum` are tidy, in the root and in `build/ci/buildgates` |
 
 ### Aggregates
@@ -323,43 +324,66 @@ repository's volumes on that host exceed `CI_CACHE_MAX_GIB` (32).
 
 | Job | Tier | Runs |
 |---|---|---|
-| Preflight | PR | One job on the runner [above](#ci) and the first of every run: the schedule guard (it refuses a `workflow_dispatch` off `main` and a pull request from a reserved checkpoint branch), the changed-files step that sets the docs-only, Lint Gates, TPM and OP-TEE path scopes, and an import-boundary check that has nothing to enforce in this repository, on the runner's shell |
-| Lint | PR | One job on Preflight's `runner_docker`, beside the image job. It takes the toolchain image from the registry cache or builds it alone (`make docker-build-toolchain`), and each stage is a step in it: `make lint`; the `Releasability (private patterns)` search ([below](#releasability)); the static checks `make ci-lint` adds beside the Lint Gates job's (`tidy-check lint-runtimesecret lint-integration`); `make gosec`, off the full tier and not on a docs-only pull request, with no network; `make deps-check`, a lint-class gate on every event, with a network for the module proxy. A failed step does not stop the later ones. `deps-check` reports, and does not fail on, a module behind a latest release published under 7 days ago without a `// held: <reason>` comment |
-| Devcontainer image | code | One job on Preflight's `runner_docker`, with a 48-minute timeout (1.5 times the 32 minutes a slow hosted run reached). It builds the images (`make docker-build`), and each stage is a step in the toolchain image: `make build`; `make cross-build`; `make coverage`; `make test-runtimesecret`; then, on the full tier only, `make security` (gosec included) and `trivy image` on the integration image. A failed step does not stop the later ones. `security` and `trivy image` get a network for the vulnerability databases and the module proxy. The job skips on a docs-only pull request |
-| Lint Gates | scoped | `make lint-gates` in the toolchain image on Preflight's `runner_docker`, beside the Lint job, so lint's wall time is the longer of the two. No `-k`: the first failing gate ends the step. It builds the toolchain image alone, and only when the Makefile defines the target; the gates get no network. On a pull request off the full tier it runs only when a changed file matches `LINT_GATES_PATTERN`. Here the pattern is `.`, which every path matches, so it runs on every pull request. A pattern that cannot be searched skips nothing |
-| FIPS | full | `make test-fips` in the toolchain image on `ubuntu-latest`. It runs on every event, a non-draft pull request included; CI Gate checks it as `full` |
-| Integration | code | `make ci-integration` on Preflight's `runner_docker`: the user-namespace, default and FIPS strict suites, on one integration image. It skips on a docs-only pull request |
-| Soak | nightly | `make ci-integration` looped on Preflight's `runner_docker` for 30 minutes, each iteration its own compose project |
-| TPM swtpm Conformance | full | Runs on every event, a non-draft pull request included; CI Gate checks it as `full`. `make integration-test-tpm` on an `ubuntu-latest` runner host, with `swtpm` from the runner's package manager and Go from `setup-go`. On a pull request it runs only when a file under `backends/tpm/`, `scripts/swtpm-fixture.sh` or `ci.yml` changed |
-| OP-TEE | full | Runs on every event, a non-draft pull request included, on `ubuntu-latest`; CI Gate checks it as `full`. `make integration-test-arm-trustzone` in the OP-TEE fixture image pinned by digest in `scripts/tool-pins.sh`; it fails when the pin is empty. It runs only when an OP-TEE path changed |
+| Preflight | PR | One job and the first of every run, on the self-hosted pool (`CI_PREFLIGHT_RUNS_ON`) for a same-repository pull request or a push and on `ubuntu-latest` for a fork; it picks the runner of every later job (Runners, below): the schedule guard (it refuses a `workflow_dispatch` off `main` and a pull request from a reserved checkpoint branch), the changed-files step that sets the docs-only, Lint Gates, TPM and OP-TEE path scopes, and an import-boundary check that has nothing to enforce in this repository, on the runner's shell |
+| Lint | PR | One job on the runner Preflight selects, beside the image job. It takes the toolchain image from the registry cache or builds it alone (`make docker-build-toolchain`), and each stage is a step in it: `make lint`; the `Releasability (private patterns)` search ([below](#releasability)); the static checks `make ci-lint` adds beside the Lint Gates job's (`tidy-check lint-runtimesecret lint-integration`); `make gosec`, off the full tier and not on a docs-only pull request, with no network; `make deps-check`, a lint-class gate on every event, with a network for the module proxy. A failed step does not stop the later ones. `deps-check` reports, and does not fail on, a module behind a latest release published under 7 days ago without a `// held: <reason>` comment |
+| Devcontainer image | PR | One job on the runner Preflight selects. It builds the images (`make docker-build`), and each stage is a step in the toolchain image: `make build`; `make cross-build`; `make coverage`; `make test-runtimesecret`; then, on the full tier only, `make security` (gosec included) and `trivy image` on the integration image. A failed step does not stop the later ones. `security` and `trivy image` get a network for the vulnerability databases and the module proxy. The job skips on a docs-only pull request |
+| Lint Gates | PR | `make lint-gates` in the toolchain image on the runner Preflight selects, beside the Lint job, so lint's wall time is the longer of the two. No `-k`: the first failing gate ends the step. It builds the toolchain image alone, and only when the Makefile defines the target; the gates get no network. On a pull request off the full tier it runs only when a changed file matches `LINT_GATES_PATTERN`. Here the pattern is `.`, which every path matches, so it runs on every pull request. A pattern that cannot be searched skips nothing |
+| FIPS | full | `make test-fips` in the toolchain image |
+| Integration | full | `make ci-integration` on the runner Preflight selects: the user-namespace, default and FIPS strict suites, on one scanned integration image |
+| Soak | nightly | `make ci-integration` looped on the runner Preflight selects for 30 minutes, each iteration its own compose project |
+| TPM swtpm Conformance | full | `make integration-test-tpm` on the runner host, with `swtpm` from the runner's package manager and Go from `setup-go`. On a pull request it runs only when a file under `backends/tpm/`, `scripts/swtpm-fixture.sh` or `ci.yml` changed |
+| OP-TEE | full | `make integration-test-arm-trustzone` in the OP-TEE fixture image pinned by digest in `scripts/tool-pins.sh`; it fails when the pin is empty. It runs only when an OP-TEE path changed |
 | Publish CI images | push to `main` | Off github.com only (a self-hosted forge's runners): publishes the toolchain image to the CI image registry (`CI_IMAGE_NAMESPACE`) when the registry lacks its hash. It skips on github.com |
 
-The **PR tier** runs on every event. The **full tier** runs on every event
-but a `workflow_dispatch` off `main` and `ci/deps-bump`: every pull request
-(a non-draft one; a draft runs none of the full jobs), a push to `main`, the
-nightly schedule and a dispatch on `main` or `ci/deps-bump`. The **nightly
-tier** runs on the schedule (Wednesdays, 04:00 UTC) and on a `workflow_dispatch`
-on `main` or `ci/deps-bump`. The `ci:full` label selects no tier: on a pull
-request it turns off the docs-only scope and the Lint Gates path scope, so
-every job runs whatever the PR changes. Label a PR `ci:full` when it changes
-the API or fixes the integration suite. The label takes effect on the PR's
-next push or update-branch, because a label change starts no run
+The **PR tier** and the **full tier** run on every event, a pull request
+included, so a pull request runs every stage `main` runs; the one exception
+is a `workflow_dispatch` off `main`, which is not the full tier (the
+schedule guard refuses it). The **nightly tier** runs on the schedule (04:00
+UTC) and on `workflow_dispatch` on `main`. The `ci:full` label selects no
+tier: on a pull request it turns off the docs-only and Lint Gates path
+scopes, so every job runs whatever files changed. Label a PR `ci:full` when
+it changes the API or fixes the integration suite. The label takes effect on
+the PR's next push or update-branch, because a label change starts no run
 (`pull_request` lists only `opened`, `synchronize` and `reopened`). A manual
-`workflow_dispatch` runs only on `main` and on `ci/deps-bump`, which the
-dependency scan dispatches because the pull request it opens starts no
-`pull_request` run: on any other ref the schedule guard refuses the run, no
-job that checks out the branch starts and CI Gate fails. A pull request whose every changed file is markdown or under
-`docs/` (a docs-only pull request) runs the Lint job without `make gosec`, and
-the Lint Gates job; the Devcontainer image and Integration jobs skip, and CI
-Gate accepts those skips. On the full tier the build and test steps always run.
+`workflow_dispatch` runs only on `main`: on any other ref the schedule guard
+refuses the run, no job that checks out the branch starts and CI Gate fails.
+A pull request without `ci:full` whose every changed file is markdown or
+under `docs/` (a docs-only pull request) runs the Lint job without `make
+gosec`, and the Lint Gates job; the Devcontainer image job skips, and CI Gate
+accepts that skip. A tree that already has a green full-tier run skips the
+jobs that would run on the self-hosted pool, and CI Gate passes on that
+proof; a proof that cannot be read runs the full tier.
+
+**Runners.** Preflight picks the runner of every later job. On github.com it
+counts this repository's jobs on GitHub-hosted runners through the Actions
+API: below `HOSTED_JOBS_PER_REPO` (12) in progress, with no hosted job of
+another run queued longer than `HOSTED_QUEUE_GRACE_SECONDS` (60), the jobs
+run on `ubuntu-latest`; when the hosted pool is full they overflow to the
+self-hosted `bigdisk` pool (the Docker jobs to `bigdisk-docker`, CI Gate to
+`bigdisk`). An API error, a reply it cannot read or a threshold that is not
+a number picks `ubuntu-latest` with a warning naming why. A pull request
+from a fork, or one whose head repository is gone, never overflows: it runs
+every job on `ubuntu-latest` with no API call, and its Preflight runs there
+too, so no fork's code reaches a self-hosted runner. A same-repository
+pull request and a push run Preflight on the self-hosted pool
+(`CI_PREFLIGHT_RUNS_ON`). FIPS, TPM swtpm Conformance and OP-TEE always run
+on `ubuntu-latest`; Publish CI images runs on the self-hosted `release`
+runner. Off github.com the jobs keep the forge's labels (`bigdisk`,
+`ci-gate`). `make lint-gates` runs `testdata/runner-select-tests.py`, which
+runs Preflight's selection step from `ci.yml` against a stub Actions API:
+forks, a deleted fork, overflow and each lookup failure.
 
 A draft pull request (a `WIP:` title) runs no CI: every job but CI Gate skips,
 and CI Gate fails on a draft, so no skipped gate reads as passed. Marking the
 PR ready starts no run; push an empty commit when it leaves draft.
 
-A newer run of a pull request cancels its older run. On `main` each push, and
-each scheduled or dispatched run, is its own group, keyed by event and commit,
-so a merge never cancels the run of an earlier `main` commit.
+A newer run of a pull request cancels its older run. On `main` the
+concurrency group is the workflow and the event (`main-push`,
+`main-workflow_dispatch`), with no commit, so a newer `main` push cancels the
+`main` push run still in progress: only the newest `main` commit finishes its
+run. A scheduled run's group is `schedule-<repository>`, so a repository has
+one scheduled run at a time, and it never shares a group with a push or a
+dispatch.
 
 `make coverage` is the test stage: the race suite across the CPU matrix, failing
 when any package is below `COVERAGE_THRESHOLD` (90). `make security` includes
@@ -374,12 +398,14 @@ only when the runner's daemon lacks it; each job leases it, and
 module credential. The toolchain image also downloads each nested module's
 graph, which includes the root module at the tag its `go.mod` requires, so
 `make docker-build` passes `GO_BUILD_PROXY`, when set, to `docker build` as the
-build argument naming the Go module proxy the image build fetches through;
-unset, the Dockerfile's public proxy applies. The image jobs pass the runner's
-`GOPROXY` as `GO_BUILD_PROXY="${GOPROXY:-}"`; a runner that sets none, such as
-`ubuntu-latest`, passes the empty value, so the image build uses the
-Dockerfile's default public proxy. No proxy chain has a `direct` entry.
-`ci.yml` does not set `MODULE_ENV_FILE`. `GO_BUILD_TAGS` must stay empty,
+BuildKit secret `goproxy` naming the Go module proxy the image build fetches
+through, never as a build argument, which the image history would keep;
+unset, the Dockerfile's public proxy applies. The image jobs pass the
+runner's own `GOPROXY` as `GO_BUILD_PROXY="${GOPROXY:-}"`: an `ubuntu-latest`
+runner carries none, so the image build uses the Dockerfile's default public
+proxy; an overflow runner's proxy goes in as the secret. No proxy chain has a `direct` entry.
+`MODULE_ENV_FILE` serves
+`integration-test` only. `GO_BUILD_TAGS` must stay empty,
 because no package is gated by a tag; the Makefile refuses any other value.
 
 The **CI Gate** is the one required check. It runs on Preflight's `runner`

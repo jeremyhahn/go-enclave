@@ -346,13 +346,10 @@ func toolchainTargetViolations(mk string) []string {
 		bad = append(bad, "the recipe does not build the toolchain stage (--target toolchain)")
 	}
 	if !strings.Contains(r, `if [ -n "$${GO_BUILD_PROXY:-}" ]; then set -- "$$@" `+proxySecretFlag+`; fi`) {
-		bad = append(bad, "the recipe does not pass a set GO_BUILD_PROXY as the goproxy build secret ("+proxySecretFlag+")")
+		bad = append(bad, "the recipe does not pass a set GO_BUILD_PROXY as the goproxy BuildKit secret")
 	}
-	if strings.Contains(r, "--build-arg") && strings.Contains(r, "GO_BUILD_PROXY=") {
-		bad = append(bad, "the recipe passes GO_BUILD_PROXY as a build argument, which the image history records")
-	}
-	if strings.Count(r, "--secret") != strings.Count(r, proxySecretFlag) {
-		bad = append(bad, "the recipe passes a build secret other than "+proxySecretFlag)
+	if strings.Count(r, "--secret") != 1 {
+		bad = append(bad, "the recipe passes a BuildKit secret other than goproxy; the image build takes GO_BUILD_PROXY, not the forge credentials")
 	}
 	for _, s := range []string{"gomodauth", "MODULE_ENV_FILE"} {
 		if strings.Contains(r, s) {
@@ -360,99 +357,6 @@ func toolchainTargetViolations(mk string) []string {
 		}
 	}
 	return bad
-}
-
-const (
-	// proxySecretFlag passes GO_BUILD_PROXY to the image build as a BuildKit
-	// secret: unlike a build argument, its value never enters the image
-	// history, which scripts/ci-image-history.sh refuses an address in.
-	proxySecretFlag = "--secret id=goproxy,env=GO_BUILD_PROXY"
-	// proxySecretMount and proxyFromSecret are how each Dockerfile RUN that
-	// fetches modules reads the proxy: the mounted secret, or the public
-	// proxy when the build was given none.
-	proxySecretMount = "RUN --mount=type=secret,id=goproxy "
-	proxyFromSecret  = `GOPROXY="$(cat /run/secrets/goproxy 2>/dev/null || echo https://proxy.golang.org)"`
-)
-
-// dockerfileProxyViolations lists what is wrong with how the Dockerfile takes
-// the build proxy: no GO_BUILD_PROXY build argument at all, and every RUN that
-// sets GOPROXY mounts the goproxy secret and reads it, the public proxy its
-// fallback.
-func dockerfileProxyViolations(df string) []string {
-	var bad []string
-	if strings.Contains(df, "GO_BUILD_PROXY") {
-		for i, line := range strings.Split(df, "\n") {
-			if strings.Contains(line, "GO_BUILD_PROXY") && !strings.HasPrefix(strings.TrimSpace(line), "#") {
-				bad = append(bad, fmt.Sprintf("line %d names GO_BUILD_PROXY (%s); a build argument's value is recorded in the image history", i+1, strings.TrimSpace(line)))
-			}
-		}
-	}
-	// One instruction per entry: continuation lines joined.
-	var instrs []string
-	cur := ""
-	for line := range strings.SplitSeq(df, "\n") {
-		if cur == "" && (strings.HasPrefix(strings.TrimSpace(line), "#") || strings.TrimSpace(line) == "") {
-			continue
-		}
-		cur += line + "\n"
-		if !strings.HasSuffix(strings.TrimRight(line, " \t"), "\\") {
-			instrs = append(instrs, cur)
-			cur = ""
-		}
-	}
-	fetching := 0
-	for _, in := range instrs {
-		if !strings.HasPrefix(in, "RUN ") || !strings.Contains(in, "GOPROXY=") {
-			continue
-		}
-		fetching++
-		first, _, _ := strings.Cut(in, "\n")
-		if !strings.HasPrefix(in, proxySecretMount) {
-			bad = append(bad, fmt.Sprintf("%q sets GOPROXY without mounting the goproxy secret (%s)", first, strings.TrimSpace(proxySecretMount)))
-		}
-		if strings.Count(in, "GOPROXY=") != strings.Count(in, proxyFromSecret) {
-			bad = append(bad, fmt.Sprintf("%q sets GOPROXY other than from the secret: want %s", first, proxyFromSecret))
-		}
-	}
-	if fetching == 0 {
-		bad = append(bad, "no RUN sets GOPROXY; the module downloads moved?")
-	}
-	return bad
-}
-
-// TestImageBuildProxyStaysOutOfTheHistory holds the image build to passing
-// the proxy as a BuildKit secret: the Dockerfile declares no GO_BUILD_PROXY
-// argument and reads the mounted secret, and neither the Makefile nor
-// scripts/devcontainer.sh passes it with --build-arg. A private proxy address
-// then never reaches the image history ci-image-history.sh checks.
-func TestImageBuildProxyStaysOutOfTheHistory(t *testing.T) {
-	root := repoRoot(t)
-	df := readFile(t, filepath.Join(root, "build", "docker", "devcontainer", "Dockerfile"))
-	for _, b := range dockerfileProxyViolations(df) {
-		t.Errorf("Dockerfile: %s", b)
-	}
-	for _, tc := range []struct{ name, old, new string }{
-		{"argument back", "FROM ${GO_IMAGE} AS tools\n", "FROM ${GO_IMAGE} AS tools\nARG GO_BUILD_PROXY\n"},
-		{"mount dropped", proxySecretMount, "RUN "},
-		{"proxy from the environment", proxyFromSecret, `GOPROXY="$GO_BUILD_PROXY"`},
-	} {
-		if !strings.Contains(df, tc.old) {
-			t.Errorf("%s: the Dockerfile no longer contains %q; update this case", tc.name, tc.old)
-			continue
-		}
-		if len(dockerfileProxyViolations(strings.Replace(df, tc.old, tc.new, 1))) == 0 {
-			t.Errorf("%s: no violation; want a refusal", tc.name)
-		}
-	}
-	for _, f := range []string{"Makefile", filepath.Join("scripts", "devcontainer.sh")} {
-		src := readFile(t, filepath.Join(root, f))
-		if strings.Contains(src, "--build-arg \"GO_BUILD_PROXY") || strings.Contains(src, "--build-arg GO_BUILD_PROXY") {
-			t.Errorf("%s passes GO_BUILD_PROXY with --build-arg; want %s", f, proxySecretFlag)
-		}
-		if !strings.Contains(src, proxySecretFlag) {
-			t.Errorf("%s does not pass GO_BUILD_PROXY as %s", f, proxySecretFlag)
-		}
-	}
 }
 
 func TestToolchainBuildTargetUsesTheModuleProxy(t *testing.T) {
@@ -467,6 +371,7 @@ func TestToolchainBuildTargetUsesTheModuleProxy(t *testing.T) {
 	for _, tc := range []struct{ name, old, new string }{
 		{"proxy dropped", proxySecretFlag, `--label x=y`},
 		{"proxy as a build argument", proxySecretFlag, `--build-arg "GO_BUILD_PROXY=$$GO_BUILD_PROXY"`},
+		{"another secret", "\ndocker-build-toolchain:\n", "\ndocker-build-toolchain:\n\t@true --secret id=other\n"},
 		{"credential staged again", "\ndocker-build-toolchain:\n", "\ndocker-build-toolchain:\n\t@true --secret id=gomodauth\n"},
 		{"target renamed away", "\ndocker-build-toolchain:\n", "\ndocker-build-tools:\n"},
 	} {

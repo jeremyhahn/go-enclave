@@ -124,8 +124,8 @@ case $1 in
     ref=$(image)
     # The backend modules' download fetches the public root module through
     # GO_BUILD_PROXY, unset on CI's GitHub-hosted runners (#293); no forge
-    # credential reaches the build. It goes in as a BuildKit secret, never a
-    # build argument, so the image history does not record it. Unset, the
+    # credential reaches the build. It goes in as the BuildKit secret goproxy,
+    # never a build argument, which the image history would keep. Unset, the
     # Dockerfile's public default applies.
     set -- -f "$dockerfile" --target toolchain -t "$ref" -t "$repo:latest"
     if [ -n "${GO_BUILD_PROXY:-}" ]; then

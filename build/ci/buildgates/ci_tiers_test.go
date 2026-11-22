@@ -44,11 +44,11 @@ const (
 	// preflight picked, a GitHub-hosted one unless it says otherwise. The gate
 	// uses no action (no checkout, no toolchain) and carries summary.sh inline.
 	ciGateRunner = `${{ github.server_url == 'https://github.com' && fromJSON(needs.preflight.outputs.runner || '"ubuntu-latest"') || 'ci-gate' }}`
-	// gateIf is the gate's `if:` (v1.29.3): always on a pull request, and
-	// off it unless the run was canceled (v1.53: a main run a newer push
-	// cancels posts a skipped gate, not a failed one); on a schedule run the
-	// guard's `busy` skips it, so a nightly never posts a green gate.
-	gateIf = "${{ (startsWith(github.event_name, 'pull_request') && always() || !cancelled()) && (github.event_name != 'schedule' || needs.preflight.outputs.verdict != 'busy') }}" //nolint:misspell // the Actions function's spelling
+	// gateIf is the gate's `if:` (v1.29.3): on a schedule run the guard's
+	// `busy` skips it, so a nightly never posts a green gate. v1.53: always()
+	// on a pull request, the not-canceled check on every other event, so a
+	// superseded main run posts a skipped gate, not a failed one.
+	gateIf = "${{ (startsWith(github.event_name, 'pull_request') && always() || !cancelled()) && (github.event_name != 'schedule' || needs.preflight.outputs.verdict != 'busy') }}" //nolint:misspell // GitHub Actions expression function cancelled()
 	// gateCheckFunc opens the gate's check() (v1.30), which judges each job's
 	// result against its tier.
 	gateCheckFunc = "check() {"
@@ -94,9 +94,9 @@ const (
 	// nightlyTierIf is the gate's NIGHTLY value.
 	nightlyTierIf = "${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}"
 	// refConcurrencyGroup is the group of every pull_request workflow: keyed
-	// by ref, on main by event (v1.53), so a newer main run cancels the older
-	// as a PR's newer run cancels its older one, and by repository on a
-	// schedule (v1.30).
+	// by ref, on main by event (v1.53), so a newer main run cancels the
+	// older one as a PR's newer run cancels the older, and by repository on
+	// a schedule (v1.30).
 	refConcurrencyGroup = "${{ github.workflow }}-${{ github.event_name == 'schedule' && format('schedule-{0}', github.repository) || github.ref == 'refs/heads/main' && format('main-{0}', github.event_name) || github.ref }}"
 	// ciSchedule is the one CI schedule, ci.yml's weekly cron: Tuesday night,
 	// 04:00 UTC Wednesday.
@@ -907,9 +907,8 @@ func TestCIGateTiers_RefusesWhatItMustRefuse(t *testing.T) {
 		{"pull_request, no cancel", "x.yml", "on:\n  pull_request:\nconcurrency:\n  group: ${{ github.workflow }}-${{ github.ref }}\njobs: {}\n", true},
 		{"pull_request, main shares the ref group", "x.yml", "on:\n  pull_request:\nconcurrency:\n  group: ${{ github.workflow }}-${{ github.ref }}\n  cancel-in-progress: true\njobs: {}\n", true},
 		{"pull_request, cancel by expression", "x.yml", "on:\n  pull_request:\nconcurrency:\n  group: " + refConcurrencyGroup + "\n  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}\njobs: {}\n", true},
-		{"pull_request, schedule shares the main group", "x.yml", "on:\n  pull_request:\nconcurrency:\n  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && format('main-{0}', github.event_name) || github.ref }}\n  cancel-in-progress: true\njobs: {}\n", true},
-		{"pull_request, per-commit main group", "x.yml", "on:\n  pull_request:\nconcurrency:\n  group: ${{ github.workflow }}-${{ github.event_name == 'schedule' && format('schedule-{0}', github.repository) || github.ref == 'refs/heads/main' && format('main-{0}-{1}', github.event_name, github.sha) || github.ref }}\n  cancel-in-progress: true\njobs: {}\n", true},
-		{"pull_request, main group per event", "x.yml", "on:\n  pull_request:\n" + wantConc + "jobs: {}\n", false},
+		{"pull_request, main pushes share a group", "x.yml", "on:\n  pull_request:\nconcurrency:\n  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && format('main-{0}', github.event_name) || github.ref }}\n  cancel-in-progress: true\njobs: {}\n", true},
+		{"pull_request, per-commit main group", "x.yml", "on:\n  pull_request:\n" + wantConc + "jobs: {}\n", false},
 		{"push only, no concurrency", "x.yml", "on:\n  push:\njobs: {}\n", false},
 		{"scheduled", "nightly.yml", "on:\n  schedule:\n    - cron: '0 3 * * *'\n  workflow_dispatch:\njobs: {}\n", true},
 		{"ci.yml scheduled", "ci.yml", "on:\n  schedule:\n    - cron: '" + ciSchedule + "'\njobs: {}\n", false},

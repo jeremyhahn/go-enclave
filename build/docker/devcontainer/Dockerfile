@@ -55,12 +55,9 @@
 #     over it; Docker seeds an empty named volume from the image, so a run
 #     starts warm.
 #
-# FETCHING happens only at build time and only through the build proxy: the
-# goproxy BuildKit secret (`docker build --secret
-# id=goproxy,env=GO_BUILD_PROXY`), which, unlike a build argument, the image
-# history never records; without it each step falls back to the default (
-# the public proxy, with no `direct` entry: ci-template v1.34.1, no direct
-# fetch anywhere), passed explicitly to each step that downloads. The images' ENV is GOPROXY=off, so a gate or the suite that
+# FETCHING happens only at build time and only through the goproxy secret
+# (default the public proxy, with no `direct` entry: ci-template v1.34.1, no
+# direct fetch anywhere), mounted in each step that downloads. The images' ENV is GOPROXY=off, so a gate or the suite that
 # reaches for a module fails instead of fetching it.
 #
 # THE TOOLCHAIN adds, for the Makefile and scripts/:
@@ -107,6 +104,13 @@
 
 ARG GO_IMAGE=golang:1.27.4-alpine3.24@sha256:0a5f7fe796599ff487605987432e7619ae45beeb2fba4c2ce0b907879932aebf
 
+# The module proxy is the BuildKit secret `goproxy` (docker build --secret
+# id=goproxy,env=GO_BUILD_PROXY), never a build argument: Docker records a
+# build argument a RUN reads in the image history, and a proxy on a private
+# address must not ship in it. Each RUN that fetches mounts the secret and
+# reads it into GOPROXY for that RUN alone; without the secret it fetches
+# through the public proxy, with no `direct` fallback.
+
 # ---------------------------------------------------------------------------
 FROM ${GO_IMAGE} AS tools
 
@@ -123,7 +127,9 @@ RUN apk add --no-cache curl tar xz
 
 WORKDIR /build
 COPY scripts/lib.sh scripts/tool.sh scripts/tool-pins.sh scripts/install-tools.sh scripts/
-RUN --mount=type=secret,id=goproxy GOPROXY="$(cat /run/secrets/goproxy 2>/dev/null || echo https://proxy.golang.org)" sh scripts/install-tools.sh /out
+RUN --mount=type=secret,id=goproxy set -eu; \
+    proxy=https://proxy.golang.org; [ ! -s /run/secrets/goproxy ] || proxy=$(cat /run/secrets/goproxy); \
+    GOPROXY="$proxy" sh scripts/install-tools.sh /out
 
 # ---------------------------------------------------------------------------
 FROM ${GO_IMAGE} AS base
@@ -164,7 +170,8 @@ WORKDIR /build
 COPY go.mod go.sum ./
 # The download retries: a transient proxy error must not fail the image (m850).
 RUN --mount=type=secret,id=goproxy set -eux; \
-    n=0; until GOPROXY="$(cat /run/secrets/goproxy 2>/dev/null || echo https://proxy.golang.org)" go mod download -x; do n=$((n + 1)); [ "$n" -lt 3 ] || exit 1; sleep $((n * 10)); done; \
+    proxy=https://proxy.golang.org; [ ! -s /run/secrets/goproxy ] || proxy=$(cat /run/secrets/goproxy); \
+    n=0; until GOPROXY="$proxy" go mod download -x; do n=$((n + 1)); [ "$n" -lt 3 ] || exit 1; sleep $((n * 10)); done; \
     go mod verify; \
     chmod -R a+rX /gomodcache; \
     find /gomodcache/cache -type d -exec chmod a+w {} +
@@ -192,7 +199,7 @@ ENV HOME=/tmp
 # safe.directory: a checkout copied or mounted in is owned by whoever ran it,
 # and the releasability gates read its .git as any uid.
 RUN apk add --no-cache \
-        bash make git curl jq nodejs \
+        bash make git curl jq nodejs python3 \
         coreutils grep sed gawk findutils diffutils tar xz; \
     git config --system --add safe.directory '*'
 
@@ -202,7 +209,8 @@ WORKDIR /build
 COPY build/ci/buildgates/go.mod build/ci/buildgates/go.sum ./
 # The download retries: a transient proxy error must not fail the image (m850).
 RUN --mount=type=secret,id=goproxy set -eux; \
-    n=0; until GOPROXY="$(cat /run/secrets/goproxy 2>/dev/null || echo https://proxy.golang.org)" go mod download -x; do n=$((n + 1)); [ "$n" -lt 3 ] || exit 1; sleep $((n * 10)); done; \
+    proxy=https://proxy.golang.org; [ ! -s /run/secrets/goproxy ] || proxy=$(cat /run/secrets/goproxy); \
+    n=0; until GOPROXY="$proxy" go mod download -x; do n=$((n + 1)); [ "$n" -lt 3 ] || exit 1; sleep $((n * 10)); done; \
     go mod verify; \
     chmod -R a+rX /gomodcache; \
     find /gomodcache/cache -type d -exec chmod a+w {} +
@@ -216,7 +224,8 @@ RUN --mount=type=secret,id=goproxy set -eux; \
 WORKDIR /build/backends/armtrustzone
 COPY backends/armtrustzone/go.mod backends/armtrustzone/go.sum ./
 RUN --mount=type=secret,id=goproxy set -eu; \
-    n=0; until GOPROXY="$(cat /run/secrets/goproxy 2>/dev/null || echo https://proxy.golang.org)" GONOSUMDB=github.com/jeremyhahn/go-enclave go mod download; do n=$((n + 1)); [ "$n" -lt 3 ] || exit 1; sleep $((n * 10)); done; \
+    proxy=https://proxy.golang.org; [ ! -s /run/secrets/goproxy ] || proxy=$(cat /run/secrets/goproxy); \
+    n=0; until GOPROXY="$proxy" GONOSUMDB=github.com/jeremyhahn/go-enclave go mod download; do n=$((n + 1)); [ "$n" -lt 3 ] || exit 1; sleep $((n * 10)); done; \
     GONOSUMDB=github.com/jeremyhahn/go-enclave go mod verify; \
     chmod -R a+rX /gomodcache; \
     find /gomodcache/cache -type d -exec chmod a+w {} +
@@ -225,7 +234,8 @@ RUN --mount=type=secret,id=goproxy set -eu; \
 WORKDIR /build/backends/tpm
 COPY backends/tpm/go.mod backends/tpm/go.sum ./
 RUN --mount=type=secret,id=goproxy set -eu; \
-    n=0; until GOPROXY="$(cat /run/secrets/goproxy 2>/dev/null || echo https://proxy.golang.org)" GONOSUMDB=github.com/jeremyhahn/go-enclave go mod download all; do n=$((n + 1)); [ "$n" -lt 3 ] || exit 1; sleep $((n * 10)); done; \
+    proxy=https://proxy.golang.org; [ ! -s /run/secrets/goproxy ] || proxy=$(cat /run/secrets/goproxy); \
+    n=0; until GOPROXY="$proxy" GONOSUMDB=github.com/jeremyhahn/go-enclave go mod download all; do n=$((n + 1)); [ "$n" -lt 3 ] || exit 1; sleep $((n * 10)); done; \
     GONOSUMDB=github.com/jeremyhahn/go-enclave go mod verify; \
     chmod -R a+rX /gomodcache; \
     find /gomodcache/cache -type d -exec chmod a+w {} +

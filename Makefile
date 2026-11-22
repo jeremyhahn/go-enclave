@@ -114,7 +114,7 @@ $(call raw_bind,$(EXTERNAL_VARS))
 # CI VARIABLES: ci.yml passes them, so they are
 # data from a workflow and raw-bound like EXTERNAL_VARS.
 ## MODULE_ENV_FILE=<file>: integration-test: the forge module variables; never read here or printed
-## GO_BUILD_PROXY=<url>: docker-build: the Go module proxy the image build fetches through, passed as the goproxy BuildKit secret when set, so the image history never records it (CI: the hosted runner's GOPROXY, unset, #293); default the Dockerfile's public proxy
+## GO_BUILD_PROXY=<url>: docker-build: the Go module proxy the image build fetches through, passed as the BuildKit secret goproxy when set (never a build argument: the image history keeps those) (CI: the hosted runner's GOPROXY, unset, #293); default the Dockerfile's public proxy
 ## IT_IMAGE=<tag>: docker-build, ci-integration: the integration image's tag (default `make -s it-image`)
 ## APK_INDEX_SUM=<sum>: docker-build, it-image: the Alpine package index checksum (scripts/apk-index-sum.sh); it-image hashes it, docker-build passes it as --build-arg
 ## IT_PROJECT=<name>: integration-test: accepted; each suite names its own compose project (go-enclave-it-*, go-enclave-userns-*)
@@ -235,8 +235,8 @@ lint-actions:
 ## lint-scripts: shellcheck (pinned) over scripts/*.sh, build/docker/devcontainer/*.sh, build/fuzz/*.sh and build/ci/*.sh
 # The scripts are POSIX sh, and release.yml runs them with a write token. -x
 # follows the `. lib.sh` every script sources. build/ci/*.sh are the workflows'
-# scripts, and CI_BASH_SCRIPTS the ci-template's ones, taken unchanged from
-# it; each names its own shell (bash or sh) on its first line.
+# scripts, and CI_BASH_SCRIPTS the ci-template's bash ones, taken unchanged
+# from it; each names its own shell on its first line.
 CI_BASH_SCRIPTS := scripts/apk-index-sum.sh scripts/apk-mirror.sh scripts/ci-image-cache.sh scripts/ci-image-history.sh scripts/ci-mask-lan.sh scripts/in-toolchain-image.sh scripts/in-toolchain-image_test.sh scripts/install-trivy.sh scripts/reap-stale-ci-stacks.sh scripts/trim-ci-caches.sh
 .PHONY: lint-scripts
 lint-scripts:
@@ -687,12 +687,21 @@ fuzz:
 check-fuzz-runner:
 	@sh build/fuzz/fuzz_test.sh
 
-## lint-gates: the repository's own gates beside lint: check-buildgates, check-releasability, check-changelog-assembly, check-scripts, check-in-toolchain-image, check-project-scripts, check-it-runner, check-fuzz-runner (CI's lint-gates job)
+## check-ci-python-suites: the CI template's carried Python suites: the LAN mask and the job-output handoff, with the mask step's placement
+# Go does not discover Python under testdata/, so this target runs each suite,
+# isolated (python3 -I), against the tree's ci.yml and scripts; no network.
+.PHONY: check-ci-python-suites
+check-ci-python-suites:
+	@python3 -I testdata/ci-mask-lan-tests.py
+	@python3 -I testdata/job-output-handoff-tests.py
+	@python3 -I testdata/runner-select-tests.py
+
+## lint-gates: the repository's own gates beside lint: check-buildgates, check-releasability, check-changelog-assembly, check-scripts, check-in-toolchain-image, check-project-scripts, check-it-runner, check-fuzz-runner, check-ci-python-suites (CI's lint-gates job)
 # ci.yml runs this as its own job, in parallel with `make lint`, so make lint
 # does not list it. tidy-check, lint-runtimesecret and lint-integration stay
 # in the image job.
 .PHONY: lint-gates
-lint-gates: check-buildgates check-releasability check-changelog-assembly check-scripts check-in-toolchain-image check-project-scripts check-it-runner check-fuzz-runner
+lint-gates: check-buildgates check-releasability check-changelog-assembly check-scripts check-in-toolchain-image check-project-scripts check-it-runner check-fuzz-runner check-ci-python-suites
 	@echo "lint-gates completed successfully"
 
 # CI AGGREGATES. ci.yml and release.yml each call these, one per job, so a job
