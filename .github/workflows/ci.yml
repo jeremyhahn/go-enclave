@@ -1114,10 +1114,18 @@ jobs:
               if isinstance(v, (int, float)):
                   return float(v)
               if isinstance(v, str):
-                  try:
-                      return float(v.strip() or 0)
-                  except ValueError:
-                      return float("nan")
+                  # Actions converts only a plain decimal, 0x hex or 0o octal; any
+                  # other string (digit separators, inf, nan) is NaN.
+                  s = v.strip()
+                  if not s:
+                      return 0.0
+                  if re.fullmatch(r"[+-]?(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][+-]?[0-9]+)?", s):
+                      return float(s)
+                  if re.fullmatch(r"0x[0-9a-fA-F]+", s):
+                      return float(int(s[2:], 16))
+                  if re.fullmatch(r"0o[0-7]+", s):
+                      return float(int(s[2:], 8))
+                  return float("nan")
               return float("nan")
 
 
@@ -1665,11 +1673,13 @@ jobs:
               t = text.strip()
               if t.startswith("{"):
                   t = flow_mapping_labels(t)
-              elif t.startswith("group:") or t.startswith("labels:") or " labels:" in t:
-                  m = re.search(r"labels:\s*(.*)$", t, re.S)
-                  t = m.group(1) if m else ""
+              elif re.match(r"""(['"]?)(?:group|labels)\1\s*:""", t) or re.search(r"""\s(['"]?)labels\1\s*:""", t):
+                  m = re.search(r"""(?:^|\s)(['"]?)labels\1\s*:\s*(.*)$""", t, re.S)
+                  t = m.group(2) if m else ""
                   g = re.search(r"\s['\"]?group['\"]?\s*:", t)
                   t = (t[:g.start()] if g else t).strip()
+              elif re.match(r"""(?:'[^']*'|"[^"]*"|[^\s'"\[{$-][^\s:]*)\s*:(?:\s|$)""", t):
+                  raise ValueError("a runs-on mapping this step cannot read")
               if t.startswith("["):
                   if not t.endswith("]"):
                       raise ValueError("a label list with no closing bracket")
