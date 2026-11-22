@@ -415,16 +415,16 @@ type forkJob struct {
 }
 
 // selectionRefusesForks reports whether the preflight job's runner step
-// emits the hosted default for a fork pull_request before any overflow: a
-// shell test that is true for a fork (see forkGuards), outside any case arm
-// a pull_request cannot take, whose branch emits "$HOSTED" "$HOSTED" and
-// exits ahead of the first overflow label.
+// emits the hosted default for a fork pull_request before any self-hosted
+// label: a shell test that is true for a fork (see forkGuards), outside any
+// case arm a pull_request cannot take, whose branch emits "$HOSTED"
+// "$HOSTED" and exits ahead of the first self-hosted label.
 func selectionRefusesForks(pre forkJob) bool {
 	for _, st := range pre.Steps {
 		if st.ID != "runner" {
 			continue
 		}
-		over := strings.Index(st.Run, `emit "$(overflow`)
+		over := strings.Index(st.Run, `emit "$(selfhosted`)
 		for _, g := range forkGuards(st.Env) {
 			guard := strings.Index(st.Run, g)
 			if guard < 0 || over >= 0 && guard > over || !armTakesPullRequest(st.Run[:guard]) {
@@ -627,14 +627,14 @@ func TestCIForkRunner_RefusesWhatItMustRefuse(t *testing.T) {
             emit "$HOSTED" "$HOSTED"
             exit 0
           fi
-          emit "$(overflow bigdisk)" "$(overflow bigdisk-docker)"
+          emit "$(selfhosted bigdisk)" "$(selfhosted bigdisk-docker)"
 `
 	unguarded := `  preflight:
     runs-on: ubuntu-latest
     steps:
       - id: runner
         run: |
-          emit "$(overflow bigdisk)" "$(overflow bigdisk-docker)"
+          emit "$(selfhosted bigdisk)" "$(selfhosted bigdisk-docker)"
 `
 	template := func(arm string) string {
 		return `  preflight:
@@ -653,7 +653,7 @@ func TestCIForkRunner_RefusesWhatItMustRefuse(t *testing.T) {
                 exit 0
               fi ;;
           esac
-          emit "$(overflow bigdisk)" "$(overflow bigdisk-docker)"
+          emit "$(selfhosted bigdisk)" "$(selfhosted bigdisk-docker)"
 `
 	}
 	late := `  preflight:
@@ -664,7 +664,7 @@ func TestCIForkRunner_RefusesWhatItMustRefuse(t *testing.T) {
           HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
           REPO: ${{ github.repository }}
         run: |
-          emit "$(overflow bigdisk)" "$(overflow bigdisk-docker)"
+          emit "$(selfhosted bigdisk)" "$(selfhosted bigdisk-docker)"
           if [ "$HEAD_REPO" != "$REPO" ]; then
             emit "$HOSTED" "$HOSTED"
             exit 0
@@ -686,7 +686,7 @@ func TestCIForkRunner_RefusesWhatItMustRefuse(t *testing.T) {
 		{"selection with a fork guard", guarded + docker, 0},
 		{"selection with the template's fork guard", template("pull_request|pull_request_target") + docker, 0},
 		{"template guard on pull_request_target only", template("pull_request_target") + docker, 1},
-		{"template guard after the overflow", late + docker, 1},
+		{"template guard after the self-hosted emit", late + docker, 1},
 		{"template preflight on the variable for a fork", "  preflight:\n    runs-on: ${{ github.server_url == 'https://github.com' && (!startsWith(github.event_name, 'pull_request') || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON(vars.X || '[\\\"self-hosted\\\"]') || 'ubuntu-latest' }}\n", 0},
 		{"preflight on the variable without the fork clause", "  preflight:\n    runs-on: ${{ github.server_url == 'https://github.com' && fromJSON(vars.X || '[\\\"self-hosted\\\"]') || 'ubuntu-latest' }}\n", 1},
 		{"unknown reference", "  a:\n    runs-on: ${{ needs.other.outputs.runner }}\n", 1},
