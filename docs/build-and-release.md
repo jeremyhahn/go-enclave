@@ -317,28 +317,55 @@ repository's volumes on that host exceed `CI_CACHE_MAX_GIB` (32).
 | OP-TEE | full | `make integration-test-arm-trustzone` in the OP-TEE fixture image pinned by digest in `scripts/tool-pins.sh`; it fails when the pin is empty. It runs only when an OP-TEE path changed |
 | Publish CI images | push to `main` | Off github.com only (a self-hosted forge's runners): publishes the toolchain image to the CI image registry (`CI_IMAGE_NAMESPACE`) when the registry lacks its hash. It skips on github.com |
 
-The **PR tier** runs on every event. The **full tier** runs on every event
-but a pull request (a push to `main`, the nightly schedule, `workflow_dispatch`
-on `main`) and on a pull request labelled `ci:full`. The **nightly tier** runs
-on the schedule (04:00 UTC) and on `workflow_dispatch` on `main`. Label a PR
-`ci:full` when it changes the API or fixes the integration suite. The label
-takes effect on the PR's next push or update-branch, because a label change
-starts no run (`pull_request` lists only `opened`, `synchronize` and
-`reopened`). A manual `workflow_dispatch` runs only on `main`: on any other
-ref the schedule guard refuses the run, no job that checks out the branch
-starts and CI Gate fails, so a dispatch cannot put a pull request on the full
-tier. A pull request whose every changed file is markdown or under
-`docs/` (a docs-only pull request) runs the Lint job without `make gosec`, and
-the Lint Gates job; the Devcontainer image job skips, and CI Gate accepts that
-skip. On the full tier the build and test steps always run.
+The **PR tier** and the **full tier** run on every event, a pull request
+included, so a pull request runs every stage `main` runs; the one exception
+is a `workflow_dispatch` off `main`, which is not the full tier (the
+schedule guard refuses it). The **nightly tier** runs on the schedule (04:00
+UTC) and on `workflow_dispatch` on `main`. The `ci:full` label selects no
+tier: on a pull request it turns off the docs-only and Lint Gates path
+scopes, so every job runs whatever files changed. Label a PR `ci:full` when
+it changes the API or fixes the integration suite. The label takes effect on
+the PR's next push or update-branch, because a label change starts no run
+(`pull_request` lists only `opened`, `synchronize` and `reopened`). A manual
+`workflow_dispatch` runs only on `main`: on any other ref the schedule guard
+refuses the run, no job that checks out the branch starts and CI Gate fails.
+A pull request without `ci:full` whose every changed file is markdown or
+under `docs/` (a docs-only pull request) runs the Lint job without `make
+gosec`, and the Lint Gates job; the Devcontainer image job skips, and CI Gate
+accepts that skip. A tree that already has a green full-tier run skips the
+jobs that would run on the self-hosted pool, and CI Gate passes on that
+proof; a proof that cannot be read runs the full tier.
+
+**Runners.** Preflight picks the runner of every later job. On github.com it
+counts this repository's jobs on GitHub-hosted runners through the Actions
+API: below `HOSTED_JOBS_PER_REPO` (12) in progress, with no hosted job of
+another run queued longer than `HOSTED_QUEUE_GRACE_SECONDS` (60), the jobs
+run on `ubuntu-latest`; when the hosted pool is full they overflow to the
+self-hosted `bigdisk` pool (the Docker jobs to `bigdisk-docker`, CI Gate to
+`bigdisk`). An API error, a reply it cannot read or a threshold that is not
+a number picks `ubuntu-latest` with a warning naming why. A pull request
+from a fork, or one whose head repository is gone, never overflows: it runs
+every job on `ubuntu-latest` with no API call, and its Preflight runs there
+too, so no fork's code reaches a self-hosted runner. A same-repository
+pull request and a push run Preflight on the self-hosted pool
+(`CI_PREFLIGHT_RUNS_ON`). FIPS, TPM swtpm Conformance and OP-TEE always run
+on `ubuntu-latest`; Publish CI images runs on the self-hosted `release`
+runner. Off github.com the jobs keep the forge's labels (`bigdisk`,
+`ci-gate`). `make lint-gates` runs `testdata/runner-select-tests.py`, which
+runs Preflight's selection step from `ci.yml` against a stub Actions API:
+forks, a deleted fork, overflow and each lookup failure.
 
 A draft pull request (a `WIP:` title) runs no CI: every job but CI Gate skips,
 and CI Gate fails on a draft, so no skipped gate reads as passed. Marking the
 PR ready starts no run; push an empty commit when it leaves draft.
 
-A newer run of a pull request cancels its older run. On `main` each push, and
-each scheduled or dispatched run, is its own group, keyed by event and commit,
-so a merge never cancels the run of an earlier `main` commit.
+A newer run of a pull request cancels its older run. On `main` the
+concurrency group is the workflow and the event (`main-push`,
+`main-workflow_dispatch`), with no commit, so a newer `main` push cancels the
+`main` push run still in progress: only the newest `main` commit finishes its
+run. A scheduled run's group is `schedule-<repository>`, so a repository has
+one scheduled run at a time, and it never shares a group with a push or a
+dispatch.
 
 `make coverage` is the test stage: the race suite across the CPU matrix, failing
 when any package is below `COVERAGE_THRESHOLD` (90). `make security` includes
@@ -355,10 +382,10 @@ graph, which includes the root module at the tag its `go.mod` requires, so
 `make docker-build` passes `GO_BUILD_PROXY`, when set, to `docker build` as the
 BuildKit secret `goproxy` naming the Go module proxy the image build fetches
 through, never as a build argument, which the image history would keep;
-unset, the Dockerfile's public proxy applies. Every CI job runs on an
-`ubuntu-latest` runner, which carries no `GOPROXY`: the image jobs pass the
-empty value as `GO_BUILD_PROXY="${GOPROXY:-}"`, so the image build uses the
-Dockerfile's default public proxy. No proxy chain has a `direct` entry.
+unset, the Dockerfile's public proxy applies. The image jobs pass the
+runner's own `GOPROXY` as `GO_BUILD_PROXY="${GOPROXY:-}"`: an `ubuntu-latest`
+runner carries none, so the image build uses the Dockerfile's default public
+proxy; an overflow runner's proxy goes in as the secret. No proxy chain has a `direct` entry.
 `MODULE_ENV_FILE` serves
 `integration-test` only. `GO_BUILD_TAGS` must stay empty,
 because no package is gated by a tag; the Makefile refuses any other value.
