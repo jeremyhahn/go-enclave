@@ -45,10 +45,10 @@ const (
 	// uses no action (no checkout, no toolchain) and carries summary.sh inline.
 	ciGateRunner = `${{ github.server_url == 'https://github.com' && fromJSON(needs.preflight.outputs.runner || '"ubuntu-latest"') || 'ci-gate' }}`
 	// gateIf is the gate's `if:` (v1.29.3): always on a pull request, and
-	// off it unless the run was cancelled (v1.53: a main run a newer push
+	// off it unless the run was canceled (v1.53: a main run a newer push
 	// cancels posts a skipped gate, not a failed one); on a schedule run the
 	// guard's `busy` skips it, so a nightly never posts a green gate.
-	gateIf = "${{ (startsWith(github.event_name, 'pull_request') && always() || !cancelled()) && (github.event_name != 'schedule' || needs.preflight.outputs.verdict != 'busy') }}"
+	gateIf = "${{ (startsWith(github.event_name, 'pull_request') && always() || !cancelled()) && (github.event_name != 'schedule' || needs.preflight.outputs.verdict != 'busy') }}" //nolint:misspell // the Actions function's spelling
 	// gateCheckFunc opens the gate's check() (v1.30), which judges each job's
 	// result against its tier.
 	gateCheckFunc = "check() {"
