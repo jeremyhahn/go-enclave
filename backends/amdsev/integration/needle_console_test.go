@@ -15,7 +15,7 @@ import (
 // needleIn reads the guest's console for the needle it holds: none once the
 // console carries the release line.
 func needleIn(serial string) (string, bool) {
-	f, err := os.Open(serial) //nolint:gosec // the kit's console file
+	f, err := os.Open(serial)
 	if err != nil {
 		return "", false
 	}
@@ -67,7 +67,7 @@ func writeConsole(t *testing.T, lines ...string) string {
 // appendConsole appends a line to the console, as the guest does.
 func appendConsole(t *testing.T, serial, line string) {
 	t.Helper()
-	f, err := os.OpenFile(serial, os.O_APPEND|os.O_WRONLY, 0) //nolint:gosec // the test's own file
+	f, err := os.OpenFile(serial, os.O_APPEND|os.O_WRONLY, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
