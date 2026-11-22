@@ -54,16 +54,19 @@ func heldThroughScan(serial, needle string) error {
 	return nil
 }
 
-// releaseNeedle ends the guest's hold: it destroys the needle's enclave with
-// destroy and announces the release on console, flushing it with flush.
+// releaseNeedle ends the guest's hold: it announces the release on console,
+// flushes it with flush, and only then destroys the needle's enclave with
+// destroy.
 func releaseNeedle(console io.Writer, flush, destroy func() error) error {
-	if err := destroy(); err != nil {
-		return err
+	// The announcement comes first and is flushed before the wipe: a host
+	// scan that completes once the wipe may have begun then finds the
+	// release line and is rejected.
+	_, werr := fmt.Fprintln(console, guestcfg.ReleasedLine)
+	if werr == nil {
+		werr = flush()
 	}
-	if _, err := fmt.Fprintln(console, guestcfg.ReleasedLine); err != nil {
-		return err
-	}
-	return flush()
+	// The needle is destroyed on every path, a failed announcement included.
+	return errors.Join(destroy(), werr)
 }
 
 const testNeedle = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"

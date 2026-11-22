@@ -27,6 +27,7 @@ import (
 	enclave "github.com/jeremyhahn/go-enclave"
 	"github.com/jeremyhahn/go-enclave/backends/amdsev"
 	"github.com/jeremyhahn/go-enclave/backendtest"
+	"golang.org/x/sys/unix"
 
 	"github.com/jeremyhahn/go-enclave/backends/amdsev/integration/guestcfg"
 )
@@ -123,9 +124,19 @@ func TestAmdSev_GuestHoldNeedle(t *testing.T) {
 	}
 	fmt.Printf("%s%s\n", guestcfg.NeedleMarker, needle)
 	time.Sleep(cfg.Hold)
-	if err := releaseNeedle(os.Stdout, func() error { return nil }, mem.Destroy); err != nil {
+	if err := releaseNeedle(os.Stdout, drainConsole, mem.Destroy); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// drainConsole waits until the guest's console has transmitted everything
+// written to it (tcdrain), so the host's console file carries the release
+// line before the needle is wiped.
+func drainConsole() error {
+	if err := unix.IoctlSetInt(int(os.Stdout.Fd()), unix.TCSBRK, 1); err != nil { //nolint:gosec // a file descriptor fits an int
+		return fmt.Errorf("draining the console: %w", err)
+	}
+	return nil
 }
 
 func env(t *testing.T, name string) string {
