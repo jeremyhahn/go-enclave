@@ -2,7 +2,6 @@ package intelsgx
 
 import (
 	"context"
-	"crypto/rand"
 	"errors"
 	"testing"
 
@@ -22,14 +21,7 @@ func conformanceConfig(verify func([]byte, enclave.Evidence) error, logf func(st
 			enclave.CapabilityAttest, enclave.CapabilityProbe,
 		},
 		Handles: []backendtest.HandleCase{{
-			Name: "material",
-			New: func(ctx context.Context, b enclave.Backend) (enclave.Handle, error) {
-				key := make([]byte, 32)
-				if _, err := rand.Read(key); err != nil {
-					return nil, err
-				}
-				return b.(*Backend).Import(ctx, key, material...)
-			},
+			Name:         "material",
 			Import:       material,
 			ImportSize:   32,
 			Capabilities: []enclave.Capability{enclave.CapabilityBytes, enclave.CapabilityFreeze},
