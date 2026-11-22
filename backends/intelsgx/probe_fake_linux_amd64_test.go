@@ -32,12 +32,10 @@ func wantEnclaveOp(t *testing.T, err error, op string) {
 
 func TestNewAndProbeInStandInEnclave(t *testing.T) {
 	fakeProbeDir(t, 0)
-	//nolint:staticcheck // New and Probe take a nil context as Background.
 	b, err := New(nil)
 	if err != nil {
 		t.Fatalf("New = %v, want a Backend", err)
 	}
-	//nolint:staticcheck // as above.
 	if err := b.Probe(nil); err != nil {
 		t.Fatalf("Probe = %v, want nil", err)
 	}
