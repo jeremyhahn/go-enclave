@@ -656,10 +656,15 @@ func workflowTriggerViolations(file string, src []byte) ([]string, error) {
 		if len(crons) != 1 || fmt.Sprint(crons[0]) != fmt.Sprint(map[string]any{"cron": ciSchedule}) {
 			bad = append(bad, fmt.Sprintf("schedule is %v, want exactly one cron: '%s' (the one CI schedule)", sched, ciSchedule))
 		}
-	case base == filepath.Base(nightlyWorkflowFile) && ok:
+	case base == filepath.Base(nightlyWorkflowFile):
+		// The Nightly workflow runs automatically on its slot and stays
+		// dispatchable by hand: a missing schedule is a refusal.
 		crons, _ := sched.([]any)
-		if len(crons) != 1 || fmt.Sprint(crons[0]) != fmt.Sprint(map[string]any{"cron": nightlySchedule}) {
+		if !ok || len(crons) != 1 || fmt.Sprint(crons[0]) != fmt.Sprint(map[string]any{"cron": nightlySchedule}) {
 			bad = append(bad, fmt.Sprintf("schedule is %v, want exactly one cron: '%s' (the Nightly slot)", sched, nightlySchedule))
+		}
+		if _, ok := events["workflow_dispatch"]; !ok {
+			bad = append(bad, "has no workflow_dispatch: trigger; the Nightly workflow keeps its manual trigger")
 		}
 	case ok:
 		bad = append(bad, fmt.Sprintf("has a schedule: trigger; the schedules are %s's and %s's", ciWorkflowFile, nightlyWorkflowFile))
