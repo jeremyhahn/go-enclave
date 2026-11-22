@@ -35,7 +35,7 @@ What it owns and never does: [SPEC purpose](docs/SPEC.md#purpose) and [SPEC boun
 - **public-release** — the first public release: a release candidate through its tag workflow and staging, then `make release`, published to GitHub with a tree byte-identical to the tag's — [release criteria](docs/SPEC.md#release-criteria) — open
 - **keyprotector-providers** — narrowed to the memory provider (`SoftwareProvider`) and the `KeyProtector` seam, both shipped; next is removing the TPM and TrustZone providers, whose callers move to go-xkms ([key-operation API removal](docs/SPEC.md#key-operation-api-removal), planned) — [#264](../../issues/264) — open
 - **arm-trustzone** — the only hardware backend, redefined as the secure-world memory backend (planned): secure-world RAM through trusted-firmware's vault trusted application, microseconds per access, for short-lived open/use/close; today the nested module `backends/armtrustzone` passes `backendtest` on an OP-TEE fixture, and `Random` fills normal-world pages from the trusted application, readable by the normal-world process and kernel; the benchmark harness records open/use/close per second and per-access latency on the OP-TEE fixture (fixture figures, not hardware figures); the vault storage waits on trusted-firmware publishing the vault trusted application's interface; next are the vault storage and the i.MX 95 figures (targets: thousands of open/use/close per second, microseconds per access); design [docs/backends/arm-trustzone-design.md](docs/backends/arm-trustzone-design.md) — [#206](../../issues/206) — open
-- **confiner-sev-snp** — the `Confiner` capability for a process inside an AMD SEV-SNP guest: the nested module `backends/amdsev`, whose handles are the root's locked-memory enclaves, refusing with a typed error outside an SNP guest; `backendtest` and a host scan of the VMM's memory (with a plain KVM control) inside an SNP guest on the SEV-SNP host (`make integration-test-amd-sev`); the SNP hardware acceptance is open, pending an SEV-SNP host, while the hardware job runs SEV and SEV-ES guests; design [docs/backends/amd-sev-snp.md](docs/backends/amd-sev-snp.md) — [#194](../../issues/194) — open
+- **confiner-sev-snp** — the `Confiner` capability for a process inside an AMD SEV-SNP guest: the nested module `backends/amdsev`, whose handles are the root's locked-memory enclaves, refusing with a typed error outside an SNP guest; `backendtest` and a host scan of the VMM's memory (with a plain KVM control) inside an SNP guest on the SEV-SNP host (`make integration-test-amd-sev`); the SNP hardware acceptance is open, pending an SEV-SNP host, while the hardware job runs SEV and SEV-ES guests; design [docs/backends/amd-sev-snp.md](docs/backends/amd-sev-snp.md) — open
 
 ## Next
 
@@ -47,7 +47,7 @@ None.
 
 ## Future
 
-- **confiner** — the `Confiner` capability for Intel SGX, Intel TDX and Arm CCA (AMD SEV-SNP is confiner-sev-snp, under Now): the process or VM runs inside the protected environment at RAM speed — [#193](../../issues/193) — blocked: needs the hardware to test on (for SGX, Xeon Scalable, Ice Lake-SP or newer, with Flexible Launch Control)
+- **confiner** — the `Confiner` capability for Intel SGX, Intel TDX and Arm CCA (AMD SEV-SNP is confiner-sev-snp, under Now): the process or VM runs inside the protected environment at RAM speed; SGX design [docs/backends/intel-sgx.md](docs/backends/intel-sgx.md) — blocked: needs the hardware to test on (for SGX, Xeon Scalable, Ice Lake-SP or newer, with Flexible Launch Control)
 
 ## Dependencies
 
