@@ -441,9 +441,10 @@
 # `|` as everywhere else (devops.md §2a): Go falls through a `,` only on a
 # 404 or 410, and through a `|` on any error, so a cache that answers the
 # probe and then fails a fetch no longer fails the build. "$bp" stays one
-# quoted make argument; the repository's Makefile quotes the value on its
-# docker build line (`--build-arg "GO_BUILD_PROXY=$(GO_BUILD_PROXY)"`), where
-# an unquoted `|` is a shell pipe. v1.29.4's `,` and its Makefile exception
+# quoted make argument; the repository's Makefile hands the value to its
+# docker build as the BuildKit secret goproxy (`--secret
+# id=goproxy,env=GO_BUILD_PROXY`), never a build argument, which the image
+# history would keep, so an unquoted `|` never reaches a shell. v1.29.4's `,` and its Makefile exception
 # go. Every job, gate, tier and in-toolchain-image.sh v4 is v1.29.4's. A
 # repository adopts v1.29.5 in the one CI-file PR that adopts v1.29.4, with
 # its Makefile's quoting line.
@@ -533,7 +534,8 @@
 # integration image", so none waits for the image job's serial stages. The
 # repository's `make -s it-image` hashes APK_INDEX_SUM, and `make
 # docker-build` passes it to the integration image's build as `--build-arg
-# APK_INDEX_SUM`. The Dockerfile's `integration` stage declares the ARG and
+# APK_INDEX_SUM` (a package index checksum, not the module proxy: no build
+# takes the proxy as a build argument; it is the goproxy BuildKit secret). The Dockerfile's `integration` stage declares the ARG and
 # then, as root, runs `apk upgrade --no-cache`, so a new sum misses the cache
 # from that step on (ci-standard.md §9, devcontainer.md §6); `base` and
 # `toolchain` do not declare it. So a new Alpine package release changes the

@@ -694,6 +694,7 @@ check-fuzz-runner:
 check-ci-python-suites:
 	@python3 -I testdata/ci-mask-lan-tests.py
 	@python3 -I testdata/job-output-handoff-tests.py
+	@python3 -I testdata/runner-select-tests.py
 
 ## lint-gates: the repository's own gates beside lint: check-buildgates, check-releasability, check-changelog-assembly, check-scripts, check-in-toolchain-image, check-project-scripts, check-it-runner, check-fuzz-runner, check-ci-python-suites (CI's lint-gates job)
 # ci.yml runs this as its own job, in parallel with `make lint`, so make lint
