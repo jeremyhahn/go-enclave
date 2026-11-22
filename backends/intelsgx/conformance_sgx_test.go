@@ -43,29 +43,7 @@ func newEnclaveBackend(t *testing.T) *Backend {
 func TestBackendConformance_InSGXEnclave(t *testing.T) {
 	v := newQuoteVerifier(t)
 	newEnclaveBackend(t)
-	material := []enclave.ImportOption{enclave.WithPurpose(enclave.PurposeMaterial)}
-	cfg := backendtest.Config{
-		New: func() (enclave.Backend, error) { return New(context.Background()) },
-		BackendCapabilities: []enclave.Capability{
-			enclave.CapabilityImport, enclave.CapabilitySweep, enclave.CapabilityConfine,
-			enclave.CapabilityAttest, enclave.CapabilityProbe,
-		},
-		Handles: []backendtest.HandleCase{{
-			Name: "material",
-			New: func(ctx context.Context, b enclave.Backend) (enclave.Handle, error) {
-				key := make([]byte, 32)
-				if _, err := rand.Read(key); err != nil {
-					return nil, err
-				}
-				return b.(*Backend).Import(ctx, key, material...)
-			},
-			Import:       material,
-			ImportSize:   32,
-			Capabilities: []enclave.Capability{enclave.CapabilityBytes, enclave.CapabilityFreeze},
-		}},
-		VerifyEvidence: v.verify,
-		Logf:           t.Logf,
-	}
+	cfg := conformanceConfig(v.verify, t.Logf)
 	if err := backendtest.TestBackend(context.Background(), cfg); err != nil {
 		t.Fatalf("the intel-sgx backend fails conformance: %v", err)
 	}
