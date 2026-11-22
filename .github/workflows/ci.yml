@@ -8,6 +8,27 @@
 # main run, and trusted-firmware had 40 main runs queued ahead of PR work.
 # A schedule run keeps `schedule-{repository}` and a workflow_dispatch run
 # keeps `main-workflow_dispatch`, so neither shares a group with a push run.
+# v1.53 also (Tenant Agent on trusted-firmware #821): (0) `Runner labels
+# (ruling 633)` lets code-review.yml's API-only jobs take exactly
+# [self-hosted, linux, x64, bigdisk] for a same-repository head under a PR
+# event, so the Review scope job no longer waits behind the hosted queue
+# (code-review.yml v5.12.12); a fork's head still takes a standard image
+# (testdata/runner-labels-tests.py part I). (1) CI Gate runs on
+# !cancelled() off pull_request, so a main run cancelled by a newer push
+# posts a skipped gate, not a failed one; a pull request keeps always(), as
+# a skipped required check counts as passed (testdata/ci-gate-cancel-tests.py).
+# (2) main-green for a release or an alpha tag is a ci.yml run for the exact
+# commit to be tagged, completed with conclusion success: a push run, or,
+# when the newest push runs were cancelled by later pushes, a
+# workflow_dispatch run on main (group main-workflow_dispatch, which no push
+# cancels); the tag goes on that run's head_sha. A red, cancelled or missing
+# main run never stops a pull request's merge (local-software-factory.md
+# steps 11 and 12). (3) preflight takes the Dells' bigdisk pool while
+# CI_PREFLIGHT_RUNS_ON is unset; the Infra Department sets it to
+# `"ubuntu-latest"` on every repository when that pool has no online runner
+# for 10 minutes, and unsets it when the pool is back (devops.md). (4)
+# ci-mask-lan.sh masks internal host names as well as private addresses, and
+# no comment names an internal repository.
 # cancel-in-progress stays a literal `true`. Only the group changes. Adopt as
 # a ci.yml-only PR that keeps the CUSTOMIZE blocks, together with v1.52's
 # runner selection (internal pull requests run on our runners), separately
@@ -288,7 +309,7 @@
 # v1.36 (2026-11-13, Tenant Agent, owner approval 16:1xZ: keep CI caches
 # local): a self-hosted job never restores or saves the Actions cache, which
 # lives in Azure blob storage behind the office's internet line. The
-# self-hosted pools (dept-infra github/runner) give every job persistent
+# self-hosted pools (the Infra Department's runner configuration) give every job persistent
 # per-host caches: GOCACHE and GOMODCACHE, CI_HOST_CACHE for anything else a
 # repository caches (trusted-firmware's OP-TEE stack under
 # $CI_HOST_CACHE/optee/<pin>, renamed into place whole), GOPROXY and
@@ -354,8 +375,8 @@
 # line of each waived line as a notice and its count, never the value
 # (go-trusted-platform #1348's mechanism, ported).
 # v1.33.1 (2026-11-08, Tenant Agent m2107 item 4): comments only; the
-# pattern file's source is named as dept-infosec
-# security/internal-names.patterns, not platform-configs.
+# pattern file's source is named as the InfoSec Department's internal-names
+# pattern file, not the platform configuration.
 # v1.33 (2026-11-08, Tenant Agent m2104 item 2): the releasability step
 # knows the five classes of the regenerated pattern file: coord-host,
 # internal-email, lab-address, lab-host and owner-path (optional `/i`).
@@ -375,8 +396,8 @@
 # lists the company's names, hosts or addresses, not even as patterns to
 # refuse. The lint job's `Releasability (private patterns)` step takes the
 # pattern file from the Actions secret RELEASABILITY_PATTERNS (v1.32:
-# class<TAB>regex lines; the source file is dept-infosec
-# security/internal-names.patterns) and fails on
+# class<TAB>regex lines; the source file is the InfoSec Department's
+# internal-names pattern file) and fails on
 # any match in the tracked tree, printing path and line only, never the
 # value. RELEASABILITY_TEST keeps the repository's own test, which checks
 # generic shapes only (public-hygiene.md "Internal values stay private").
@@ -426,7 +447,7 @@
 # go. Every job, gate, tier and in-toolchain-image.sh v4 is v1.29.4's. A
 # repository adopts v1.29.5 in the one CI-file PR that adopts v1.29.4, with
 # its Makefile's quoting line.
-# v1.29.4 (ruling 261(c), 2026-10-30; claude-agents #379
+# v1.29.4 (ruling 261(c), 2026-10-30; the factory tooling's issue 379,
 # comment 157032): three changes, and no job, gate or tier change.
 #   - the module fetches of the image build go through Athens first, with the
 #     proxy.golang.org fallback. The toolchain image build and the Lint Gates
@@ -1709,6 +1730,11 @@ jobs:
           # overflow may also be exactly the list its output names. Any other
           # self-hosted value still needs its waiver.
           SEL_FILES = {"ci.yml", "ci.yaml"}
+          # v1.53 (Tenant Agent on trusted-firmware #821): code-review.yml's
+          # API-only guard jobs may take exactly [self-hosted, linux, x64,
+          # bigdisk] for a same-repository head under a PR event; a fork's
+          # head and every other event still take a standard image.
+          REVIEW_FILES = {"code-review.yml", "code-review.yaml"}
           SEL_OUT = {"needs.preflight.outputs.runner": "bigdisk",
                      "needs.preflight.outputs.runner_docker": "bigdisk-docker"}
           OVERFLOW = [["self-hosted", "linux", "x64", v] for v in SEL_OUT.values()]
@@ -1867,6 +1893,9 @@ jobs:
                                           continue
                                       if sel == "unset" and got == OVERFLOW[0] and not fork_target:
                                           continue
+                                      if (sel is None and got == OVERFLOW[0] and ev in PR and head == "o/r"
+                                              and path.replace("\\", "/").rsplit("/", 1)[-1] in REVIEW_FILES):
+                                          continue  # v1.53: a same-repository head's review guard
                                       if got is None or len(got) != 1 or not STANDARD.fullmatch(got[0]):
                                           what = "an unknown label" if got is None else ", ".join(got)
                                           note = ", runner selection overflow" if sel == "overflow" else ""
@@ -2072,6 +2101,15 @@ jobs:
       # Ruling 887: the release runner is a pool host; the LAN addresses are
       # masked before ci-image-cache.sh publish builds and prints.
       - name: Mask the LAN addresses
+        env:
+          # v1.53: the internal registry is the Actions secret CI_IMAGE_REGISTRY,
+          # never a `vars` value. Actions prints a step's env in its log header
+          # before the run body, so an add-mask comes too late for a variable;
+          # the runner masks a secret from its first byte. A GitHub-hosted run
+          # receives none. ci-mask-lan.sh also masks the bare host name.
+          # CUSTOMIZE: one such line per other *_REGISTRY secret this job reads
+          # (testdata/ci-mask-lan-tests.py M1 to M5).
+          CI_IMAGE_REGISTRY: ${{ runner.environment != 'github-hosted' && secrets.CI_IMAGE_REGISTRY || '' }}
         run: scripts/ci-mask-lan.sh
 
       # v1.42 (ruling 742 (1)): ci-image-cache.sh v3 scans the toolchain
@@ -2122,6 +2160,15 @@ jobs:
       # Ruling 887: the LAN addresses this runner's environment names, masked
       # before any step that builds can print one.
       - name: Mask the LAN addresses
+        env:
+          # v1.53: the internal registry is the Actions secret CI_IMAGE_REGISTRY,
+          # never a `vars` value. Actions prints a step's env in its log header
+          # before the run body, so an add-mask comes too late for a variable;
+          # the runner masks a secret from its first byte. A GitHub-hosted run
+          # receives none. ci-mask-lan.sh also masks the bare host name.
+          # CUSTOMIZE: one such line per other *_REGISTRY secret this job reads
+          # (testdata/ci-mask-lan-tests.py M1 to M5).
+          CI_IMAGE_REGISTRY: ${{ runner.environment != 'github-hosted' && secrets.CI_IMAGE_REGISTRY || '' }}
         run: scripts/ci-mask-lan.sh
 
       # CUSTOMIZE (go-enclave): a GitHub-hosted runner has about 14 GB free;
@@ -2169,8 +2216,8 @@ jobs:
       # v1.32 (2026-11-08, Tenant Agent m2098 item 2, InfoSec finding): the
       # internal-name gate. Its patterns are internal values, so they never
       # live in this repository: the Actions secret RELEASABILITY_PATTERNS
-      # carries the private pattern file (source: dept-infosec
-      # security/internal-names.patterns). Blank
+      # carries the private pattern file (source: the InfoSec Department's
+      # internal-names pattern file). Blank
       # and `#` lines are skipped; every other line is `class<TAB>regex`, a
       # class of coord-host, internal-email, lab-address, lab-host or
       # owner-path (v1.33; an `/i` suffix is allowed) and a POSIX extended regex. A malformed line, an unknown
@@ -2397,6 +2444,15 @@ jobs:
       # Ruling 887: the LAN addresses this runner's environment names, masked
       # before any step that builds can print one.
       - name: Mask the LAN addresses
+        env:
+          # v1.53: the internal registry is the Actions secret CI_IMAGE_REGISTRY,
+          # never a `vars` value. Actions prints a step's env in its log header
+          # before the run body, so an add-mask comes too late for a variable;
+          # the runner masks a secret from its first byte. A GitHub-hosted run
+          # receives none. ci-mask-lan.sh also masks the bare host name.
+          # CUSTOMIZE: one such line per other *_REGISTRY secret this job reads
+          # (testdata/ci-mask-lan-tests.py M1 to M5).
+          CI_IMAGE_REGISTRY: ${{ runner.environment != 'github-hosted' && secrets.CI_IMAGE_REGISTRY || '' }}
         run: scripts/ci-mask-lan.sh
 
       # CUSTOMIZE (go-enclave): a GitHub-hosted runner has about 14 GB free;
@@ -2626,6 +2682,15 @@ jobs:
       # Ruling 887: the LAN addresses this runner's environment names, masked
       # before any step that builds can print one.
       - name: Mask the LAN addresses
+        env:
+          # v1.53: the internal registry is the Actions secret CI_IMAGE_REGISTRY,
+          # never a `vars` value. Actions prints a step's env in its log header
+          # before the run body, so an add-mask comes too late for a variable;
+          # the runner masks a secret from its first byte. A GitHub-hosted run
+          # receives none. ci-mask-lan.sh also masks the bare host name.
+          # CUSTOMIZE: one such line per other *_REGISTRY secret this job reads
+          # (testdata/ci-mask-lan-tests.py M1 to M5).
+          CI_IMAGE_REGISTRY: ${{ runner.environment != 'github-hosted' && secrets.CI_IMAGE_REGISTRY || '' }}
         run: scripts/ci-mask-lan.sh
 
       # CUSTOMIZE (go-enclave): a GitHub-hosted runner has about 14 GB free;
@@ -2724,6 +2789,15 @@ jobs:
       # Ruling 887: the LAN addresses this runner's environment names, masked
       # before any step that builds can print one.
       - name: Mask the LAN addresses
+        env:
+          # v1.53: the internal registry is the Actions secret CI_IMAGE_REGISTRY,
+          # never a `vars` value. Actions prints a step's env in its log header
+          # before the run body, so an add-mask comes too late for a variable;
+          # the runner masks a secret from its first byte. A GitHub-hosted run
+          # receives none. ci-mask-lan.sh also masks the bare host name.
+          # CUSTOMIZE: one such line per other *_REGISTRY secret this job reads
+          # (testdata/ci-mask-lan-tests.py M1 to M5).
+          CI_IMAGE_REGISTRY: ${{ runner.environment != 'github-hosted' && secrets.CI_IMAGE_REGISTRY || '' }}
         run: scripts/ci-mask-lan.sh
 
       # CUSTOMIZE (go-enclave): a GitHub-hosted runner has about 14 GB free;
@@ -2890,6 +2964,15 @@ jobs:
       # Ruling 887: the LAN addresses this runner's environment names, masked
       # before any step that builds can print one.
       - name: Mask the LAN addresses
+        env:
+          # v1.53: the internal registry is the Actions secret CI_IMAGE_REGISTRY,
+          # never a `vars` value. Actions prints a step's env in its log header
+          # before the run body, so an add-mask comes too late for a variable;
+          # the runner masks a secret from its first byte. A GitHub-hosted run
+          # receives none. ci-mask-lan.sh also masks the bare host name.
+          # CUSTOMIZE: one such line per other *_REGISTRY secret this job reads
+          # (testdata/ci-mask-lan-tests.py M1 to M5).
+          CI_IMAGE_REGISTRY: ${{ runner.environment != 'github-hosted' && secrets.CI_IMAGE_REGISTRY || '' }}
         run: scripts/ci-mask-lan.sh
 
       # CUSTOMIZE (go-enclave): a GitHub-hosted runner has about 14 GB free;
@@ -3055,6 +3138,23 @@ jobs:
   # and its check line in CI Gate is full, pr or code as before: the gate
   # reads a proven skip as passed. Its timeout-minutes is ceil(1.5 x its
   # 72-hour p95) (ci-standard.md §12).
+  # v1.53 (the Tenant Agent's read of the Codex P1 on go-trusted-platform
+  # #2311): a job output never carries a registry address. The LAN mask
+  # registers each internal registry as a secret, and GitHub drops a job
+  # output that contains a masked value, so a consumer would read an empty
+  # reference. A CUSTOMIZE job that hands an image to another job exports
+  # only an unmasked identifier (the tag, the digest or its hex suffix), and
+  # each consumer rebuilds the reference from the secret CI_IMAGE_REGISTRY
+  # after its own mask step. The registry is never read from `vars`: a step's
+  # env is printed in its log header before the run body, and only a secret
+  # is masked from the first byte. A GitHub-hosted run receives none, so it
+  # takes the artifact path as before:
+  #   producer:  echo "image_tag=$tag" >> "$GITHUB_OUTPUT"
+  #   consumer:  env: { IT_REGISTRY: ${{ runner.environment != 'github-hosted' && secrets.CI_IMAGE_REGISTRY || '' }},
+  #                     IT_IMAGE_TAG: ${{ needs.<producer>.outputs.image_tag }} }
+  #              run: ref="$IT_REGISTRY/<repo>/it-image:$IT_IMAGE_TAG"
+  # testdata/job-output-handoff-tests.py H1 to H5 holds the rule; run it
+  # with a copy's path to check that copy.
 
   # v1.35.2 (Tenant Agent m2577): the commit signature gate is not a job of
   # this workflow. It is signatures.yml, on pull_request_target, so it runs
@@ -3090,6 +3190,20 @@ jobs:
             echo "::add-mask::$val"
             case $val in *://*:*@*) t=${val#*://}; t=${t%%@*}; echo "::add-mask::${t#*:}" ;; esac
           done
+
+      # Ruling 887: the LAN addresses this runner's environment names, masked
+      # before any step that builds can print one.
+      - name: Mask the LAN addresses
+        env:
+          # v1.53: the internal registry is the Actions secret CI_IMAGE_REGISTRY,
+          # never a `vars` value. Actions prints a step's env in its log header
+          # before the run body, so an add-mask comes too late for a variable;
+          # the runner masks a secret from its first byte. A GitHub-hosted run
+          # receives none. ci-mask-lan.sh also masks the bare host name.
+          # CUSTOMIZE: one such line per other *_REGISTRY secret this job reads
+          # (testdata/ci-mask-lan-tests.py M1 to M5).
+          CI_IMAGE_REGISTRY: ${{ runner.environment != 'github-hosted' && secrets.CI_IMAGE_REGISTRY || '' }}
+        run: scripts/ci-mask-lan.sh
 
       # A GitHub-hosted runner has about 14 GB free; the image build needs more.
       - name: Free disk for the image build
@@ -3142,13 +3256,28 @@ jobs:
       - name: Are the TPM paths selected?
         run: |
           if [ "$TPM_SELECTED" = true ]; then
-            echo "TPM suite selected: running make integration-test-tpm"
+            echo "TPM suite selected: running the integration-test-tpm target"
           else
             echo "TPM suite not selected: this pull request changes no file under backends/tpm/, scripts/swtpm-fixture.sh or .github/workflows/ci.yml"
           fi
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7   CUSTOMIZE: newer than the template's v6.1.0; never downgraded
         if: ${{ env.TPM_SELECTED == 'true' }}
+
+      # Ruling 887: the LAN addresses this runner's environment names, masked
+      # before any step that builds can print one.
+      - name: Mask the LAN addresses
+        if: ${{ env.TPM_SELECTED == 'true' }}
+        env:
+          # v1.53: the internal registry is the Actions secret CI_IMAGE_REGISTRY,
+          # never a `vars` value. Actions prints a step's env in its log header
+          # before the run body, so an add-mask comes too late for a variable;
+          # the runner masks a secret from its first byte. A GitHub-hosted run
+          # receives none. ci-mask-lan.sh also masks the bare host name.
+          # CUSTOMIZE: one such line per other *_REGISTRY secret this job reads
+          # (testdata/ci-mask-lan-tests.py M1 to M5).
+          CI_IMAGE_REGISTRY: ${{ runner.environment != 'github-hosted' && secrets.CI_IMAGE_REGISTRY || '' }}
+        run: scripts/ci-mask-lan.sh
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         if: ${{ env.TPM_SELECTED == 'true' }}
@@ -3233,6 +3362,21 @@ jobs:
             case $val in *://*:*@*) t=${val#*://}; t=${t%%@*}; echo "::add-mask::${t#*:}" ;; esac
           done
 
+      # Ruling 887: the LAN addresses this runner's environment names, masked
+      # before any step that builds can print one.
+      - name: Mask the LAN addresses
+        if: steps.select.outputs.run == 'true'
+        env:
+          # v1.53: the internal registry is the Actions secret CI_IMAGE_REGISTRY,
+          # never a `vars` value. Actions prints a step's env in its log header
+          # before the run body, so an add-mask comes too late for a variable;
+          # the runner masks a secret from its first byte. A GitHub-hosted run
+          # receives none. ci-mask-lan.sh also masks the bare host name.
+          # CUSTOMIZE: one such line per other *_REGISTRY secret this job reads
+          # (testdata/ci-mask-lan-tests.py M1 to M5).
+          CI_IMAGE_REGISTRY: ${{ runner.environment != 'github-hosted' && secrets.CI_IMAGE_REGISTRY || '' }}
+        run: scripts/ci-mask-lan.sh
+
       # A GitHub-hosted runner has about 14 GB free on /, and the fixture
       # image alone unpacks to 27.4 GB. Remove toolchains this job never uses
       # from / (about 25 GB) and move Docker's data root to the runner's
@@ -3300,7 +3444,16 @@ jobs:
     # gate, so `CI / CI Gate (schedule)` posts `skipped` (Gitea 1.27.1 posts a
     # skipped job as `skipped`, not `success`), never a green nightly. Every
     # other verdict, an empty one included, runs it.
-    if: ${{ always() && (github.event_name != 'schedule' || needs.preflight.outputs.verdict != 'busy') }}
+    # v1.53 (Tenant Agent on trusted-firmware #821): with main-{event} a newer
+    # push cancels the older main run, and an always() gate then read the
+    # cancelled needs and failed, so every superseded main commit showed a red
+    # gate. Off pull_request the gate runs on !cancelled(): a cancelled run
+    # posts no gate result (skipped), and a run that is not cancelled still
+    # fails closed on any need that failed. A pull request keeps always(): a
+    # skipped required check counts as passed, so a cancelled PR run must post
+    # a failing gate, never a skip; only an older head of the PR is cancelled
+    # by its group, and the head that merges has its own run.
+    if: ${{ (startsWith(github.event_name, 'pull_request') && always() || !cancelled()) && (github.event_name != 'schedule' || needs.preflight.outputs.verdict != 'busy') }}
     timeout-minutes: 5        # v1.30
     # CUSTOMIZE: the repo's job list. Add every CUSTOMIZE job here AND as a
     # check line below; remove none of the template's jobs. v1.30: lint
