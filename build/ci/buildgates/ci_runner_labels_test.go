@@ -83,6 +83,7 @@ var runnerLabelsCases = []struct {
 	// Actions writes a number without a fraction when it is integral, null
 	// as the empty string, and `{{` in a format string as `{`.
 	{"fail-format-number-string", true},
+	{"fail-number-separator-string", true},
 	{"fail-format-null-string", true},
 	{"fail-format-escaped-brace", true},
 	// A waiver is a real trailing YAML comment. The same text inside a
@@ -106,6 +107,7 @@ var runnerLabelsCases = []struct {
 	{"fail-release-list-format-label", true},
 	{"fail-release-block-list-label", true},
 	{"fail-release-labels-mapping", true},
+	{"fail-release-quoted-labels-key", true},
 	{"fail-release-flow-mapping-label", true},
 	{"fail-release-flow-mapping-group", true},
 	{"pass-list-hosted-expression", false},
@@ -171,6 +173,12 @@ var runnerLabelsWant = map[string][]string{
 		"publish: (a) names `release` in a workflow with a pull_request trigger",
 	},
 	"fail-release-labels-mapping": {
+		"publish: (a) names `release` in a workflow with a pull_request trigger",
+	},
+	"fail-number-separator-string": {
+		"build: (c) does not run on a standard GitHub-hosted image",
+	},
+	"fail-release-quoted-labels-key": {
 		"publish: (a) names `release` in a workflow with a pull_request trigger",
 	},
 	"fail-release-flow-mapping-label": {
