@@ -47,10 +47,10 @@ def script_cases():
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         "DEVCACHE_APT_PROXY": "http://192.168.77.7:3142",  # lab-string-ok: private-range fixture; the mask under test applies only to private addresses
         "DEVCACHE_APK_MIRROR": "http://192.168.77.7:3143/alpine",  # lab-string-ok: private-range fixture; the mask under test applies only to private addresses
-        "GOPROXY": "http://10.1.2.3:3300|https://proxy.golang.org,direct",
+        "GOPROXY": "http://10.1.2.3:3300|https://proxy.golang.org,direct",  # lab-string-ok: private-range fixture; the mask under test applies only to private addresses
         "CI_REGISTRY": "172.20.0.5:5005",
         # the forge's release registry and its own host, which image
-        # publishing and resolving name (Codex P1 on go-xkms #2273)
+        # publishing and resolving name
         "RELEASE_REGISTRY": "172.21.0.9:5443",
         "GITHUB_SERVER_URL": "http://10.9.8.7:8443",
         "OTHER": "http://192.168.9.9:1",  # lab-string-ok: private-range fixture; the mask under test applies only to private addresses
