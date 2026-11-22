@@ -9,7 +9,6 @@
 package amdsev_test
 
 import (
-	"bufio"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -236,24 +235,6 @@ func awaitNeedle(serial string, done <-chan error, timeout time.Duration) (strin
 		}
 	}
 	return "", fmt.Errorf("no needle within %s; console in %s", timeout, serial)
-}
-
-func needleIn(serial string) (string, bool) {
-	f, err := os.Open(serial) //nolint:gosec // the kit's console file
-	if err != nil {
-		return "", false
-	}
-	defer func() { _ = f.Close() }()
-	s := bufio.NewScanner(f)
-	for s.Scan() {
-		line := strings.TrimSpace(s.Text())
-		if rest, ok := strings.CutPrefix(line, guestcfg.NeedleMarker); ok && line != guestcfg.ReleasedLine {
-			if _, err := hex.DecodeString(rest); err == nil && rest != "" {
-				return rest, true
-			}
-		}
-	}
-	return "", false
 }
 
 func readPid(pidfile string) (int, error) {
