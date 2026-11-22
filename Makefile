@@ -127,6 +127,11 @@ endif
 CI_VARS := MODULE_ENV_FILE GO_BUILD_PROXY IT_IMAGE IT_PROJECT GO_BUILD_TAGS
 $(call raw_bind,$(CI_VARS))
 
+# AMDSEV_GUESTS (integration-test-amd-sev) is caller data too, bound here
+# before the first $(shell ...) below can expand it on export.
+AMDSEV_GUESTS ?= sev sev-es
+$(call raw_bind,AMDSEV_GUESTS)
+
 # Every GOOS/GOARCH a consumer may build for; 32-bit targets catch uintptr
 # comparisons that do not compile there.
 CROSS_TARGETS := linux/amd64 linux/arm64 linux/386 linux/arm \
@@ -530,10 +535,9 @@ integration-test-arm-trustzone: docker-build
 # in the backends/amdsev module behind the amdsev build tag, so neither the
 # root module nor make test-backends builds a test that needs the hardware.
 # AMDSEV_CACHE and AMDSEV_RESULTS place the kit and the consoles.
-AMDSEV_GUESTS ?= sev sev-es
 .PHONY: integration-test-amd-sev
 integration-test-amd-sev:
-	@AMDSEV_GUESTS='$(AMDSEV_GUESTS)' sh scripts/amd-sev-snp/run.sh
+	@AMDSEV_GUESTS="$$AMDSEV_GUESTS" sh scripts/amd-sev-snp/run.sh
 
 ## SWTPM_PORT=<port>: integration-test-tpm: the swtpm command port on 127.0.0.1 (default 2321)
 ## SWTPM_CTRL_PORT=<port>: integration-test-tpm: the swtpm control port on 127.0.0.1 (default 2322)
