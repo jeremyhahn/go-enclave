@@ -69,3 +69,4 @@ self-hosted-runner:
     - release
     - fixture-push
     - amd-sev
+    - amd-sev-snp
