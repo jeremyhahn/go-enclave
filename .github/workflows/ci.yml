@@ -1,5 +1,5 @@
 # ci-template: v1.52 — canonical CI for all first-party Go repos.
-# v1.52 (2026-11-21, Tenant Agent order, defect fix): a fork's pull request
+# v1.52 (2026-11-21, defect fix): a fork's pull request
 # under pull_request reached a self-hosted runner. preflight's runs-on had
 # no fork check, so on github.com it took the Dells' bigdisk pool for a
 # fork's head, and `Hosted or overflow runner (ruling 1024)` could overflow
@@ -10,15 +10,15 @@
 # github.event.pull_request.head.repo.full_name == github.repository)`
 # before the variable, so a fork takes `ubuntu-latest` whatever
 # CI_PREFLIGHT_RUNS_ON holds, and the selection step outputs the hosted
-# default for a fork's head with a ::notice and no API call. `Runner labels
-# (ruling 633)` gives a fork's head under pull_request, as under
+# default for a fork's head with a ::notice and no API call. `Runner labels`
+# gives a fork's head under pull_request, as under
 # pull_request_target since v1.51, no unset-variable exemption, and reads
 # the selection outputs for it at their hosted default, as the step emits.
 # Same-repository pull requests, pushes and Gitea are unchanged.
 # testdata/runner-labels-tests.py part H and testdata/runner-select-tests.py
 # part E hold the cases. Adopt as a one-file bump that keeps the CUSTOMIZE
 # blocks.
-# v1.51 (2026-11-21, ruling 633 hardening): `Runner labels (ruling 633)`
+# v1.51 (2026-11-21, hardening): `Runner labels (ruling 633)`
 # also checks every runs-on under pull_request_target, same-repository and
 # fork. code-review.yml and signatures.yml run on that base-defined event, so
 # a runs-on that picks a self-hosted label only there was never read. In a
@@ -26,8 +26,8 @@
 # unset-variable exemption: a fork never reaches a self-hosted runner, and
 # its finding says so. testdata/runner-labels-tests.py part G holds the
 # cases. No other change.
-# v1.50 (2026-11-21, rulings 999/1024 "hosted first with overflow to the
-# Dells", defect fix): the overflow never fired under load. The Actions
+# v1.50 (2026-11-21, "hosted first with overflow to the
+# self-hosted pool", defect fix): the overflow never fired under load. The Actions
 # API's runs?status=queued listing returns fewer items than its total_count
 # while runs change state (go-trusted-platform preflights 01:15Z-01:40Z on
 # 11-21: "61 of 62 entries", "57 of 59"; go-quicbaas 02:23Z: "30 of 31"),
@@ -42,7 +42,7 @@
 # number, and more than 1000 entries still pick hosted with a warning.
 # testdata/runner-select-tests.py C4 and B7 hold the cases. Adopt as a
 # one-file bump that keeps the CUSTOMIZE blocks.
-# v1.49 (2026-11-20, Tenant Agent ruling 1047 (3) and (2), CI priority 1,
+# v1.49 (2026-11-20, CI priority 1,
 # defect fix): the preflight job ran on ubuntu-latest on github.com, about
 # ten seconds of work, and with the 40 hosted runners full and about 320
 # jobs queued it waited up to an hour; every other job needs it, so the
@@ -51,8 +51,8 @@
 # On github.com preflight's runs-on is now
 # `fromJSON(vars.CI_PREFLIGHT_RUNS_ON || '["self-hosted","linux","x64","bigdisk"]')`:
 # the Dells' bigdisk pool, which the overflow already uses. The repository
-# variable CI_PREFLIGHT_RUNS_ON, runs-on JSON, is the fallback switch: Fleet
-# Ops sets it to `"ubuntu-latest"` (quotes included; a value that is not
+# variable CI_PREFLIGHT_RUNS_ON, runs-on JSON, is the fallback switch: an
+# operator sets it to `"ubuntu-latest"` (quotes included; a value that is not
 # JSON fails the run) while the Dells are down. Off github.com it keeps
 # `ubuntu-latest`, the forge label, as before. preflight sets up no Go and
 # touches no Actions cache (v1.36), builds nothing and prints no runner
@@ -67,8 +67,8 @@
 # holds the cases. preflight now holds a bigdisk slot for its ten seconds,
 # and the pool needs jq, curl, git and python3 on its runner. Adopt as a
 # one-file bump that keeps the CUSTOMIZE blocks.
-# v1.48 (2026-11-20, Tenant Agent ruling 1024 item 1, queue 250 (a), owner
-# decision: the Dells' self-hosted runners supplement the 40 GitHub-hosted
+# v1.48 (2026-11-20, owner
+# decision: the self-hosted runners supplement the 40 GitHub-hosted
 # runners; hosted stays the default, and when the hosted pool is full a job
 # runs on the Dells instead of queueing): a new preflight step, `Hosted or
 # overflow runner (ruling 1024)`, counts this repository's jobs on
@@ -80,7 +80,7 @@
 # when HOSTED_JOBS_PER_REPO (12, a new top-level env) or more hosted jobs of
 # the repository are in progress, or a hosted job of another run has been
 # queued HOSTED_QUEUE_GRACE_SECONDS (60) or more. The labels are the ones the
-# Dell pools already register per repository. lint, image, lint-gates,
+# self-hosted pools already register per repository. lint, image, lint-gates,
 # integration and soak build or run images on a Docker daemon, so their
 # runs-on reads runner_docker; CI Gate needs no daemon and reads runner
 # (guarded with `|| '"ubuntu-latest"'`, since it also runs when preflight
@@ -105,7 +105,7 @@
 # blocks; a CUSTOMIZE job that builds images may read runner_docker the same
 # way, and one that adds `Free runner disk` runs it only when
 # `runner.environment == 'github-hosted'`.
-# v1.47 (2026-11-20, Tenant Agent ruling 1007; go-qrdb #1642's Codex review
+# v1.47 (2026-11-20; a Codex review
 # found that the v1.46 gate let `runs-on: codex  # self-hosted: hardware: ...`
 # through on the waiver alone): the step `Runner labels (ruling 633)` checks
 # the label and the category together. The review-only labels, `codex` and
@@ -115,7 +115,7 @@
 # only `credential:` and `qwen` only `hardware:`, and `credential:` is
 # accepted only on the `codex` job; any other pairing is (f). Nothing else
 # changes, and a repository that copied v1.46 unchanged passes v1.47.
-# v1.46 (2026-11-20, Tenant Agent ruling 999, owner decision: GitHub-hosted
+# v1.46 (2026-11-20, owner decision: GitHub-hosted
 # standard runners for every CI job possible; self-hosted only for
 # hardware-specific or oversize jobs, the reason recorded per job): the
 # preflight step `Runner labels (ruling 633)` accepts a self-hosted runs-on
@@ -125,23 +125,23 @@
 # standard runner's 4 vCPU, 16 GB, about 45 GB of disk after `Free runner
 # disk`, or 6 hours). `# self-hosted: credential: <reason>` is accepted for
 # the one job that holds a credential kept on one host (code-review.yml's
-# Codex review), pending the Tenant Agent's answer on ruling 999. A v1.43
+# Codex review), pending a decision. A v1.43
 # reason with no category is now finding (e). A `release` job is the release
 # rule's, unchanged. Every template job passes: batch.yml v1.3 and fuzz.yml
 # v2 move to ubuntu-latest, code-review.yml v5.12.4 names its categories. A
 # repository adopts v1.46 in ONE PR: each job that fits a standard runner
 # moves to `ubuntu-latest` (keeping `Free runner disk` before an image
 # build), and each job that stays self-hosted names its category and reason.
-# v1.45 (2026-11-18, Tenant Agent ruling 901): every job that builds an image
+# v1.45 (2026-11-18): every job that builds an image
 # (lint, lint-gates, image, integration, soak) runs scripts/ci-image-history.sh
 # on the images it will use, after its last build step and before its first
 # use, on a pool runner: a pool build passes the LAN caches as BuildKit
 # secrets, which no history entry keeps, and the check fails on any private
 # address in an image's history or config. publish-images checks through
-# ci-image-cache.sh v4 before the push, and masks the LAN addresses (ruling
-# 887). Copy scripts/ci-image-history.sh (`chmod +x`); testdata/
+# ci-image-cache.sh v4 before the push, and masks the LAN addresses
+# (v1.44). Copy scripts/ci-image-history.sh (`chmod +x`); testdata/
 # ci-image-history-tests.py holds the steps' places and publish's order.
-# v1.44 (2026-11-18, Tenant Agent ruling 887; the owner's rule that internal
+# v1.44 (2026-11-18; the owner's rule that internal
 # addresses stay out of public repositories, and their CI logs count): every
 # job that builds runs scripts/ci-mask-lan.sh right after the credential
 # mask. A pool runner's environment names LAN addresses (the DEVCACHE_*
@@ -153,8 +153,8 @@
 # routes to a pool is therefore masked from its first build on. Copy the
 # script to scripts/ci-mask-lan.sh (`chmod +x`); testdata/ci-mask-lan-tests.py
 # holds the script and the step's place.
-# v1.43 (2026-11-17, Tenant Agent ruling 833; the owner's 11-07 ruling that
-# GitHub-hosted runners are the default, ruling 834's hosted-first phase 1):
+# v1.43 (2026-11-17; the owner's 11-07 decision that
+# GitHub-hosted runners are the default, hosted-first phase 1):
 # a job runs on a standard GitHub-hosted image unless it cannot fit one. The
 # P1 repositories routed nearly every job to self-hosted pools for a push to
 # main and a same-repository PR (go-qrdb 46 self-hosted references and no
@@ -172,7 +172,7 @@
 # public repository. Every template job already passes; a repository adopts
 # v1.43 by moving each job that fits to `ubuntu-latest` (keeping `Free runner
 # disk` before an image build) and giving each job that stays a reason.
-# v1.42 (2026-11-16, owner ruling 742 (1)): the CI Gate is hermetic. Its
+# v1.42 (2026-11-16): the CI Gate is hermetic. Its
 # outcome depends only on the tree under test, on every event. The checks
 # that fail on the state of the world rather than on a change leave ci.yml
 # on every event: `make deps-check` (newer upstream releases and
@@ -196,7 +196,7 @@
 # adopts v1.42 in one CI-file PR that also takes ci-image-cache.sh v3,
 # deletes .github/workflows/deps-bump.yml and adds scans.yml v1.0.0.
 # Every other job, gate and tier is v1.41's.
-# v1.41 (2026-11-16, owner ruling 742 (2)): PR/main parity. Every job and
+# v1.41 (2026-11-16): PR/main parity. Every job and
 # step that runs on a push to main also runs on a pull_request to main, with
 # the same steps, so a PR never merges a change that main then fails on.
 # CI_FULL_TIER is true on every event but a workflow_dispatch off main and
@@ -209,7 +209,7 @@
 # it only turns off the two PR path scopes below. The exceptions, each a job
 # that cannot run on a PR by nature or a scope whose inputs a PR does not
 # change: publish-images (pushes images to the registry from the release
-# runner, ruling 633: no PR job may reach that runner); soak (schedule and
+# runner, and no PR job may reach that runner); soak (schedule and
 # workflow_dispatch only, never on a push either, so no parity gap); the
 # docs-only scope (a PR whose every file matches DOCS_ONLY_PATTERN skips build
 # and make coverage, whose inputs it does not touch) and the lint-gates path
@@ -218,18 +218,18 @@
 # as `code`, not `full`. A repository adopts v1.41 in one CI-file PR and
 # sizes its PR runner capacity for the integration job on every PR.
 # Every other job, gate and tier is v1.40's.
-# v1.40 (2026-11-16, owner ruling 732): a library behind a newer upstream
+# v1.40 (2026-11-16): a library behind a newer upstream
 # release never fails CI. The deps-check step passes DEPS_CHECK_LAG=report on
 # every event, so depscheck v1.1.0 (`-lag report`) reports every lag and fails
 # only a vulnerable go.mod requirement, a lookup failure, and a fork replace or
 # pseudo-version with no reason comment on a line the change adds or bumps
-# (ruling 640). Before it, deps-check turned 11+ PRs red across three
+# (v1.39). Before it, deps-check turned 11+ PRs red across three
 # repositories for upstream releases the PRs never touched. The daily
 # deps-bump.yml (deps-bump v1.1.0) keeps the full gate and carries every lag
 # as ONE PR on ci/deps-bump. A repository adopts v1.40 in one CI-file PR with
 # scripts/depscheck v1.1.0, the Makefile's `-lag $(DEPS_CHECK_LAG)` argument
 # and deps-bump.yml v1.1.0. Every other job, gate and tier is v1.39's.
-# v1.39 (2026-11-14, ruling 640, owner decision 222 (a)): deps-check fails a
+# v1.39 (2026-11-14): deps-check fails a
 # library behind its latest release only when the change adds that go.mod
 # requirement or changes its version, or when govulncheck reports a version of
 # a go.mod requirement vulnerable (stdlib, toolchain and indirect-only findings
@@ -247,15 +247,15 @@
 # carries the bumps. A repository adopts v1.39 in one CI-file PR with
 # scripts/depscheck, its Makefile's deps-check and deps-bump targets, and
 # .github/workflows/deps-bump.yml. Every other job, gate and tier is v1.38's.
-# v1.38 (2026-11-14, owner ruling 633, decision 219(d)): release and publish
+# v1.38 (2026-11-14): release and publish
 # jobs run only on `[self-hosted, linux, x64, release]`, and no pull request
 # job ever does. A pull request's test code reached the Docker daemon that
 # main's image builds and the Trivy gate also used, so it could re-tag a base
-# or scan image they then trusted (go-xkms #1384). publish-images moves to
+# or scan image they then trusted. publish-images moves to
 # that label; on GitHub it runs only when the repository variable
 # RELEASE_RUNNER is `true`, so no run waits on a label with no runner, and on
-# Gitea it runs as before. A new preflight step, `Runner labels (ruling
-# 633)`, fails CI when a workflow of the repository has a job that names
+# Gitea it runs as before. A new preflight step, `Runner labels`,
+# fails CI when a workflow of the repository has a job that names
 # `release` and that a pull request could run, or whose `if:` does not
 # restrict it to a push to main or a tag, or a workflow_dispatch on main.
 # The bigdisk-docker pools get a rootless Docker daemon of their own at the
@@ -265,17 +265,17 @@
 # @sha256 digest and pulls them by digest before docker create or run, and
 # sets RELEASE_RUNNER only once Infrastructure reports the release pools
 # live. Every other job, gate and tier is v1.37's.
-# v1.37 (2026-11-13, ruling 580): every job in every template carries
+# v1.37 (2026-11-13): every job in every template carries
 # timeout-minutes so a hung job ends itself. Ceilings by kind: unit, race,
 # lint and other test jobs 60; integration, image builds, soak and release
 # 120; gates and aggregators 10. A repository sets a job at or under its
 # ceiling, sized at 1.5 x the job's longest green run; a job whose green
 # runs need more keeps its measured value. automerge.yml, nightly.yml and
 # revert-red-main.yml gain the timeouts they lacked.
-# v1.36 (2026-11-13, Tenant Agent, owner approval 16:1xZ: keep CI caches
+# v1.36 (2026-11-13, owner approval: keep CI caches
 # local): a self-hosted job never restores or saves the Actions cache, which
 # lives in Azure blob storage behind the office's internet line. The
-# self-hosted pools (dept-infra github/runner) give every job persistent
+# self-hosted pools give every job persistent
 # per-host caches: GOCACHE and GOMODCACHE, CI_HOST_CACHE for anything else a
 # repository caches (trusted-firmware's OP-TEE stack under
 # $CI_HOST_CACHE/optee/<pin>, renamed into place whole), GOPROXY and
@@ -287,15 +287,15 @@
 # scripts/in-toolchain-image.sh v6 passes the TRIVY_* settings to a bridge
 # stage. GitHub-hosted jobs are unchanged. Every job, gate and tier is
 # v1.35.3's.
-# v1.35.3 (2026-11-12, Tenant Agent m2586 (1)): `pull_request` also fires on
+# v1.35.3 (2026-11-12): `pull_request` also fires on
 # `ready_for_review`. A draft runs no CI (v1.26), and marking it ready started
 # no run, so every draft converted to ready sat with no CI until someone
 # pushed or closed and reopened it (go-quicraft reopened 8 PRs by hand). The
 # ready_for_review run is the PR's first real run: the draft had none in
 # flight for it to cancel. This supersedes v1.26's "no ready_for_review
 # trigger" and its empty-commit step. Every job, gate and tier is v1.35.2's.
-# v1.35.2 (2026-11-11, Tenant Agent m2577, Codex finding on xkey-android
-# #129): the `Signatures` job leaves this workflow. It ran in the pull
+# v1.35.2 (2026-11-11, a Codex
+# finding): the `Signatures` job leaves this workflow. It ran in the pull
 # request's own workflow, so the pull request's tree held the verifier that
 # judged it. It is now signatures.yml (signatures-template v1), on
 # pull_request_target: GitHub reads it from the base branch, it checks out
@@ -304,13 +304,13 @@
 # its needs; the ruleset requires `Signatures / Signatures` beside it. A
 # repository adopts v1.35.2 in one CI-file PR: ci.yml, signatures.yml and
 # .github/allowed_signers. Every other job, gate and tier is v1.35.1's.
-# v1.35.1 (2026-11-11, Tenant Agent m2557, Codex findings on go-luks2 #444 and
-# xkey-android #129): the Signatures job fetches a named base that is not in
+# v1.35.1 (2026-11-11, Codex
+# findings): the Signatures job fetches a named base that is not in
 # the clone and fails closed when it still cannot be read (it no longer falls
 # back to the head's registry and the head commit alone), and its
 # signature-presence check reads the whole commit object, so a long signed
 # message cannot fail under pipefail with SIGPIPE.
-# v1.35 (2026-11-11, Tenant Agent m2557, owner ruling on commit signing): a
+# v1.35 (2026-11-11, owner decision on commit signing): a
 # `Signatures` job verifies every commit in the range against the
 # repository's .github/allowed_signers registry, read from the base commit,
 # and accepts a GitHub-made commit only when the API reports it verified as
@@ -1336,7 +1336,7 @@ jobs:
           fetch-depth: ${{ (github.event_name == 'pull_request' || github.event_name == 'push') && '0' || '1' }}   # CUSTOMIZE
           persist-credentials: false
 
-      # v1.38 (owner ruling 633, decision 219(d)): a job that names the
+      # v1.38: a job that names the
       # `release` label runs only on a push to refs/heads/main or a tag, or a
       # workflow_dispatch on main, and never for a pull request. This step
       # reads every .github/workflows/*.yml and *.yaml of the repository as
@@ -2014,7 +2014,7 @@ jobs:
           fi
           echo "OK: no go-objstore import outside the storage seam"
 
-  # v1.38 (owner ruling 633, decision 219(d)): `[self-hosted, linux, x64,
+  # v1.38: `[self-hosted, linux, x64,
   # release]`, the only label a publish job takes, and never a pull request
   # (the preflight step `Runner labels (ruling 633)` fails CI otherwise). On
   # GitHub the job runs only when the repository variable RELEASE_RUNNER is
