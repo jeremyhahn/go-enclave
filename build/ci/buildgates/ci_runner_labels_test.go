@@ -27,7 +27,7 @@ import (
 // The script is taken out of the real ci.yml and run with bash, as CI runs
 // it, in a directory whose .github/workflows holds one fixture from
 // testdata/runner_labels, and once more on the repository itself.
-const runnerLabelsStep = "Runner labels (ruling 633)"
+const runnerLabelsStep = "Runner labels"
 
 // runnerLabelsWorkflow is the part of a workflow the gate reads: each step's
 // name and script.

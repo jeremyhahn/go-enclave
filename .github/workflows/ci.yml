@@ -1005,7 +1005,7 @@ jobs:
           fi
           echo "OK: no go-objstore import outside the storage seam"
 
-      # v1.38 (owner ruling 633, decision 219(d)): a job that names the
+      # v1.38: a job that names the
       # `release` label runs only on a push to refs/heads/main or a tag, or a
       # workflow_dispatch on main, and never for a pull request. This step
       # reads every .github/workflows/*.yml and *.yaml of the repository as
@@ -1019,10 +1019,10 @@ jobs:
       # hold anything, so the `if:` must be false whatever it holds; an `if:`
       # it cannot read fails. It prints each file:job and the reason. A lint,
       # not the gate: the runner side refuses such a job as well.
-      # v1.43 (ruling 833): on github.com every other job runs on a standard
+      # v1.43: on github.com every other job runs on a standard
       # GitHub-hosted image on every event (c), or its runs-on line says why
       # it cannot, `# self-hosted: <reason>`; a larger runner is refused (d).
-      # v1.46 (ruling 999): the reason names its category, hardware: or
+      # v1.46: the reason names its category, hardware: or
       # oversize: (credential: for the one Codex review job, code-review.yml's
       # `review`); a reason with no category is (e), a credential reason on
       # any other job (f). A runs-on expression that may yield a value the
@@ -1030,7 +1030,7 @@ jobs:
       # pinned, and the event, the ref and every other context are unknown.
       # A workflow whose jobs, or a job whose runs-on, it cannot read is (g).
       # Its tests: build/ci/buildgates/ci_runner_labels_test.go.
-      - name: Runner labels (ruling 633)
+      - name: Runner labels
         run: |
           python3 -I - <<'PY'
           import glob, json, re, sys
@@ -1551,7 +1551,7 @@ jobs:
               return set()
 
 
-          # v1.43 (ruling 833): the standard GitHub-hosted images, free on a public
+          # v1.43: the standard GitHub-hosted images, free on a public
           # repository; a larger runner (cores, large, xlarge, gpu) bills even there.
           STANDARD = re.compile(r"(ubuntu-(latest|24\.04|22\.04)(-arm)?|ubuntu-slim)")
           LARGER = re.compile(r"(cores|xlarge|large|gpu)", re.I)
@@ -1768,7 +1768,7 @@ jobs:
 
 
           def hosted_or_reasoned(where, path, job, ro, ro_line, bad):
-              # v1.43 (ruling 833): hosted first.
+              # v1.43: hosted first.
               if LARGER.search(ro) and re.search(r"ubuntu|windows|macos", ro):
                   bad.append(f"{where}: (d) names a larger GitHub-hosted runner ({ro}); it bills on a public repository")
                   return
@@ -1796,7 +1796,7 @@ jobs:
                   elif len(got) != 1 or not STANDARD.fullmatch(got[0]):
                       off.append(", ".join(got))
               if off and BARE.search(ro_line):
-                  bad.append(f"{where}: (e) its `# self-hosted:` reason names no category; ruling 999 allows a self-hosted job "
+                  bad.append(f"{where}: (e) its `# self-hosted:` reason names no category; a self-hosted job is allowed "
                              f"only as `# self-hosted: hardware: <reason>` or `# self-hosted: oversize: <reason>`; it runs on " + "; ".join(dict.fromkeys(off)))
               elif off:
                   bad.append(f"{where}: (c) does not run on a standard GitHub-hosted image on github.com and its runs-on "
@@ -1877,7 +1877,7 @@ jobs:
           for b in bad:
               print(f"::error::{b}")
           if bad:
-              print(f"{len(bad)} runner-label finding(s) in {len(files)} workflow file(s): a `release` job runs only on {ALLOWED}, never for a pull request (ruling 633); every other job runs on a standard GitHub-hosted image, or its runs-on line names a hardware or oversize reason (rulings 833, 999)")
+              print(f"{len(bad)} runner-label finding(s) in {len(files)} workflow file(s): a `release` job runs only on {ALLOWED}, never for a pull request; every other job runs on a standard GitHub-hosted image, or its runs-on line names a hardware or oversize reason")
               sys.exit(1)
           print(f"OK: {len(files)} workflow file(s); every job that names `release` runs only on {ALLOWED}, and every other job on a standard GitHub-hosted image or with a hardware or oversize reason")
           PY
