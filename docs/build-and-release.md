@@ -246,7 +246,8 @@ its own. Each target runs `vet-buildgates` first and selects tests by prefix.
 | `make check-project-scripts` | `scripts/project-scripts_test.sh` | `swtpm-fixture.sh`, `test-runtimesecret.sh`, `cross-build.sh`, `lint-integration.sh` and `release-verify.sh` refuse bad input, make exactly their calls and report every failure; stub tools on PATH, offline |
 | `make check-it-runner` | `build/docker/devcontainer/run-integration-tests_test.sh` | The integration runner refuses bad input with status 2 and fails a merged profile below the floor or missing a cover package; a stub `go`, offline |
 | `make check-fuzz-runner` | `build/fuzz/fuzz_test.sh` | `make fuzz` finds every target in every module, honours `FUZZ`, `FUZZ_PKG` and `FUZZTIME`, and stops at the first failure naming its input; a stub `go`, offline |
-| `make lint-gates` | the rows above | Runs `check-buildgates`, `check-releasability`, `check-changelog-assembly`, `check-scripts`, `check-in-toolchain-image`, `check-project-scripts`, `check-it-runner` and `check-fuzz-runner`: the repository's own gates beside lint. CI runs it as the Lint Gates job; `make lint` does not list it |
+| `make check-ci-python-suites` | `testdata/ci-mask-lan-tests.py`, `testdata/job-output-handoff-tests.py` | The CI template's carried suites, each under `python3 -I`: the LAN mask masks what it must, and every job that builds masks before its first build step and hands its outputs on as the template does; offline |
+| `make lint-gates` | the rows above | Runs `check-buildgates`, `check-releasability`, `check-changelog-assembly`, `check-scripts`, `check-in-toolchain-image`, `check-project-scripts`, `check-it-runner`, `check-fuzz-runner` and `check-ci-python-suites`: the repository's own gates beside lint. CI runs it as the Lint Gates job; `make lint` does not list it |
 | `make tidy-check` | — | `go.mod` and `go.sum` are tidy, in the root and in `build/ci/buildgates` |
 
 ### Aggregates

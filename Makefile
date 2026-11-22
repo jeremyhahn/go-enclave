@@ -687,12 +687,20 @@ fuzz:
 check-fuzz-runner:
 	@sh build/fuzz/fuzz_test.sh
 
-## lint-gates: the repository's own gates beside lint: check-buildgates, check-releasability, check-changelog-assembly, check-scripts, check-in-toolchain-image, check-project-scripts, check-it-runner, check-fuzz-runner (CI's lint-gates job)
+## check-ci-python-suites: the CI template's carried Python suites: the LAN mask and the job-output handoff, with the mask step's placement
+# Go does not discover Python under testdata/, so this target runs each suite,
+# isolated (python3 -I), against the tree's ci.yml and scripts; no network.
+.PHONY: check-ci-python-suites
+check-ci-python-suites:
+	@python3 -I testdata/ci-mask-lan-tests.py
+	@python3 -I testdata/job-output-handoff-tests.py
+
+## lint-gates: the repository's own gates beside lint: check-buildgates, check-releasability, check-changelog-assembly, check-scripts, check-in-toolchain-image, check-project-scripts, check-it-runner, check-fuzz-runner, check-ci-python-suites (CI's lint-gates job)
 # ci.yml runs this as its own job, in parallel with `make lint`, so make lint
 # does not list it. tidy-check, lint-runtimesecret and lint-integration stay
 # in the image job.
 .PHONY: lint-gates
-lint-gates: check-buildgates check-releasability check-changelog-assembly check-scripts check-in-toolchain-image check-project-scripts check-it-runner check-fuzz-runner
+lint-gates: check-buildgates check-releasability check-changelog-assembly check-scripts check-in-toolchain-image check-project-scripts check-it-runner check-fuzz-runner check-ci-python-suites
 	@echo "lint-gates completed successfully"
 
 # CI AGGREGATES. ci.yml and release.yml each call these, one per job, so a job
