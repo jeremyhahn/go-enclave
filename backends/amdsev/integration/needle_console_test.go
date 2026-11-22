@@ -117,6 +117,22 @@ func TestNeedleIn_NoConsole(t *testing.T) {
 	}
 }
 
+// A console line longer than the scanner's limit stops the scan before EOF,
+// so a release line after it would go unseen: the read fails closed, and no
+// needle counts as held.
+func TestNeedleIn_OversizedLineFailsClosed(t *testing.T) {
+	serial := writeConsole(t,
+		guestcfg.NeedleMarker+testNeedle,
+		strings.Repeat("x", 128<<10),
+		guestcfg.ReleasedLine)
+	if got, ok := needleIn(serial); ok {
+		t.Fatalf("needleIn = %q, true; want no needle when the console cannot be read to its end", got)
+	}
+	if err := heldThroughScan(serial, testNeedle); err == nil {
+		t.Fatal("heldThroughScan = nil for a console read that stopped before the release line; want an error")
+	}
+}
+
 func TestHeldThroughScan_HeldNeedle(t *testing.T) {
 	serial := writeConsole(t, guestcfg.NeedleMarker+testNeedle)
 	if err := heldThroughScan(serial, testNeedle); err != nil {
