@@ -176,17 +176,21 @@ refusal cases (item 5) and the host scan in those guests; the SEV-SNP tests
 listed. A host that cannot run a listed mode fails the run naming what is
 missing.
 
-The workflow `.github/workflows/amd-sev.yml` is the SEV and SEV-ES hardware
-job. It runs the target on the self-hosted runner labelled `amd-sev`, and
-starts only while the repository variable `AMD_SEV_RUNNER` is `online`. That
-host has SEV and SEV-ES and no SEV-SNP, so the job's SEV-SNP step, which
-runs the target with `AMDSEV_GUESTS=snp` where `kvm_amd` reports `sev_snp`,
-reports "SNP not available on this runner" there and fails nothing; every
-SEV and SEV-ES check still runs.
+The workflow `.github/workflows/amd-sev.yml` has two hardware jobs. The
+`amd-sev` job runs the target for `sev sev-es` on the self-hosted runner
+labelled `amd-sev`, and starts only while the repository variable
+`AMD_SEV_RUNNER` is `online`. That host has SEV and SEV-ES and no SEV-SNP,
+and the job runs no SNP step.
+
+The `amd-sev-snp` job runs the target with `AMDSEV_GUESTS=snp`, the SNP guest
+and its plain KVM control, on the self-hosted runner labelled `amd-sev-snp`.
+It starts only while the repository variable `AMD_SEV_SNP_RUNNER` is
+`online`, and its first check fails the job, with an error annotation, unless
+`kvm_amd` reports `sev_snp` as `Y` or `1`: a green run of it is an SNP run.
 
 **Open:** the SNP hardware acceptance, items 3 and 4 in an SNP guest, has
-not run. It needs an SEV-SNP host, and until one runs it the row stays in
-progress.
+not run. The `amd-sev-snp` job runs once an SEV-SNP host is registered as
+that runner and the variable is set; until then the row stays in progress.
 
 ## What it does not do
 
