@@ -115,6 +115,73 @@ func readRepoFile(t *testing.T, rel string) string {
 	return string(src)
 }
 
+// composeBuildArgProxy matches a module proxy among the build args of a
+// compose file's build: section.
+var composeBuildArgProxy = regexp.MustCompile(`(?m)^\s+-?\s*"?(GO_BUILD_PROXY|GOPROXY)\b[^\n]*$`)
+
+// composeBuildArgs returns the lines of every `args:` map under a `build:`
+// key in a compose file.
+func composeBuildArgs(src string) string {
+	var out []string
+	lines := strings.Split(src, "\n")
+	for i, l := range lines {
+		if strings.TrimSpace(l) != "args:" {
+			continue
+		}
+		ind := len(l) - len(strings.TrimLeft(l, " "))
+		for _, m := range lines[i+1:] {
+			if strings.TrimSpace(m) == "" || strings.HasPrefix(strings.TrimSpace(m), "#") {
+				continue
+			}
+			if len(m)-len(strings.TrimLeft(m, " ")) <= ind {
+				break
+			}
+			out = append(out, m)
+		}
+	}
+	return strings.Join(out, "\n")
+}
+
+// proxyTextViolations lists where the workflow or the compose file still
+// passes, or says it passes, the module proxy as a build argument.
+func proxyTextViolations(ci, compose string) []string {
+	var bad []string
+	if proxyBuildArgFlag.MatchString(ci) {
+		bad = append(bad, ".github/workflows/ci.yml says the image build takes GO_BUILD_PROXY as --build-arg; it is the goproxy BuildKit secret")
+	}
+	if composeBuildArgProxy.MatchString(composeBuildArgs(compose)) {
+		bad = append(bad, "build/docker/devcontainer/compose.yaml passes a module proxy as a build argument; Docker records it in the image history")
+	}
+	return bad
+}
+
+func TestNoBuildTakesTheProxyAsABuildArg(t *testing.T) {
+	ci := readRepoFile(t, ".github/workflows/ci.yml")
+	compose := readRepoFile(t, "build/docker/devcontainer/compose.yaml")
+	for _, b := range proxyTextViolations(ci, compose) {
+		t.Error(b)
+	}
+	if composeBuildArgs(compose) == "" {
+		t.Error("compose.yaml: the parse found no build args; the check no longer reads the file")
+	}
+}
+
+func TestNoBuildTakesTheProxyAsABuildArg_RefusesWhatItMustRefuse(t *testing.T) {
+	good := "services:\n  it:\n    build:\n      args:\n        APK_INDEX_SUM: ${APK_INDEX_SUM:-}\n    environment:\n      GOPROXY: \"off\"\n"
+	if b := proxyTextViolations("# the proxy is the goproxy secret\n", good); len(b) != 0 {
+		t.Fatalf("the good shape is refused: %v", b)
+	}
+	for _, c := range []struct{ name, ci, compose string }{
+		{"comment names the build arg", "# (`--build-arg \"GO_BUILD_PROXY=$(GO_BUILD_PROXY)\"`)\n", good},
+		{"compose map arg", "", strings.Replace(good, "        APK", "        GO_BUILD_PROXY: ${GO_BUILD_PROXY:-}\n        APK", 1)},
+		{"compose list arg", "", strings.Replace(good, "        APK_INDEX_SUM: ${APK_INDEX_SUM:-}", "        - GOPROXY=${GOPROXY}", 1)},
+	} {
+		if len(proxyTextViolations(c.ci, c.compose)) == 0 {
+			t.Errorf("%s: passes", c.name)
+		}
+	}
+}
+
 func TestImageBuildProxyIsABuildKitSecret(t *testing.T) {
 	const dockerfile = "build/docker/devcontainer/Dockerfile"
 	for _, b := range dockerfileProxyViolations(readRepoFile(t, dockerfile)) {

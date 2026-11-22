@@ -11,6 +11,20 @@ import (
 var ciPythonSuites = []string{
 	"testdata/ci-mask-lan-tests.py",
 	"testdata/job-output-handoff-tests.py",
+	// The runner selector (the preflight step that picks a hosted or an
+	// overflow runner): its fork isolation, overflow and lookup failures run
+	// against a stub Actions API.
+	"testdata/runner-select-tests.py",
+}
+
+// TestCIPythonSuitesShip fails when a suite lint-gates must run is not in the
+// tree.
+func TestCIPythonSuitesShip(t *testing.T) {
+	for _, suite := range ciPythonSuites {
+		if src := readRepoFile(t, suite); !strings.Contains(src, "ci.yml") {
+			t.Errorf("%s does not read ci.yml", suite)
+		}
+	}
 }
 
 // makeRule returns the prerequisites and the recipe of target in mk, and
@@ -67,13 +81,15 @@ func TestLintGatesRunsTheCIPythonSuites(t *testing.T) {
 func TestLintGatesRunsTheCIPythonSuites_RefusesWhatItMustRefuse(t *testing.T) {
 	good := "\nlint-gates: check-a check-py\n\t@echo ok\n\ncheck-py:\n" +
 		"\t@python3 -I " + ciPythonSuites[0] + "\n" +
-		"\t@python3 -I " + ciPythonSuites[1] + "\n\ncheck-a:\n\t@true\n"
+		"\t@python3 -I " + ciPythonSuites[1] + "\n" +
+		"\t@python3 -I " + ciPythonSuites[2] + "\n\ncheck-a:\n\t@true\n"
 	if b := ciPythonSuiteViolations(good); len(b) != 0 {
 		t.Fatalf("a good Makefile is refused: %v", b)
 	}
 	for _, tc := range []struct{ name, old, new string }{
 		{"target not in lint-gates", "check-a check-py\n", "check-a\n"},
 		{"a suite dropped", "\t@python3 -I " + ciPythonSuites[1] + "\n", ""},
+		{"the runner-select suite dropped", "\t@python3 -I " + ciPythonSuites[2] + "\n", ""},
 		{"without -I", "python3 -I " + ciPythonSuites[0], "python3 " + ciPythonSuites[0]},
 		{"no lint-gates", "\nlint-gates:", "\nlint-all:"},
 	} {
