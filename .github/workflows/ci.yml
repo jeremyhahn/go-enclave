@@ -1651,13 +1651,14 @@ jobs:
                       nest[0] -= 1
                   return s[i] == "," and nest[0] == 0
 
-              value = None
+              value, group = None, False
               for pair in split_top(t[1:-1], comma):
                   kv = split_top(pair, lambda s, i: s[i] == ":" and (i + 1 == len(s) or s[i + 1].isspace()))
                   if len(kv) != 2:
                       raise ValueError("a flow mapping entry that is not one key and one value")
                   key = unquote(kv[0])
                   if key == "group":
+                      group = True
                       continue
                   if key != "labels" or value is not None:
                       raise ValueError(f"a flow mapping key this step does not read: {key!r}")
@@ -1666,13 +1667,62 @@ jobs:
                   raise ValueError("a flow mapping with unbalanced brackets")
               if value is None or value.startswith("{"):
                   raise ValueError("a flow mapping with no label list")
-              return value
+              return value, group
 
 
-          def runs_on_labels(text):
-              t = text.strip()
+          def decode_keys(t):
+              """t with every quoted mapping key, flow or block, replaced by the key
+              YAML decodes it to, so `"gr\\u006fup":` reads as `group:`. Quoted values
+              and expressions stay as written. A key this step cannot decode, or one
+              that decodes to more than a bare word, raises ValueError."""
+              out, depth, i = [], 0, 0
+              while i < len(t):
+                  c = t[i]
+                  if t.startswith(OPEN, i):
+                      depth += 1
+                      out.append(OPEN)
+                      i += len(OPEN)
+                      continue
+                  if depth and t.startswith("}}", i):
+                      depth -= 1
+                      out.append("}}")
+                      i += 2
+                      continue
+                  if depth or c not in "'\"" or (i and t[i - 1] not in " \t{[,:-?"):
+                      out.append(c)
+                      i += 1
+                      continue
+                  j = i + 1
+                  while True:
+                      if j >= len(t):
+                          raise ValueError("a quoted scalar with no closing quote")
+                      if c == '"' and t[j] == "\\":
+                          j += 2
+                          continue
+                      if t[j] == c:
+                          if c == "'" and t[j + 1:j + 2] == "'":
+                              j += 2
+                              continue
+                          break
+                      j += 1
+                  scalar = t[i:j + 1]
+                  if re.match(r"\s*:", t[j + 1:]):
+                      scalar = unquote(scalar)
+                      if not re.fullmatch(r"[^\s'\"{}\[\],:#&*!|>%@`]+", scalar):
+                          raise ValueError(f"a mapping key this step cannot read: {scalar!r}")
+                  out.append(scalar)
+                  i = j + 1
+              return "".join(out)
+
+
+          def runs_on_mapping(text):
+              """(labels, group): the runs-on's labels as runs_on_labels gives them, and
+              whether a `group` key stands beside them, read after every key is decoded."""
+              t = decode_keys(text.strip())
+              group = bool(GROUP.search(t))
               if t.startswith("{"):
-                  t = flow_mapping_labels(t)
+                  t, flow_group = flow_mapping_labels(t)
+                  group = group or flow_group
               elif re.match(r"""(['"]?)(?:group|labels)\1\s*:""", t) or re.search(r"""\s(['"]?)labels\1\s*:""", t):
                   m = re.search(r"""(?:^|\s)(['"]?)labels\1\s*:\s*(.*)$""", t, re.S)
                   t = m.group(2) if m else ""
@@ -1683,11 +1733,15 @@ jobs:
               if t.startswith("["):
                   if not t.endswith("]"):
                       raise ValueError("a label list with no closing bracket")
-                  return label_values(split_top(t[1:-1], lambda s, i: s[i] == ","))
+                  return label_values(split_top(t[1:-1], lambda s, i: s[i] == ",")), group
               if t.startswith("- "):
                   return label_values(split_top(t, lambda s, i: s[i] == "-" and (i == 0 or s[i - 1].isspace())
-                                                and (i + 1 == len(s) or s[i + 1].isspace())))
-              return label_values([t])
+                                                and (i + 1 == len(s) or s[i + 1].isspace()))), group
+              return label_values([t]), group
+
+
+          def runs_on_labels(text):
+              return runs_on_mapping(text)[0]
 
 
           def names_release(text):
@@ -1726,12 +1780,16 @@ jobs:
               if w:
                   return
               off = []
-              if GROUP.search(ro):
-                  off.append("a runner group, which routes the job off the GitHub-hosted pool whatever its labels")
+              group, got, err = bool(GROUP.search(ro)), None, None
               try:
-                  got = runs_on_labels(ro)
+                  got, decoded_group = runs_on_mapping(ro)
+                  group = group or decoded_group
               except ValueError as e:
-                  off.append(f"a runs-on this step cannot read ({e})")
+                  err = e
+              if group:
+                  off.append("a runner group, which routes the job off the GitHub-hosted pool whatever its labels")
+              if err is not None:
+                  off.append(f"a runs-on this step cannot read ({err})")
               else:
                   if got is None:
                       off.append("a runner this step cannot know: the expression tests an event, ref or value it does not pin")
