@@ -197,6 +197,11 @@ func TestAmdSev_HostScan(t *testing.T) {
 			scan := exec.Command("sh", filepath.Join(scripts, "host-scan.sh"), strconv.Itoa(pid), needle) //nolint:gosec // the kit's own script
 			out, err := scan.CombinedOutput()
 			t.Logf("host scan of the %s guest's QEMU (pid %d):\n%s", tc.mode, pid, out)
+			// The verdict counts only if the needle was live for the
+			// whole scan: a release before completion fails the run.
+			if err := heldThroughScan(serial, needle); err != nil {
+				t.Fatalf("%s guest: %v", tc.mode, err)
+			}
 			code := 0
 			var ee *exec.ExitError
 			switch {

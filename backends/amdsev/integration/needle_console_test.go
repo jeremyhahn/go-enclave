@@ -3,6 +3,7 @@ package amdsev_test
 import (
 	"bufio"
 	"encoding/hex"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,23 +12,44 @@ import (
 	"github.com/jeremyhahn/go-enclave/backends/amdsev/integration/guestcfg"
 )
 
-// needleIn reads the guest's console for the needle it holds.
+// needleIn reads the guest's console for the needle it holds: none once the
+// console carries the release line.
 func needleIn(serial string) (string, bool) {
 	f, err := os.Open(serial) //nolint:gosec // the kit's console file
 	if err != nil {
 		return "", false
 	}
 	defer func() { _ = f.Close() }()
+	needle := ""
 	s := bufio.NewScanner(f)
 	for s.Scan() {
 		line := strings.TrimSpace(s.Text())
-		if rest, ok := strings.CutPrefix(line, guestcfg.NeedleMarker); ok && line != guestcfg.ReleasedLine {
+		if line == guestcfg.ReleasedLine {
+			// The guest has destroyed the needle's enclave: there is no
+			// needle left in its memory to scan for.
+			return "", false
+		}
+		if rest, ok := strings.CutPrefix(line, guestcfg.NeedleMarker); ok && needle == "" {
 			if _, err := hex.DecodeString(rest); err == nil && rest != "" {
-				return rest, true
+				needle = rest
 			}
 		}
 	}
-	return "", false
+	return needle, needle != ""
+}
+
+// heldThroughScan reports whether the guest still holds needle, unreleased,
+// once a host scan has completed. A scan the guest's hold does not outlast
+// read memory the guest had already wiped, so its "not found" proves nothing.
+func heldThroughScan(serial, needle string) error {
+	held, ok := needleIn(serial)
+	switch {
+	case !ok:
+		return fmt.Errorf("the guest released its needle before the host scan completed, so the scan may have read wiped memory; raise amdsev.hold (console in %s)", serial)
+	case held != needle:
+		return fmt.Errorf("the guest's console holds needle %q, not the scanned %q (console in %s)", held, needle, serial)
+	}
+	return nil
 }
 
 const testNeedle = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
