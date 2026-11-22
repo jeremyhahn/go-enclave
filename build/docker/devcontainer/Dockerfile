@@ -221,6 +221,20 @@ RUN set -eu; \
     GONOSUMDB=github.com/jeremyhahn/go-enclave go mod verify; \
     chmod -R a+rX /gomodcache; \
     find /gomodcache/cache -type d -exec chmod a+w {} +
+WORKDIR /build/backends/amdsev
+COPY backends/amdsev/go.mod backends/amdsev/go.sum ./
+RUN set -eu; \
+    n=0; until GOPROXY="$GO_BUILD_PROXY" GONOSUMDB=github.com/jeremyhahn/go-enclave go mod download; do n=$((n + 1)); [ "$n" -lt 3 ] || exit 1; sleep $((n * 10)); done; \
+    GONOSUMDB=github.com/jeremyhahn/go-enclave go mod verify; \
+    chmod -R a+rX /gomodcache; \
+    find /gomodcache/cache -type d -exec chmod a+w {} +
+WORKDIR /build/backends/intelsgx
+COPY backends/intelsgx/go.mod backends/intelsgx/go.sum ./
+RUN set -eu; \
+    n=0; until GOPROXY="$GO_BUILD_PROXY" GONOSUMDB=github.com/jeremyhahn/go-enclave go mod download; do n=$((n + 1)); [ "$n" -lt 3 ] || exit 1; sleep $((n * 10)); done; \
+    GONOSUMDB=github.com/jeremyhahn/go-enclave go mod verify; \
+    chmod -R a+rX /gomodcache; \
+    find /gomodcache/cache -type d -exec chmod a+w {} +
 # The TPM backend downloads all: go mod tidy there loads go-tpm's simulator
 # test dependency, which the bare download leaves out of the cache.
 WORKDIR /build/backends/tpm
