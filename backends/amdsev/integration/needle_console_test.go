@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,11 +16,16 @@ import (
 )
 
 // needleIn reads the guest's console for the needle it holds: none once the
-// console carries the release line.
-func needleIn(serial string) (string, bool) {
+// console carries the release line, and an error when the console cannot be
+// read to its end.
+func needleIn(serial string) (string, bool, error) {
 	f, err := os.Open(serial)
-	if err != nil {
-		return "", false
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		// The guest has not written its console yet.
+		return "", false, nil
+	case err != nil:
+		return "", false, fmt.Errorf("reading the guest's console: %w", err)
 	}
 	defer func() { _ = f.Close() }()
 	needle := ""
@@ -29,7 +35,7 @@ func needleIn(serial string) (string, bool) {
 		if line == guestcfg.ReleasedLine {
 			// The guest has destroyed the needle's enclave: there is no
 			// needle left in its memory to scan for.
-			return "", false
+			return "", false, nil
 		}
 		if rest, ok := strings.CutPrefix(line, guestcfg.NeedleMarker); ok && needle == "" {
 			if _, err := hex.DecodeString(rest); err == nil && rest != "" {
@@ -37,15 +43,22 @@ func needleIn(serial string) (string, bool) {
 			}
 		}
 	}
-	return needle, needle != ""
+	if err := s.Err(); err != nil {
+		// The read stopped before the end of the console, so a release line
+		// may lie beyond it: fail closed, with no needle held.
+		return "", false, fmt.Errorf("reading the guest's console %s to its end: %w", serial, err)
+	}
+	return needle, needle != "", nil
 }
 
 // heldThroughScan reports whether the guest still holds needle, unreleased,
 // once a host scan has completed. A scan the guest's hold does not outlast
 // read memory the guest had already wiped, so its "not found" proves nothing.
 func heldThroughScan(serial, needle string) error {
-	held, ok := needleIn(serial)
+	held, ok, err := needleIn(serial)
 	switch {
+	case err != nil:
+		return fmt.Errorf("the needle cannot be shown held through the host scan: %w", err)
 	case !ok:
 		return fmt.Errorf("the guest released its needle before the host scan completed, so the scan may have read wiped memory; raise amdsev.hold (console in %s)", serial)
 	case held != needle:
@@ -98,21 +111,21 @@ func appendConsole(t *testing.T, serial, line string) {
 
 func TestNeedleIn_HeldNeedle(t *testing.T) {
 	serial := writeConsole(t, "boot", guestcfg.NeedleMarker+testNeedle)
-	got, ok := needleIn(serial)
-	if !ok || got != testNeedle {
-		t.Fatalf("needleIn = %q, %v; want %q, true", got, ok, testNeedle)
+	got, ok, err := needleIn(serial)
+	if !ok || got != testNeedle || err != nil {
+		t.Fatalf("needleIn = %q, %v, %v; want %q, true, nil", got, ok, err, testNeedle)
 	}
 }
 
 func TestNeedleIn_ReleasedNeedleIsNotReturned(t *testing.T) {
 	serial := writeConsole(t, guestcfg.NeedleMarker+testNeedle, guestcfg.ReleasedLine)
-	if got, ok := needleIn(serial); ok {
+	if got, ok, _ := needleIn(serial); ok {
 		t.Fatalf("needleIn = %q, true; want no needle once the console carries %q: the guest has wiped it", got, guestcfg.ReleasedLine)
 	}
 }
 
 func TestNeedleIn_NoConsole(t *testing.T) {
-	if got, ok := needleIn(filepath.Join(t.TempDir(), "absent.log")); ok {
+	if got, ok, _ := needleIn(filepath.Join(t.TempDir(), "absent.log")); ok {
 		t.Fatalf("needleIn = %q, true; want no needle without a console", got)
 	}
 }
@@ -125,8 +138,9 @@ func TestNeedleIn_OversizedLineFailsClosed(t *testing.T) {
 		guestcfg.NeedleMarker+testNeedle,
 		strings.Repeat("x", 128<<10),
 		guestcfg.ReleasedLine)
-	if got, ok := needleIn(serial); ok {
-		t.Fatalf("needleIn = %q, true; want no needle when the console cannot be read to its end", got)
+	got, ok, err := needleIn(serial)
+	if ok || err == nil {
+		t.Fatalf("needleIn = %q, %v, %v; want no needle and an error when the console cannot be read to its end", got, ok, err)
 	}
 	if err := heldThroughScan(serial, testNeedle); err == nil {
 		t.Fatal("heldThroughScan = nil for a console read that stopped before the release line; want an error")
@@ -144,7 +158,7 @@ func TestHeldThroughScan_HeldNeedle(t *testing.T) {
 // wiped: its "not found" proves nothing, so the run must fail.
 func TestHeldThroughScan_DelayedScanFails(t *testing.T) {
 	serial := writeConsole(t, guestcfg.NeedleMarker+testNeedle)
-	needle, ok := needleIn(serial)
+	needle, ok, _ := needleIn(serial)
 	if !ok {
 		t.Fatal("no needle in the console")
 	}
@@ -196,7 +210,7 @@ func TestHeldThroughScan_ScanDuringDestroyFails(t *testing.T) {
 	if scanErr == nil {
 		t.Fatal("heldThroughScan = nil for a scan completing while the guest destroys its needle; want an error: the release must be on the console before the wipe")
 	}
-	if _, ok := needleIn(serial); ok {
+	if _, ok, _ := needleIn(serial); ok {
 		t.Fatal("needleIn returned a needle after the release")
 	}
 }

@@ -240,7 +240,11 @@ func TestAmdSev_HostScan(t *testing.T) {
 func awaitNeedle(serial string, done <-chan error, timeout time.Duration) (string, error) {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		if n, ok := needleIn(serial); ok {
+		n, ok, err := needleIn(serial)
+		switch {
+		case err != nil:
+			return "", err
+		case ok:
 			return n, nil
 		}
 		select {
