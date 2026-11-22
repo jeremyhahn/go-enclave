@@ -3,7 +3,9 @@ package amdsev_test
 import (
 	"bufio"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -50,6 +52,18 @@ func heldThroughScan(serial, needle string) error {
 		return fmt.Errorf("the guest's console holds needle %q, not the scanned %q (console in %s)", held, needle, serial)
 	}
 	return nil
+}
+
+// releaseNeedle ends the guest's hold: it destroys the needle's enclave with
+// destroy and announces the release on console, flushing it with flush.
+func releaseNeedle(console io.Writer, flush, destroy func() error) error {
+	if err := destroy(); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintln(console, guestcfg.ReleasedLine); err != nil {
+		return err
+	}
+	return flush()
 }
 
 const testNeedle = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
@@ -133,5 +147,54 @@ func TestHeldThroughScan_OtherNeedleFails(t *testing.T) {
 func TestHeldThroughScan_NoConsoleFails(t *testing.T) {
 	if err := heldThroughScan(filepath.Join(t.TempDir(), "absent.log"), testNeedle); err == nil {
 		t.Fatal("heldThroughScan = nil without a console; want an error")
+	}
+}
+
+// A host scan that completes while the guest is destroying the needle, after
+// the wipe started but before any later step, read memory being wiped: the
+// guest must have announced the release by then, so the scan is rejected.
+func TestHeldThroughScan_ScanDuringDestroyFails(t *testing.T) {
+	serial := writeConsole(t, guestcfg.NeedleMarker+testNeedle)
+	console, err := os.OpenFile(serial, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = console.Close() }()
+	destroyed := false
+	var scanErr error
+	destroy := func() error {
+		destroyed = true
+		// The host scan completes here, inside the destroy interval.
+		scanErr = heldThroughScan(serial, testNeedle)
+		return nil
+	}
+	if err := releaseNeedle(console, console.Sync, destroy); err != nil {
+		t.Fatal(err)
+	}
+	if !destroyed {
+		t.Fatal("releaseNeedle did not destroy the needle")
+	}
+	if scanErr == nil {
+		t.Fatal("heldThroughScan = nil for a scan completing while the guest destroys its needle; want an error: the release must be on the console before the wipe")
+	}
+	if _, ok := needleIn(serial); ok {
+		t.Fatal("needleIn returned a needle after the release")
+	}
+}
+
+// A failed flush still destroys the needle, and reports the failure.
+func TestReleaseNeedle_FlushFailureStillDestroys(t *testing.T) {
+	var console strings.Builder
+	destroyed := false
+	flushErr := errors.New("flush failed")
+	err := releaseNeedle(&console, func() error { return flushErr }, func() error { destroyed = true; return nil })
+	if !errors.Is(err, flushErr) {
+		t.Fatalf("releaseNeedle = %v; want the flush error", err)
+	}
+	if !destroyed {
+		t.Fatal("releaseNeedle did not destroy the needle after a failed flush")
+	}
+	if !strings.Contains(console.String(), guestcfg.ReleasedLine) {
+		t.Fatalf("console %q lacks %q", console.String(), guestcfg.ReleasedLine)
 	}
 }

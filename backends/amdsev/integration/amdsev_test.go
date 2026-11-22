@@ -123,10 +123,9 @@ func TestAmdSev_GuestHoldNeedle(t *testing.T) {
 	}
 	fmt.Printf("%s%s\n", guestcfg.NeedleMarker, needle)
 	time.Sleep(cfg.Hold)
-	if err := mem.Destroy(); err != nil {
+	if err := releaseNeedle(os.Stdout, func() error { return nil }, mem.Destroy); err != nil {
 		t.Fatal(err)
 	}
-	fmt.Println(guestcfg.ReleasedLine)
 }
 
 func env(t *testing.T, name string) string {
