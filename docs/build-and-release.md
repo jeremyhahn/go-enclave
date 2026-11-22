@@ -289,7 +289,7 @@ drives the runner on a stub `go`.
 
 ## CI
 
-`ci.yml` is the handbook's CI template v1.49, named on its first line. Where
+`ci.yml` is the handbook's CI template v1.54, named on its first line. Where
 the repository departs from the template, the line carries a `CUSTOMIZE`
 comment: the FIPS, TPM swtpm and OP-TEE jobs and their CI Gate check lines,
 the cross-build and runtimesecret steps, the job timeouts, the weekly schedule,
@@ -302,9 +302,9 @@ On github.com the Preflight job runs on a self-hosted
 `"ubuntu-latest"`, quotes included, while that pool is down. A value that is
 not JSON fails the run. Off github.com Preflight runs on `ubuntu-latest`.
 Preflight then picks the runner for every job that builds or runs images
-(`runner_docker`) and for CI Gate (`runner`): `ubuntu-latest`, or the
-self-hosted overflow pool when the hosted queue is full, pull requests
-included. Off github.com those jobs keep their forge labels (`bigdisk`,
+(`runner_docker`) and for CI Gate (`runner`): `ubuntu-latest` or the
+self-hosted `bigdisk` pool, whichever is less used (Runners, below); a pull
+request from a fork always runs hosted. Off github.com those jobs keep their forge labels (`bigdisk`,
 `ci-gate`).
 
 Every stage of `ci.yml` runs in the devcontainer's toolchain image, built from the commit under test: `make
@@ -355,14 +355,22 @@ jobs that would run on the self-hosted pool, and CI Gate passes on that
 proof; a proof that cannot be read runs the full tier.
 
 **Runners.** Preflight picks the runner of every later job. On github.com it
-counts this repository's jobs on GitHub-hosted runners through the Actions
-API: below `HOSTED_JOBS_PER_REPO` (12) in progress, with no hosted job of
-another run queued longer than `HOSTED_QUEUE_GRACE_SECONDS` (60), the jobs
-run on `ubuntu-latest`; when the hosted pool is full they overflow to the
-self-hosted `bigdisk` pool (the Docker jobs to `bigdisk-docker`, CI Gate to
-`bigdisk`). An API error, a reply it cannot read or a threshold that is not
-a number picks `ubuntu-latest` with a warning naming why. A pull request
-from a fork, or one whose head repository is gone, never overflows: it runs
+counts this repository's jobs through the Actions API and balances the use of
+two pools, read from three repository variables the Infra Department sets:
+`CI_HOSTED_SHARE` (HS, this repository's share of the account's hosted
+runners), `CI_SELF_HOSTED_BIGDISK` (C1) and `CI_SELF_HOSTED_BIGDISK_DOCKER`
+(C2), the units of each self-hosted label. Hosted use is H/HS for H hosted
+jobs in progress; self-hosted use is the larger of S1/C1 and S2/C2. With both
+pools below their limit the less used one wins, and a tie goes hosted; with
+one pool full the jobs go to the other; with both full they go to the pool
+with fewer queued jobs (`bigdisk` and `bigdisk-docker` counted together), and
+a tie goes hosted. Self-hosted means `bigdisk-docker` for the Docker jobs and
+`bigdisk` for CI Gate. `CI_HOSTED_SHARE` unset, 0 or not a whole number gives a
+warning and HS=12; either self-hosted variable unset, 0 or not a whole number
+picks `ubuntu-latest` with a warning. An API error, a reply it cannot read or
+a list short of its total picks `ubuntu-latest` with a warning naming why.
+One decision holds for every job of the run. A pull request from a fork, or
+one whose head repository is gone, always runs hosted: it runs
 every job on `ubuntu-latest` with no API call, and its Preflight runs there
 too, so no fork's code reaches a self-hosted runner. A same-repository
 pull request and a push run Preflight on the self-hosted pool
@@ -371,7 +379,8 @@ on `ubuntu-latest`; Publish CI images runs on the self-hosted `release`
 runner. Off github.com the jobs keep the forge's labels (`bigdisk`,
 `ci-gate`). `make lint-gates` runs `testdata/runner-select-tests.py`, which
 runs Preflight's selection step from `ci.yml` against a stub Actions API:
-forks, a deleted fork, overflow and each lookup failure.
+forks, a deleted fork, the balance between the pools and each lookup
+failure.
 
 A draft pull request (a `WIP:` title) runs no CI: every job but CI Gate skips,
 and CI Gate fails on a draft, so no skipped gate reads as passed. Marking the
@@ -403,7 +412,7 @@ through, never as a build argument, which the image history would keep;
 unset, the Dockerfile's public proxy applies. The image jobs pass the
 runner's own `GOPROXY` as `GO_BUILD_PROXY="${GOPROXY:-}"`: an `ubuntu-latest`
 runner carries none, so the image build uses the Dockerfile's default public
-proxy; an overflow runner's proxy goes in as the secret. No proxy chain has a `direct` entry.
+proxy; a self-hosted runner's proxy goes in as the secret. No proxy chain has a `direct` entry.
 `MODULE_ENV_FILE` serves
 `integration-test` only. `GO_BUILD_TAGS` must stay empty,
 because no package is gated by a tag; the Makefile refuses any other value.
