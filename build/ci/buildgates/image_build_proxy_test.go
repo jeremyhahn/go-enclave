@@ -345,10 +345,13 @@ func toolchainTargetViolations(mk string) []string {
 	if !strings.Contains(r, "--target toolchain") {
 		bad = append(bad, "the recipe does not build the toolchain stage (--target toolchain)")
 	}
-	if !strings.Contains(r, `if [ -n "$${GO_BUILD_PROXY:-}" ]; then set -- "$$@" --build-arg "GO_BUILD_PROXY=$$GO_BUILD_PROXY"; fi`) {
-		bad = append(bad, "the recipe does not pass a set GO_BUILD_PROXY as a build argument")
+	if !strings.Contains(r, `if [ -n "$${GO_BUILD_PROXY:-}" ]; then set -- "$$@" `+proxySecretFlag+`; fi`) {
+		bad = append(bad, "the recipe does not pass a set GO_BUILD_PROXY as the goproxy BuildKit secret")
 	}
-	for _, s := range []string{"gomodauth", "--secret", "MODULE_ENV_FILE"} {
+	if strings.Count(r, "--secret") != 1 {
+		bad = append(bad, "the recipe passes a BuildKit secret other than goproxy; the image build takes GO_BUILD_PROXY, not the forge credentials")
+	}
+	for _, s := range []string{"gomodauth", "MODULE_ENV_FILE"} {
 		if strings.Contains(r, s) {
 			bad = append(bad, fmt.Sprintf("the recipe names %s; the image build takes GO_BUILD_PROXY, not the forge credentials", s))
 		}
@@ -366,7 +369,9 @@ func TestToolchainBuildTargetUsesTheModuleProxy(t *testing.T) {
 		t.Errorf("Makefile: %s", b)
 	}
 	for _, tc := range []struct{ name, old, new string }{
-		{"proxy dropped", `--build-arg "GO_BUILD_PROXY=$$GO_BUILD_PROXY"`, `--label x=y`},
+		{"proxy dropped", proxySecretFlag, `--label x=y`},
+		{"proxy as a build argument", proxySecretFlag, `--build-arg "GO_BUILD_PROXY=$$GO_BUILD_PROXY"`},
+		{"another secret", "\ndocker-build-toolchain:\n", "\ndocker-build-toolchain:\n\t@true --secret id=other\n"},
 		{"credential staged again", "\ndocker-build-toolchain:\n", "\ndocker-build-toolchain:\n\t@true --secret id=gomodauth\n"},
 		{"target renamed away", "\ndocker-build-toolchain:\n", "\ndocker-build-tools:\n"},
 	} {

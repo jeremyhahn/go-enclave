@@ -1,6 +1,6 @@
 # Build and release
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-11-16
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-11-22
 > Conflicts with this document are defects. For shipped behavior the Makefile, `scripts/` and `build/ci/` are canonical: fix this document to match them.
 
 How a change is built and gated, and how a signed release is cut, verified and
@@ -352,7 +352,8 @@ only when the runner's daemon lacks it; each job leases it, and
 module credential. The toolchain image also downloads each nested module's
 graph, which includes the root module at the tag its `go.mod` requires, so
 `make docker-build` passes `GO_BUILD_PROXY`, when set, to `docker build` as the
-build argument naming the Go module proxy the image build fetches through;
+BuildKit secret `goproxy` naming the Go module proxy the image build fetches
+through, never as a build argument, which the image history would keep;
 unset, the Dockerfile's public proxy applies. Every CI job runs on an
 `ubuntu-latest` runner, which carries no `GOPROXY`: the image jobs pass the
 empty value as `GO_BUILD_PROXY="${GOPROXY:-}"`, so the image build uses the
