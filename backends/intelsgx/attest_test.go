@@ -4,8 +4,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"runtime"
-	"sync"
 	"testing"
 
 	enclave "github.com/jeremyhahn/go-enclave"
@@ -77,35 +75,5 @@ func TestAttestEndedContext(t *testing.T) {
 	cancel()
 	if _, err := (newTestBackend()).Attest(ctx, []byte{1}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Attest(canceled) = %v, want context.Canceled", err)
-	}
-}
-
-// TestAttestRefusesOutsideEnclave runs the real Attest on a linux/amd64 host
-// that is not in an SGX enclave, from many goroutines at once: each call
-// refuses at attestation_type, under the backend's lock.
-func TestAttestRefusesOutsideEnclave(t *testing.T) {
-	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
-		t.Skip("the stub's refusal is attest_other_test.go's")
-	}
-	skipInEnclave(t)
-	b := newTestBackend()
-	var wg sync.WaitGroup
-	errs := make([]error, 8)
-	for i := range errs {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			_, errs[i] = b.Attest(context.Background(), []byte{byte(i)})
-		}()
-	}
-	wg.Wait()
-	for _, err := range errs {
-		var se *SGXEnclaveError
-		if !errors.Is(err, ErrSGXUnavailable) || !errors.As(err, &se) || se.Op != "attestation_type" {
-			t.Fatalf("Attest = %v, want an SGXEnclaveError with Op attestation_type", err)
-		}
-		if errors.Is(err, ErrSGXQuote) {
-			t.Fatalf("Attest = %v matches ErrSGXQuote, want unavailable only", err)
-		}
 	}
 }

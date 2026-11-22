@@ -155,7 +155,7 @@ func TestAttestOnUnconstructedBackend(t *testing.T) {
 // not in an SGX enclave (or not linux/amd64): it refuses with the typed
 // unavailable error and builds no backend.
 func TestNewRefusesOutsideEnclave(t *testing.T) {
-	skipInEnclave(t)
+	outsideEnclave(t)
 	b, err := New(context.Background())
 	if b != nil || !errors.Is(err, ErrSGXUnavailable) {
 		t.Fatalf("New = %v, %v; want nil, ErrSGXUnavailable", b, err)
@@ -176,7 +176,7 @@ func TestBackendShape(t *testing.T) {
 	if b.Name() != "intel-sgx" || b.Rank() != 2 || !b.ConfinesProcess() {
 		t.Fatalf("Name, Rank, ConfinesProcess = %q, %d, %v; want intel-sgx, 2, true", b.Name(), b.Rank(), b.ConfinesProcess())
 	}
-	skipInEnclave(t)
+	outsideEnclave(t)
 	if err := b.Probe(context.Background()); !errors.Is(err, ErrSGXUnavailable) {
 		t.Fatalf("Probe = %v, want ErrSGXUnavailable", err)
 	}

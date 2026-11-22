@@ -8,8 +8,8 @@ import (
 	"testing"
 )
 
-// skipInEnclave never skips here: no enclave runs this build.
-func skipInEnclave(*testing.T) {}
+// outsideEnclave has nothing to point here: this build is never in an enclave.
+func outsideEnclave(*testing.T) {}
 
 func TestProbeRefusesPlatform(t *testing.T) {
 	err := probe(context.Background())
