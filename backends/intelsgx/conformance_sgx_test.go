@@ -5,9 +5,8 @@ package intelsgx
 import (
 	"context"
 	"crypto/rand"
-	"encoding/binary"
 	"errors"
-	"fmt"
+	"os"
 	"sync"
 	"testing"
 
@@ -20,26 +19,16 @@ import (
 // plan sets out (docs/backends/intel-sgx.md). There is no simulator path and no
 // skip: outside such an enclave construction fails and so does the test.
 
-// verifyQuoteBinding is the relying party's check this module can make on its
-// own: the evidence is a version 3 ECDSA quote whose REPORT_DATA is the padded
-// nonce and whose enclave is not a debug enclave. The PCK chain, quote
-// signature and TCB status are the DCAP verifier's, which the hardware runner
-// supplies.
-func verifyQuoteBinding(nonce []byte, ev enclave.Evidence) error {
-	if ev.Format != EvidenceFormat {
-		return fmt.Errorf("evidence format %q, want %q", ev.Format, EvidenceFormat)
-	}
-	rd, err := padNonce(nonce)
+// newQuoteVerifier is the relying party the hardware runner supplies (see
+// quoteVerifierFromEnv): without it the test fails, since a header and nonce
+// check alone would pass an unsigned quote.
+func newQuoteVerifier(t *testing.T) *quoteVerifier {
+	t.Helper()
+	v, err := quoteVerifierFromEnv(os.Getenv)
 	if err != nil {
-		return err
+		t.Fatalf("the intel-sgx conformance test needs the hardware runner's quote verifier: %v", err)
 	}
-	if err := checkQuote(ev.Data, rd); err != nil {
-		return err
-	}
-	if binary.LittleEndian.Uint64(ev.Data[quoteHeaderSize+attributesOffset:])&flagDebug != 0 {
-		return ErrDebugEnclave
-	}
-	return nil
+	return v
 }
 
 func newEnclaveBackend(t *testing.T) *Backend {
@@ -52,6 +41,7 @@ func newEnclaveBackend(t *testing.T) *Backend {
 }
 
 func TestBackendConformance_InSGXEnclave(t *testing.T) {
+	v := newQuoteVerifier(t)
 	newEnclaveBackend(t)
 	material := []enclave.ImportOption{enclave.WithPurpose(enclave.PurposeMaterial)}
 	cfg := backendtest.Config{
@@ -73,7 +63,7 @@ func TestBackendConformance_InSGXEnclave(t *testing.T) {
 			ImportSize:   32,
 			Capabilities: []enclave.Capability{enclave.CapabilityBytes, enclave.CapabilityFreeze},
 		}},
-		VerifyEvidence: verifyQuoteBinding,
+		VerifyEvidence: v.verify,
 		Logf:           t.Logf,
 	}
 	if err := backendtest.TestBackend(context.Background(), cfg); err != nil {
@@ -82,6 +72,7 @@ func TestBackendConformance_InSGXEnclave(t *testing.T) {
 }
 
 func TestAttestConcurrentInSGXEnclave(t *testing.T) {
+	v := newQuoteVerifier(t)
 	b := newEnclaveBackend(t)
 	nonces := make([][]byte, 8)
 	evs := make([]enclave.Evidence, len(nonces))
@@ -103,11 +94,11 @@ func TestAttestConcurrentInSGXEnclave(t *testing.T) {
 		if errs[i] != nil {
 			t.Fatalf("Attest(nonce %d) = %v", i, errs[i])
 		}
-		if err := verifyQuoteBinding(nonces[i], evs[i]); err != nil {
+		if err := v.verify(nonces[i], evs[i]); err != nil {
 			t.Fatalf("the quote for nonce %d does not verify against it: %v", i, err)
 		}
 		other := nonces[(i+1)%len(nonces)]
-		if err := verifyQuoteBinding(other, evs[i]); !errors.Is(err, ErrReportDataMismatch) {
+		if err := v.verify(other, evs[i]); !errors.Is(err, ErrReportDataMismatch) {
 			t.Fatalf("the quote for nonce %d verifies against another nonce: %v", i, err)
 		}
 	}
