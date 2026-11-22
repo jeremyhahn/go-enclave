@@ -45,28 +45,28 @@ def script_cases():
         return
     env = {
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-        "DEVCACHE_APT_PROXY": "http://192.168.77.7:3142",
-        "DEVCACHE_APK_MIRROR": "http://192.168.77.7:3143/alpine",
+        "DEVCACHE_APT_PROXY": "http://192.168.77.7:3142",  # lab-string-ok: private-range fixture; the mask under test applies only to private addresses
+        "DEVCACHE_APK_MIRROR": "http://192.168.77.7:3143/alpine",  # lab-string-ok: private-range fixture; the mask under test applies only to private addresses
         "GOPROXY": "http://10.1.2.3:3300|https://proxy.golang.org,direct",
         "CI_REGISTRY": "172.20.0.5:5005",
         # the forge's release registry and its own host, which image
         # publishing and resolving name (Codex P1 on go-xkms #2273)
         "RELEASE_REGISTRY": "172.21.0.9:5443",
         "GITHUB_SERVER_URL": "http://10.9.8.7:8443",
-        "OTHER": "http://192.168.9.9:1",
+        "OTHER": "http://192.168.9.9:1",  # lab-string-ok: private-range fixture; the mask under test applies only to private addresses
     }
     out = subprocess.run(["bash", SCRIPT], env=env, capture_output=True, text=True)
     check(out.returncode == 0, f"ci-mask-lan.sh exited {out.returncode}: {out.stderr}")
     lines = out.stdout.split()
-    for want in ["::add-mask::http://192.168.77.7:3142", "::add-mask::192.168.77.7:3142", "::add-mask::192.168.77.7",
-                 "::add-mask::http://192.168.77.7:3143/alpine", "::add-mask::192.168.77.7:3143",
+    for want in ["::add-mask::http://192.168.77.7:3142", "::add-mask::192.168.77.7:3142", "::add-mask::192.168.77.7",  # lab-string-ok: private-range fixture; the mask under test applies only to private addresses
+                 "::add-mask::http://192.168.77.7:3143/alpine", "::add-mask::192.168.77.7:3143",  # lab-string-ok: private-range fixture; the mask under test applies only to private addresses
                  "::add-mask::http://10.1.2.3:3300", "::add-mask::10.1.2.3",
                  "::add-mask::172.20.0.5:5005", "::add-mask::172.20.0.5",
                  "::add-mask::172.21.0.9:5443", "::add-mask::172.21.0.9",
                  "::add-mask::http://10.9.8.7:8443", "::add-mask::10.9.8.7:8443", "::add-mask::10.9.8.7"]:
         check(want in lines, f"the script does not print {want}")
     for l in lines:
-        check("proxy.golang.org" not in l and "direct" not in l and "192.168.9.9" not in l,
+        check("proxy.golang.org" not in l and "direct" not in l and "192.168.9.9" not in l,  # lab-string-ok: private-range fixture; the mask under test applies only to private addresses
               f"the script masks {l}: a public host, a keyword or a variable outside the list")
     # v1.53: internal host names are masked as well as private addresses.
     names = dict(PATH=env["PATH"], DEVCACHE_APT_PROXY="http://build-node-2:3142",
