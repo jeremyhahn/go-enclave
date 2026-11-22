@@ -62,6 +62,10 @@ var runnerLabelsCases = []struct {
 	// A runner group routes the job off the hosted pool, whatever labels
 	// stand beside it.
 	{"fail-runner-group-hosted-labels", true},
+	// A group key spelled with an escape is still `group` once YAML decodes
+	// it, in a flow mapping and in a block mapping alike.
+	{"fail-runner-group-escaped-key", true},
+	{"fail-runner-group-escaped-block-key", true},
 	// A release job's `if:` must prove push to main or a tag, or
 	// workflow_dispatch on main; a branch, ref or event outside that is
 	// a finding, however it is spelled.
@@ -186,6 +190,14 @@ var runnerLabelsWant = map[string][]string{
 	},
 	"fail-release-flow-mapping-group": {
 		"publish: (a) names `release` in a workflow with a pull_request trigger",
+	},
+	"fail-runner-group-escaped-key": {
+		"build: (c) does not run on a standard GitHub-hosted image on github.com and its runs-on line gives no " +
+			"`# self-hosted: hardware|oversize: <reason>`; it runs on a runner group",
+	},
+	"fail-runner-group-escaped-block-key": {
+		"build: (c) does not run on a standard GitHub-hosted image on github.com and its runs-on line gives no " +
+			"`# self-hosted: hardware|oversize: <reason>`; it runs on a runner group",
 	},
 }
 

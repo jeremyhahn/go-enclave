@@ -1,0 +1,8 @@
+on: [pull_request]
+jobs:
+  build:
+    runs-on:
+      "gr\u006fup": private-runners
+      labels: ubuntu-latest
+    steps:
+      - run: "true"
