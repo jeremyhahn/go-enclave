@@ -1,6 +1,6 @@
 # Intel SGX backend — architecture (proposal)
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-11-12
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-11-23
 > Conflicts with this document are defects. A planned feature ([SPEC](../SPEC.md#features), row `intel-sgx`): no code exists, and no code is written until the owner decides the [open questions](#open-questions); each answer then replaces its options here. The backend's own docs move to its module with its code.
 
 ## Problem
@@ -23,10 +23,8 @@ enclave's pages live in the Enclave Page Cache (EPC), encrypted in DRAM with a
 key the CPU never exports, and the CPU refuses every access to them from
 outside the enclave, the kernel's and the hypervisor's included. Unlike
 SEV-SNP and TDX, which protect a whole virtual machine and trust its kernel,
-SGX protects a part of one process and trusts no kernel at all. The enclave
-can ask the CPU for a report over its own measurement, which Intel's Quoting
-Enclave turns into a quote signed by a key certified to Intel's root, so the
-environment attests itself rather than through the host's platform.
+SGX protects a part of one process and trusts no kernel at all.
+Attestation of the enclave is go-xkms's.
 
 An SGX enclave runs in user mode with no system calls: the `SYSCALL`
 instruction faults inside it. A Go program, whose runtime makes system calls
@@ -56,7 +54,6 @@ attribute clear.
 | DIMM or bus read, cold boot | plaintext | plaintext | ciphertext; a physical replay of DRAM contents is not detected on the parts without an integrity tree ([hardware](#hardware-and-firmware)) |
 | Swap and core dumps | locked, `MADV_DONTDUMP` | locked, `VM_DONTDUMP` | EPC pages the kernel evicts are encrypted and versioned by the CPU (`EWB`, `ELDU`), so swap holds ciphertext the kernel cannot replay; a core dump reads abort pages |
 | Code inside the process (the same enclave) | readable | readable | readable: SGX does not isolate inside the enclave ([Q7](#q7-handle-memory-and-freezer)) |
-| Attestation of the environment | through the host's platform ([SPEC boundaries](../SPEC.md#boundaries)) | the same | its own: a DCAP ECDSA quote over the enclave's measurement and a caller's nonce |
 
 It does not stop code inside the enclave, side channels the platform's TCB
 does not mitigate (SGX has a long record of them, each closed by a microcode
@@ -154,36 +151,8 @@ the enclave cannot run or quote without them.
 
 ## Attestation
 
-The backend implements `Attester` on the backend, placing platform evidence
-there as the [seam requires](architecture.md#attestation):
-
-- **Evidence.** `Attest(ctx, nonce)` takes the backend's lock, writes `nonce`
-  (1 to 64 bytes) zero-padded to 64 bytes to `user_report_data`, reads
-  `quote`, checks that the quote's `REPORT_DATA` is the 64 bytes it wrote, and
-  releases the lock. It returns `Evidence{Format: "sgx-quote", Data: quote}`,
-  where `quote` is the version 3 ECDSA quote of the DCAP Quote Library API,
-  byte for byte ([Q6](#q6-evidence-shape)).
-- **What it binds.** The quote's ISV enclave report body carries `MRENCLAVE`
-  (the enclave's build measurement), `MRSIGNER` (the hash of the signing key),
-  `ISVPRODID`, `ISVSVN`, `ATTRIBUTES` (DEBUG, 64-bit, KSS), `CPUSVN`, the
-  `CONFIGID` and `CONFIGSVN` when KSS is used, and `REPORT_DATA`. The Quoting
-  Enclave signs the header and body with its ECDSA P-256 attestation key; its
-  own report, signed by the PCK, binds that key; the PCK certificate chains to
-  the Intel SGX Root CA.
-- **Who verifies.** The relying party, through the `sgx-quote` format's
-  verifier, outside this module: go-enclave never parses or appraises evidence
-  ([SPEC boundaries](../SPEC.md#boundaries)); platform attestation belongs to
-  go-xkms and go-trusted-platform. The verifier checks the chain and CRLs,
-  the QE report and identity, the TCB info for the platform's FMSPC and the
-  TCB status it accepts, `REPORT_DATA` against the nonce it issued, DEBUG
-  clear, and its policy on `MRENCLAVE` or `MRSIGNER`, `ISVPRODID` and minimum
-  `ISVSVN`.
-- **What the measurement covers.** `MRENCLAVE` covers the library OS, its
-  loader and the manifest; the manifest names each trusted file by hash, so
-  the Go binary and its libraries are covered. Files the manifest only allows,
-  arguments and environment variables not fixed in the manifest, and anything
-  read from the host at run time are not; the user doc will say so, and the
-  test manifest fixes them all.
+Attestation is go-xkms's: this backend implements no `Attester` and returns
+no evidence ([SPEC scope](../SPEC.md#scope)).
 
 ## Shape proposed
 
@@ -197,7 +166,6 @@ flowchart LR
   detect -->|"Rank 1, Probe"| sm[linux-secretmem]
   detect -->|"Rank 2, Probe: one quote round trip"| sgx[intel-sgx backend]
   sgx -->|"Import: memory enclave in EPC"| h[Handle: ByteAccess, Freezer]
-  sgx -->|"Attest: user_report_data, quote"| ev[Evidence sgx-quote]
 ```
 
 - **Out of tree** (Q1), a module of its own (`go-enclave-intel-sgx`), in the
@@ -208,7 +176,7 @@ flowchart LR
 - **Runs whole inside an enclave under Gramine** (Q2); the backend reaches
   SGX only through the library OS's `/dev/attestation` (Q3).
 - **Capabilities**, as the [TEE-memory class](architecture.md#what-each-backend-class-provides)
-  provides: `Importer`, `Attester` (backend), `Confiner`, `Sweeper` and
+  provides: `Importer`, `Confiner`, `Sweeper` and
   `Prober` on the backend; `ByteAccess` and `Freezer` on its handles; no
   `AEAD`, `Deriver`, `crypto.Signer` or `crypto.Decrypter` (Q8).
 - **Handles** wrap a memory enclave made with `enclave.NewMemory` inside the
@@ -222,8 +190,8 @@ flowchart LR
 - **`Sweep`** destroys every handle the backend made and returns the count it
   could not; `WipeAll`'s first phase reaches the same memory enclaves.
 - **Rank 2** (Q4); the probe runs only from `Detect` (Q5), and the constructor
-  checks the same interface, so a backend that cannot attest is never built.
-- It passes `backendtest` with `VerifyEvidence` set (Q9).
+  checks the same interface, so a backend that cannot quote is never built.
+- It passes `backendtest`.
 - **Linux on amd64 only.** On any other GOOS or GOARCH a stub compiles whose
   constructor and probe return the typed unavailable error, so a
   cross-platform `main` that registers it builds everywhere.
@@ -240,10 +208,7 @@ holds.
 | Not in an SGX enclave: no `/dev/attestation` (not under a library OS), `attestation_type` not `dcap` (Gramine without SGX, or attestation not enabled in the manifest) | probe, construction | `*SGXEnclaveError{Op, Cause}` matching `ErrSGXUnavailable`; `Op` names the step (`attestation_type`, `report`, `user_report_data`, `quote`), `Cause` the `*os.PathError` or the value read |
 | A debug enclave (`ATTRIBUTES.DEBUG` set in its own report) | probe, construction | the same, `Op` `debug` |
 | Non-Linux or non-amd64 build | probe, construction | `ErrSGXUnavailable` with no cause |
-| The quote cannot be produced (the quoting service down or unreachable through the host, the PCK not provisioned, the platform not registered, the host's delay outlasting `ctx`) | `Attest` | `*SGXQuoteError{Op, Cause}` matching `ErrSGXQuote` |
-| The quote's `REPORT_DATA` is not what the backend wrote (another writer in the process raced it) | `Attest` | the same, `Op` `report_data`; never a quote of unknown provenance |
-| The quote is not a version 3 ECDSA quote, or shorter than its header and report body | `Attest` | the same, `Op` `quote` |
-| A nonce empty or over 64 bytes | `Attest` | go-enclave's existing `ErrInvalidNonce`, before any request |
+| The probe's quote cannot be produced (the quoting service down or unreachable through the host, the PCK not provisioned, the platform not registered), does not carry the `REPORT_DATA` the probe wrote, or is not a version 3 ECDSA quote | probe, construction | the same, `Op` `quote`, its `Cause` an `*SGXQuoteError{Op, Cause}` matching `ErrSGXQuote` |
 | `ctx` ended | every call | `ctx.Err()`, as the seam requires |
 | Budget refused, an `ImportSpec` refused | `Import` | the existing `*BudgetError`, `ErrInvalidImport`, `*CapabilityError` |
 | The enclave's memory exhausted (the manifest's enclave size) | `Import` | the memory enclave's existing `ErrLockedMemoryUnavailable` |
@@ -273,11 +238,9 @@ machine the owner provides, Linux on amd64.
    environment fixed, the binary a trusted file), computes the expected
    `MRENCLAVE` and `MRSIGNER` from the signing step, and runs the backend
    module's tests under `gramine-sgx`, handing the expected values to the test.
-3. **Conformance inside the enclave.** `backendtest.TestBackend` with
-   `VerifyEvidence` set to a verifier that checks the PCK chain to the Intel
-   SGX Root CA, the QE report and identity, the quote signature, the TCB
-   status, `REPORT_DATA` against the suite's nonce, the expected `MRENCLAVE`
-   and DEBUG clear. The residue sweep runs if the library OS's `/proc`
+3. **Conformance inside the enclave.** `backendtest.TestBackend`, claiming
+   `CapabilityImport`, `CapabilitySweep`, `CapabilityConfine` and
+   `CapabilityProbe`. The residue sweep runs if the library OS's `/proc`
    emulation gives `internal/memscan` its view of the process; if it does
    not, the implementing slice says so in the conformance harness and skips
    that subtest by name.
@@ -293,9 +256,8 @@ machine the owner provides, Linux on amd64.
 6. **Refusals on the same machine.** The test binary on the host itself, under
    `gramine-direct`, and in a debug enclave: the probe returns
    `ErrSGXUnavailable` naming the step, and `Detect` keeps the next backend.
-   With the quoting service stopped: `Attest` returns `ErrSGXQuote`.
-   Concurrent `Attest` calls from many goroutines each return a quote that
-   verifies against its own nonce.
+   With the quoting service stopped: the probe returns `ErrSGXUnavailable`
+   with `Op` `quote`, its cause matching `ErrSGXQuote`.
 
 ## Open questions
 
@@ -358,24 +320,14 @@ machine the owner provides, Linux on amd64.
   version 3 ECDSA quote with that nonce at `REPORT_DATA`'s offset; it
   verifies nothing else. It costs one quote, a round trip to the host's
   Quoting Enclave, per `Detect`, and it passes only an enclave that can
-  attest, which every environment must ([SPEC boundaries](../SPEC.md#boundaries)).
+  quote, so go-xkms can attest it.
 - **Presence only** (`attestation_type` and the DEBUG check): no quote round
   trip, but it passes an enclave whose platform is not provisioned or whose
-  quoting service is down, which then fails at the first `Attest`.
+  quoting service is down.
 
 ### Q6: evidence shape
 
-- **The quote alone** (recommended): `Data` is the version 3 ECDSA quote as
-  the DCAP Quote Library API defines it, its certification data carrying the
-  PCK certificate chain as the quoting service returns it; the format name is
-  `sgx-quote`, alongside the seam's `tdx-quote` and `sev-snp-report`. The
-  verifier fetches TCB info, QE identity and CRLs from Intel's PCS or a cache.
-  The nonce is zero-padded to 64 bytes; the verifier compares against the
-  nonce it issued and its length.
-- **Quote and collateral in one wrapper**, such as the IETF RATS Conceptual
-  Message Wrapper (draft-ietf-rats-msg-wrap): one value carries everything,
-  but it adopts a draft, to be pinned and watched, and collateral is the
-  verifier's to fetch and cache.
+Withdrawn: attestation is go-xkms's, and this backend returns no evidence.
 
 ### Q7: handle memory and Freezer
 
@@ -392,7 +344,7 @@ machine the owner provides, Linux on amd64.
 
 ### Q8: sealing keys
 
-- **Not in this row** (recommended): the backend attests and confines; it
+- **Not in this row** (recommended): the backend confines; it
   holds no device key. `EGETKEY` derives seal keys bound to `MRENCLAVE` or
   `MRSIGNER` and the CPU's SVNs (Gramine exposes them under
   `/dev/attestation/keys`), which would seal material to this enclave on this
@@ -404,13 +356,7 @@ machine the owner provides, Linux on amd64.
 
 ### Q9: the verifier the tests use
 
-- **The `sgx-quote` verifier of go-trusted-platform** (recommended), the
-  project that owns platform attestation, so the test proves the evidence the
-  portfolio's relying party accepts. If it has no SGX quote verifier when
-  this row is moved, that is its row to add first.
-- **A third-party verifier** (Intel's DCAP quote verification library through
-  cgo) as a test-only dependency of the backend module: available now, but it
-  brings cgo into the tests and proves a verifier the portfolio does not run.
+Withdrawn: the tests verify no evidence, since attestation is go-xkms's.
 
 ### Q10: the test hardware
 
@@ -448,6 +394,6 @@ machine the owner provides, Linux on amd64.
 ## What it does not do
 
 No code in this module, no protection inside the enclave beyond the memory
-enclave's, no evidence verification, no collateral fetching, no seal keys or
+enclave's, no attestation (go-xkms's), no evidence verification, no collateral fetching, no seal keys or
 sealing, no SGX on Windows or on client processors, no simulation mode, and
 nothing off Linux on amd64.

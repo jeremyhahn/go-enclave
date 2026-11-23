@@ -1,6 +1,6 @@
 # amd-sev-snp backend — design
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-11-21
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-11-23
 > Conflicts with this document are defects. The module `backends/amdsev` is canonical: where it and this document disagree, fix this document to match it.
 > The design and test plan of SPEC row [confiner-sev-snp](../SPEC.md#features): a backend that implements the [backend seam](architecture.md) and `Confiner` for a process inside an AMD SEV-SNP guest. It supersedes the Attester and KeyProtector parts of the earlier [confidential-vm proposal](confidential-vm.md).
 
@@ -188,9 +188,13 @@ It starts only while the repository variable `AMD_SEV_SNP_RUNNER` is
 `online`, and its first check fails the job, with an error annotation, unless
 `kvm_amd` reports `sev_snp` as `Y` or `1`: a green run of it is an SNP run.
 
-**Open:** the SNP hardware acceptance, items 3 and 4 in an SNP guest, has
-not run. The `amd-sev-snp` job runs once an SEV-SNP host is registered as
-that runner and the variable is set; until then the row stays in progress.
+**Acceptance.** The row's acceptance is what the `amd-sev` job checks on SEV
+and SEV-ES guests today: the refusal cases (item 5), and the host scan of
+item 4 in those guests, where the needle must not be found, with the plain
+KVM control, where it must be. The SNP conformance, items 3 and 4 inside an
+SNP guest with the plain KVM control, waits on an SEV-SNP host and the gated
+`amd-sev-snp` job, which runs once such a host is registered as that runner
+and the variable is set; it is not part of the row's acceptance.
 
 ## What it does not do
 
