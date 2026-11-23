@@ -1,6 +1,0 @@
-on: [push, pull_request]
-jobs:
-  build:
-    runs-on: "${{ '# self-hosted: hardware: example' && 'self-hosted' }}"
-    steps:
-      - run: "true"

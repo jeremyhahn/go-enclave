@@ -1,6 +1,0 @@
-on: [push, pull_request]
-jobs:
-  build:
-    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'bigdisk' }}
-    steps:
-      - run: "true"

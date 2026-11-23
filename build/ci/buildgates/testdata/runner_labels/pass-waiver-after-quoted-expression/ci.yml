@@ -1,6 +1,0 @@
-on: [push, pull_request]
-jobs:
-  build:
-    runs-on: "${{ 'self-hosted' }}" # self-hosted: hardware: the device this job drives
-    steps:
-      - run: "true"

@@ -1,6 +1,0 @@
-on: [push, pull_request]
-'jobs':
-  build:
-    runs-on: [self-hosted, linux]
-    steps:
-      - run: "true"

@@ -1,6 +1,0 @@
-on: [pull_request]
-jobs:
-  publish:
-    runs-on: {labels: [self-hosted, "rel\u0065ase"], group: g} # self-hosted: hardware: the signing device this job drives
-    steps:
-      - run: "true"

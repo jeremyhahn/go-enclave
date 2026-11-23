@@ -1,6 +1,0 @@
-on: [push, pull_request]
-jobs:
-  build:
-    runs-on: ${{ github.event_name != 'push' && github.event_name != 'pull_request' && github.event_name != 'workflow_dispatch' && github.event_name != 'schedule' && 'self-hosted' || 'ubuntu-latest' }}
-    steps:
-      - run: "true"

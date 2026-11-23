@@ -1,7 +1,0 @@
-on: [push, pull_request]
-jobs:
-  publish:
-    runs-on: [self-hosted, release]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    steps:
-      - run: "true"

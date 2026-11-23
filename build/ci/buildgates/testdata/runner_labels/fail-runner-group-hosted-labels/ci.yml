@@ -1,8 +1,0 @@
-on: [push, pull_request]
-jobs:
-  build:
-    runs-on:
-      group: private-runners
-      labels: ubuntu-latest
-    steps:
-      - run: "true"

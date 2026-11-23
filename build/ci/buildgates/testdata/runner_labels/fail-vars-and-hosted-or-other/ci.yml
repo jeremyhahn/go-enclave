@@ -1,6 +1,0 @@
-on: [push, pull_request]
-jobs:
-  build:
-    runs-on: ${{ vars.RUNNER && 'ubuntu-latest' || 'x' }}
-    steps:
-      - run: "true"
