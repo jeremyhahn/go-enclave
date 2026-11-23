@@ -34,8 +34,9 @@ import (
 // with a looser `if:` or an untagged gate line would pass quietly.
 //
 // Every workflow that runs on pull_request also cancels the superseded run of
-// its ref (devops §9b), and exactly one CI schedule exists, ci.yml's, which
-// runs the full tier and Soak weekly; no other workflow has a schedule.
+// its ref (devops §9b), and two schedules exist: ci.yml's,
+// which runs the full tier and Soak weekly, and nightly.yml's daily slot; no
+// other workflow has a schedule.
 
 const (
 	ciWorkflowFile = ".github/workflows/ci.yml"
@@ -101,6 +102,10 @@ const (
 	// ciSchedule is the one CI schedule, ci.yml's weekly cron: Tuesday night,
 	// 04:00 UTC Wednesday.
 	ciSchedule = "0 4 * * 3"
+	// nightlyWorkflowFile runs on its own daily cron, nightlySchedule, by the
+	// owner order of 2026-11-22 that the Nightly workflow run automatically.
+	nightlyWorkflowFile = ".github/workflows/nightly.yml"
+	nightlySchedule     = "25 5 * * *"
 )
 
 // The terms a job's `if:` is built from (v1.30), each without its outer
@@ -651,8 +656,18 @@ func workflowTriggerViolations(file string, src []byte) ([]string, error) {
 		if len(crons) != 1 || fmt.Sprint(crons[0]) != fmt.Sprint(map[string]any{"cron": ciSchedule}) {
 			bad = append(bad, fmt.Sprintf("schedule is %v, want exactly one cron: '%s' (the one CI schedule)", sched, ciSchedule))
 		}
+	case base == filepath.Base(nightlyWorkflowFile):
+		// The Nightly workflow runs automatically on its slot and stays
+		// dispatchable by hand: a missing schedule is a refusal.
+		crons, _ := sched.([]any)
+		if !ok || len(crons) != 1 || fmt.Sprint(crons[0]) != fmt.Sprint(map[string]any{"cron": nightlySchedule}) {
+			bad = append(bad, fmt.Sprintf("schedule is %v, want exactly one cron: '%s' (the Nightly slot)", sched, nightlySchedule))
+		}
+		if _, ok := events["workflow_dispatch"]; !ok {
+			bad = append(bad, "has no workflow_dispatch: trigger; the Nightly workflow keeps its manual trigger")
+		}
 	case ok:
-		bad = append(bad, fmt.Sprintf("has a schedule: trigger; the one schedule is %s's", ciWorkflowFile))
+		bad = append(bad, fmt.Sprintf("has a schedule: trigger; the schedules are %s's and %s's", ciWorkflowFile, nightlyWorkflowFile))
 	}
 	return bad, nil
 }
@@ -910,7 +925,11 @@ func TestCIGateTiers_RefusesWhatItMustRefuse(t *testing.T) {
 		{"pull_request, main pushes share a group", "x.yml", "on:\n  pull_request:\nconcurrency:\n  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && format('main-{0}', github.event_name) || github.ref }}\n  cancel-in-progress: true\njobs: {}\n", true},
 		{"pull_request, per-commit main group", "x.yml", "on:\n  pull_request:\n" + wantConc + "jobs: {}\n", false},
 		{"push only, no concurrency", "x.yml", "on:\n  push:\njobs: {}\n", false},
-		{"scheduled", "nightly.yml", "on:\n  schedule:\n    - cron: '0 3 * * *'\n  workflow_dispatch:\njobs: {}\n", true},
+		{"scheduled", "x.yml", "on:\n  schedule:\n    - cron: '0 3 * * *'\n  workflow_dispatch:\njobs: {}\n", true},
+		{"nightly.yml on its slot", "nightly.yml", "on:\n  schedule:\n    - cron: '" + nightlySchedule + "'\n  workflow_dispatch:\njobs: {}\n", false},
+		{"nightly.yml on another cron", "nightly.yml", "on:\n  schedule:\n    - cron: '0 3 * * *'\n  workflow_dispatch:\njobs: {}\n", true},
+		{"nightly.yml dispatch only", "nightly.yml", "on:\n  workflow_dispatch:\njobs: {}\n", true},
+		{"nightly.yml on its slot without dispatch", "nightly.yml", "on:\n  schedule:\n    - cron: '" + nightlySchedule + "'\njobs: {}\n", true},
 		{"ci.yml scheduled", "ci.yml", "on:\n  schedule:\n    - cron: '" + ciSchedule + "'\njobs: {}\n", false},
 		{"ci.yml unscheduled", "ci.yml", "on:\n  push:\njobs: {}\n", true},
 		{"ci.yml scheduled twice", "ci.yml", "on:\n  schedule:\n    - cron: '" + ciSchedule + "'\n    - cron: '0 16 * * *'\njobs: {}\n", true},
