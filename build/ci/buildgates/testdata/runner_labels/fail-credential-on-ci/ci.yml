@@ -1,0 +1,6 @@
+on: [push, pull_request]
+jobs:
+  build:
+    runs-on: [self-hosted, linux]  # self-hosted: credential: a token is mounted on this runner alone
+    steps:
+      - run: "true"

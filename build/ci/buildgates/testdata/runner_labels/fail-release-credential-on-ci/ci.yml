@@ -1,0 +1,7 @@
+on: [push, pull_request]
+jobs:
+  publish:
+    runs-on: [self-hosted, release]  # self-hosted: credential: a token is mounted on this runner alone
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - run: "true"

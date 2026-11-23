@@ -1,0 +1,7 @@
+on: [push, issue_comment]
+jobs:
+  publish:
+    runs-on: release  # self-hosted: hardware: the signing device this job drives
+    if: github.event_name == 'issue_comment' && github.ref == 'refs/heads/dev'
+    steps:
+      - run: "true"
