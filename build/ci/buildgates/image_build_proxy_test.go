@@ -22,15 +22,46 @@ import (
 // toolchainBuildMakeCall is the same call for the toolchain image alone,
 // which the lint and lint-gates jobs build (#277); it passes the same proxy.
 const (
-	imageBuildRunner       = hostedRunner
 	imageBuildMakeCall     = `make docker-build GO_BUILD_PROXY="${GOPROXY:-}"`
 	toolchainBuildMakeCall = `make docker-build-toolchain GO_BUILD_PROXY="${GOPROXY:-}"`
 )
 
-// hostedRunner is the runner label every job in hostedWorkflows takes, with
-// no exception: no self-hosted label, no label list and no expression that
-// picks a runner by event.
+// hostedRunner is the runner label every job in hostedWorkflows takes unless
+// templateRunners names the job: no self-hosted label, no label list and no
+// expression that picks a runner by event.
 const hostedRunner = "ubuntu-latest"
+
+// The runs-on expressions of the CI template's own jobs (v1.48, v1.49). On
+// github.com preflight picks the runner: GitHub-hosted, or the bigdisk pool
+// when the hosted pool is full; off github.com each takes its forge label.
+// A pull request from a fork runs preflight GitHub-hosted, never on the pool.
+const (
+	preflightRunner = `${{ github.server_url == 'https://github.com' && (!startsWith(github.event_name, 'pull_request') || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON(vars.CI_PREFLIGHT_RUNS_ON || '["self-hosted","linux","x64","bigdisk"]') || 'ubuntu-latest' }}`
+	dockerRunner    = `${{ github.server_url == 'https://github.com' && fromJSON(needs.preflight.outputs.runner_docker) || 'bigdisk' }}`
+	gateRunner      = `${{ github.server_url == 'https://github.com' && fromJSON(needs.preflight.outputs.runner || '"ubuntu-latest"') || 'ci-gate' }}`
+	// releaseRunner is publish-images' label list; its if runs it on
+	// github.com only when RELEASE_RUNNER is true (ci_tiers_test.go).
+	releaseRunner = "[self-hosted linux x64 release]"
+)
+
+// templateRunners names, per workflow, the jobs that take the template's
+// runs-on rather than hostedRunner, each with the one value it must have.
+var templateRunners = map[string]map[string]string{
+	".github/workflows/ci.yml": {
+		"preflight": preflightRunner, "ci-gate": gateRunner, "publish-images": releaseRunner,
+		"lint": dockerRunner, "lint-gates": dockerRunner, "image": dockerRunner,
+		"integration": dockerRunner, "soak": dockerRunner,
+	},
+}
+
+// wantRunsOn is the one runs-on a job of a workflow whose template jobs are
+// runners may take.
+func wantRunsOn(runners map[string]string, job string) string {
+	if r, ok := runners[job]; ok {
+		return r
+	}
+	return hostedRunner
+}
 
 // goEnvSet matches a workflow line that sets one of the module variables, as
 // an env: key or a shell assignment or export.
@@ -41,16 +72,16 @@ var imageBuildWorkflows = []string{".github/workflows/ci.yml", ".github/workflow
 var hostedWorkflows = []string{".github/workflows/ci.yml", ".github/workflows/release.yml"}
 
 // hostedRunnerViolations lists every job in one workflow whose runs-on is
-// not the GitHub-hosted runner.
-func hostedRunnerViolations(src []byte) ([]string, error) {
+// not the GitHub-hosted runner, or for a job runners names, not that value.
+func hostedRunnerViolations(src []byte, runners map[string]string) ([]string, error) {
 	var wf proxyWorkflow
 	if err := yaml.Unmarshal(src, &wf); err != nil {
 		return nil, err
 	}
 	var bad []string
 	for name, job := range wf.Jobs {
-		if job.RunsOn != hostedRunner {
-			bad = append(bad, fmt.Sprintf("job %s: runs-on %v, want %s", name, job.RunsOn, hostedRunner))
+		if want := wantRunsOn(runners, name); fmt.Sprint(job.RunsOn) != want {
+			bad = append(bad, fmt.Sprintf("job %s: runs-on %v, want %s", name, job.RunsOn, want))
 		}
 	}
 	if len(wf.Jobs) == 0 {
@@ -66,7 +97,7 @@ func TestEveryJobRunsOnAHostedRunner(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read %s: %v", f, err)
 		}
-		bad, err := hostedRunnerViolations(src)
+		bad, err := hostedRunnerViolations(src, templateRunners[f])
 		if err != nil {
 			t.Fatalf("parse %s: %v", f, err)
 		}
@@ -96,7 +127,7 @@ func TestEveryJobRunsOnAHostedRunner_RefusesWhatItMustRefuse(t *testing.T) {
 				if i < 0 {
 					t.Fatalf("%s no longer contains %q; update this case", f, old)
 				}
-				bad, err := hostedRunnerViolations([]byte(wf[:i] + tc.new + wf[i+len(old):]))
+				bad, err := hostedRunnerViolations([]byte(wf[:i]+tc.new+wf[i+len(old):]), templateRunners[f])
 				if err != nil {
 					t.Fatalf("parse: %v", err)
 				}
@@ -105,6 +136,39 @@ func TestEveryJobRunsOnAHostedRunner_RefusesWhatItMustRefuse(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// TestEveryJobRunsOnAHostedRunner_RefusesATemplateJobOffItsRunner pins the
+// template jobs of ci.yml to their one runs-on each: another label, the
+// event-picked pool or another job's expression is refused.
+func TestEveryJobRunsOnAHostedRunner_RefusesATemplateJobOffItsRunner(t *testing.T) {
+	src, err := os.ReadFile(filepath.Join(repoRoot(t), ciWorkflowFile))
+	if err != nil {
+		t.Fatalf("read %s: %v", ciWorkflowFile, err)
+	}
+	wf := string(src)
+	for _, tc := range []struct{ name, old, new string }{
+		{"preflight on a bare self-hosted label", preflightRunner, "self-hosted"},
+		{"preflight on the docker runner", preflightRunner, dockerRunner},
+		{"image jobs on the pool", dockerRunner, poolRunner},
+		{"image jobs on a bare self-hosted label", dockerRunner, "self-hosted"},
+		{"image jobs on the hosted label", dockerRunner, hostedRunner},
+		{"gate on the docker runner", gateRunner, dockerRunner},
+		{"publish-images off the release label", "[self-hosted, linux, x64, release]", "[self-hosted, linux, x64]"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if !strings.Contains(wf, tc.old) {
+				t.Fatalf("%s no longer contains %q; update this case", ciWorkflowFile, tc.old)
+			}
+			bad, err := hostedRunnerViolations([]byte(strings.ReplaceAll(wf, tc.old, tc.new)), templateRunners[ciWorkflowFile])
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			if len(bad) == 0 {
+				t.Fatal("no violation; want a refusal")
+			}
+		})
 	}
 }
 
@@ -141,7 +205,7 @@ func TestEveryJobRunsOnAHostedRunner_NoPoolException(t *testing.T) {
 		{"hosted label in a list", []any{hostedRunner}, hostedRunner, hostedRunner, []string{"job lint:"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			bad, err := hostedRunnerViolations(workflow(tc.lint, tc.lintGates, tc.image))
+			bad, err := hostedRunnerViolations(workflow(tc.lint, tc.lintGates, tc.image), nil)
 			if err != nil {
 				t.Fatalf("parse: %v", err)
 			}
@@ -169,7 +233,7 @@ type proxyWorkflow struct {
 
 // imageBuildProxyViolations lists what in one workflow would keep the image
 // build off the hosted runner or its default module proxy.
-func imageBuildProxyViolations(src []byte) ([]string, error) {
+func imageBuildProxyViolations(src []byte, runners map[string]string) ([]string, error) {
 	var bad []string
 	if strings.Contains(string(src), "gomodauth") {
 		bad = append(bad, "names gomodauth; the image build takes GO_BUILD_PROXY, not the forge credentials")
@@ -205,8 +269,8 @@ func imageBuildProxyViolations(src []byte) ([]string, error) {
 				continue
 			}
 			builds++
-			if job.RunsOn != imageBuildRunner {
-				bad = append(bad, fmt.Sprintf("job %s: builds the image on runs-on %v, want %s", name, job.RunsOn, imageBuildRunner))
+			if want := wantRunsOn(runners, name); fmt.Sprint(job.RunsOn) != want {
+				bad = append(bad, fmt.Sprintf("job %s: builds the image on runs-on %v, want %s", name, job.RunsOn, want))
 			}
 			for _, line := range strings.Split(st.Run, "\n") {
 				if strings.Contains(line, "make docker-build") && !strings.Contains(line, imageBuildMakeCall) && !strings.Contains(line, toolchainBuildMakeCall) {
@@ -227,7 +291,7 @@ func TestImageBuildUsesTheModuleProxy(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read %s: %v", f, err)
 		}
-		bad, err := imageBuildProxyViolations(src)
+		bad, err := imageBuildProxyViolations(src, templateRunners[f])
 		if err != nil {
 			t.Fatalf("parse %s: %v", f, err)
 		}
@@ -250,7 +314,7 @@ func TestImageBuildUsesTheModuleProxy_RefusesAToolchainBuildWithoutTheProxy(t *t
 		t.Fatalf("ci.yml no longer contains %q; update this test", toolchainBuildMakeCall)
 	}
 	for _, repl := range []string{"make docker-build-toolchain", `make docker-build-toolchain GO_BUILD_PROXY="${{ vars.GO_BUILD_PROXY }}"`} {
-		bad, err := imageBuildProxyViolations([]byte(strings.ReplaceAll(wf, toolchainBuildMakeCall, repl)))
+		bad, err := imageBuildProxyViolations([]byte(strings.ReplaceAll(wf, toolchainBuildMakeCall, repl)), templateRunners[ciWorkflowFile])
 		if err != nil {
 			t.Fatalf("parse: %v", err)
 		}
@@ -262,8 +326,8 @@ func TestImageBuildUsesTheModuleProxy_RefusesAToolchainBuildWithoutTheProxy(t *t
 
 // toolchainTargetViolations lists what is wrong with the Makefile's
 // docker-build-toolchain recipe (#277): it builds the toolchain stage alone
-// the way `scripts/devcontainer.sh build` builds it, with GO_BUILD_PROXY as a
-// build argument when it is set and with no forge credential.
+// the way `scripts/devcontainer.sh build` builds it, with GO_BUILD_PROXY as
+// the goproxy BuildKit secret when it is set and with no forge credential.
 func toolchainTargetViolations(mk string) []string {
 	_, rest, ok := strings.Cut(mk, "\ndocker-build-toolchain:\n")
 	if !ok {
@@ -281,10 +345,13 @@ func toolchainTargetViolations(mk string) []string {
 	if !strings.Contains(r, "--target toolchain") {
 		bad = append(bad, "the recipe does not build the toolchain stage (--target toolchain)")
 	}
-	if !strings.Contains(r, `if [ -n "$${GO_BUILD_PROXY:-}" ]; then set -- "$$@" --build-arg "GO_BUILD_PROXY=$$GO_BUILD_PROXY"; fi`) {
-		bad = append(bad, "the recipe does not pass a set GO_BUILD_PROXY as a build argument")
+	if !strings.Contains(r, `if [ -n "$${GO_BUILD_PROXY:-}" ]; then set -- "$$@" `+proxySecretFlag+`; fi`) {
+		bad = append(bad, "the recipe does not pass a set GO_BUILD_PROXY as the goproxy BuildKit secret")
 	}
-	for _, s := range []string{"gomodauth", "--secret", "MODULE_ENV_FILE"} {
+	if strings.Count(r, "--secret") != 1 {
+		bad = append(bad, "the recipe passes a BuildKit secret other than goproxy; the image build takes GO_BUILD_PROXY, not the forge credentials")
+	}
+	for _, s := range []string{"gomodauth", "MODULE_ENV_FILE"} {
 		if strings.Contains(r, s) {
 			bad = append(bad, fmt.Sprintf("the recipe names %s; the image build takes GO_BUILD_PROXY, not the forge credentials", s))
 		}
@@ -302,7 +369,9 @@ func TestToolchainBuildTargetUsesTheModuleProxy(t *testing.T) {
 		t.Errorf("Makefile: %s", b)
 	}
 	for _, tc := range []struct{ name, old, new string }{
-		{"proxy dropped", `--build-arg "GO_BUILD_PROXY=$$GO_BUILD_PROXY"`, `--label x=y`},
+		{"proxy dropped", proxySecretFlag, `--label x=y`},
+		{"proxy as a build argument", proxySecretFlag, `--build-arg "GO_BUILD_PROXY=$$GO_BUILD_PROXY"`},
+		{"another secret", "\ndocker-build-toolchain:\n", "\ndocker-build-toolchain:\n\t@true --secret id=other\n"},
 		{"credential staged again", "\ndocker-build-toolchain:\n", "\ndocker-build-toolchain:\n\t@true --secret id=gomodauth\n"},
 		{"target renamed away", "\ndocker-build-toolchain:\n", "\ndocker-build-tools:\n"},
 	} {
@@ -335,14 +404,15 @@ func TestImageBuildUsesTheModuleProxy_RefusesWhatItMustRefuse(t *testing.T) {
 			{"GONOSUMDB exported", "      - name: ", "      - name: x\n        run: export GONOSUMDB=example.com/*\n      - name: "},
 			{"url insteadOf rewrite", "      - name: ", "      - name: x\n        run: git config --global url.https://example.com/.insteadOf https://github.com/\n      - name: "},
 			{"make call drops the proxy", imageBuildMakeCall, "make docker-build"},
-			{"image job on a self-hosted label", "runs-on: " + imageBuildRunner + "\n", "runs-on: self-hosted\n"},
-			{"image job back on the server_url choice", "runs-on: " + imageBuildRunner + "\n", "runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'self-hosted' }}\n"},
+			{"image job on a self-hosted label", "runs-on: " + wantRunsOn(templateRunners[f], "integration"), "runs-on: self-hosted"},
+			{"image job back on the server_url choice", "runs-on: " + wantRunsOn(templateRunners[f], "integration"), "runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'self-hosted' }}"},
+			{"image job on the pool", "runs-on: " + wantRunsOn(templateRunners[f], "integration"), "runs-on: " + poolRunner},
 		} {
 			t.Run(filepath.Base(f)+"/"+tc.name, func(t *testing.T) {
 				if !strings.Contains(wf, tc.old) {
 					t.Fatalf("%s no longer contains %q; update this case", f, tc.old)
 				}
-				bad, err := imageBuildProxyViolations([]byte(strings.ReplaceAll(wf, tc.old, tc.new)))
+				bad, err := imageBuildProxyViolations([]byte(strings.ReplaceAll(wf, tc.old, tc.new)), templateRunners[f])
 				if err != nil {
 					t.Fatalf("parse: %v", err)
 				}

@@ -40,19 +40,22 @@ import (
 const (
 	ciWorkflowFile = ".github/workflows/ci.yml"
 	ciGateJob      = "ci-gate"
-	// ciGateRunner is the gate's runner label: a GitHub-hosted runner, like
-	// every CI job. The gate uses no action (no checkout, no toolchain) and
-	// carries summary.sh inline.
-	ciGateRunner = "ubuntu-latest"
-	// gateIf is the gate's `if:` (v1.29.3): always, but on a schedule run the
-	// guard's `busy` skips it, so a nightly never posts a green gate.
-	gateIf = "${{ always() && (github.event_name != 'schedule' || needs.preflight.outputs.verdict != 'busy') }}"
+	// ciGateRunner is the gate's runs-on (v1.48): on github.com the runner
+	// preflight picked, a GitHub-hosted one unless it says otherwise. The gate
+	// uses no action (no checkout, no toolchain) and carries summary.sh inline.
+	ciGateRunner = `${{ github.server_url == 'https://github.com' && fromJSON(needs.preflight.outputs.runner || '"ubuntu-latest"') || 'ci-gate' }}`
+	// gateIf is the gate's `if:` (v1.29.3): on a schedule run the guard's
+	// `busy` skips it, so a nightly never posts a green gate. v1.53: always()
+	// on a pull request, the not-canceled check on every other event, so a
+	// superseded main run posts a skipped gate, not a failed one.
+	gateIf = "${{ (startsWith(github.event_name, 'pull_request') && always() || !cancelled()) && (github.event_name != 'schedule' || needs.preflight.outputs.verdict != 'busy') }}" //nolint:misspell // GitHub Actions expression function cancelled()
 	// gateCheckFunc opens the gate's check() (v1.30), which judges each job's
 	// result against its tier.
 	gateCheckFunc = "check() {"
 	// fullTierIf is ci.yml's workflow-level CI_FULL_TIER (v1.30), which the
-	// gate's FULL_TIER reads.
-	fullTierIf = "${{ (github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main')) || contains(github.event.pull_request.labels.*.name, 'ci:full') }}"
+	// gate's FULL_TIER reads. Since v1.41 it is true on every event but a
+	// dispatch off main and ci/deps-bump: every pull request runs the full tier.
+	fullTierIf = "${{ " + termFull + " }}"
 	// draftIf is the `if:` that skips a job on a draft pull request (v1.26),
 	// which every PR-tier job carries or inherits through `needs:`.
 	draftIf = "${{ !github.event.pull_request.draft }}"
@@ -80,20 +83,21 @@ const (
 	scheduleGuardJob = preflightJob
 	changesJob       = preflightJob
 	// publishJob is the one job outside the gate (v1.30); its if holds
-	// publishGuard, so it never runs on github.com, where go-enclave lives and
-	// no `release` runner serves it (#277).
+	// publishGuard, so on github.com it runs only where the repository
+	// variable RELEASE_RUNNER says a `release` runner serves it (v1.49).
 	publishJob = "publish-images"
-	// publishGuard is the template's term that skips publishJob on github.com.
-	publishGuard = "github.server_url != 'https://github.com'"
+	// publishGuard is the template's term that skips publishJob on github.com
+	// unless RELEASE_RUNNER is true.
+	publishGuard = "github.server_url != 'https://github.com' || vars.RELEASE_RUNNER == 'true'"
 	// fullTierEnv is the gate's FULL_TIER value.
 	fullTierEnv = "${{ env.CI_FULL_TIER }}"
 	// nightlyTierIf is the gate's NIGHTLY value.
 	nightlyTierIf = "${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}"
 	// refConcurrencyGroup is the group of every pull_request workflow: keyed
-	// by ref, on main by event and commit, so a main run never cancels
-	// another main run (issue #246) while a PR's newer run cancels the older,
-	// and by repository on a schedule (v1.30).
-	refConcurrencyGroup = "${{ github.workflow }}-${{ github.event_name == 'schedule' && format('schedule-{0}', github.repository) || github.ref == 'refs/heads/main' && format('main-{0}-{1}', github.event_name, github.sha) || github.ref }}"
+	// by ref, on main by event (v1.53), so a newer main run cancels the
+	// older one as a PR's newer run cancels the older, and by repository on
+	// a schedule (v1.30).
+	refConcurrencyGroup = "${{ github.workflow }}-${{ github.event_name == 'schedule' && format('schedule-{0}', github.repository) || github.ref == 'refs/heads/main' && format('main-{0}', github.event_name) || github.ref }}"
 	// ciSchedule is the one CI schedule, ci.yml's weekly cron: Tuesday night,
 	// 04:00 UTC Wednesday.
 	ciSchedule = "0 4 * * 3"
@@ -104,7 +108,7 @@ const (
 const (
 	termDraft   = "!github.event.pull_request.draft"
 	termRun     = "needs.preflight.outputs.verdict == 'run'"
-	termFull    = "github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')"
+	termFull    = "github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/ci/deps-bump'"
 	termNightly = "github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'"
 	termCode    = "needs.preflight.outputs.docs_only != 'true'"
 	termScoped  = "needs.preflight.outputs.lint_gates != 'false'"
@@ -127,7 +131,7 @@ var tierTerms = map[string][]string{
 // builds the toolchain image before make lint: ceil(1.5 x (19 + 8)) = 41, the
 // cold-cache run of main fc58102.
 var ciJobTimeouts = map[string]int{
-	preflightJob: 10, publishJob: 60, lintJob: 41, "image": 32,
+	preflightJob: 10, publishJob: 60, lintJob: 41, "image": 48,
 	lintGatesJob: 20, "fips": 11, "integration": 22, "soak": 56, ciGateJob: 5,
 	"tpm-swtpm": 30, "optee": 180,
 }
@@ -468,7 +472,10 @@ func ciTierViolations(src []byte) ([]string, error) {
 			}
 		}
 		for _, term := range terms {
-			if !slices.Contains(tierTerms[t], term) && term != termDraft && term != termRun {
+			// v1.41: the template's code-tier integration job also holds the
+			// full-tier term; no other tier may.
+			fullInCode := term == termFull && t == "code"
+			if !slices.Contains(tierTerms[t], term) && term != termDraft && term != termRun && !fullInCode {
 				bad = append(bad, fmt.Sprintf("job %s is tagged %s but its if has %q, which the tier does not allow", name, t, term))
 			}
 		}
@@ -692,6 +699,86 @@ func TestCIGateTiersMatchTheJobs(t *testing.T) {
 
 // TestCIGateTiers_RefusesWhatItMustRefuse pins the checks against edits of
 // the real ci.yml, so a rewrite that stops looking cannot pass.
+// statusFunc is an Actions status-check function in an `if:`.
+var statusFunc = regexp.MustCompile(`\b(always|success|failure|cancelled)\(\)`) //nolint:misspell // the Actions function's spelling
+
+// fullNeedsSkippableViolations reports each job CI Gate checks as `full` that
+// needs a job its tier lets skip (code, scoped or nightly) and has no status
+// function in its `if:`. Actions skips such a job whenever that need skips,
+// before any of its steps reports, so on a docs-only PR the gate sees a full
+// job skipped while the full tier is selected, and fails.
+func fullNeedsSkippableViolations(src []byte) ([]string, error) {
+	var wf tieredWorkflow
+	if err := yaml.Unmarshal(src, &wf); err != nil {
+		return nil, err
+	}
+	tier := map[string]string{}
+	for _, st := range wf.Jobs[ciGateJob].Steps {
+		for line := range strings.SplitSeq(st.Run, "\n") {
+			if m := gateCheckLine.FindStringSubmatch(line); m != nil {
+				tier[m[2]] = m[3]
+			}
+		}
+	}
+	var bad []string
+	for name, t := range tier {
+		if t != "full" {
+			continue
+		}
+		job := wf.Jobs[name]
+		if statusFunc.MatchString(fmt.Sprint(job.If)) {
+			continue
+		}
+		for _, n := range job.Needs {
+			if nt := tier[n]; nt == "code" || nt == "scoped" || nt == "nightly" {
+				bad = append(bad, fmt.Sprintf("job %s is checked as full but needs %s, which skips in its %s scope, and its if has no status function: the job skips before it reports", name, n, nt))
+			}
+		}
+	}
+	slices.Sort(bad)
+	return bad, nil
+}
+
+func TestCIGateFullJobsReportWhenANeedSkips(t *testing.T) {
+	src := []byte(readFile(t, filepath.Join(repoRoot(t), ciWorkflowFile)))
+	bad, err := fullNeedsSkippableViolations(src)
+	if err != nil {
+		t.Fatalf("parse %s: %v", ciWorkflowFile, err)
+	}
+	for _, b := range bad {
+		t.Errorf("%s: %s", ciWorkflowFile, b)
+	}
+	// A full job that needs the code-tier image job is refused without a
+	// status function and passes with one.
+	const wfFmt = `jobs:
+  image:
+    if: ${{ needs.preflight.outputs.docs_only != 'true' }}
+  optee:
+    needs: [preflight, image]
+    if: ${{ %s }}
+  ci-gate:
+    steps:
+      - run: |
+          check image       "${{ needs.image.result }}" code
+          check optee       "${{ needs.optee.result }}" full
+`
+	for _, tc := range []struct {
+		cond   string
+		wantOK bool
+	}{
+		{"needs.preflight.outputs.verdict == 'run'", false},
+		{"!cancelled() && needs.image.result != 'failure'", true}, //nolint:misspell // the Actions function's spelling
+	} {
+		bad, err := fullNeedsSkippableViolations(fmt.Appendf(nil, wfFmt, tc.cond))
+		if err != nil {
+			t.Fatalf("parse the %q case: %v", tc.cond, err)
+		}
+		if (len(bad) == 0) != tc.wantOK {
+			t.Errorf("if: %s: violations %v, want ok = %v", tc.cond, bad, tc.wantOK)
+		}
+	}
+}
+
 func TestCIGateTiers_RefusesWhatItMustRefuse(t *testing.T) {
 	src, err := os.ReadFile(filepath.Join(repoRoot(t), ciWorkflowFile))
 	if err != nil {
@@ -702,8 +789,8 @@ func TestCIGateTiers_RefusesWhatItMustRefuse(t *testing.T) {
 	// lintHead is the lint job's head: a PR-tier job that needs the preflight
 	// job for its guard (v1.34; the arch-gates job before), and lintIf its if.
 	const lintIf = "    if: " + guardedPRJobIf + "\n"
-	// lintRunsOn is the lint job's runs-on line: the hosted runner.
-	const lintRunsOn = "    runs-on: " + hostedRunner + "\n"
+	// lintRunsOn is the lint job's runs-on line: the runner preflight picks.
+	const lintRunsOn = "    runs-on: " + dockerRunner + "   # v1.48\n"
 	const lintHead = "    name: Lint [lint, gosec, build tags]\n" + lintRunsOn + "    needs: preflight   # v1.34\n" + lintIf
 	const lintNeeds = "    name: Lint [lint, gosec, build tags]\n" + lintRunsOn + "    needs: preflight   # v1.34\n"
 	const nightlyIf = "    if: ${{ (" + termNightly + ") && " + termRun + " }}\n"
@@ -737,7 +824,7 @@ func TestCIGateTiers_RefusesWhatItMustRefuse(t *testing.T) {
 		{"full job's run verdict ored away", fullIf, "    if: ${{ ((" + termFull + ") && " + termDraft + ") || " + termRun + " }}\n"},
 		{"fips without the guard in needs", "    name: FIPS\n    needs: preflight   # v1.34\n", "    name: FIPS\n"},
 		{"swtpm without the guard in needs", fullIf + "    needs: preflight   # v1.34\n", fullIf + "    needs: lint\n"},
-		{"optee guarded through the image job only", "    needs: [preflight, image]   # v1.34\n", "    needs: [image]\n"},
+		{"optee guarded through the image job only", "    needs: preflight   # v1.34; optee reports on a docs-only PR\n", "    needs: [image]\n"},
 		{"lint without the guard in needs", lintHead, "    name: Lint [lint, gosec, build tags]\n" + lintRunsOn + lintIf},
 		{"lint runs a refused dispatch", lintHead, lintNeeds + "    if: " + draftIf + "\n"},
 		{"gate does not fail on a draft", gateDraftCheck, `[ "${DRAFT}" = never ]`},
@@ -758,13 +845,13 @@ func TestCIGateTiers_RefusesWhatItMustRefuse(t *testing.T) {
 		{"gate drops check()", gateCheckFunc, "chk() {"},
 		{"workflow CI_FULL_TIER differs", "  CI_FULL_TIER: " + fullTierIf, "  CI_FULL_TIER: ${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full') }}"},
 		{"labeled type added back", "types: [opened, synchronize, reopened, ready_for_review]", "types: [opened, synchronize, reopened, ready_for_review, labeled]"},
-		{"gate on a self-hosted label", "    name: CI Gate\n    runs-on: " + ciGateRunner + "\n", "    name: CI Gate\n    runs-on: ci-gate\n"},
+		{"gate on a self-hosted label", "    name: CI Gate\n    runs-on: " + ciGateRunner, "    name: CI Gate\n    runs-on: ci-gate"},
 		{"deps-check back in the PR gate", "      - name: make gosec\n", "      - name: make deps-check\n        run: scripts/in-toolchain-image.sh \"$TOOLCHAIN_IMAGE\" make deps-check\n      - name: make gosec\n"},
 		{"make security back in the image job", "      - name: make build\n", "      - name: make security\n        run: scripts/in-toolchain-image.sh \"$TOOLCHAIN_IMAGE\" make security\n      - name: make build\n"},
 		{"gosec back on the PR tier only", "      - name: make gosec\n        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && needs.preflight", "      - name: make gosec\n        if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' && env.CI_FULL_TIER != 'true' && needs.preflight"}, //nolint:misspell // the Actions function's spelling, not prose
 		{"gate uses an action", "      - name: Fail closed on any non-success\n", "      - uses: actions/checkout@abc # v7\n      - name: Fail closed on any non-success\n"},
-		{"publish-images runs", "    if: ${{ " + publishGuard + " && ", "    if: ${{ "},
-		{"publish-images guard ored away", "    if: ${{ " + publishGuard + " && ", "    if: ${{ " + publishGuard + " || "},
+		{"publish-images runs", " && (" + publishGuard + ") }}\n", " }}\n"},
+		{"publish-images guard ored away", " && (" + publishGuard + ") }}\n", " || (" + publishGuard + ") }}\n"},
 		{"publish-images dropped", "  publish-images:\n", "  publish-images-x:\n"},
 		{"timeout off its value", "    timeout-minutes: 56 ", "    timeout-minutes: 90 "},
 		{"job without a timeout", "    timeout-minutes: 5        # v1.30\n", ""},

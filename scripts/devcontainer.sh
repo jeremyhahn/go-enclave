@@ -128,10 +128,12 @@ case $1 in
     ref=$(image)
     # The backend modules' download fetches the public root module through
     # GO_BUILD_PROXY, unset on CI's GitHub-hosted runners (#293); no forge
-    # credential reaches the build. Unset, the Dockerfile's public default applies.
+    # credential reaches the build. It goes in as the BuildKit secret goproxy,
+    # never a build argument, which the image history would keep. Unset, the
+    # Dockerfile's public default applies.
     set -- -f "$dockerfile" --target toolchain -t "$ref" -t "$repo:latest"
     if [ -n "${GO_BUILD_PROXY:-}" ]; then
-      set -- "$@" --build-arg "GO_BUILD_PROXY=$GO_BUILD_PROXY"
+      set -- "$@" --secret id=goproxy,env=GO_BUILD_PROXY
     fi
     if held "$ref"; then
       docker tag "$ref" "$repo:latest"
