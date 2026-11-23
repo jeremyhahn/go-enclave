@@ -23,10 +23,6 @@ type Backend struct {
 	// build claims no confinement and refuses use.
 	constructed bool
 
-	// attestSem is a one-slot semaphore serializing [Backend.Attest]'s
-	// request and check; a waiter selects on its context.
-	attestSem chan struct{}
-
 	// handlesMu guards handles, the live imported handles Sweep destroys.
 	handlesMu sync.Mutex
 	handles   map[*handle]struct{}
@@ -34,7 +30,7 @@ type Backend struct {
 
 // newBackend returns a constructed Backend; only New and tests call it.
 func newBackend() *Backend {
-	return &Backend{constructed: true, attestSem: make(chan struct{}, 1)}
+	return &Backend{constructed: true}
 }
 
 var (
@@ -67,7 +63,7 @@ func (*Backend) Rank() int { return rank }
 // error matching [ErrSGXUnavailable] naming the failing step otherwise. A
 // nil ctx is context.Background. A Backend that New did not build (nil or
 // the zero value) fails with [ErrSGXUnavailable] before probing, so
-// detection never selects an instance whose Import and Attest refuse.
+// detection never selects an instance whose Import refuses.
 func (b *Backend) Probe(ctx context.Context) error {
 	if b == nil || !b.constructed {
 		return ErrSGXUnavailable

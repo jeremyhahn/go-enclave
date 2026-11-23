@@ -30,6 +30,42 @@ func wantEnclaveOp(t *testing.T, err error, op string) {
 	}
 }
 
+// fakeAttestation stands a temporary directory in for Gramine's
+// /dev/attestation: attestation_type is "dcap", and the quote it returns is
+// a version 3 ECDSA quote over whatever user_report_data holds. It drives
+// the probe's path from the report data to the quote; it proves nothing
+// about SGX, which only the hardware conformance run does.
+func fakeAttestation(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "attestation_type"), []byte("dcap"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "user_report_data"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	oldDir, oldWrite, oldRead := attestationDir, writeReportData, readQuote
+	t.Cleanup(func() { attestationDir, writeReportData, readQuote = oldDir, oldWrite, oldRead })
+	attestationDir = dir
+	writeReportData = func(data []byte) error {
+		return os.WriteFile(filepath.Join(dir, "user_report_data"), data, 0o600)
+	}
+	readQuote = func(string) ([]byte, error) {
+		rd, err := os.ReadFile(filepath.Join(dir, "user_report_data"))
+		if err != nil {
+			return nil, err
+		}
+		return quote(quoteVersion, keyTypeECDSAP256, rd), nil
+	}
+	return dir
+}
+
+func TestUserReportDataPathIsInAttestationDir(t *testing.T) {
+	if want := attestationDir + "/user_report_data"; userReportDataPath != want {
+		t.Fatalf("userReportDataPath = %q, want %q", userReportDataPath, want)
+	}
+}
+
 func TestNewAndProbeInStandInEnclave(t *testing.T) {
 	fakeProbeDir(t, 0)
 	b, err := New(nil)
@@ -107,29 +143,4 @@ func TestProbeQuoteStepFailureIsEnclaveError(t *testing.T) {
 	if !errors.As(err, &ee) || !errors.Is(err, os.ErrPermission) {
 		t.Fatalf("New = %v, want an SGXEnclaveError carrying the write failure", err)
 	}
-}
-
-func TestAttestRefusesStandInAttestationType(t *testing.T) {
-	t.Run("missing", func(t *testing.T) {
-		dir := fakeAttestation(t)
-		if err := os.Remove(filepath.Join(dir, "attestation_type")); err != nil {
-			t.Fatal(err)
-		}
-		_, err := newTestBackend().Attest(context.Background(), []byte("nonce"))
-		wantEnclaveOp(t, err, opAttestationType)
-		if !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("Attest = %v, want it to carry the missing file", err)
-		}
-	})
-	t.Run("epid", func(t *testing.T) {
-		dir := fakeAttestation(t)
-		if err := os.WriteFile(filepath.Join(dir, "attestation_type"), []byte("epid"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		_, err := newTestBackend().Attest(context.Background(), []byte("nonce"))
-		var ate *AttestationTypeError
-		if !errors.As(err, &ate) || ate.Value != "epid" {
-			t.Fatalf("Attest = %v, want an AttestationTypeError with Value epid", err)
-		}
-	})
 }

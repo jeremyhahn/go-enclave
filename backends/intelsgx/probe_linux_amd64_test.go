@@ -7,7 +7,6 @@ import (
 	"errors"
 	"io/fs"
 	"path/filepath"
-	"sync"
 	"testing"
 	"time"
 )
@@ -40,34 +39,6 @@ func TestProbeRefusesOutsideEnclave(t *testing.T) {
 	}
 	if errors.Is(err, ErrSGXQuote) {
 		t.Fatalf("probe = %v matches ErrSGXQuote, want unavailable only", err)
-	}
-}
-
-// TestAttestRefusesOutsideEnclave runs the real Attest outside an SGX
-// enclave, from many goroutines at once: each call refuses at
-// attestation_type, under the backend's lock. The stub's refusal is
-// attest_other_test.go's.
-func TestAttestRefusesOutsideEnclave(t *testing.T) {
-	outsideEnclave(t)
-	b := newTestBackend()
-	var wg sync.WaitGroup
-	errs := make([]error, 8)
-	for i := range errs {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			_, errs[i] = b.Attest(context.Background(), []byte{byte(i)})
-		}()
-	}
-	wg.Wait()
-	for _, err := range errs {
-		var se *SGXEnclaveError
-		if !errors.Is(err, ErrSGXUnavailable) || !errors.As(err, &se) || se.Op != "attestation_type" {
-			t.Fatalf("Attest = %v, want an SGXEnclaveError with Op attestation_type", err)
-		}
-		if errors.Is(err, ErrSGXQuote) {
-			t.Fatalf("Attest = %v matches ErrSGXQuote, want unavailable only", err)
-		}
 	}
 }
 

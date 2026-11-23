@@ -16,13 +16,6 @@ const promptly = 2 * time.Second
 // hardware probe.
 func newTestBackend() *Backend { return newBackend() }
 
-// holdAttestSlot takes the attestation slot until the test ends.
-func holdAttestSlot(t *testing.T, b *Backend) {
-	t.Helper()
-	b.attestSem <- struct{}{}
-	t.Cleanup(func() { <-b.attestSem })
-}
-
 func TestUnconstructedBackendRefusesUse(t *testing.T) {
 	var b Backend
 	if b.ConfinesProcess() {
@@ -42,7 +35,7 @@ func TestUnconstructedBackendRefusesUse(t *testing.T) {
 
 // TestProbeRefusesUnconstructedBackend guards detection: a Backend that New
 // did not build must not pass Probe on a usable host, or it would displace
-// working backends while its Import and Attest always refuse. A canceled
+// working backends while its Import always refuses. A canceled
 // ctx tells the paths apart without hardware: the probe helper returns
 // ctx.Err(), the refusal returns ErrSGXUnavailable before probing.
 func TestProbeRefusesUnconstructedBackend(t *testing.T) {
@@ -109,45 +102,6 @@ func TestSweepHonoursContextWhileHandleBorrowed(t *testing.T) {
 		}
 	case <-time.After(promptly):
 		t.Fatal("Sweep did not return after its context ended while a handle was borrowed")
-	}
-}
-
-func TestAttestHonoursContextWhileSlotHeld(t *testing.T) {
-	b := newTestBackend()
-	holdAttestSlot(t, b)
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	defer cancel()
-	done := make(chan error, 1)
-	go func() {
-		_, err := b.Attest(ctx, []byte{1})
-		done <- err
-	}()
-	select {
-	case err := <-done:
-		if !errors.Is(err, context.DeadlineExceeded) {
-			t.Fatalf("Attest err = %v, want context.DeadlineExceeded", err)
-		}
-	case <-time.After(promptly):
-		t.Fatal("Attest did not return after its context ended while another call held the slot")
-	}
-}
-
-// TestAttestOnUnconstructedBackend guards the nil semaphore: an
-// unconstructed Backend refuses at once instead of blocking on it.
-func TestAttestOnUnconstructedBackend(t *testing.T) {
-	var b Backend
-	done := make(chan error, 1)
-	go func() {
-		_, err := b.Attest(context.Background(), []byte{1})
-		done <- err
-	}()
-	select {
-	case err := <-done:
-		if !errors.Is(err, ErrSGXUnavailable) {
-			t.Fatalf("Attest on an unconstructed Backend: err = %v, want ErrSGXUnavailable", err)
-		}
-	case <-time.After(promptly):
-		t.Fatal("Attest on an unconstructed Backend did not return")
 	}
 }
 

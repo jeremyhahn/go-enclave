@@ -18,6 +18,6 @@
 // builds everywhere.
 //
 // This first slice carries the module, the typed errors, the probe and the
-// refusal path. Attest, Import, Sweep and the handles follow in later slices
+// refusal path. Import, Sweep and the handles follow in later slices
 // (docs/plans/193.md).
 package intelsgx
