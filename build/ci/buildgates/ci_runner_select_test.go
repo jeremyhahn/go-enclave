@@ -41,6 +41,7 @@ var runnerSelectEnv = map[string]string{
 	"SERVER":    "${{ github.server_url }}",
 	"EVENT":     "${{ github.event_name }}",
 	"HEAD_REPO": "${{ github.event.pull_request.head.repo.full_name }}",
+	"REF":       "${{ github.ref }}",
 	"REPO":      "${{ github.repository }}",
 	"API":       "${{ github.api_url }}/repos/${{ github.repository }}/actions",
 	"RUN_ID":    "${{ github.run_id }}",
@@ -216,7 +217,7 @@ func runSelect(t *testing.T, script string, env map[string]string) (outputs, log
 		"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"GITHUB_OUTPUT="+out, "RUNNER_TEMP="+dir)
 	base := map[string]string{
-		"SERVER": "https://github.com", "EVENT": "pull_request", "HEAD_REPO": "o/r",
+		"SERVER": "https://github.com", "EVENT": "pull_request", "HEAD_REPO": "o/r", "REF": "refs/pull/1/merge",
 		"REPO": "o/r", "API": "https://api.github.invalid/repos/o/r/actions",
 		"RUN_ID": "100", "JOB_TOKEN": "t", "HS": "12", "C1": "4", "C2": "4",
 	}
@@ -258,6 +259,9 @@ func TestRunnerSelectionKeepsForksHosted(t *testing.T) {
 		{"same repository, CI_SELF_HOSTED_BIGDISK unset", map[string]string{"C1": ""}, false, "CI_SELF_HOSTED_BIGDISK=''"},
 		{"same repository, CI_SELF_HOSTED_BIGDISK_DOCKER 0", map[string]string{"C2": "0"}, false, "CI_SELF_HOSTED_BIGDISK_DOCKER='0'"},
 		{"same repository, the API unreachable", nil, true, "::warning::"},
+		{"schedule, which the self-hosted runners refuse", map[string]string{"EVENT": "schedule", "REF": "refs/heads/main"}, false, "which the self-hosted runners refuse"},
+		{"workflow_dispatch, which the self-hosted runners refuse", map[string]string{"EVENT": "workflow_dispatch", "REF": "refs/heads/main"}, false, "which the self-hosted runners refuse"},
+		{"push of another branch", map[string]string{"EVENT": "push", "REF": "refs/heads/feature"}, false, "which the self-hosted runners refuse"},
 		{"off github.com", map[string]string{"SERVER": "https://forge.invalid", "HEAD_REPO": "fork/r"}, false, "no selection"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
