@@ -248,7 +248,7 @@ func TestScriptsLib_HelpersAreDefinedOnce(t *testing.T) {
 	source := regexp.MustCompile(`(?m)^\. "\$\{0%/\*\}/lib\.sh"$`)
 	// These scripts ship with ci-template and are copied verbatim: the template,
 	// not lib.sh, governs their drift, so neither rule binds them.
-	templateScripts := map[string]bool{"apk-index-sum.sh": true, "ci-image-cache.sh": true}
+	templateScripts := map[string]bool{"apk-index-sum.sh": true, "ci-image-cache.sh": true, "ci-image-history.sh": true, "ci-mask-lan.sh": true}
 	for _, s := range scripts {
 		body, err := os.ReadFile(s)
 		if err != nil {

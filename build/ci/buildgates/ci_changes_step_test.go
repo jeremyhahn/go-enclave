@@ -14,8 +14,8 @@ import (
 
 // The changed-files step (ci.yml, job changes, step `diff`) decides what a
 // pull request may skip: docs_only=true skips the build and test steps of the
-// PR tier, lint_gates=false skips the lint-gates job (CI Gate reads that skip
-// as passed). Each answer is a search of
+// PR tier and lint_gates=false skips the lint-gates job (CI Gate reads that
+// skip as passed). Each answer is a search of
 // the changed files for a pattern, so only a search that ran and selected no
 // file may give the answer that skips. A search that could not run (a
 // pattern that is no regular expression, or an empty one) must keep the
@@ -102,9 +102,11 @@ type changesRun struct {
 	event string
 	// files is what `git diff --name-only` lists. noDiff is a diff git
 	// cannot take: the stub fails.
-	files    []string
-	noDiff   bool
-	fullTier bool
+	files  []string
+	noDiff bool
+	// fullLabel is a ci:full PR (CI_FULL_LABEL). Since v1.41 the full tier
+	// (CI_FULL_TIER) is true on every event, a pull request included.
+	fullLabel bool
 	// The patterns: DOCS_ONLY_PATTERN, LINT_GATES_PATTERN.
 	docs, lint string
 	// want is docs_only and lint_gates, in changesOutputs' order.
@@ -119,7 +121,7 @@ type changesRun struct {
 // remaining files are many: grep -q stops reading at the first line, and a
 // search that stopped early is not a search that failed.
 func longChangedList() []string {
-	files := []string{"backends/armtrustzone/backend.go"}
+	files := []string{"backends/memory/memory.go"}
 	for i := 0; i < 20000; i++ {
 		files = append(files, "docs/reference/page-"+strconv.Itoa(i)+".md")
 	}
@@ -137,7 +139,7 @@ var changesRuns = []changesRun{
 		changesDocsPattern, changesLintPattern, [2]string{"true", "false"}, ""},
 	{"one changed file is neither docs nor markdown", "pull_request", []string{"README.md", "enclave.go"}, false, false,
 		changesDocsPattern, changesLintPattern, [2]string{"false", "false"}, ""},
-	{"the full tier is never docs only and never skips lint-gates", "pull_request", []string{"README.md"}, false, true,
+	{"a ci:full PR is never docs only and never skips lint-gates", "pull_request", []string{"README.md"}, false, true,
 		changesDocsPattern, changesLintPattern, [2]string{"false", "true"}, ""},
 	{"a diff that cannot be taken skips nothing", "pull_request", nil, true, false,
 		changesDocsPattern, changesLintPattern, [2]string{"false", "true"}, ""},
@@ -194,7 +196,7 @@ func (fx changesFixture) violations(t *testing.T, script string) []string {
 			"GITHUB_OUTPUT=" + output, "RUNNER_TEMP=" + tmp,
 			"EVENT=" + r.event,
 			"BASE=0123456789abcdef0123456789abcdef01234567", "HEAD=89abcdef0123456789abcdef0123456789abcdef",
-			"CI_FULL_TIER=" + strconv.FormatBool(r.fullTier),
+			"CI_FULL_TIER=true", "CI_FULL_LABEL=" + strconv.FormatBool(r.fullLabel),
 			"DOCS_ONLY_PATTERN=" + r.docs, "LINT_GATES_PATTERN=" + r.lint,
 		}
 		if !r.noDiff {
@@ -271,8 +273,8 @@ const changesNegatedSearches = `docs_only=false lint_gates=true
 if [ "$EVENT" = pull_request ]; then
   if files=$(git diff --name-only --no-renames "$BASE...$HEAD"); then
     if [ -n "$files" ]; then
-      if [ "$CI_FULL_TIER" != true ] && ! grep -qvE "$DOCS_ONLY_PATTERN" <<< "$files"; then docs_only=true; fi
-      if [ "$CI_FULL_TIER" != true ] && ! grep -qE "$LINT_GATES_PATTERN" <<< "$files"; then lint_gates=false; fi
+      if [ "$CI_FULL_LABEL" != true ] && ! grep -qvE "$DOCS_ONLY_PATTERN" <<< "$files"; then docs_only=true; fi
+      if [ "$CI_FULL_LABEL" != true ] && ! grep -qE "$LINT_GATES_PATTERN" <<< "$files"; then lint_gates=false; fi
     fi
   fi
 fi

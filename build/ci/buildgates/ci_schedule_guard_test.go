@@ -284,7 +284,7 @@ func TestScheduleGuardDecidesTheVerdict_RefusesWhatItMustRefuse(t *testing.T) {
 	job := wf[start:end]
 	fx, skip := newScheduleGuardFixture(t)
 	const (
-		offMain    = `[ "$REF" != refs/heads/main ]; then`
+		offMain    = `[ "$REF" != refs/heads/main ] && [ "$REF" != refs/heads/ci/deps-bump ]; then`
 		checkpoint = `[ "${HEAD_REF#lane-ckpt/}" != "$HEAD_REF" ]; then`
 	)
 	for _, tc := range []struct{ name, old, new string }{
