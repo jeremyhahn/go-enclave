@@ -14,20 +14,7 @@ import (
 	"github.com/goccy/go-yaml"
 )
 
-// The schedule guard (ci.yml, job schedule-guard, step `guard`) decides
-// whether a run may start the jobs that check out the branch. Every such job
-// needs the guard and requires its `run` verdict (ciTierViolations); this
-// file holds the decision itself, in two kinds of check:
-//
-//   - the job's text: the verdict the other jobs read is the guard step's
-//     output, and the step reads the event, the server, the ref and the pull
-//     request's head branch from the run (scheduleGuardViolations);
-//   - what the script does: it is taken out of the real ci.yml and run with
-//     bash once per scheduleGuardRuns row, with the step's environment set as
-//     the runner sets it, and the verdict is read from the file GITHUB_OUTPUT
-//     names. The programs that could reach an API are stubs first in PATH
-//     that record the call and fail, so a run that must make no API call is
-//     one that leaves no record.
+// The schedule guard decides whether a run may start the jobs that check out the branch; its script runs here against stubs.
 const (
 	scheduleGuardStep = "guard"
 	// scheduleGuardVerdict is what the job hands the jobs that need it.

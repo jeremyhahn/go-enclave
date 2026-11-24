@@ -1,38 +1,5 @@
 #!/bin/sh
-# release-tag.sh — the second of a release's two steps: tag the merged release
-# commit.
-#   make release-tag VERSION=vX.Y.Z[-alpha|-rc.N]
-#
-# Usage: scripts/release-tag.sh   (from the repository root)
-#
-# Run after the pull request release.sh's branch release/<version> was opened
-# for has merged into main. Environment as for release.sh: VERSION, AGENT_GIT,
-# REPO_NAME, and FORGE_API_URL, FORGE_REPOSITORY and FORGE_TOKEN (a read token).
-#
-# Before it tags, it refuses unless: VERSION is a release version; the local
-# checkout is a clean main that is dev's main as just fetched; that HEAD is the
-# merged release commit, i.e. VERSION there is the version and its parent's is
-# not; the version is strictly greater than that parent's VERSION and every
-# existing v* tag, dev's fetched first (release-version-check.sh, as release.sh runs it: an older
-# release pull request merged after a newer release must not be tagged);
-# and the tree passes release-check-tag.sh (no fragment left, a literal
-# `## [vX.Y.Z…]` heading); the tag is free locally and on dev; the forge names
-# HEAD as the merge commit of a merged pull request from release/<version>
-# into main; and that pull request's head has a CI Gate check run of success.
-#
-# The CI Gate read is the release pull request's head, not main's HEAD: when
-# the release ships the fix for a red main job, main's own run of the merge
-# commit can still be red for exactly the reason the release fixes, and the
-# ruleset admitted the merge on the pull request's CI Gate. See
-# release-ci-gate.sh.
-#
-# Then it creates the signed annotated tag on HEAD and pushes it in one atomic
-# push with a move of dev's release lock (refs/heads/release-lock) to HEAD,
-# leased on the lock's value read before the precedence check: when another
-# release was pushed meanwhile, dev writes neither ref and the local tag is
-# deleted. main is not pushed. Pushing the tag hands off to release.yml, which
-# gates the tagged commit again (that it is on main, and that the tag is
-# greater than every other v* tag on the forge) in a run of its own.
+# release-tag.sh: tag the merged release commit after every release check passes, pushing the tag with the release lock atomically (make release-tag VERSION=...).
 set -eu
 # shellcheck source=lib.sh
 . "${0%/*}/lib.sh"
@@ -72,12 +39,7 @@ have=$(cat VERSION 2>/dev/null) || have=
 [ "$have" = "$want" ] || die "VERSION on main is ${have:-missing}, not $want; tag only the merged release commit of $version"
 parent=$(git show HEAD^:VERSION 2>/dev/null) || parent=
 [ "$parent" != "$want" ] || die "main's HEAD $head_sha is not the commit that set VERSION to $want (its parent already has it); tag the release pull request's merge commit, before anything merged after it"
-# The release lock: one ref on dev, at the commit of the latest release tag.
-# Its value is read here, before the precedence check, and the tag is pushed
-# together with a move of the lock, atomically and leased on this value. A
-# release another maintainer pushes after this read (while this script waits
-# on the forge, say) moved the lock, so dev refuses both refs and nothing is
-# written; with no lock yet (the first release) the lease requires it absent.
+# The release lock is one ref on dev, read before the precedence check and moved with the tag in a leased push.
 lock_ref=refs/heads/release-lock
 lock_line=$("$agent_git" "$repo_name" ls-remote dev "$lock_ref") || die "could not read dev's $lock_ref; refusing to order $version against an unanswered read"
 lock=$(printf '%s\n' "$lock_line" | awk -v r="$lock_ref" '$2 == r { print $1 }')

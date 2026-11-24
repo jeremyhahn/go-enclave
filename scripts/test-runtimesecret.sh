@@ -1,13 +1,5 @@
 #!/bin/sh
-# test-runtimesecret.sh — unit tests built with GOEXPERIMENT=runtimesecret.
-#
-# Usage: scripts/test-runtimesecret.sh <go test flag>...   (from the repository root)
-#
-# The body of `make test-runtimesecret` (key-schedule erasure). First checks
-# per-platform erasure file selection, then runs the suite with the experiment
-# on the module's own toolchain (resolved with the experiment unset; an older go
-# cannot parse it). The erasure proof runs without -race, whose allocator would
-# blind its control, so it takes its own flags.
+# test-runtimesecret.sh <go test flag>...: unit tests built with GOEXPERIMENT=runtimesecret.
 set -eu
 # shellcheck source=lib.sh
 . "${0%/*}/lib.sh"

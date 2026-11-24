@@ -23,12 +23,7 @@ import (
 	enclave "github.com/jeremyhahn/go-enclave"
 )
 
-// Covers allocator.go and memlock.go against a REAL
-// RLIMIT_MEMLOCK: each test runs in a child process whose ceiling was lowered
-// (soft and hard) before any test code ran, in a container holding no
-// CAP_IPC_LOCK, so the kernel enforces it and the process cannot lift it.
-// Every figure the allocator reports is checked against the kernel's own
-// VmLck, and every kernel refusal is a real mlock failure, not a simulation.
+// Covers allocator.go and memlock.go against a real, lowered RLIMIT_MEMLOCK, checked against the kernel's VmLck.
 
 // admissionPages is the child's ceiling, in pages, for the ceiling tests.
 const admissionPages = 32
@@ -60,8 +55,7 @@ func requireCeiling(t *testing.T, want int64) {
 	}
 }
 
-// requireBudgetError asserts err is a refusal by the BUDGET (before any
-// syscall) with exactly the given figures.
+// requireBudgetError asserts err is a budget refusal with exactly the given figures.
 func requireBudgetError(t *testing.T, what string, err error, requested, inUse, limit int64) {
 	t.Helper()
 	if !errors.Is(err, enclave.ErrBudgetExhausted) {
@@ -662,12 +656,7 @@ func TestLockedMemoryBudget_AllocatorRefusesInvalidArguments(t *testing.T) {
 	})
 }
 
-// TestLockedMemoryBudget_OnlyAConstructedAllocatorIsAccepted: an Allocator
-// is built only by NewAllocator or NewAllocatorWithinRLimit, so SetAllocator
-// refuses a nil one with ErrNilAllocator and another implementation of the
-// interface with ErrAllocatorNotConstructed, TransferTo refuses either as its
-// destination, and nothing is locked. A nil or zero implementation cannot be
-// built outside the package; the unit tests cover its receiver.
+// TestLockedMemoryBudget_OnlyAConstructedAllocatorIsAccepted pins that SetAllocator and TransferTo refuse unconstructed allocators.
 func TestLockedMemoryBudget_OnlyAConstructedAllocatorIsAccepted(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		before := vmLck(t)

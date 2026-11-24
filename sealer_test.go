@@ -288,16 +288,7 @@ func TestSealer_EnvelopeBindsBlobToCiphertext(t *testing.T) {
 	e.Destroy()
 }
 
-// TestSealer_WipedFailsClosedPerMode pins the mode asymmetry around a
-// shutdown sweep:
-//
-//   - ModeRootKey: the hierarchy is swept; new seals and existing values
-//     report ErrSealerWiped, and the sealer never re-keys.
-//   - ModePerOperation over the in-process software provider: the same, from
-//     the provider's side.
-//   - ModePerOperation over a device-held key (the map provider): the sweep
-//     destroys nothing the values depend on, so sealing and opening keep
-//     working.
+// TestSealer_WipedFailsClosedPerMode pins that a sweep wipes in-process keys per mode, while a device-held key keeps working.
 func TestSealer_WipedFailsClosedPerMode(t *testing.T) {
 	material := []byte("mode-asymmetry-material")
 
@@ -924,11 +915,7 @@ func TestSealer_CancellationReachesTheProvider(t *testing.T) {
 	}
 }
 
-// TestSealer_ContextEndingDuringASuccessfulCallIsHonoured pins the AFTER half:
-// a provider that completes its work while the caller's context ends must not
-// turn into a success the caller stopped waiting for — and, for the root
-// unseal, must not cost the root: the unseal succeeded, so it is published
-// and never asked for again.
+// TestSealer_ContextEndingDuringASuccessfulCallIsHonoured pins that a context ending during a successful call fails it, keeping an unsealed root.
 func TestSealer_ContextEndingDuringASuccessfulCallIsHonoured(t *testing.T) {
 	t.Run("Protect", func(t *testing.T) {
 		p := newBlockingProvider()
@@ -1070,12 +1057,7 @@ func TestNewSealed_EndedContextInstallsNothing(t *testing.T) {
 	}
 }
 
-// TestSealer_AuthenticationVerdictSurvivesCancellation pins the documented
-// precedence: an authentication failure the PROVIDER reported is a security
-// signal and stays visible even when the caller's context ended before the
-// post-call check — the error matches ErrSealedAuthentication AND the
-// cancellation. Only a refusal the provider attributed to the context alone is
-// kept clear of ErrSealedAuthentication.
+// TestSealer_AuthenticationVerdictSurvivesCancellation pins that a provider's authentication failure stays visible after cancellation.
 func TestSealer_AuthenticationVerdictSurvivesCancellation(t *testing.T) {
 	p := &errorThenCancelProtector{inner: newSoftwareProvider(), openErr: ErrSealedAuthentication}
 	s, err := newEnvelopeSealer(WithKeyProtector(p))
@@ -1156,12 +1138,7 @@ func TestSealed_OnlyTheLastOpenOutWipes(t *testing.T) {
 	}
 }
 
-// TestSealer_PassThroughSentinelsAreJoinedWhenTheContextEnds pins that a
-// pass-through sentinel the provider returns (ErrSealerWiped,
-// ErrLockedMemoryUnavailable, ErrProviderMessageLimit) is joined with the
-// cancellation when the caller's context has ended by the time the provider
-// returns: it matches the operation's sentinel, the context's error and the
-// provider's sentinel.
+// TestSealer_PassThroughSentinelsAreJoinedWhenTheContextEnds pins that provider sentinels are joined with the cancellation.
 func TestSealer_PassThroughSentinelsAreJoinedWhenTheContextEnds(t *testing.T) {
 	for _, sentinel := range []error{ErrSealerWiped, ErrLockedMemoryUnavailable} {
 		t.Run("open/"+sentinel.Error(), func(t *testing.T) {

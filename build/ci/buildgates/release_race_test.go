@@ -25,12 +25,7 @@ func (r *releaseRepo) beforePush(script string) {
 	}
 }
 
-// TestScriptsReleaseTag_RefusesWhenAHigherReleaseMovesTheLockBeforeThePush
-// interleaves a second release with release-tag.sh after its last read of
-// dev: rc.1 passes its precedence check, then another maintainer's release
-// tags rc.2 on dev and moves the release lock, and only then does rc.1's push
-// run. Pushing rc.1 would publish a lower version after a higher one, so the
-// push must be refused on dev itself, writing neither the tag nor the lock.
+// TestScriptsReleaseTag_RefusesWhenAHigherReleaseMovesTheLockBeforeThePush checks a lower tag is never pushed after a higher one.
 func TestScriptsReleaseTag_RefusesWhenAHigherReleaseMovesTheLockBeforeThePush(t *testing.T) {
 	const version, newer = "v1.5.0-rc.1", "v1.5.0-rc.2"
 	for _, tc := range []struct {
@@ -104,14 +99,7 @@ func TestScriptsReleaseTag_SetsTheReleaseLockAndMovesIt(t *testing.T) {
 	lockAt("v1.5.0-rc.2")
 }
 
-// TestScriptsReleaseWorkflow_OrdersEveryTagInItsOwnRun requires release.yml's
-// concurrency group to be keyed by the pushed tag, so no tag's run displaces
-// another's pending one (GitHub keeps one pending run per group), never to
-// cancel a run in progress, and to order the tag before anything else runs:
-// Verify fetches every v* tag from the forge, sets the pushed tag aside, and
-// runs scripts/release-version-check.sh --merged on the tagged commit, and
-// every other job needs Verify.
-// Nothing publishes: the retired forge's release publisher is gone.
+// TestScriptsReleaseWorkflow_OrdersEveryTagInItsOwnRun checks release.yml's per-tag concurrency and Verify ordering.
 func TestScriptsReleaseWorkflow_OrdersEveryTagInItsOwnRun(t *testing.T) {
 	type step struct {
 		Run string `yaml:"run"`
@@ -230,9 +218,7 @@ func verifyPrecedenceStep(t *testing.T) string {
 	return ""
 }
 
-// verifyForge is a forge with one line of commits, each setting VERSION and
-// carrying the scripts Verify runs, and the v* tags pushed on them: what
-// release.yml's Verify job fetches from when a tag's run starts.
+// verifyForge is a forge with one line of commits and v* tags, as Verify fetches it.
 type verifyForge struct {
 	t          *testing.T
 	bare, work string
@@ -277,8 +263,7 @@ func (f *verifyForge) git(dir string, args ...string) string {
 	return strings.TrimSpace(string(out))
 }
 
-// commit records a commit that sets VERSION to version on top of the line,
-// tags it with each of tags and pushes the commit and the tags to the forge.
+// commit sets VERSION, tags the commit and pushes both to the forge.
 func (f *verifyForge) commit(version string, tags ...string) {
 	f.t.Helper()
 	if err := os.WriteFile(filepath.Join(f.work, "VERSION"), []byte(version+"\n"), 0o644); err != nil {
@@ -318,12 +303,7 @@ func (f *verifyForge) verify(run, tag string) (string, bool) {
 	return string(out), true
 }
 
-// TestScriptsReleaseWorkflow_VerifyPassesAnEarlierTagAfterALaterOne pushes
-// rc.1 and then rc.2, in order, on successive commits before rc.1's run
-// verifies. rc.2 is on a descendant of rc.1's commit, so it is not part of
-// the release state rc.1 was published in: rc.1's Verify must pass (and a
-// rerun of it later), and so must rc.2's. The leased push of the release
-// lock, not Verify, is what orders releases.
+// TestScriptsReleaseWorkflow_VerifyPassesAnEarlierTagAfterALaterOne checks Verify passes rc.1 after rc.2 is pushed.
 func TestScriptsReleaseWorkflow_VerifyPassesAnEarlierTagAfterALaterOne(t *testing.T) {
 	run := verifyPrecedenceStep(t)
 	f := newVerifyForge(t)

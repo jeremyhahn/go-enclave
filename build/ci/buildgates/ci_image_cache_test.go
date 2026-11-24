@@ -10,12 +10,7 @@ import (
 	"testing"
 )
 
-// Tests for scripts/ci-image-cache.sh, the toolchain image's registry cache.
-// In CI it logs in to the forge registry and pushes there; here it runs with
-// bash against a fake make and a fake docker first on PATH. Both log every
-// call (argv, DOCKER_CONFIG, whether that directory exists, and docker
-// login's stdin) to a file, and per-case FAKE_* variables choose their
-// answers, so no case reaches a real daemon or registry.
+// Tests for scripts/ci-image-cache.sh against a fake make and docker.
 
 const (
 	cacheServer = "https://forge.example"
@@ -150,8 +145,7 @@ func runImageCache(t *testing.T, env map[string]string, args ...string) cacheRun
 		t.Fatalf("read log: %v", err)
 	}
 
-	// The throwaway DOCKER_CONFIG lives under TMPDIR; it is gone after
-	// every run, whatever the exit.
+	// The throwaway DOCKER_CONFIG is gone after every run.
 	left, err := os.ReadDir(tmp)
 	if err != nil {
 		t.Fatalf("read tmp: %v", err)

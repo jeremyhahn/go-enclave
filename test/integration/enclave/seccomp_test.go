@@ -10,30 +10,7 @@
 
 package enclave_test
 
-// Real kernel refusals, on demand.
-//
-// The library's recovery paths run only when the kernel refuses a memory
-// syscall, so an integration test needs the refusal to come from the kernel.
-// This is a seccomp user-notification supervisor: an isolated child (a filter
-// cannot be removed) installs a filter that routes mlock, munlock, mprotect up
-// to maxRoutedMprotect bytes, and munmap of one chosen length to a supervisor
-// goroutine in the same process. The supervisor answers from a policy the test
-// changes at run time: continue the call as the kernel would, or fail it with
-// an errno. Lifting a refusal is a policy change, so a test can drive
-// "refused, then retried".
-//
-// Scope:
-//   - Nothing the supervisor needs to run may be routed to it. A cgo build
-//     (every -race build) creates threads with pthread_create, and musl
-//     mprotects each new thread stack: routed, that deadlocks; refused, it
-//     aborts the runtime. mprotect is therefore routed only up to
-//     maxRoutedMprotect, below musl's smallest stack (128 KiB).
-//   - The supervisor's goroutine is locked to its own thread and makes only
-//     ioctl and futex-class calls, none of which are routed.
-//   - Requires Linux >= 5.19 (WAIT_KILLABLE_RECV, so runtime preemption
-//     signals cannot withdraw a notification being answered; TSYNC_ESRCH),
-//     no_new_privs (set here), and a container profile permitting seccomp(2).
-//     Absence is a failure, not a skip.
+// Real kernel refusals on demand: a seccomp user-notification supervisor that continues or fails routed memory syscalls (Linux 5.19+).
 
 import (
 	"errors"
@@ -375,10 +352,7 @@ func (f *faultInjector) commitLocked(n *seccompNotif, d decision) {
 	f.rules[n.Data.Nr] = r
 }
 
-// supervise answers notifications for the life of the process, locked to its
-// own thread. With WAIT_KILLABLE_RECV a received notification can be canceled
-// only by a fatal signal; before receipt, a signal withdraws it and RECV may
-// report ENOENT. Both RECV errors mean "nothing to answer", not "stop".
+// supervise answers notifications for the life of the process, locked to its own thread.
 func (f *faultInjector) supervise(started chan<- struct{}) {
 	runtime.LockOSThread()
 	close(started)

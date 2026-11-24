@@ -2,10 +2,7 @@ package armtrustzone
 
 import "unsafe"
 
-// The Linux TEE subsystem's user-space ABI, as include/uapi/linux/tee.h
-// defines it at the kernel the fixture pins (docs/reference/linux-uapi-tee.h).
-// Every struct here has the header's layout on linux/arm64 and linux/amd64;
-// tee_linux_test.go checks the sizes and the field offsets.
+// The Linux TEE user-space ABI (include/uapi/linux/tee.h); tee_linux_test.go checks the layouts.
 
 // The ioctl type and the first command number (TEE_IOC_MAGIC, TEE_IOC_BASE).
 const (

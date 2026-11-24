@@ -1,13 +1,5 @@
 #!/usr/bin/env bash
-# Tests for scripts/in-toolchain-image.sh's CPU bound: the stage's --cpus,
-# GOMAXPROCS and GOFLAGS=-p all take the computed bound, capped at the
-# daemon's NCPU when `docker info` reports a positive integer below it; empty,
-# 0, malformed or failed output leaves the bound as it was. A stub `docker` on
-# PATH records every call and answers `docker info` with STUB_NCPU (exit
-# STUB_NCPU_RC); a stub `tar` keeps the copy-in off the image's own tar.
-# IN_IMAGE_CPUS sets the bound, so the host's CPU count never matters.
-#
-#   usage: scripts/in-toolchain-image_test.sh   (also: make check-in-toolchain-image)
+# Tests for in-toolchain-image.sh's CPU bound against stub docker and tar (usage: scripts/in-toolchain-image_test.sh, or make check-in-toolchain-image).
 set -eu
 
 # shellcheck source=lib.sh

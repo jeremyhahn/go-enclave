@@ -22,12 +22,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// This file is built only with -tags=userns, which `make
-// integration-test-userns` passes inside the `userns` compose service: the
-// default toolchain container refuses user namespaces (its seccomp profile
-// denies clone(CLONE_NEWUSER) without CAP_SYS_ADMIN), so there `make test`
-// could only fail this test. The tag selects where it runs; it does not make it
-// optional. Where it runs and cannot create the namespace, it fails.
+// Built only with -tags=userns, inside the userns compose service; where the namespace is refused the test fails.
 
 const (
 	userNamespaceMarker        = "GO_ENCLAVE_USERNS_CHILD"
@@ -35,16 +30,7 @@ const (
 	userNamespaceLimitEnforced = "userns child: the limit was reported and found enforced"
 )
 
-// TestMemlockRLimit_EnforcedInsideAnUnprivilegedUserNamespace re-executes the
-// test binary as root of a new user namespace, the equivalent of unshare -Ur:
-// it holds CAP_IPC_LOCK there, and the kernel still applies RLIMIT_MEMLOCK
-// because the capability is checked in the initial namespace. The child
-// asserts both: this package reports the limit enforced, and mlock past it
-// really fails.
-//
-// It fails when the host refuses unprivileged user namespaces, or grants one
-// without capabilities (an AppArmor userns restriction): a run that verified
-// nothing is not a pass.
+// TestMemlockRLimit_EnforcedInsideAnUnprivilegedUserNamespace checks RLIMIT_MEMLOCK still binds root of a child user namespace.
 func TestMemlockRLimit_EnforcedInsideAnUnprivilegedUserNamespace(t *testing.T) {
 	if os.Getenv(userNamespaceMarker) == "1" {
 		userNamespaceChild(t)

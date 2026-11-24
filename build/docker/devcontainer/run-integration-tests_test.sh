@@ -1,20 +1,5 @@
 #!/bin/sh
-# Tests for build/docker/devcontainer/run-integration-tests.sh: its usage
-# refusals, its go test and covdata calls, the coverage floor it enforces
-# through the real scripts/coverage-gate.sh, GO_ENCLAVE_IT_PROFILE_OUT and
-# the removal of its temporary files.
-#
-# The runner resolves the gate relative to $0 and the suite relative to the
-# working directory, so it runs as a copy in a scratch tree that holds
-# test/integration/demo and copies of scripts/coverage-gate.sh and
-# scripts/lib.sh. A stub `go` on PATH records every call and answers
-# `go test` (exit STUB_TEST_RC), `go tool covdata textfmt` (writes the
-# fixture STUB_PROFILE, or exits STUB_COVDATA_RC) and `go tool cover -func`
-# (prints a fixture). The refusals run under every sh found (dash as sh,
-# bash). No Docker, no network, no Go toolchain.
-#
-#   usage: build/docker/devcontainer/run-integration-tests_test.sh
-#          (also: make check-it-runner)
+# Tests for run-integration-tests.sh against a stub go, under every available sh; run with make check-it-runner.
 set -eu
 
 here=$(cd -- "$(dirname -- "$0")" && pwd)
@@ -74,11 +59,7 @@ printf 'mode: atomic\nexample.com/m/a/a.go:1.1,9.2 90 3\nexample.com/m/a/a.go:10
 printf 'mode: atomic\nexample.com/m/a/a.go:1.1,9.2 89 3\nexample.com/m/a/a.go:10.1,19.2 11 0\n' > "$D/fix/at89"
 printf 'example.com/m/a/a.go:1:\tFullyCovered\t100.0%%\nexample.com/m/a/a.go:10:\tLeastCovered\t0.0%%\ntotal:\t(statements)\t89.0%%\n' > "$D/fix/func"
 
-# run <shell> [NAME=value...]: the runner under <shell>, from the scratch
-# tree, in an environment holding only PATH, HOME, the stub's state, the
-# defaults and the NAME=value words given (the last assignment wins). drop_
-# names one default to leave out (TESTFLAGS, FLOOR or COVERPKG); pkg_ is the
-# package argument, none when nopkg_=1. Output in $D/out, status in $rc.
+# run <shell> [NAME=value...]: the runner from the scratch tree in a minimal environment; output in $D/out, status in $rc.
 drop_=
 pkg_=demo
 nopkg_=
@@ -111,8 +92,7 @@ cleaned() {
   done < "$D/state/paths"
 }
 
-# refused <shell> <case> <message> [NAME=value...]: exit 2, the message on
-# the output, no go call.
+# refused <shell> <case> <message> [NAME=value...]: exit 2, the message, no go call.
 refused() {
   r_sh=$1 r_what=$2 r_msg=$3
   shift 3

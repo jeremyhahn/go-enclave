@@ -12,12 +12,7 @@ import (
 // needle could match by chance, and a hit would prove nothing.
 const residueNeedleMin = 16
 
-// checkResidue requires that no copy of a handle's material is findable in the
-// process once Destroy returns, or, for a Sweeper, once Sweep does. For every
-// case with ByteAccess it copies the material into a locked needle, sweeps the
-// process with the handle alive as the control, ends the handle and sweeps
-// again: any hit outside the needle's own mapping is a copy the backend kept
-// or did not wipe.
+// checkResidue requires no copy of a handle's material to be findable in the process after Destroy or Sweep.
 func checkResidue(r *report, cfg Config) {
 	const property = "residue"
 	if cfg.SkipResidueSweep != "" {
@@ -170,12 +165,7 @@ func isUniform(b []byte) bool {
 	return true
 }
 
-// copyByByte copies src into dst without ever holding more than one byte of
-// the material in a register. copy is a memmove, which holds a short material
-// whole in vector registers, and a signal that lands while they still hold it
-// has the kernel save them, byte-exact, into a frame on the thread's signal
-// stack, which lives in the Go heap and is never cleared: the sweep after the
-// end would find the harness's own copy and blame the backend.
+// copyByByte copies src into dst one byte at a time, so no register holds the whole material.
 func copyByByte(dst, src []byte) {
 	for i := range src { //nolint:staticcheck // copy stages the material in vector registers that a signal can spill to the heap, so the loop moves one byte at a time
 		dst[i] = src[i]

@@ -17,12 +17,7 @@ import (
 	"testing"
 )
 
-// FuzzUnwrapKey feeds unwrapKey, and the parseBlobHeader it relies on, frames
-// it did not produce. A frame shorter than blobHeaderLen or of another version
-// is malformed and refused with ErrSealedAuthentication; every other frame
-// parses to the bytes it carries. unwrapKey never panics, accepts only the one
-// blob wrapKey produced, and refuses everything else with
-// ErrSealedAuthentication, leaving dst untouched or wiped.
+// FuzzUnwrapKey checks unwrapKey accepts only wrapKey's blob and refuses every other frame.
 func FuzzUnwrapKey(f *testing.F) {
 	const gen = 3
 	wrapping := newWrappingKey(f)
@@ -71,13 +66,7 @@ func FuzzUnwrapKey(f *testing.F) {
 	})
 }
 
-// FuzzUnwrapKeyDevice is FuzzUnwrapKey for a wrapping key that encrypts in its
-// device, the openOnDeviceInto path, at every nonce size the fuzzer picks, 0
-// included. wrapKey followed by unwrapKey round-trips; unwrapKey never panics,
-// accepts only the blob wrapKey produced, and refuses everything else with
-// ErrSealedAuthentication, or ErrPlaintextEscaped when the genuine key is
-// longer than dst, leaving dst wiped once the device has opened into it and
-// untouched before.
+// FuzzUnwrapKeyDevice is FuzzUnwrapKey for a wrapping key that encrypts in its device.
 func FuzzUnwrapKeyDevice(f *testing.F) {
 	const gen = 3
 	device := newFuzzDeviceKey(f)
@@ -159,16 +148,7 @@ var errFuzzDevice = errors.New("fuzz: device key failed")
 // device failure and the two AEAD errors openOnDeviceInto maps.
 var deviceFailures = [...]error{errFuzzDevice, ErrAEADAuthentication, ErrEnclaveDestroyed}
 
-// FuzzOpenOnDeviceInto feeds openOnDeviceInto sealed bytes and additional data
-// it did not produce, at every nonce size and dst length, through a device key
-// that is honest or misbehaves. openOnDeviceInto never panics; sealOnDevice
-// followed by openOnDeviceInto round-trips; the honest key's only accepted
-// plaintext is the one sealed; a plaintext returned outside dst is refused with
-// ErrPlaintextEscaped and wiped; one of the wrong length is refused with
-// ErrSealedAuthentication; a device failure is an *OpenError carrying it,
-// except ErrAEADAuthentication (ErrSealedAuthentication) and
-// ErrEnclaveDestroyed (itself). Every refusal leaves dst wiped once the device
-// has opened into it, untouched before.
+// FuzzOpenOnDeviceInto checks openOnDeviceInto against honest and misbehaving device keys.
 func FuzzOpenOnDeviceInto(f *testing.F) {
 	device := newFuzzDeviceKey(f)
 	plaintext := make([]byte, dekBytes)
@@ -275,15 +255,7 @@ func FuzzOpenOnDeviceInto(f *testing.F) {
 	})
 }
 
-// fuzzDeviceKey is a wrapping key that encrypts in its device, implementing
-// AEAD and not ByteAccess, at any nonce size: AES-256-GCM under a nonce it
-// draws itself, so FIPS 140-only mode accepts it, with the caller's
-// NonceSize-byte nonce bound as additional data. open, when set, replaces
-// Open's decryption, so a target can model a device that breaks the AEAD
-// contract.
-// refusedAsDocumented reports whether a refused openOnDeviceInto left dst as
-// its contract says: wiped whole once the device's Open has run (reached),
-// untouched otherwise.
+// refusedAsDocumented reports whether a refused openOnDeviceInto left dst wiped (reached) or untouched.
 func refusedAsDocumented(dst []byte, reached bool) bool {
 	if reached {
 		return bytes.Equal(dst, make([]byte, len(dst)))

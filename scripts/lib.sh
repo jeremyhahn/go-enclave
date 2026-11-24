@@ -1,21 +1,5 @@
 # shellcheck shell=sh disable=SC2034
-# lib.sh — the helpers every script in scripts/ shares. Sourced, never run:
-#
-#   set -eu
-#   # shellcheck source=lib.sh
-#   . "${0%/*}/lib.sh"
-#
-# Defines (the caller's $0 is the script, so these describe the script):
-#   here                    the directory holding the scripts
-#   prog                    the script's name without .sh, the prefix of die()
-#   NL                      one newline
-#   die MSG...              print "<prog>: MSG" to stderr and exit 1
-#   require_scanned_image   die unless the integration image is the one that was scanned
-#   matches VALUE ERE       the WHOLE value matches
-#   VERSION_RE              vX.Y.Z[-pre]
-#   RELEASE_TAG_RE          vX.Y.Z, vX.Y.Z-alpha or vX.Y.Z-rc.N
-#   version_anchor VERSION  the ERE of VERSION's CHANGELOG heading
-#   unreleased_pending FILE the first entry still under [Unreleased], if any
+# lib.sh: helpers every script in scripts/ sources (here, prog, NL, die, require_scanned_image, matches, VERSION_RE, RELEASE_TAG_RE, version_anchor, unreleased_pending).
 LC_ALL=C
 export LC_ALL
 

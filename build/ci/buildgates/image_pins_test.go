@@ -12,19 +12,7 @@ import (
 	"github.com/goccy/go-yaml/parser"
 )
 
-// Every container image a workflow pulls must be named by digest:
-//
-//	container: golang:1.27.2-alpine3.24@sha256:<64 hex>
-//	services:
-//	  db:
-//	    image: postgres:18@sha256:<64 hex>
-//
-// A tag is as movable as an action's tag (see action_pins_test.go) and these
-// containers run the job's steps or sit beside them with the job's secrets in
-// reach. The gate covers the two places a workflow names an image:
-// jobs.<id>.container (a string, or a mapping with `image`) and
-// jobs.<id>.services.<name>.image. Like the action gate it parses the YAML, and
-// a shape it cannot read is an error, not a pass.
+// Every container and service image a workflow pulls must be named by digest.
 
 // digestPinnedImage is a name (no `$`, so no ${{ expression }}) and exactly 64
 // lowercase hex, whatever tag stands in front of the digest.

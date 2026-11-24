@@ -41,12 +41,7 @@ const wrappingKeyInfo = "go-enclave v1 ModeRootKey KEK-wrapping key"
 // not produce on demand.
 var hkdfKey = hkdf.Key[hash.Hash]
 
-// deriveWrappingKey replaces root, in place, with the key a [ModeRootKey]
-// sealer wraps its KEK generations under: HKDF-SHA256 of the provider's root
-// under a per-sealer salt. Every sealer over a provider, and every boot of a
-// hardware root, gets the same root; the salt makes maxKEKGenerations bound
-// a key no other sealer uses. The HKDF output and HMAC state are heap memory,
-// wiped or erased as for an AES key schedule.
+// deriveWrappingKey replaces root in place with HKDF-SHA256 of the provider's root under a per-sealer salt.
 func deriveWrappingKey(root, salt []byte) error {
 	var err error
 	secretDo(func() {
@@ -62,11 +57,7 @@ func deriveWrappingKey(root, salt []byte) error {
 	return nil
 }
 
-// hierarchyStateLocked is the one statement of a [ModeRootKey] sealer's
-// state. It reports [ErrSealerDestroyed] after Destroy; otherwise whether a
-// hierarchy is published, with [ErrSealerWiped] if it is and its root or
-// current KEK is dead. Nothing is published before the first seal, nor ever
-// in [ModePerOperation]. The caller holds s.mu (read is enough).
+// hierarchyStateLocked reports a [ModeRootKey] sealer's state; the caller holds s.mu.
 func (s *sealerState) hierarchyStateLocked() (published bool, err error) {
 	switch {
 	case s.destroyed:
@@ -80,15 +71,7 @@ func (s *sealerState) hierarchyStateLocked() (published bool, err error) {
 	}
 }
 
-// protectRootKey wraps the DEK under the current KEK generation, initializing
-// or rotating first when needed. After either it loops, so the wrap always
-// uses a generation re-read under the lock it runs under. The context is
-// checked on every pass: an initialization that succeeded after the caller's
-// context ended is kept, but that caller is told it was abandoned.
-//
-// protectRootKey and unprotectRootKey are the boundary every root-mode seal
-// and open passes through, so their deferred withDeadHierarchyCleanup is the
-// one place a dead hierarchy's key release is retried, and no exit skips it.
+// protectRootKey wraps the DEK under the current KEK generation, initializing or rotating first when needed.
 func (s *sealerState) protectRootKey(ctx context.Context, dek *lockedRegion) (blob []byte, err error) {
 	defer func() { err = s.withDeadHierarchyCleanup(err) }()
 
@@ -144,10 +127,7 @@ func (s *sealerState) protectRootKey(ctx context.Context, dek *lockedRegion) (bl
 	}
 }
 
-// releaseBlob ends the reference a value sealed under blob holds on its KEK
-// generation (see kekRefs), and drops a retired generation with its last
-// value. It is a no-op outside ModeRootKey, once the sealer is destroyed, and
-// for a blob that is not one of this sealer's DEK blobs.
+// releaseBlob drops a value's reference on its KEK generation, and a retired generation with its last value.
 func (s *sealerState) releaseBlob(blob []byte) {
 	if s.mode != ModeRootKey {
 		return
@@ -229,10 +209,7 @@ func (s *sealerState) unprotectRootKey(_ context.Context, blob []byte, dek *lock
 	}), s.root, s.kek)
 }
 
-// withDeadHierarchyCleanup returns err unchanged unless it reports
-// ErrSealerWiped and the published hierarchy is dead; then it retries the
-// release of the hierarchy's keys and joins any refusal. The caller must not
-// hold s.mu.
+// withDeadHierarchyCleanup retries the release of a dead hierarchy's keys on ErrSealerWiped; the caller must not hold s.mu.
 func (s *sealerState) withDeadHierarchyCleanup(err error) error {
 	if !errors.Is(err, ErrSealerWiped) {
 		return err
@@ -247,11 +224,7 @@ func (s *sealerState) withDeadHierarchyCleanup(err error) error {
 	return withCleanupFailure(err, destroyKeys(s.kek, s.root))
 }
 
-// unwrapRetiredKEKLocked recovers a retired KEK generation into a fresh locked
-// enclave the caller must destroy. The caller holds s.mu (read is enough) and
-// has verified the hierarchy is alive. It stays in locked memory even under
-// WithBackend: importing would be a blocking device call under mu, for one
-// unwrap of a generation that was itself minted in locked memory.
+// unwrapRetiredKEKLocked recovers a retired KEK generation into a fresh locked enclave; the caller holds s.mu.
 func (s *sealerState) unwrapRetiredKEKLocked(kekBlob []byte) (*lockedRegion, error) {
 	kek, err := newMemorySized(kekBytes)
 	if err != nil {
@@ -266,14 +239,7 @@ func (s *sealerState) unwrapRetiredKEKLocked(kekBlob []byte) (*lockedRegion, err
 	return kek, nil
 }
 
-// hierarchyFailure turns an [ErrEnclaveDestroyed] into [ErrSealerWiped] only
-// when one of the given hierarchy keys is dead. A dead per-call enclave (the
-// DEK, or a materialized retired KEK) stays ErrEnclaveDestroyed: the
-// hierarchy is intact. Hierarchy keys are used only under s.mu or by the
-// initSlot holder, and neither destroys one in use, so a dead one is a
-// sweep's doing. Callers under s.mu pass the root and current KEK read under
-// it, so a rotation cannot change them between a failure and its
-// translation.
+// hierarchyFailure turns [ErrEnclaveDestroyed] into [ErrSealerWiped] only when a hierarchy key is dead.
 func hierarchyFailure(err error, hierarchy ...Handle) error {
 	if !errors.Is(err, ErrEnclaveDestroyed) {
 		return err
@@ -286,11 +252,7 @@ func hierarchyFailure(err error, hierarchy ...Handle) error {
 	return err
 }
 
-// destroyKeys destroys every key of the hierarchy, which may be handles of
-// the sealer's backend, skipping nil ones, and returns every release the
-// kernel refused. A refused key is already wiped and stays on the [WipeAll]
-// ledger; destroying it again retries the release, and destroying a released
-// one again is a no-op.
+// destroyKeys destroys every non-nil hierarchy key and returns every refused release.
 func destroyKeys(keys ...Handle) error {
 	var refused []error
 	for _, k := range keys {
@@ -301,11 +263,7 @@ func destroyKeys(keys ...Handle) error {
 	return withCleanupFailure(nil, refused...)
 }
 
-// importKey moves the key src holds into s's importer, for wrapping with
-// AES-256-GCM, and destroys src on every path. A backend's own failure is a
-// failure, an E; a handle the sealer cannot wrap with, one with neither
-// AEAD nor ByteAccess, is destroyed and refused. A handle that refuses that
-// Destroy is retained (destroyOrRetain). The caller must not hold s.mu.
+// importKey moves src's key into s's importer for AES-256-GCM wrapping and destroys src; the caller must not hold s.mu.
 func importKey[E causeShape, P causeError[E]](ctx context.Context, s *sealerState, src *lockedRegion) (Handle, error) {
 	var h Handle
 	err := src.WithBytes(func(k []byte) error {
@@ -347,22 +305,7 @@ func backendFailure[E causeShape, P causeError[E]](err error) error {
 	return providerFailure[E, P](err)
 }
 
-// initHierarchy performs the once-per-sealer root unseal and mints the first
-// KEK generation. It is retried rather than memoized with sync.Once, because
-// a memlock ceiling or transient provider failure can lift. A failed unseal
-// is retried with a fresh UnsealRoot call; a successful unseal followed by a
-// failed mint keeps the root in pendingRoot and retries only the mint.
-//
-// The unseal and mint run holding initSlot and nothing else; mu is
-// write-locked only to publish root, KEK and generation map as one state. A
-// caller queued behind a successful initializer finds the hierarchy published
-// and does not call the provider.
-//
-// A sweep overlapping the initialization leaves the sealer wiped: the sweep
-// sequence is read before the unseal and checked before the mint, after a
-// failed mint, and at publication. On overlap the root and any KEK are
-// destroyed rather than published, the dead root stays in pendingRoot, and
-// every later attempt reports [ErrSealerWiped] without asking the provider.
+// initHierarchy unseals the root and mints the first KEK generation, retried rather than memoized; an overlapping sweep leaves the sealer wiped.
 func (s *sealerState) initHierarchy(ctx context.Context) (err error) {
 	select {
 	case s.initSlot <- struct{}{}:
@@ -500,10 +443,7 @@ func (s *sealerState) firstGeneration(ctx context.Context, wrap Handle) (Handle,
 	return h, blob, nil
 }
 
-// unsealRoot asks the provider for the root and replaces it, within the same
-// borrow, by the derived wrapping key, which it leaves in pendingRoot with
-// the sweep sequence read before the unseal in pendingGen. The caller holds
-// initSlot.
+// unsealRoot asks the provider for the root and replaces it with the derived wrapping key; the caller holds initSlot.
 func (s *sealerState) unsealRoot(ctx context.Context) (*lockedRegion, error) {
 	// Read before the root exists, as Seal reads sealedAtGen.
 	gen := sweepGeneration()
@@ -568,13 +508,7 @@ func initFailure(ctx context.Context, err error) error {
 	return contextFailure[SealError](ctx, err)
 }
 
-// discardIfSwept returns nil unless a sweep has overlapped the initialization
-// that produced pendingRoot (the sequence moved since pendingGen, or was odd
-// then). If one has, it releases the pending keys and returns
-// [ErrSealerWiped] (a [SealerWipedError] carrying cause, the failure that
-// prompted the check, when it is non-nil), with any refused release. Since
-// the sequence never returns to pendingGen, every later attempt retries a
-// refused release. The caller holds initSlot.
+// discardIfSwept releases the pending keys and returns [ErrSealerWiped] if a sweep overlapped initialization; the caller holds initSlot.
 func (s *sealerState) discardIfSwept(cause error) error {
 	if !sweepInFlight(s.pendingGen) && sweepGeneration() == s.pendingGen {
 		return nil
@@ -582,12 +516,7 @@ func (s *sealerState) discardIfSwept(cause error) error {
 	return withCleanupFailure(withCause[SealerWipedError](cause), s.releasePending())
 }
 
-// releasePending destroys pendingKEK, pendingWrap and pendingRoot. Once all
-// are released pendingKEK is cleared; pendingWrap and pendingRoot are kept,
-// dead, as the wiped state of a
-// hierarchy never published (a destroyed sealer reports ErrSealerDestroyed
-// before it). A release the kernel refuses keeps its reference, so a later
-// call retries it. The caller holds initSlot.
+// releasePending destroys the pending keys, keeping refused releases for retry; the caller holds initSlot.
 func (s *sealerState) releasePending() error {
 	err := destroyKeys(s.pendingKEK, s.pendingWrap, s.pendingRoot)
 	if err == nil {
@@ -596,12 +525,7 @@ func (s *sealerState) releasePending() error {
 	return err
 }
 
-// rotateKEK retires the current KEK generation and mints the next. The
-// outgoing KEK's enclave is destroyed (the write lock excludes in-flight
-// users) and its root-wrapped blob stays in kekBlobs while values sealed
-// under it are alive, so they keep opening. Holding mu across the mint is
-// allowed because the mint never calls the provider; the import WithBackend
-// adds runs with mu released.
+// rotateKEK retires the current KEK generation and mints the next.
 func (s *sealerState) rotateKEK(ctx context.Context) error {
 	s.mu.Lock()
 
@@ -666,12 +590,7 @@ func (s *sealerState) mintNextLocked(gen uint64) (*lockedRegion, []byte, error) 
 		return nil, nil, &SealError{Cause: ErrSealerExhausted}
 	}
 
-	// WipeAll skips the root while newGeneration borrows it, so a sweep here
-	// could kill only the old KEK; publishing the new generation would then
-	// re-key after a WipeAll. Any overlap wipes the whole hierarchy, the
-	// unpublished generation included. A refused key is already wiped and
-	// stays on the WipeAll ledger; the sealer also retries its published root
-	// and KEK whenever a seal or open finds the hierarchy dead.
+	// Any overlapping sweep wipes the whole hierarchy, the unpublished generation included.
 	kek, blob, err := newGeneration(s.root, s.kekGen+1)
 	if sweepInFlight(gen) || sweepGeneration() != gen {
 		return nil, nil, withCleanupFailure(withCause[SealerWipedError](err), destroyKeys(kek, s.kek, s.root))
@@ -680,12 +599,7 @@ func (s *sealerState) mintNextLocked(gen uint64) (*lockedRegion, []byte, error) 
 	return kek, blob, err
 }
 
-// publishNextLocked makes kek, whose root-wrapped form is blob, the current
-// generation, destroys the outgoing KEK, and drops the outgoing generation's
-// root-wrapped blob if no live value needs it. An outgoing KEK that refuses
-// its Destroy is retained (destroyOrRetainLocked) until a Destroy releases it,
-// and its [CleanupError] returned: the new generation is published all the
-// same. Called with mu write-locked.
+// publishNextLocked makes kek the current generation and destroys the outgoing one; called with mu write-locked.
 func (s *sealerState) publishNextLocked(kek Handle, blob []byte) error {
 	outgoing := s.kekGen
 	err := s.destroyOrRetainLocked(nil, s.kek)

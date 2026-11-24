@@ -23,19 +23,7 @@ import (
 // Covers sealed.go: between opens the process holds only ciphertext, measured
 // by sweeping process memory; and OpenIn's admission against a budget.
 
-// TestSealing_SealedValueHoldsNoPlaintextBetweenOpens follows one secret through a
-// sealed value's life, in both modes, sweeping every readable mapping at each
-// step:
-//
-//   - in the caller's heap slice before sealing — the sweep's control for the
-//     Go heap, where a leak would most plausibly land;
-//   - NOWHERE once sealed: Seal wiped the slice and left no plaintext in any
-//     buffer, stack or AEAD scratch it used;
-//   - in exactly the enclave Open returns, and nowhere else, while it is open
-//     — the control for locked mappings, and proof the plaintext was decrypted
-//     straight into locked pages;
-//   - nowhere again once that enclave is destroyed, and likewise for OpenIn;
-//   - nowhere after a shutdown sweep reclaims an enclave still open at exit.
+// TestSealing_SealedValueHoldsNoPlaintextBetweenOpens sweeps memory at each step of a sealed value's life, in both modes.
 func TestSealing_SealedValueHoldsNoPlaintextBetweenOpens(t *testing.T) {
 	for _, mode := range sealerModes {
 		t.Run(mode.String(), func(t *testing.T) {

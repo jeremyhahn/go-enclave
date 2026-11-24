@@ -20,17 +20,7 @@ import (
 	"github.com/jeremyhahn/go-enclave/backendtest"
 )
 
-// Covers backendtest against the arm-trustzone backend on OP-TEE (#250). The
-// optee tag keeps it out of every other run; `make
-// integration-test-arm-trustzone` runs it against trusted-firmware's QEMU
-// fixture. The backend is out of tree (#206): the harness finds it in the
-// registry by name and never imports it, so go-enclave keeps golang.org/x/sys
-// as its only dependency. The registry is per process, so the fixture cannot
-// fill it: an optee-tagged file in this package, arm_trustzone_register_test.go,
-// registers the backend in-process with enclave.Register and sets
-// armTrustZoneRegistered from its init. #206 supplies that file; until then
-// the harness refuses with a *backendtest.RegistrationError, and `make
-// integration-test-arm-trustzone` refuses before it builds.
+// Covers backendtest against the arm-trustzone backend on OP-TEE; the backend registers itself from arm_trustzone_register_test.go.
 
 // armTrustZoneRegistered is set by the init of arm_trustzone_register_test.go
 // once that file registers the backend in this process.

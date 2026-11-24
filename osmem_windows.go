@@ -15,10 +15,7 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// sysMap reserves and commits n bytes of private read-write memory with
-// VirtualAlloc; the system zero-fills it. The uintptr-to-pointer conversion is
-// safe because the pages are not Go heap and stay valid until sysUnmap; reading
-// the uintptr's storage is the spelling go vet's unsafeptr check accepts.
+// sysMap reserves and commits n zero-filled bytes with VirtualAlloc.
 func sysMap(n int) ([]byte, error) {
 	addr, err := windows.VirtualAlloc(0, uintptr(n), windows.MEM_RESERVE|windows.MEM_COMMIT, windows.PAGE_READWRITE)
 	if err != nil {

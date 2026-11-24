@@ -1,20 +1,5 @@
 #!/bin/sh
-# toolchain-trivy.sh — copy the pinned trivy out of the toolchain image.
-#
-# Usage: sh build/ci/toolchain-trivy.sh <dir>
-#
-# The integration job scans the image it builds, and trivy is not on the runner
-# host. The toolchain image already carries it at the pin in scripts/tool-pins.sh
-# (installed by scripts/install-tools.sh, SHA-256 verified), so the job takes
-# that copy instead of downloading a release tarball on every run.
-#
-# The image is found by a content tag on a Docker daemon the job shares with
-# other jobs, so an image already carrying that tag is not trusted: the copy is
-# hashed against the architecture's pinned binary SHA-256
-# (TRIVY_BIN_SHA256_LINUX_* in scripts/tool-pins.sh) BEFORE it is placed in <dir>
-# or run, and nothing is left in <dir> on a mismatch. The caller puts <dir> on
-# PATH; scripts/tool.sh then verifies the same hash again (TOOL_INSTALL=0) and
-# requires the version to equal the pin.
+# toolchain-trivy.sh <dir> copies trivy out of the toolchain image after checking it against the pinned SHA-256.
 set -eu
 
 [ $# -eq 1 ] && [ -n "$1" ] || { echo "usage: $0 <dir>" >&2; exit 1; }

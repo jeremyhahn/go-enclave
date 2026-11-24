@@ -12,15 +12,7 @@ import (
 	"github.com/goccy/go-yaml"
 )
 
-// The toolchain image build fetches backends/armtrustzone's modules, whose
-// root module is public (#293): the jobs run on GitHub-hosted runners, which
-// carry no GOPROXY, so each make docker-build passes the empty inherited
-// GOPROXY as GO_BUILD_PROXY and the Dockerfile's default public proxy serves
-// the build. No workflow sets the module variables or rewrites module URLs,
-// and no forge credential reaches the build as the gomodauth secret.
-//
-// toolchainBuildMakeCall is the same call for the toolchain image alone,
-// which the lint and lint-gates jobs build (#277); it passes the same proxy.
+// Image builds use the public module proxy through GO_BUILD_PROXY, with no forge credential.
 const (
 	imageBuildMakeCall     = `make docker-build GO_BUILD_PROXY="${GOPROXY:-}"`
 	toolchainBuildMakeCall = `make docker-build-toolchain GO_BUILD_PROXY="${GOPROXY:-}"`
@@ -302,9 +294,7 @@ func TestImageBuildUsesTheModuleProxy(t *testing.T) {
 	}
 }
 
-// TestImageBuildUsesTheModuleProxy_RefusesAToolchainBuildWithoutTheProxy pins
-// the check on the toolchain-only build of ci.yml's lint and lint-gates jobs
-// (#277): the call without GO_BUILD_PROXY, or with another proxy, is refused.
+// TestImageBuildUsesTheModuleProxy_RefusesAToolchainBuildWithoutTheProxy pins the toolchain-only build's proxy.
 func TestImageBuildUsesTheModuleProxy_RefusesAToolchainBuildWithoutTheProxy(t *testing.T) {
 	src, err := os.ReadFile(filepath.Join(repoRoot(t), ".github/workflows/ci.yml"))
 	if err != nil {
@@ -325,10 +315,7 @@ func TestImageBuildUsesTheModuleProxy_RefusesAToolchainBuildWithoutTheProxy(t *t
 	}
 }
 
-// toolchainTargetViolations lists what is wrong with the Makefile's
-// docker-build-toolchain recipe (#277): it builds the toolchain stage alone
-// the way `scripts/devcontainer.sh build` builds it, with GO_BUILD_PROXY as
-// the goproxy BuildKit secret when it is set and with no forge credential.
+// toolchainTargetViolations lists what is wrong with the docker-build-toolchain recipe.
 func toolchainTargetViolations(mk string) []string {
 	_, rest, ok := strings.Cut(mk, "\ndocker-build-toolchain:\n")
 	if !ok {

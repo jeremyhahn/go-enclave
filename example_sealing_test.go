@@ -17,9 +17,7 @@ import (
 	enclave "github.com/jeremyhahn/go-enclave"
 )
 
-// Seal a credential under the process sealer, open it late, use it inside
-// the borrow window and destroy everything early. NewSealed wipes the
-// caller's slice, so the plaintext no longer sits on the heap.
+// Seal a credential under the process sealer, open it late, use it inside the borrow and destroy everything early.
 func ExampleNewSealed() {
 	ctx := context.Background()
 	credential := []byte("correct horse battery staple")

@@ -25,13 +25,7 @@ import (
 	"github.com/jeremyhahn/go-enclave/internal/memscan"
 )
 
-// runTestChild re-executes this test binary running exactly the named test,
-// with marker=value in its environment, and returns the child's combined
-// output and exit error. Fault-injecting tests use it because their faults (an
-// RLIMIT_MEMLOCK ceiling, a write that kills the process) are process-wide.
-//
-// A child that matched no test or skipped exits 0 without verifying anything,
-// so both fail here.
+// runTestChild re-executes this test binary for exactly the named test and fails if it ran nothing.
 func runTestChild(t *testing.T, test, marker, value string) (string, error) {
 	t.Helper()
 	return runTestChildWith(t, test, marker, value, nil)
@@ -54,10 +48,7 @@ func runTestChildWith(t *testing.T, test, marker, value string, attr *syscall.Sy
 	return string(out), err
 }
 
-// requireChildFaulted asserts that a child whose success condition is death
-// died of the memory fault under test and of nothing else: it printed armed
-// just before the faulting store, never printed survived, and exited with the
-// runtime's fatal-fault status 2 and a "fatal error: fault" SIGSEGV report.
+// requireChildFaulted asserts the child died of the memory fault under test and nothing else.
 func requireChildFaulted(t *testing.T, out string, err error, armed, survived, what string) {
 	t.Helper()
 	if strings.Contains(out, survived) {
@@ -78,14 +69,7 @@ func requireChildFaulted(t *testing.T, out string, err error, armed, survived, w
 	}
 }
 
-// injectMemlockCeiling makes RLIMIT_MEMLOCK bind for the calling goroutine and
-// returns a setter for the soft limit.
-//
-// CAP_IPC_LOCK exempts a process from the limit, so it is dropped first.
-// Capabilities are per thread, so the goroutine is pinned before they are
-// touched and left pinned for the rest of the child. None of this needs
-// privilege; a sandbox that filters getrlimit(2), setrlimit(2) or capset(2)
-// fails these tests naming the refused call.
+// injectMemlockCeiling drops CAP_IPC_LOCK on a pinned thread and returns a setter for the soft RLIMIT_MEMLOCK.
 func injectMemlockCeiling(t *testing.T) (set func(cur uint64), original unix.Rlimit) {
 	t.Helper()
 	runtime.LockOSThread()
@@ -430,12 +414,7 @@ const (
 	sizedReservationReleased = "NewSized released its reservation on a lock failure"
 )
 
-// TestAllocator_NewSized_RefusalNeverAttemptsMapping pins that
-// [Allocator.NewSized] admission decides before any memory is mapped:
-// ErrBudgetExhausted comes only from admission and ErrLockedMemoryUnavailable
-// only from the kernel, so the sentinel says which layer refused. An unrelated
-// canary enclave must survive both refusals. It runs in a subprocess because
-// the fault is process-wide.
+// TestAllocator_NewSized_RefusalNeverAttemptsMapping pins that admission decides before any memory is mapped.
 func TestAllocator_NewSized_RefusalNeverAttemptsMapping(t *testing.T) {
 	if os.Getenv(sizedAdmissionMarker) == "1" {
 		sizedAdmissionChild(t)

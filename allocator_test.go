@@ -23,15 +23,7 @@ import (
 	"github.com/jeremyhahn/go-enclave/internal/memscan"
 )
 
-// FuzzAllocatorAdmission drives an Allocator with a small budget through a
-// sequence of allocations and destroys decoded from the input, on one
-// goroutine (concurrency stays with the race tests). The first byte sets the
-// budget, 1 to 8 pages; each later pair is one operation: an even first byte
-// allocates ((op>>1)<<8 | arg) bytes, an odd one destroys live[arg%len(live)].
-// Properties: InUse matches the page-rounded bytes of the live handles and
-// never exceeds the budget; a request over the remaining budget is refused
-// with a *BudgetError matching ErrBudgetExhausted; destroying every handle
-// returns InUse to zero.
+// FuzzAllocatorAdmission checks InUse tracks live handles, never exceeds the budget, and returns to zero.
 func FuzzAllocatorAdmission(f *testing.F) {
 	f.Add([]byte{0})
 	f.Add([]byte{3, 0, 1, 0x10, 0, 0, 0xff, 1, 0, 0x20, 0})
@@ -475,7 +467,7 @@ func TestAllocator_SetLimit_RefusesBelowInUse(t *testing.T) {
 		t.Errorf("EqualTo after refused lowering = %v, %v; want the material intact", ok, err)
 	}
 
-	// CONTROL: lowering to exactly what is in use is legal and must succeed.
+	// Lowering to exactly what is in use is legal.
 	if err := a.SetLimit(pageSize); err != nil {
 		t.Fatalf("SetLimit to exactly InUse: %v (a legal lowering was refused)", err)
 	}
@@ -526,7 +518,7 @@ func TestAllocator_SetLimit_Bounds(t *testing.T) {
 			t.Errorf("NewSized while quiesced = %v, want ErrBudgetExhausted", err)
 		}
 
-		// CONTROL: quiescing is reversible, not a one-way trip.
+		// Quiescing is reversible.
 		if err := a.SetLimit(pageSize); err != nil {
 			t.Fatalf("SetLimit(unquiesce): %v", err)
 		}
@@ -632,8 +624,7 @@ func TestAllocator_ForceLimit_LowersBeneathLiveReservations(t *testing.T) {
 	if a.InUse() != 0 || a.Available() != pageSize {
 		t.Errorf("after full drain InUse=%d Available=%d, want 0 and %d", a.InUse(), a.Available(), pageSize)
 	}
-	// CONTROL: once drained the allocator admits again, so the over-subscription
-	// was a transient state and not a permanently poisoned budget.
+	// Once drained the allocator admits again.
 	e3, err := a.admitSized(32)
 	if err != nil {
 		t.Fatalf("NewSized after the drain: %v", err)
@@ -816,7 +807,7 @@ func TestAllocator_TransferTo_RefusedWithoutHeadroom(t *testing.T) {
 	if !errors.As(err, &le) {
 		t.Fatalf("err is not a *BudgetInUseError: %v", err)
 	}
-	// Requested is the budget the SOURCE would have been left with.
+	// Requested is the budget the source would have been left with.
 	if le.Requested != pageSize || le.InUse != 2*pageSize || le.Limit != 2*pageSize {
 		t.Errorf("BudgetInUseError = %+v, want Requested=%d InUse=%d Limit=%d",
 			le, pageSize, 2*pageSize, 2*pageSize)
@@ -829,7 +820,7 @@ func TestAllocator_TransferTo_RefusedWithoutHeadroom(t *testing.T) {
 			dst.Limit(), dst.Available(), pageSize)
 	}
 
-	// CONTROL: with headroom freed, the identical transfer succeeds.
+	// With headroom freed, the identical transfer succeeds.
 	e1.Destroy()
 	if err := src.TransferTo(dst, pageSize); err != nil {
 		t.Fatalf("TransferTo after freeing headroom: %v", err)
@@ -907,12 +898,7 @@ func TestAllocator_TransferTo_DestinationOverflow(t *testing.T) {
 	}
 }
 
-// TestAllocator_TransferTo_NeverInBoth pins the direction of the transfer's
-// intermediate state: the moved bytes may be in neither allocator, never both.
-// The sampler reads dst then src, opposite to the write order (debit src, then
-// credit dst), so with correct ordering the sum can never exceed the total and
-// reversed writes let it. Transfers run one way only, since a returning
-// transfer writes in the other order.
+// TestAllocator_TransferTo_NeverInBoth pins that moved bytes may be in neither allocator, never both.
 func TestAllocator_TransferTo_NeverInBoth(t *testing.T) {
 	const moves = 4000
 	src, err := newBudgetAllocator(moves * pageSize)
@@ -1050,9 +1036,7 @@ func (sh retuneShape) granted() int64 {
 	return sh.demand()
 }
 
-// retuneRound is the state of one arranged round. Every field is written by a
-// single goroutine and read by the coordinator after the join, except the
-// counters, which are atomic because the actors share them.
+// retuneRound is the state of one arranged round.
 type retuneRound struct {
 	shape retuneShape
 	a     *budgetAllocator
@@ -1096,23 +1080,7 @@ type retuneTally struct {
 	overCommit   atomic.Int64
 }
 
-// TestAllocator_Retune_RacesAdmission pins that a budget lowering and an
-// admission racing for the same page are linearized: exactly one gets it.
-//
-// The contest is arranged, not a storm: a storm's lowerings starve when
-// admitting goroutines hold pages across preemption, so coverage depended on
-// load. Each round releases a fixed cast from one line (one-page admissions,
-// one-page drains, and a retuner that raises by a page and then lowers by one),
-// so min(supply, demand) claims must be granted in any order. Shapes:
-//
-//   - slack: supply covers demand; every admission and the lowering succeed.
-//   - contested: two pages short; exactly two claims are refused. Detecting a
-//     double-spend here needs more than one core.
-//   - draining: destroys land inside the window; accounting must stay exact.
-//
-// Each round asserts free never goes negative, exactly granted() claims
-// succeed, every actor recorded an outcome, InUse and Limit match the outcome,
-// and the allocator is whole once its enclaves are destroyed.
+// TestAllocator_Retune_RacesAdmission pins that a lowering and an admission racing for one page are linearized.
 func TestAllocator_Retune_RacesAdmission(t *testing.T) {
 	var tally retuneTally
 
@@ -1390,17 +1358,7 @@ func oneIf(b bool) int64 {
 	return 0
 }
 
-// TestAllocator_Retune_LoweringLosesTheContestedPage stages the lowering vs.
-// admission race deterministically through the stalled seam. With one page of
-// headroom:
-//
-//  1. SetLimit(0) reads free = one page and parks before its compare-and-swap.
-//  2. The test admits that page, which must succeed.
-//  3. The withdrawal resumes, its swap fails, it re-reads, and refuses.
-//
-// Afterwards the admission holds the page, the budget is unchanged, and free is
-// zero, not negative. The reverse window (an admission parked) is not staged,
-// since that would put a seam on the admission path.
+// TestAllocator_Retune_LoweringLosesTheContestedPage stages the lowering-versus-admission race through the stalled seam.
 func TestAllocator_Retune_LoweringLosesTheContestedPage(t *testing.T) {
 	a, err := newBudgetAllocator(pageSize)
 	if err != nil {
@@ -1508,10 +1466,7 @@ func TestAllocator_TransferTo_ConcurrentOppositeDirections(t *testing.T) {
 		}
 	}
 
-	// The allocations bound the run and the transfers stop when they do. Bounded
-	// transfers can finish before the allocators are scheduled (GOMAXPROCS=1), and
-	// unbounded coordination lets transfers drain one side so nothing is admitted;
-	// either passes having asserted nothing.
+	// The allocations bound the run and the transfers stop when they do.
 	const allocIterations = 400
 	var wg sync.WaitGroup
 
@@ -1714,12 +1669,7 @@ func TestAllocator_budgetSnapshot_FallsBackWhenLoweredUnderAStaleRead(t *testing
 	}
 }
 
-// TestAllocator_Refusal_NeverReportsNegativeInUse drives the real window: an
-// over-subscribed allocator is raised to MaxInt64 and dropped back repeatedly
-// while other goroutines collect refusals, none of which may report a negative
-// InUse. It needs parallelism to hit the window reliably; the budgetSnapshot
-// tests cover it deterministically. It checks that the count is possible, not
-// that it is exact.
+// TestAllocator_Refusal_NeverReportsNegativeInUse checks no refusal reports a negative InUse.
 func TestAllocator_Refusal_NeverReportsNegativeInUse(t *testing.T) {
 	a, err := newBudgetAllocator(2 * pageSize)
 	if err != nil {
@@ -1897,13 +1847,7 @@ func newRefusedAllocator(tb testing.TB) *budgetAllocator {
 	return a
 }
 
-// BenchmarkRefusalSerial and [BenchmarkRefusalParallel] guard the property that
-// the refusal path is lock-free and scales: parallel refusal must cost no more
-// per operation than serial. Compare the ratio, not nanoseconds; see
-// docs/locked-memory-budget/engineering.md, Test strategy.
-//
-//	go test -run '^$' -bench 'Refusal' -benchtime 2s -count 8 . > new.txt
-//	benchstat old.txt new.txt
+// BenchmarkRefusalSerial and [BenchmarkRefusalParallel] check the refusal path scales; compare the ratio with benchstat.
 func BenchmarkRefusalSerial(b *testing.B) {
 	a := newRefusedAllocator(b)
 
@@ -1918,9 +1862,7 @@ func BenchmarkRefusalSerial(b *testing.B) {
 	}
 }
 
-// BenchmarkRefusalParallel refuses against one shared Allocator from
-// GOMAXPROCS goroutines; the shared cacheline is what is under test. The loop
-// writes no shared sink, which would add contention of its own.
+// BenchmarkRefusalParallel refuses against one shared Allocator from GOMAXPROCS goroutines.
 func BenchmarkRefusalParallel(b *testing.B) {
 	a := newRefusedAllocator(b)
 
@@ -1975,12 +1917,7 @@ func TestAllocator_NilReceiver(t *testing.T) {
 	}
 }
 
-// TestNewAllocator_ReturnsTheInterface pins that NewAllocator,
-// NewAllocatorWithinRLimit and ProcessAllocator hand out the [Allocator]
-// interface and New and NewSized a [ByteAccess], never a pointer a caller
-// could hold as a concrete type; that every failure returns a nil interface;
-// and that SetAllocator and TransferTo refuse an implementation this package
-// did not build.
+// TestNewAllocator_ReturnsTheInterface pins that constructors return interfaces and foreign implementations are refused.
 func TestNewAllocator_ReturnsTheInterface(t *testing.T) {
 	a, err := NewAllocator(LockedSize(32))
 	if err != nil {
@@ -2081,8 +2018,7 @@ func TestSetAllocator_SecondInstallFailsClosed(t *testing.T) {
 	if err := SetAllocator(second); !errors.Is(err, ErrAllocatorInstalled) {
 		t.Fatalf("second SetAllocator = %v, want ErrAllocatorInstalled", err)
 	}
-	// Failing closed means the FIRST one is still the answer, not merely that
-	// an error was returned.
+	// Failing closed: the first allocator is still the answer.
 	got, err := ProcessAllocator()
 	if err != nil {
 		t.Fatalf("ProcessAllocator: %v", err)
