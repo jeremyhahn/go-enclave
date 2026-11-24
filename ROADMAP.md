@@ -48,7 +48,7 @@ None.
 
 ## Future
 
-- **confiner** — the `Confiner` capability for Intel SGX, Intel TDX and Arm CCA (AMD SEV-SNP is confiner-sev-snp, under Now): the process or VM runs inside the protected environment at RAM speed; attestation is go-xkms's; SGX design [docs/backends/intel-sgx.md](docs/backends/intel-sgx.md) — blocked: needs the hardware to test on (for SGX, Xeon Scalable, Ice Lake-SP or newer, with Flexible Launch Control)
+- **confiner** — the `Confiner` capability for Intel SGX, Intel TDX and Arm CCA (AMD SEV-SNP is confiner-sev-snp, under Now): the process or VM runs inside the protected environment at RAM speed; attestation is go-xkms's — [#193](../../issues/193) — blocked: needs the hardware to test on (for SGX, Xeon Scalable, Ice Lake-SP or newer, with Flexible Launch Control)
 
 ## Dependencies
 

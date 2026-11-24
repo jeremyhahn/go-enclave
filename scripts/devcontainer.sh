@@ -51,8 +51,6 @@ inputs() {
     build/ci/buildgates/go.sum \
     backends/amdsev/go.mod \
     backends/amdsev/go.sum \
-    backends/intelsgx/go.mod \
-    backends/intelsgx/go.sum \
     backends/armtrustzone/go.mod \
     backends/armtrustzone/go.sum \
     backends/tpm/go.mod \
