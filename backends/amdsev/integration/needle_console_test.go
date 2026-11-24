@@ -28,8 +28,19 @@ func needleIn(serial string) (string, bool, error) {
 		return "", false, fmt.Errorf("reading the guest's console: %w", err)
 	}
 	defer func() { _ = f.Close() }()
-	needle := ""
+	// QEMU appends to the console while the host polls it, so the last line
+	// may be incomplete: only newline-terminated lines are read, and the
+	// unterminated tail is kept aside for the next poll.
+	var tail []byte
 	s := bufio.NewScanner(f)
+	s.Split(func(data []byte, atEOF bool) (int, []byte, error) {
+		advance, token, err := bufio.ScanLines(data, false)
+		if advance == 0 && atEOF {
+			tail = data
+		}
+		return advance, token, err
+	})
+	needle := ""
 	for s.Scan() {
 		line := strings.TrimSpace(s.Text())
 		if line == guestcfg.ReleasedLine {
@@ -38,7 +49,7 @@ func needleIn(serial string) (string, bool, error) {
 			return "", false, nil
 		}
 		if rest, ok := strings.CutPrefix(line, guestcfg.NeedleMarker); ok && needle == "" {
-			if _, err := hex.DecodeString(rest); err == nil && rest != "" {
+			if _, err := hex.DecodeString(rest); err == nil && len(rest) == needleHexLen {
 				needle = rest
 			}
 		}
@@ -48,8 +59,17 @@ func needleIn(serial string) (string, bool, error) {
 		// may lie beyond it: fail closed, with no needle held.
 		return "", false, fmt.Errorf("reading the guest's console %s to its end: %w", serial, err)
 	}
+	if partial := strings.TrimSpace(string(tail)); len(partial) > len(guestcfg.NeedleMarker) &&
+		strings.HasPrefix(guestcfg.ReleasedLine, partial) {
+		// The release line is being written: the guest has already destroyed
+		// the needle's enclave. A needle is hex, so it never matches here.
+		return "", false, nil
+	}
 	return needle, needle != "", nil
 }
+
+// needleHexLen is the length of the hex needle the guest prints: 32 bytes.
+const needleHexLen = 64
 
 // heldThroughScan reports whether the guest still holds needle, unreleased,
 // once a host scan has completed. A scan the guest's hold does not outlast
