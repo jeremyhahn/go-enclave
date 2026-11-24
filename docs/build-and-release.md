@@ -1,6 +1,6 @@
 # Build and release
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-11-22
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-11-24
 > Conflicts with this document are defects. For shipped behavior the Makefile, `scripts/` and `build/ci/` are canonical: fix this document to match them.
 
 How a change is built and gated, and how a signed release is cut, verified and
@@ -359,12 +359,16 @@ counts this repository's jobs through the Actions API and balances the use of
 two pools, read from three repository variables the Infra Department sets:
 `CI_HOSTED_SHARE` (HS, this repository's share of the account's hosted
 runners), `CI_SELF_HOSTED_BIGDISK` (C1) and `CI_SELF_HOSTED_BIGDISK_DOCKER`
-(C2), the units of each self-hosted label. Hosted use is H/HS for H hosted
-jobs in progress; self-hosted use is the larger of S1/C1 and S2/C2. With both
-pools below their limit the less used one wins, and a tie goes hosted; with
+(C2), the units of each self-hosted label. H, S1 and S2 count this
+repository's jobs of other runs that are in progress or queued: H on hosted
+runners, S1 on `bigdisk`, S2 on `bigdisk-docker`. Hosted use is H/HS;
+self-hosted use is the larger of S1/C1 and S2/C2. The hosted pool is full when
+H reaches HS, the self-hosted pool when S1 reaches C1 or S2 reaches C2. With
+both pools below their limit, self-hosted wins when its use is at or below
+hosted use, so a tie goes self-hosted (two empty pools pick self-hosted); with
 one pool full the jobs go to the other; with both full they go to the pool
 with fewer queued jobs (`bigdisk` and `bigdisk-docker` counted together), and
-a tie goes hosted. Self-hosted means `bigdisk-docker` for the Docker jobs and
+a tie again goes self-hosted. Self-hosted means `bigdisk-docker` for the Docker jobs and
 `bigdisk` for CI Gate. `CI_HOSTED_SHARE` unset, 0 or not a whole number gives a
 warning and HS=12; either self-hosted variable unset, 0 or not a whole number
 picks `ubuntu-latest` with a warning. An API error, a reply it cannot read or
