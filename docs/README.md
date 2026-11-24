@@ -1,6 +1,6 @@
 # go-enclave documentation
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-11-20
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-11-24
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 What go-enclave is and every feature it has: [SPEC](SPEC.md). What is done
@@ -71,7 +71,23 @@ MINOR bump, and its [CHANGELOG.md](../CHANGELOG.md) entry is marked
 **BREAKING** and links here. Upgrade one release at a time. Each section
 describes its release under the names that release shipped.
 
-### Unreleased (from v0.11)
+### Unreleased (from v0.12)
+
+**Nothing to change for Go callers.** No exported name or signature changes.
+Two conformance behaviors change, and a provider or backend author should
+re-run its suite:
+
+- `providertest.TestProvider`'s residue sweep also searches for each half of
+  a recovered key, so a provider that keeps the first or the last 16 bytes
+  past `Unprotect` is now reported where it passed under v0.12. Wipe the
+  whole key, not a prefix. The sweep also lists the mappings again, up to
+  three times, when the runtime unmaps one mid-read, so such a run is no
+  longer reported not measured.
+- A `providertest.FindingsError` with no findings renders
+  `providertest: no findings`, was an empty message. Match it with
+  `errors.As`, not by its text.
+
+### v0.12.0-alpha (from v0.11)
 
 #### Key-operation API removal (planned)
 
