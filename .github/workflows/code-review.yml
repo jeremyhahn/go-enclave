@@ -3643,8 +3643,7 @@ jobs:
   # without `code-review` and `task:ready` passed it unreviewed. The review
   # job is now `Codex review`; this job carries the required name, always
   # runs (no `if:` can skip it), and passes only when
-  #   (a) every file the PR changes, base commit to head, is on the owner's
-  #       no-review list (NO_REVIEW_PATHS: docs and CI config), or
+  #   (a) no file the PR changes, base commit to head, is code (NON_CODE_PATHS), or
   #   (b) $REVIEWER's latest standing verdict ON THIS HEAD is APPROVED.
   # Anything else fails, the label missing included: no approval, a
   # REQUEST_CHANGES, an approval of another head, a fork head, an unreadable
