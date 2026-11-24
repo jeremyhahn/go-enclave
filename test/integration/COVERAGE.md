@@ -1,6 +1,6 @@
 # Integration coverage by feature
 
-> **Status: REFERENCE** · Scope: go-enclave · Last verified: 2026-11-12
+> **Status: REFERENCE** · Scope: go-enclave · Last verified: 2026-11-21
 > For shipped behavior the tests are canonical: fix this document to match them.
 
 Which integration tests exercise each feature in [docs/](../../docs/README.md).
@@ -56,8 +56,7 @@ run against a real device stack rather than the devcontainer.
 
 | Feature | Target | Tests |
 |---|---|---|
-| [arm-trustzone](../../docs/backends/engineering.md#arm-trustzone), [keyprotector-providers](../../docs/sealing/hardware-providers.md) | `make integration-test-arm-trustzone` | `backends/armtrustzone/conformance_optee_test.go` (`optee` tag), built for linux/arm64 and run in the guest of the pinned OP-TEE fixture ([harness](../../docs/backend-conformance/engineering.md#the-arm-trustzone-harness)). `TestBackendConformance_OnOPTEE` registers the backend in-process and runs `backendtest` with the trusted application's probe and random-filled handles. `TestKeyProtectorConformance_OnOPTEE` runs `providertest` against the backend's `KeyProtector`; it skips only when the fixture declares, through `GO_ENCLAVE_OPTEE_SEAL`, that its pinned trusted-firmware release has no SEAL command, and `GO_ENCLAVE_OPTEE_SEAL=required` turns that skip into a failure. |
-| [keyprotector-providers](../../docs/sealing/hardware-providers.md#tpm-provider) | `make integration-test-tpm` | `backends/tpm/conformance_swtpm_test.go` (`swtpm` tag), under `-race` on the host against a throwaway `swtpm`. `TestProviderConformance_OnSWTPM` runs `providertest` with its residue sweep, forging blobs under the unlabelled storage template so the suite measures the label binding; `TestBlobLength_OnSWTPM` checks the sealed blob's length; `TestReclaimAfterInterrupt_OnSWTPM` interrupts each handle-bearing command more times than the TPM has slots and checks every transient handle and session is flushed. |
+| [arm-trustzone](../../docs/backends/engineering.md#arm-trustzone) | `make integration-test-arm-trustzone` | `backends/armtrustzone/conformance_optee_test.go` (`optee` tag), built for linux/arm64 and run in the guest of the pinned OP-TEE fixture ([harness](../../docs/backend-conformance/engineering.md#the-arm-trustzone-harness)). `TestBackendConformance_OnOPTEE` registers the backend in-process and runs `backendtest` with the trusted application's probe and random-filled handles. |
 
 ## Helpers
 

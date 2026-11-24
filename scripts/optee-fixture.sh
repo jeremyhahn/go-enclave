@@ -11,9 +11,9 @@
 # is refused, never followed. check runs the checkout's
 # `make integration-test-optee` (xtest and the TA's version and rng commands;
 # no go-enclave code). harness takes backends/armtrustzone's optee-tagged
-# conformance tests and benchmarks, a static linux/arm64 test binary the make
+# conformance test and benchmarks, a static linux/arm64 test binary the make
 # target compiled in the toolchain image ($ARM_TRUSTZONE_BIN), shares it with
-# the aarch64 guest, runs the conformance tests then BenchmarkOpenUseClose and
+# the aarch64 guest, runs the conformance test then BenchmarkOpenUseClose and
 # BenchmarkAccess, and exits with
 # the status of `make optee-run`, which is the binary's.
 set -eu
@@ -27,7 +27,6 @@ cache=${TRUSTED_FIRMWARE_CACHE:-}
 [ -n "$cache" ] || cache=${HOME:?HOME is unset}/.cache/go-enclave/trusted-firmware
 endpoint=${GO_ENCLAVE_OPTEE_ENDPOINT-}
 prebuilt=${OPTEE_FIXTURE_PREBUILT:-}
-seal=${GO_ENCLAVE_OPTEE_SEAL-}
 
 [ "$#" -eq 1 ] || die "usage: $prog check|harness"
 case $1 in
@@ -80,16 +79,6 @@ fi
 case $endpoint in
   *[!A-Za-z0-9/._-]*) die "GO_ENCLAVE_OPTEE_ENDPOINT '$endpoint' is not a device path" ;;
 esac
-# The pinned trusted-firmware release's TA has no SEAL: an empty knob
-# declares so, as absent:<tag>, which lets the KeyProtector test skip on a
-# missing SEAL only while <tag> is the release the test knows lacks it.
-# "required" makes a missing SEAL fail.
-case $seal in
-  '') seal="absent:$tag" ;;
-  required) ;;
-  *) die "GO_ENCLAVE_OPTEE_SEAL '$seal' is not empty or 'required'" ;;
-esac
-echo "GO_ENCLAVE_OPTEE_SEAL=$seal"
 share=$(mktemp -d "${TMPDIR:-/tmp}/go-enclave-optee.XXXXXX")
 trap 'rm -rf "$share"' EXIT
 case $share in
@@ -111,5 +100,5 @@ out=${ARM_TRUSTZONE_BIN:-}
 cp "$out" "$share/$bin"
 rc=0
 tfmake optee-run OPTEE_SHARE="$share" \
-  OPTEE_GUEST_CMD="GO_ENCLAVE_OPTEE_ENDPOINT=$endpoint GO_ENCLAVE_OPTEE_SEAL=$seal ./$bin -test.v -test.run='^(TestBackendConformance|TestKeyProtectorConformance)_OnOPTEE' -test.bench='^Benchmark(OpenUseClose|Access)' -test.benchtime=2s" || rc=$?
+  OPTEE_GUEST_CMD="GO_ENCLAVE_OPTEE_ENDPOINT=$endpoint ./$bin -test.v -test.run='^TestBackendConformance_OnOPTEE' -test.bench='^Benchmark(OpenUseClose|Access)' -test.benchtime=2s" || rc=$?
 exit "$rc"

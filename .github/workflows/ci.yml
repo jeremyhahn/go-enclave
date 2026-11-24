@@ -944,8 +944,8 @@
 # GOPRIVATE (injected by the runners, dependency-resolution.md §6) already
 # exempts first-party modules from proxy and sumdb; the blanket override
 # disables checksum-database verification for every third-party dependency
-# and breaks the build when an upstream re-points a tag (go-tpm-tools v0.4.8,
-# 2026-08-14). `ghcr.io` likewise does not exist on Gitea — use the Gitea
+# and breaks the build when an upstream re-points a tag (a
+# third-party module, 2026-08-14). `ghcr.io` likewise does not exist on Gitea — use the Gitea
 # registry (lessons.md).
 # Source of truth: software/templates/github-actions/ci.yml in the
 # handbook. Copied into each repo (never workflow_call: the
@@ -1128,9 +1128,6 @@ jobs:
     outputs:
       docs_only: ${{ steps.diff.outputs.docs_only }}
       lint_gates: ${{ steps.diff.outputs.lint_gates }}   # v1.30
-      # CUSTOMIZE: true when a pull request changes the TPM provider, its
-      # swtpm fixture or this workflow; the tpm-swtpm job's steps read it.
-      tpm: ${{ steps.diff.outputs.tpm }}
       # CUSTOMIZE: the optee job's path gate (step optee below).
       optee: ${{ steps.optee.outputs.optee }}
       verdict: ${{ steps.guard.outputs.verdict }}
@@ -2042,7 +2039,6 @@ jobs:
           BASE: ${{ github.event.pull_request.base.sha }}
           HEAD: ${{ github.event.pull_request.head.sha }}
           EVENT: ${{ github.event_name }}
-          TPM_PATTERN: '^(backends/tpm/|scripts/swtpm-fixture\.sh$|\.github/workflows/ci\.yml$)'   # CUSTOMIZE
         run: |
           # v1.30: lint_gates is false only on a PR whose changed files all
           # miss LINT_GATES_PATTERN; any doubt runs the job. v1.41: a ci:full
@@ -2053,11 +2049,10 @@ jobs:
           # pattern VAR names, and `found VAR -v` whether one misses it. 0 is
           # yes and 1 is no. Any other status (a pattern that is no regular
           # expression) and an empty pattern are a search that did not run:
-          # it answers yes with a warning, so docs_only stays false,
-          # lint_gates stays true and tpm is true. A broken pattern skips no
-          # job. grep reads the list from a here-string, so no pipe closes on
-          # a writer when grep -q stops at the first line. tpm is the
-          # tpm-swtpm job's path gate, on a ci:full PR as well.
+          # it answers yes with a warning, so docs_only stays false and
+          # lint_gates stays true. A broken pattern skips no job. grep reads
+          # the list from a here-string, so no pipe closes on a writer when
+          # grep -q stops at the first line.
           found() {
             local rc=0
             if [ -z "${!1}" ]; then
@@ -2072,7 +2067,6 @@ jobs:
             return "$rc"
           }
           docs_only=false lint_gates=true
-          tpm=false
           if [ "$EVENT" = pull_request ]; then
             if files=$(git diff --name-only --no-renames "$BASE...$HEAD"); then
               if [ -n "$files" ]; then
@@ -2082,20 +2076,13 @@ jobs:
                 if [ "$CI_FULL_LABEL" != true ] && ! found LINT_GATES_PATTERN; then
                   lint_gates=false
                 fi
-                if found TPM_PATTERN; then
-                  tpm=true
-                fi
                 printf '%s\n' "$files"
               fi
-            else
-              tpm=true   # an unknown diff runs the TPM suite rather than skip it
             fi
           fi
           echo "docs only: $docs_only; lint-gates: $lint_gates"
           echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
           echo "lint_gates=$lint_gates" >> "$GITHUB_OUTPUT"
-          echo "tpm paths: $tpm"
-          echo "tpm=$tpm" >> "$GITHUB_OUTPUT"
 
       # CUSTOMIZE: scripts/optee-selected.sh decides from the changed paths and
       # the diff of scripts/tool-pins.sh (it lists what it selects on: the
@@ -3315,86 +3302,6 @@ jobs:
       - name: make test-fips (toolchain image)
         run: scripts/in-toolchain-image.sh "$TOOLCHAIN_IMAGE" make test-fips
 
-  # CUSTOMIZE (TPM provider conformance): backends/tpm's swtpm-tagged
-  # tests (providertest conformance with its residue sweep, and the sealed
-  # blob's length) against a throwaway swtpm, through `make
-  # integration-test-tpm`. It is full tier, and its job-level `if:` is the
-  # full tier's (the tier check pins it), so the path gate is per step: a
-  # pull request runs the suite only when the changes job's `tpm` output is
-  # true, and every other full-tier event always runs it. The suite runs on
-  # the runner host with swtpm from the runner's apt and Go from setup-go, not
-  # in the toolchain image: that container's network is none (or bridge),
-  # which cannot reach swtpm on the host's loopback, and the image carries no
-  # swtpm. A skipped suite step leaves the job green with the reason printed.
-  tpm-swtpm:
-    name: TPM swtpm Conformance
-    # v1.26: never on a draft PR, ci:full or not, and only on the
-    # guard's run verdict.
-    if: ${{ (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/ci/deps-bump') && !github.event.pull_request.draft && needs.preflight.outputs.verdict == 'run' }}
-    needs: preflight   # v1.34
-    runs-on: ubuntu-latest
-    timeout-minutes: 30       # CUSTOMIZE
-    env:
-      TPM_SELECTED: ${{ github.event_name != 'pull_request' || needs.preflight.outputs.tpm == 'true' }}
-    steps:
-      - name: Are the TPM paths selected?
-        run: |
-          if [ "$TPM_SELECTED" = true ]; then
-            echo "TPM suite selected: running the integration-test-tpm target"
-          else
-            echo "TPM suite not selected: this pull request changes no file under backends/tpm/, scripts/swtpm-fixture.sh or .github/workflows/ci.yml"
-          fi
-
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7   CUSTOMIZE: newer than the template's v6.1.0; never downgraded
-        if: ${{ env.TPM_SELECTED == 'true' }}
-
-      # Ruling 887: the LAN addresses this runner's environment names, masked
-      # before any step that builds can print one.
-      - name: Mask the LAN addresses
-        if: ${{ env.TPM_SELECTED == 'true' }}
-        env:
-          # v1.53: the internal registry is the Actions secret CI_IMAGE_REGISTRY,
-          # never a `vars` value. Actions prints a step's env in its log header
-          # before the run body, so an add-mask comes too late for a variable;
-          # the runner masks a secret from its first byte. A GitHub-hosted run
-          # receives none. ci-mask-lan.sh also masks the bare host name.
-          # CUSTOMIZE: one such line per other *_REGISTRY secret this job reads
-          # (testdata/ci-mask-lan-tests.py M1 to M5).
-          CI_IMAGE_REGISTRY: ${{ runner.environment != 'github-hosted' && secrets.CI_IMAGE_REGISTRY || '' }}
-        run: scripts/ci-mask-lan.sh
-
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
-        if: ${{ env.TPM_SELECTED == 'true' }}
-        with:
-          go-version-file: backends/tpm/go.mod
-          cache-dependency-path: backends/tpm/go.sum
-
-      # Retries, so that one transient mirror or DNS error does not fail the
-      # job: one such error once failed main.
-      - name: Install swtpm
-        if: ${{ env.TPM_SELECTED == 'true' }}
-        run: |
-          for attempt in 1 2 3; do
-            if sudo apt-get -o Acquire::Retries=5 update &&
-               sudo apt-get -o Acquire::Retries=5 install -y --no-install-recommends swtpm swtpm-tools; then
-              break
-            fi
-            [ "$attempt" = 3 ] && { echo "swtpm install failed after $attempt attempts"; exit 1; }
-            echo "swtpm install attempt $attempt failed; retrying in 20 s"; sleep 20
-          done
-          swtpm --version
-
-      # The runner image moves its kernel; the run records which one it had.
-      - name: Print the kernel
-        if: ${{ env.TPM_SELECTED == 'true' }}
-        run: |
-          uname -a
-          cat /proc/version
-
-      - name: make integration-test-tpm
-        if: ${{ env.TPM_SELECTED == 'true' }}
-        run: make integration-test-tpm
-
   # CUSTOMIZE (go-enclave): the arm-trustzone harness
   # on the OP-TEE QEMU fixture. make integration-test-arm-trustzone compiles
   # the linux/arm64 test binary in the toolchain image and runs
@@ -3408,7 +3315,7 @@ jobs:
   # step is skipped, so the job succeeds without running the harness.
   optee:
     name: OP-TEE [arm-trustzone harness, fixture image]
-    # The guard is named here, as in fips and tpm-swtpm. Not image: a
+    # The guard is named here, as in fips. Not image: a
     # docs-only PR skips image, and optee must still run its select step and
     # report, since CI Gate checks it as full.
     needs: preflight   # v1.34; optee reports on a docs-only PR
@@ -3545,7 +3452,7 @@ jobs:
     # CUSTOMIZE (go-enclave): the fips job stays here, tagged full, and has its
     # check line. build/ci/buildgates holds every job in needs to exactly one
     # check line and the gate to no checkout and no action.
-    needs: [preflight, lint, image, lint-gates, fips, integration, soak, tpm-swtpm, optee]   # v1.34; v1.35.2 signatures.yml
+    needs: [preflight, lint, image, lint-gates, fips, integration, soak, optee]   # v1.34; v1.35.2 signatures.yml
     steps:
       - name: Fail closed on any non-success
         env:
@@ -3614,6 +3521,5 @@ jobs:
           check integration "${{ needs.integration.result }}" code
           check soak        "${{ needs.soak.result }}" nightly
           check fips        "${{ needs.fips.result }}" full
-          check tpm-swtpm   "${{ needs.tpm-swtpm.result }}" full
           check optee       "${{ needs.optee.result }}" full
           exit $BAD

@@ -21,7 +21,6 @@ rules.
 | `make lint` | gofmt, golangci-lint, actionlint, shellcheck |
 | `make lint-gates` | The repository's own checks in `build/ci/buildgates` |
 | `make integration-test` / `make integration-test-<feature>` | The integration suite in the devcontainer (needs Docker); never on the host |
-| `make integration-test-tpm` | The TPM provider against `swtpm`, on the host |
 | `make integration-test-arm-trustzone` | The arm-trustzone backend in the pinned OP-TEE fixture image |
 | `make ci-fast` / `make ci` | The full gate without Docker / with Docker |
 | `make docker-run CMD='make test'` | Any target in the pinned toolchain image, offline |
@@ -39,8 +38,8 @@ fails at startup without them ([prerequisites](CONTRIBUTING.md#unit-test-prerequ
 - In the root package, constructors return interfaces and concrete types stay
   unexported.
 - Importing a package registers nothing. `main` calls `Register`.
-- The root module depends only on `golang.org/x/sys`. `backends/tpm` and
-  `backends/armtrustzone` are separate modules that require a released root,
+- The root module depends only on `golang.org/x/sys`.
+  `backends/armtrustzone` is a separate module that requires a released root,
   never the reverse. No `replace` directives and no `go.work`: the Makefile
   sets `GOWORK=off`.
 - Shipped source cites no issue numbers; `make lint-gates` checks this.
@@ -67,7 +66,6 @@ empty; the Makefile refuses any other value.
 | `integration` | The integration suite, `test/integration/enclave/` |
 | `userns` | `memlock_userns_linux_test.go`, the user-namespace test (`make integration-test-userns`) |
 | `optee` | The OP-TEE conformance tests in `backends/armtrustzone` and the OP-TEE harness in the integration suite |
-| `swtpm` | The `swtpm` conformance tests in `backends/tpm` |
 | `goexperiment.runtimesecret` | Set by `GOEXPERIMENT=runtimesecret`; builds `secret_erase.go` on linux/amd64 and linux/arm64 (not Android) |
 
 The other constraints are GOOS and GOARCH: per-OS files such as
@@ -81,8 +79,7 @@ The other constraints are GOOS and GOARCH: per-OS files such as
                             Sealer, backends, Detect, linux-secretmem, WipeAll
 providertest/               conformance suite for KeyProtector and RootUnsealer providers
 backendtest/                conformance suite for backends
-backends/tpm/               TPM 2.0 KeyProtector (its own module)
-backends/armtrustzone/      OP-TEE backend and KeyProtector (its own module)
+backends/armtrustzone/      OP-TEE backend (its own module)
 internal/memscan/           process-memory scan the residue tests share (Linux)
 testdata/fuzz/              fuzz regression corpus for the root package; go test reads it here
 test/integration/           integration suite (enclave/) and COVERAGE.md
@@ -104,7 +101,8 @@ Unit tests live beside their source.
 - Each feature has a folder `docs/<feature>/` with `user.md`,
   `architecture.md`, `engineering.md` and `api.md`.
 - `docs/backends/` also holds the arm-trustzone design and the backend
-  proposals. `docs/sealing/hardware-providers.md` is the TPM provider design.
+  proposals. `docs/sealing/hardware-providers.md` records the removal of the
+  hardware providers, which live in go-xkms.
 - `docs/build-and-release.md` covers the gates, CI and releases.
 - Pages carry a status banner (NORMATIVE or REFERENCE) and a
   `Last verified:` date. Where a page and the code disagree, the code is

@@ -14,7 +14,6 @@ To report a security issue, do not open an issue or a pull request. Follow
   ([test status](docs/memory-enclave/engineering.md#test-status)).
 - Docker, for the integration suite and the devcontainer targets.
 - `jq`, for `make check-scripts`.
-- `swtpm` and `swtpm-tools`, only for `make integration-test-tpm`.
 
 The analysis tools (golangci-lint, gosec, govulncheck, trivy, shellcheck,
 actionlint) are pinned with SHA-256 checksums in `scripts/tool-pins.sh`. `make`
@@ -75,7 +74,7 @@ Run the package or feature you are changing, not the whole suite:
 | `make test-<pkg>`, `make coverage-<pkg>` | One package: `enclave` (the root), `providertest`, `backendtest` or `memscan` (`internal/memscan`) |
 | `make bench-enclave` | The root package's benchmarks |
 | `make test-<feature>` | The unit tests of one feature, a directory under `docs/` such as `sealing` or `linux-secretmem` |
-| `make test-backends` | The unit tests of `backends/tpm` and `backends/armtrustzone` |
+| `make test-backends` | The unit tests of `backends/armtrustzone` |
 
 Pass extra test flags with `TESTFLAGS`, for example
 `make test-enclave TESTFLAGS=-run=TestSealer`. `-race` is kept.
@@ -91,8 +90,7 @@ build tag. It never runs on the host: each target runs it in the devcontainer.
 | `make integration-test-fips` | The whole suite under FIPS 140-3 strict mode |
 | `make integration-test-<feature>` | The tests of one feature only |
 | `make integration-test-userns` | The user-namespace test, under a seccomp profile that permits `CLONE_NEWUSER` |
-| `make integration-test-tpm` | `providertest` against the TPM provider on a throwaway `swtpm`, on the host |
-| `make integration-test-arm-trustzone` | `backendtest` and `providertest` against the arm-trustzone backend, in the guest of the pinned OP-TEE fixture image (`make optee-fixture-image` prints it) |
+| `make integration-test-arm-trustzone` | `backendtest` against the arm-trustzone backend, in the guest of the pinned OP-TEE fixture image (`make optee-fixture-image` prints it) |
 
 Every integration test is named with its feature's prefix, such as
 `TestSealing_` or `TestLinuxSecretmem_`, and `scripts/features.map` maps each
@@ -138,7 +136,6 @@ synonyms.
 
 ## Nested modules
 
-`backends/tpm` and `backends/armtrustzone` are Go modules of their own. Each
-requires a released version of the root module, and the root never requires
-them, so the root module keeps a single dependency. Do not add a `replace`
+`backends/armtrustzone` is a Go module of its own. It requires a released
+version of the root module, and the root never requires it, so the root module keeps a single dependency. Do not add a `replace`
 directive or a `go.work` file; the Makefile sets `GOWORK=off`.

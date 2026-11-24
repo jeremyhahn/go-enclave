@@ -1,6 +1,6 @@
 # Confidential VM support — architecture (proposal)
 
-> **Status: REFERENCE** · Scope: go-enclave · Last verified: 2026-11-12
+> **Status: REFERENCE** · Scope: go-enclave · Last verified: 2026-11-21
 > Proposal — not implemented. A design for the future feature in [SPEC](../SPEC.md#features) row `confidential-vm`. No code exists, and every identifier here is a proposal, not an API you can call. The [open questions](#open-questions) mark a recommended answer; none is decided.
 
 ## Problem
@@ -82,8 +82,8 @@ flowchart LR
 
 - **A nested module, `backends/confidentialvm`** (package `confidentialvm`),
   requiring the root module and `golang.org/x/sys`, never the reverse
-  ([Q1](#q1-where-the-module-lives)). It sits beside `backends/tpm`, which
-  likewise ships a `KeyProtector` and no backend.
+  ([Q1](#q1-where-the-module-lives)). Like go-xkms's TPM provider, it ships
+  a `KeyProtector` and no backend.
 - **Linux on amd64 only.** On any other target a stub compiles whose
   constructors return the typed unavailable error, so a cross-platform `main`
   that links the module builds everywhere.
@@ -340,7 +340,7 @@ the nonce checks, and error texts and unwrapping.
 ### Q1: where the module lives
 
 - **A nested module, `backends/confidentialvm`** (recommended), beside
-  `backends/tpm` and `backends/armtrustzone`, released with the repository.
+  `backends/armtrustzone`, released with the repository.
 - **A repository of its own:** released on its own, but split from the
   conformance suites it is tested against.
 
@@ -375,7 +375,7 @@ the nonce checks, and error texts and unwrapping.
 - **Support a guest under an SVSM** (recommended): reports are requested at
   `privlevel_floor`, which the report records, and the derived key for the
   guest kernel's own VMPL. The verifier's policy says which VMPL it accepts.
-  The SVSM's vTPM is a TPM, reached through `backends/tpm`.
+  The SVSM's vTPM is a TPM, reached through go-xkms's TPM provider.
 - **VMPL0 guests only:** simpler, but refuses the deployments where an SVSM
   gives the guest a measured boot through its vTPM.
 

@@ -143,12 +143,12 @@ PKGDIR_backendtest  := ./backendtest
 PKGDIR_memscan      := ./internal/memscan
 
 # BACKEND MODULES: hardware backends, each its own module at backends/<name>
-# requiring a released root (#206), so the root never depends on them. lint-go,
+# requiring a released root, so the root never depends on them. lint-go,
 # tidy-check, govulncheck, test and cross-build run in each, as for
 # build/ci/buildgates. coverage runs their unit tests too, with -race, after
 # the root packages; the floor measures the root packages only (their device
 # paths need the device).
-BACKEND_MODULES := backends/armtrustzone backends/tpm
+BACKEND_MODULES := backends/armtrustzone
 
 # FEATURE MAPPING. A feature is a directory
 # docs/<feature>/, mapped in scripts/features.map to its package, its
@@ -456,7 +456,6 @@ integration-test-userns:
 ## TRUSTED_FIRMWARE_COMMIT=<sha>: optee-fixture-check, integration-test-arm-trustzone: the commit the tag peels to (pinned); a checkout at any other commit is refused
 ## TRUSTED_FIRMWARE_CACHE=<dir>: optee-fixture-check, integration-test-arm-trustzone: where the checkout lives, one directory per tag (default ~/.cache/go-enclave/trusted-firmware)
 ## GO_ENCLAVE_OPTEE_ENDPOINT=<endpoint>: integration-test-arm-trustzone: the TEE client device in the fixture's guest (default /dev/tee0)
-## GO_ENCLAVE_OPTEE_SEAL=required: integration-test-arm-trustzone: fail, rather than skip, the KeyProtector test when the trusted application has no SEAL; empty (default) makes the fixture declare absent:<TRUSTED_FIRMWARE_TAG>, the pinned release lacking SEAL, which the test skips on; any other value is refused
 ## TRUSTED_FIRMWARE_URL=<url>: optee-fixture-check, integration-test-arm-trustzone: the forge's trusted-firmware clone URL; empty refuses a clone (the pinned commit, not the URL, is what is trusted)
 ## OPTEE_FIXTURE_IMAGE=<image@digest>: integration-test-arm-trustzone: run the harness in this OP-TEE fixture image, on its prebuilt stack (pinned in scripts/tool-pins.sh; empty runs it on the host); the CI optee job refuses an empty pin
 # The tag and commit come from scripts/tool-pins.sh; a command-line value
@@ -467,8 +466,7 @@ integration-test-userns:
 TRUSTED_FIRMWARE_URL      ?=
 TRUSTED_FIRMWARE_CACHE    ?=
 GO_ENCLAVE_OPTEE_ENDPOINT ?= /dev/tee0
-GO_ENCLAVE_OPTEE_SEAL     ?=
-$(call raw_bind,TRUSTED_FIRMWARE_URL TRUSTED_FIRMWARE_TAG TRUSTED_FIRMWARE_COMMIT TRUSTED_FIRMWARE_CACHE GO_ENCLAVE_OPTEE_ENDPOINT GO_ENCLAVE_OPTEE_SEAL OPTEE_FIXTURE_IMAGE)
+$(call raw_bind,TRUSTED_FIRMWARE_URL TRUSTED_FIRMWARE_TAG TRUSTED_FIRMWARE_COMMIT TRUSTED_FIRMWARE_CACHE GO_ENCLAVE_OPTEE_ENDPOINT OPTEE_FIXTURE_IMAGE)
 # The fixture image's trusted-firmware cache: the checkout is
 # OPTEE_FIXTURE_CACHE/<tag> (the contract's path).
 OPTEE_FIXTURE_CACHE := /opt/go-enclave/trusted-firmware
@@ -489,8 +487,8 @@ optee-fixture-check:
 # The toolchain image builds backends/armtrustzone (its own module) with
 # go test -c -tags=optee as a CGO-free linux/arm64 test binary;
 # scripts/optee-fixture.sh shares it with the guest and runs
-# TestBackendConformance_OnOPTEE and TestKeyProtectorConformance_OnOPTEE there
-# under make optee-run, whose status is the target's. The tests connect
+# TestBackendConformance_OnOPTEE there under make optee-run, whose status is
+# the target's. The tests connect
 # in-process; a missing endpoint fails the run, never skips it. The root's optee-tagged harness
 # (test/integration/enclave) is not run: the root go.mod never requires the
 # nested module, so nothing registers the backend there. Both containers get a
@@ -512,30 +510,13 @@ integration-test-arm-trustzone: docker-build
 	  name=go-enclave-optee-$$$$-$$(date +%s); \
 	  trap 'docker rm -f -v "$$name" >/dev/null 2>&1 || true' EXIT; \
 	  docker create --name "$$name" -w /src \
-	    -e TRUSTED_FIRMWARE_TAG -e TRUSTED_FIRMWARE_COMMIT -e GO_ENCLAVE_OPTEE_ENDPOINT -e GO_ENCLAVE_OPTEE_SEAL \
+	    -e TRUSTED_FIRMWARE_TAG -e TRUSTED_FIRMWARE_COMMIT -e GO_ENCLAVE_OPTEE_ENDPOINT \
 	    -e TRUSTED_FIRMWARE_CACHE=$(OPTEE_FIXTURE_CACHE) -e OPTEE_FIXTURE_PREBUILT=1 \
 	    -e ARM_TRUSTZONE_BIN=$(ARM_TRUSTZONE_BIN) -e OPTEE_TEST_BIN=$(notdir $(ARM_TRUSTZONE_BIN)) \
 	    "$$OPTEE_FIXTURE_IMAGE" sh scripts/optee-fixture.sh harness >/dev/null && \
 	  tar -C "$$PWD" --owner=1000 --group=1000 --numeric-owner -cf - . | docker cp -a - "$$name:/src" && \
 	  docker start -a "$$name"; \
 	fi
-
-## SWTPM_PORT=<port>: integration-test-tpm: the swtpm command port on 127.0.0.1 (default 2321)
-## SWTPM_CTRL_PORT=<port>: integration-test-tpm: the swtpm control port on 127.0.0.1 (default 2322)
-SWTPM_PORT      ?= 2321
-SWTPM_CTRL_PORT ?= 2322
-$(call raw_bind,SWTPM_PORT SWTPM_CTRL_PORT)
-
-## integration-test-tpm: providertest against the TPM provider on a throwaway swtpm: backends/tpm's swtpm-tagged conformance and blob-length tests, under -race, on the host (swtpm and swtpm-tools installed)
-# scripts/swtpm-fixture.sh starts swtpm on loopback TCP with its state in a
-# temporary directory, runs the tests with the host's Go against
-# GO_ENCLAVE_SWTPM=tcp:127.0.0.1:$(SWTPM_PORT), and stops swtpm and removes
-# its state on every exit. Not in the toolchain image: its container has no
-# network that reaches the host's loopback, and the image carries no swtpm.
-# Without swtpm on PATH the target fails, never skips.
-.PHONY: integration-test-tpm
-integration-test-tpm:
-	@sh scripts/swtpm-fixture.sh
 
 ## integration-test-fips: every integration suite under FIPS 140-3 strict mode, in the devcontainer
 .PHONY: integration-test-fips
@@ -655,9 +636,8 @@ check-scripts: vet-buildgates
 check-in-toolchain-image:
 	@bash scripts/in-toolchain-image_test.sh
 
-## check-project-scripts: swtpm-fixture, test-runtimesecret, cross-build, lint-integration and release-verify pass and fail as they should
-# Stub go, swtpm and swtpm_ioctl on PATH and a scratch git tree; no toolchain,
-# TPM, network or Docker.
+## check-project-scripts: test-runtimesecret, cross-build, lint-integration and release-verify pass and fail as they should
+# A stub go on PATH and a scratch git tree; no toolchain, network or Docker.
 .PHONY: check-project-scripts
 check-project-scripts:
 	@sh scripts/project-scripts_test.sh

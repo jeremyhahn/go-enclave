@@ -1,6 +1,6 @@
 # go-enclave documentation
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-11-15
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-11-24
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 What go-enclave is and every feature it has: [SPEC](SPEC.md). What is done
@@ -24,22 +24,21 @@ compile and their test binaries link, and no test runs on them
 | memory-enclave | [user](memory-enclave/user.md) · [api](memory-enclave/api.md) · [architecture](memory-enclave/architecture.md) · [engineering](memory-enclave/engineering.md) | The memory enclave, held as a `ByteAccess`: constructors, borrowing, `Freeze` through `As`, `Destroy` and canary corruption, guard pages and canary, platform and core-dump matrix |
 | locked-memory-budget | [user](locked-memory-budget/user.md) · [api](locked-memory-budget/api.md) · [architecture](locked-memory-budget/architecture.md) · [engineering](locked-memory-budget/engineering.md) | `Allocator`, `RLIMIT_MEMLOCK` discovery, retuning, the process allocator, refunds for failed constructions |
 | sealing | [user](sealing/user.md) · [api](sealing/api.md) · [architecture](sealing/architecture.md) · [engineering](sealing/engineering.md) | `Sealed`, `Sealer` modes, the `KeyProtector`/`RootUnsealer` seam, contexts, `Openable`, FIPS, the key-schedule heap exposure and its erasure under `runtime/secret` |
-| keyprotector-providers | [hardware providers](sealing/hardware-providers.md) | The TPM 2.0 provider (`backends/tpm`) as shipped, now to move to go-xkms ([key-operation API removal](SPEC.md#key-operation-api-removal)), and the earlier secure-element (PKCS#11) outline, out of scope. Installing a hardware provider: [sealing user guide](sealing/user.md#install-a-hardware-provider) |
+| keyprotector-providers | [hardware providers](sealing/hardware-providers.md) | The `KeyProtector` providers: the memory provider (`SoftwareProvider`, in [sealing](sealing/user.md)) ships; the hardware providers were removed and live in go-xkms ([key-operation API removal](SPEC.md#key-operation-api-removal)) |
 | shutdown-sweep | [user](shutdown-sweep/user.md) · [api](shutdown-sweep/api.md) · [architecture](shutdown-sweep/architecture.md) · [engineering](shutdown-sweep/engineering.md) | `WipeAll(ctx)`: admission, waiting for borrows, termination, the count and `SweepError` |
 | provider-conformance | [user](provider-conformance/user.md) · [api](provider-conformance/api.md) · [architecture](provider-conformance/architecture.md) · [engineering](provider-conformance/engineering.md) | `providertest.TestProvider(ctx, cfg)` for `KeyProtector` and `RootUnsealer` authors |
 | backends | [user](backends/user.md) · [api](backends/api.md) · [architecture](backends/architecture.md) · [engineering](backends/engineering.md) | The backend seam: `Handle`, `Backend`, capabilities, the named registry, `As`, the sealing wiring (`WithBackend`, `OpenIn`, `SealFrom`) |
 | backend-conformance | [user](backend-conformance/user.md) · [api](backend-conformance/api.md) · [architecture](backend-conformance/architecture.md) · [engineering](backend-conformance/engineering.md) | `backendtest`: the conformance suite for `Backend` and `Handle` authors |
 | backend-detection | [user](backend-detection/user.md) · [api](backend-detection/api.md) · [architecture](backend-detection/architecture.md) · [engineering](backend-detection/engineering.md) | `Detect(ctx)`: the `Prober` rank and probe, selecting the most secure usable registered backend with locked memory as the floor, and why each other was passed over |
 | linux-secretmem | [user](linux-secretmem/user.md) · [api](linux-secretmem/api.md) · [architecture](linux-secretmem/architecture.md) · [engineering](linux-secretmem/engineering.md) | `NewSecretMemory`: a Linux-only backend of rank 1 on `memfd_secret(2)` memory, out of the kernel direct map; what it adds over the memory enclave, kernel requirements, its probe and failure modes. Also covers open-in-secretmem |
-| arm-trustzone | [design](backends/arm-trustzone-design.md) · [user](backends/user.md#arm-trustzone) · [engineering](backends/engineering.md#arm-trustzone) | The backend over OP-TEE in the nested module `backends/armtrustzone`, the only hardware backend, and its `KeyProtector` (to move to go-xkms). Secure-world memory storage is planned, not built: today `Random` allocates normal-world pages (`enclave.NewMemorySized`) and fills them from the trusted application, so the bytes stay readable by the normal-world process and kernel |
+| arm-trustzone | [design](backends/arm-trustzone-design.md) · [user](backends/user.md#arm-trustzone) · [engineering](backends/engineering.md#arm-trustzone) | The backend over OP-TEE in the nested module `backends/armtrustzone`, the only hardware backend. Secure-world memory storage is planned, not built: today `Random` allocates normal-world pages (`enclave.NewMemorySized`) and fills them from the trusted application, so the bytes stay readable by the normal-world process and kernel |
 
 ### Nested modules
 
-Each is its own Go module and requires the root module, never the reverse.
+It is its own Go module and requires the root module, never the reverse.
 
 | Module | Docs |
 |---|---|
-| `github.com/jeremyhahn/go-enclave/backends/tpm` | [pkg.go.dev](https://pkg.go.dev/github.com/jeremyhahn/go-enclave/backends/tpm), [hardware providers](sealing/hardware-providers.md#tpm-provider) |
 | `github.com/jeremyhahn/go-enclave/backends/armtrustzone` | [pkg.go.dev](https://pkg.go.dev/github.com/jeremyhahn/go-enclave/backends/armtrustzone), [arm-trustzone design](backends/arm-trustzone-design.md) |
 
 ### Withdrawn proposals
@@ -72,15 +71,59 @@ describes its release under the names that release shipped.
 
 ### Unreleased (from v0.11)
 
-#### Key-operation API removal (planned)
+#### Hardware KeyProtector providers removed
 
-**Nothing to change yet.** The key-operation API is to be removed from
-go-enclave: the hardware `KeyProtector` providers (`backends/tpm` and
-`(*armtrustzone.Backend).KeyProtector`) and attestation (`Attester`,
-`Evidence`). Keys, key operations and attestation belong to
-[go-xkms](https://github.com/jeremyhahn/go-xkms), and callers of these APIs
-move there ([SPEC scope](SPEC.md#scope)). This release changes no code; the
-release that removes each API adds its migration steps here.
+**BREAKING. A caller of a hardware `KeyProtector` provider moves to go-xkms
+or seals with `SoftwareProvider`.** Keys and key operations belong to
+[go-xkms](https://github.com/jeremyhahn/go-xkms)
+([key-operation API removal](SPEC.md#key-operation-api-removal)), so both
+hardware providers are removed from go-enclave:
+
+- **`backends/tpm`.** The nested module
+  `github.com/jeremyhahn/go-enclave/backends/tpm` is gone from this
+  repository. Drop it from `go.mod` (`go mod tidy`). The TPM 2.0 provider is
+  `enclaveprovider.NewKeyProtector` in the package
+  `github.com/jeremyhahn/go-xkms/pkg/enclaveprovider`, built over go-xkms's
+  TPM 2.0 sealer (package `github.com/jeremyhahn/go-xkms/pkg/tpm2`, a
+  `types.Sealer` from `github.com/jeremyhahn/go-xkms/pkg/types`) and the
+  sealing key's `*types.KeyAttributes`. Pass it to `enclave.WithKeyProtector`
+  as before: the `KeyProtector` interface is unchanged.
+
+  ```go
+  protector, err := enclaveprovider.NewKeyProtector(sealer, attrs)
+  if err != nil { /* handle */ }
+  s, err := enclave.NewSealer(enclave.WithKeyProtector(protector))
+  ```
+
+  Where the root needs a `RootUnsealer` (`enclave.WithRootUnsealer`), the
+  same package has `NewRootUnsealer(sealer, attrs, sealedRoot)` and
+  `ProvisionRoot`.
+- **`(*armtrustzone.Backend).KeyProtector()`.** The method is gone from
+  `backends/armtrustzone`. The TrustZone provider is the same
+  `enclaveprovider.NewKeyProtector` from
+  `github.com/jeremyhahn/go-xkms/pkg/enclaveprovider`, over go-xkms's OP-TEE
+  sealer; pass it to `enclave.WithKeyProtector`. The arm-trustzone backend
+  stays: `Connect`, `Connector` and `Random` are unchanged.
+- **Without a device.** Seal with the memory provider instead:
+
+  ```go
+  p := enclave.NewSoftwareProvider()
+  defer p.Destroy()
+  s, err := enclave.NewSealer(enclave.WithKeyProtector(p))
+  ```
+
+No sealed value needs converting: a `Sealed` lives only in the memory of the
+process that sealed it ([configuration and
+persistence](sealing/engineering.md#configuration-and-persistence)). A blob
+that the removed provider produced is opened by the go-xkms provider only
+where go-xkms documents that compatibility.
+
+#### Attestation removal (planned)
+
+**Nothing to change yet.** `Attester` and `Evidence` are to be removed from
+go-enclave and their callers move to go-xkms
+([SPEC scope](SPEC.md#scope)). This release does not change them; the release
+that removes them adds its migration steps here.
 
 #### i.MX EdgeLock backend module moved to go-xkms
 
@@ -97,7 +140,7 @@ application) is planned.
 
 **Build with Go 1.27.4 or later.** The `go` line of `go.mod` is `1.27.4`
 (was `1.27.3`), for GO-2026-6859 in the go1.27.3 standard library, and
-[README.md](../README.md#install) states the same minimum. The nested backend modules below carry the same
+[README.md](../README.md#install) states the same minimum. The nested backend module below carries the same
 line.
 
 #### Sealed envelope version 2
@@ -119,17 +162,16 @@ order: no process can hand its envelopes to another, whatever the release.
 
 #### Backend modules
 
-Two backends ship as nested modules of this repository, each with its own
-`go.mod`. The root module requires neither, so a caller that wants one
+One backend ships as a nested module of this repository, with its own
+`go.mod`. The root module does not require it, so a caller that wants it
 requires it by its own module path; it requires the root at `v0.11.1-alpha`
 or later and Go 1.27.4.
 
 | Module | What it gives | Docs |
 |---|---|---|
-| `github.com/jeremyhahn/go-enclave/backends/armtrustzone` | the `arm-trustzone` backend over OP-TEE (`Connect`, `Connector`), and a TrustZone `KeyProtector` from `(*Backend).KeyProtector()` | [backends](backends/user.md#arm-trustzone) |
-| `github.com/jeremyhahn/go-enclave/backends/tpm` | a TPM 2.0 `enclave.KeyProtector` for Linux, `tpm.Open("")` on `/dev/tpmrm0` | [install a hardware provider](sealing/user.md#install-a-hardware-provider) |
+| `github.com/jeremyhahn/go-enclave/backends/armtrustzone` | the `arm-trustzone` backend over OP-TEE (`Connect`, `Connector`, `Random`) | [backends](backends/user.md#arm-trustzone) |
 
-A caller that uses neither has nothing to change: the root module's
+A caller that does not use it has nothing to change: the root module's
 dependencies are still `golang.org/x/sys` alone.
 
 ### v0.11.1-alpha (from v0.11.0)

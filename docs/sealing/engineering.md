@@ -1,6 +1,6 @@
 # Sealing and the provider seam — engineering contract
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-10-31
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-11-21
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 ## Exported surface
@@ -166,12 +166,8 @@ sealer over a `SoftwareProvider` therefore carries no provider blob.
 
 [Provider contract](#provider-contract) item 4 ("Blob is opaque") still holds for
 every other provider. Contract v1 fixes only the envelope and the
-SoftwareProvider blob. A provider such as the OP-TEE TA implements
-SEAL/UNSEAL (0x3/0x4) against this section; go-enclave's side is the
-arm-trustzone backend's `KeyProtector`
-([design](../backends/arm-trustzone-design.md#keyprotector)). The pinned
-OP-TEE trusted application does not implement SEAL yet
-([backend conformance](../backend-conformance/engineering.md#the-arm-trustzone-harness)).
+SoftwareProvider blob. Hardware providers, such as those in go-xkms, define
+their own blob inside the envelope.
 
 ### Versioning
 
@@ -589,13 +585,6 @@ process-lifetime `Sealer` (an AST guard test keeps it that way).
   failure is an `*OpenError` carrying it.
 - Provider behavior is checked by [provider-conformance](../provider-conformance/engineering.md),
   which `SoftwareProvider` passes in this repository's own tests.
-- The TPM provider (`backends/tpm`) runs the same conformance suite, with its
-  residue sweep, and checks its sealed blob's length against a software TPM:
-  with `swtpm` and `swtpm-tools` installed, `make integration-test-tpm` starts
-  a throwaway swtpm on 127.0.0.1 (`SWTPM_PORT`, default 2321, and
-  `SWTPM_CTRL_PORT`, default 2322), runs the module's swtpm-tagged tests under
-  `-race` against it, and stops it on exit. Without `swtpm` on `PATH` the
-  target fails; it does not skip. CI runs it on the full tier.
 - `make test-fips` runs the suite in FIPS strict mode (`GOFIPS140=latest`; see [FIPS 140-3](#fips-140-3)).
 
 ## Observability

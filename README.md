@@ -28,9 +28,9 @@ library that handles key material can share one implementation.
   allocator and libraries draw on it.
 - **Sealing.** `Sealed` holds an AES-256-GCM envelope and opens it only into a
   fresh, frozen memory enclave. A `Sealer` seals under a key provider, in
-  `ModeRootKey` or `ModePerOperation`. Providers ship for software
-  (`NewSoftwareProvider`), TPM 2.0 ([`backends/tpm`](backends/tpm)) and
-  OP-TEE on Arm TrustZone ([`backends/armtrustzone`](backends/armtrustzone)).
+  `ModeRootKey` or `ModePerOperation`. The memory provider
+  (`NewSoftwareProvider`) ships here; hardware providers (TPM, TrustZone) live
+  in [go-xkms](https://github.com/jeremyhahn/go-xkms).
 - **Backends.** A small `Backend` and `Handle` core with optional
   capabilities, found with `As`. Backends are registered by name with
   `Register`; importing the package registers nothing. `Detect` probes the
@@ -58,11 +58,10 @@ go get github.com/jeremyhahn/go-enclave
 ```
 
 Requires Go 1.27.4 or later. The root module depends only on
-`golang.org/x/sys`. The hardware providers are separate modules with their own
-dependencies, so the root module never pulls them in:
+`golang.org/x/sys`. The arm-trustzone backend is a separate module, so the
+root module never pulls it in:
 
 ```sh
-go get github.com/jeremyhahn/go-enclave/backends/tpm           # adds github.com/google/go-tpm
 go get github.com/jeremyhahn/go-enclave/backends/armtrustzone  # pure Go, no cgo
 ```
 
@@ -123,22 +122,24 @@ if err != nil {
 defer p.Destroy() // open late, destroy early
 ```
 
-Seal under a TPM instead of a software key:
+Seal under a TPM instead of a software key. The hardware provider is
+go-xkms's `enclaveprovider.NewKeyProtector`, in the package
+`github.com/jeremyhahn/go-xkms/pkg/enclaveprovider`, over a go-xkms TPM 2.0
+sealer and the sealing key's attributes
+([Upgrading](docs/README.md#hardware-keyprotector-providers-removed)):
 
 ```go
-tp, err := tpm.Open("") // /dev/tpmrm0
+protector, err := enclaveprovider.NewKeyProtector(sealer, attrs) // go-xkms
 if err != nil {
 	return err
 }
-defer tp.Close()
-
-sealer, err := enclave.NewSealer(enclave.WithKeyProtector(tp))
+s, err := enclave.NewSealer(enclave.WithKeyProtector(protector))
 if err != nil {
 	return err
 }
-defer sealer.Destroy()
+defer s.Destroy()
 
-s, err := sealer.Seal(ctx, credential)
+sealed, err := s.Seal(ctx, credential)
 ```
 
 Sweep at shutdown, in `main` and never in a library, with a deadline taken
