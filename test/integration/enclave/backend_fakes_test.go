@@ -165,8 +165,7 @@ func (b *deviceBackend) newHandle(spec enclave.ImportSpec, material []byte, keys
 	return &deviceKey{deviceHandle: base, aead: g, inline: inline}
 }
 
-// fipsOnly reports whether the process runs with GODEBUG=fips140=only, which
-// refuses AES-GCM with a caller-chosen nonce.
+// fipsOnly reports whether the process runs with GODEBUG=fips140=only.
 func fipsOnly() bool { return fips140.Enforced() }
 
 // setHook installs fn, called with the 1-based number of each Import before it

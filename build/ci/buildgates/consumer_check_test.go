@@ -8,17 +8,7 @@ import (
 	"testing"
 )
 
-// consumer-check.sh against a fake go: every refusal after the argument
-// checks, without a network or a module proxy. The fake is driven by
-// environment variables:
-//
-//	FAKE_GO_LOG       a file each invocation appends "<args> GOFLAGS=[..] GOWORK=.." to
-//	FAKE_GO_FAIL      the step that fails: "mod init", "get", "mod verify" or "build"
-//	FAKE_GO_VERSION   the version `go list -m` reports (default: the one asked for)
-//	FAKE_GO_REPLACE   `go list -m`'s replacement field ("replaced" or empty)
-//	FAKE_GO_DIR       `go list -m`'s module directory (default: under GOMODCACHE)
-//	FAKE_CONSUMER_OUT what the built consumer prints (default: the success marker)
-//	FAKE_CONSUMER_RC  the built consumer's exit status (default 0)
+// consumer-check.sh against a fake go driven by FAKE_GO_* and FAKE_CONSUMER_* variables.
 const consumerFakeGo = `#!/bin/sh
 [ -z "${FAKE_GO_LOG-}" ] || echo "$* GOFLAGS=[${GOFLAGS-unset}] GOWORK=${GOWORK-unset}" >> "$FAKE_GO_LOG"
 fail() { echo "fake go: $1 failed" >&2; exit 1; }
@@ -50,9 +40,7 @@ const (
 	fakeConsumerVersion = "v1.2.3"
 )
 
-// consumerFakeEnv returns an environment with only the fake go and the shell
-// utilities on PATH, a private TMPDIR, a caller GOFLAGS the script must clear,
-// and the fake's log file.
+// consumerFakeEnv returns an environment with only the fake go and shell utilities on PATH.
 func consumerFakeEnv(t *testing.T, over map[string]string) (env map[string]string, tmp, log string) {
 	t.Helper()
 	bin := filepath.Join(t.TempDir(), "bin")

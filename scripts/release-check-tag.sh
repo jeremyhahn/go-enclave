@@ -1,30 +1,5 @@
 #!/bin/sh
-# release-check-tag.sh — refuse a release tag that disagrees with its own tree.
-#
-# Usage: scripts/release-check-tag.sh <tag>      (run from the repository root)
-#
-# release.yml runs this first (through `make release-verify`), on the tagged
-# commit, before any gate or publication; the release targets
-# (`make release`, `make release-candidate`, `make release-alpha`) run it before
-# they commit. The tag and the tree carry the version in three places that
-# nothing else reconciles (release-versioning §2, its PROPOSED P4: "a CI
-# check failing when v$(cat VERSION) != the tag … plus a check for a matching
-# CHANGELOG entry — the third thing that drifts"):
-#
-#   - the tag is vX.Y.Z, vX.Y.Z-alpha or vX.Y.Z-rc.N (N from 1, no leading
-#     zeros) — the only pre-releases in use (release-versioning §1, §1a);
-#     anything else is a typo or an unsanctioned kind;
-#   - VERSION holds exactly the tag without its `v` (§2: the file is
-#     unprefixed, the tag prefixed);
-#   - CHANGELOG.md has exactly one non-empty section for the tag
-#     (scripts/release-notes.sh, which also produces the release body);
-#   - no fragment is left in changelog.d/ and `## [Unreleased]` holds no
-#     entry: the release targets fold both into the version's section before
-#     tagging (§5), so either one surviving at a tag is an entry the release
-#     leaves out.
-#
-# Every failure is reported, not just the first, so one run says everything
-# that has to change.
+# release-check-tag.sh <tag>: refuse a release tag that disagrees with VERSION, CHANGELOG.md or changelog.d/, reporting every failure.
 set -eu
 # shellcheck source=lib.sh
 . "${0%/*}/lib.sh"

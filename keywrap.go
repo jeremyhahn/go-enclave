@@ -13,10 +13,7 @@ import (
 	"errors"
 )
 
-// Blob framing. Every wrapped-key blob this package produces starts with a
-// fixed header that is also the AAD of the wrapping, so a blob cannot be
-// re-purposed across kinds or generations. [ModePerOperation] provider blobs
-// are opaque.
+// Blob framing: a fixed header, also the wrapping's AAD, starts every wrapped-key blob.
 const (
 	// blobVersion makes an accidental format change fail authentication
 	// instead of misparse. Sealed values do not outlive the process, so there
@@ -51,10 +48,7 @@ func parseBlobHeader(blob []byte) (kind byte, gen uint32, err error) {
 	return blob[1], binary.BigEndian.Uint32(blob[2:blobHeaderLen]), nil
 }
 
-// wrapKey seals key under the key in wrapping and returns the blob: the
-// frame for kind and gen, which the seal binds as AAD, then the sealed key.
-// A wrapping handle with [AEAD] seals in its device; one with only
-// [ByteAccess] seals in this process.
+// wrapKey seals key under wrapping with the kind and generation frame as AAD, in the device or in this process.
 func wrapKey(wrapping Handle, key []byte, kind byte, gen uint32) ([]byte, error) {
 	header := blobHeader(kind, gen)
 	var body []byte

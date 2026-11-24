@@ -1,38 +1,5 @@
 #!/bin/sh
-# release-version-check.sh — refuse a release version that does not move forward.
-#
-# Usage: scripts/release-version-check.sh [--merged <commit>] <vX.Y.Z[-pre]> [<X.Y.Z[-pre]>]
-#        (from the repository root)
-#
-# With --merged, only the v* tags merged into <commit> (on it or its
-# ancestors) are ordered against: the release state that commit was cut from.
-# release.yml's Verify passes the tagged commit, so a later tag on a
-# descendant never fails an earlier tag's run, or a rerun of it. The order of
-# releases is enforced when the tag is pushed (release-tag.sh's leased push of
-# the release lock); without --merged every v* tag is ordered against.
-#
-# With a second argument, that is the VERSION ordered against in place of the
-# VERSION file: release-tag.sh passes the merged release commit's first
-# parent's VERSION, since the file already holds the new version there.
-#
-# The release targets (scripts/release.sh) run this before they write anything. release-versioning
-# §3: a VERSION file is never lowered and a published tag is never superseded
-# by a lower one — a backward version silently loses whatever the intervening
-# releases fixed, and Go's MVS will happily keep selecting the higher one. So
-# the new version must be STRICTLY greater, by SemVer 2.0.0 precedence (§11),
-# than:
-#   - the version VERSION holds now (unprefixed, release-versioning §2), and
-#   - every existing `v*` tag in the repository.
-#
-# Precedence, per SemVer 2.0.0 §11: MAJOR, MINOR, PATCH compared numerically;
-# a version with a pre-release is LOWER than the same version without one
-# (v1.0.0-alpha < v1.0.0); pre-releases compare identifier by identifier —
-# numeric identifiers numerically, numeric below alphanumeric, alphanumeric in
-# ASCII order, and a shorter list below a longer one it prefixes. Build
-# metadata (`+…`) does not take part.
-#
-# A `v*` tag that is not SemVer cannot be ordered, so it is refused rather than
-# skipped: skipping it is exactly how a release could be cut below it.
+# release-version-check.sh [--merged <commit>] <vX.Y.Z[-pre]> [<X.Y.Z[-pre]>]: refuse a version not strictly greater, by SemVer precedence, than VERSION and every v* tag.
 set -eu
 # shellcheck source=lib.sh
 . "${0%/*}/lib.sh"

@@ -226,9 +226,7 @@ func TestMemoryEnclave_EnclaveAccessorsTellTheTruth(t *testing.T) {
 	})
 }
 
-// TestSealing_KeyScheduleErasureReportsThisBuild pins that a build without
-// GOEXPERIMENT=runtimesecret reports that it does not erase key schedules.
-// make test-runtimesecret covers the erasing build.
+// TestSealing_KeyScheduleErasureReportsThisBuild pins that a build without GOEXPERIMENT=runtimesecret reports no erasure.
 func TestSealing_KeyScheduleErasureReportsThisBuild(t *testing.T) {
 	if enclave.KeyScheduleErasure() {
 		t.Fatal("KeyScheduleErasure() = true in a build without GOEXPERIMENT=runtimesecret")

@@ -166,12 +166,7 @@ const (
 	rollbackNone = "failed copy constructors returned locked memory to its baseline"
 )
 
-// TestNewFrozenCopy_FailedConstructionReturnsToBaseline pins the rollback of
-// every copying constructor (NewMemory, NewMemoryCopy, Allocator.New) on both
-// of its failure paths: a refused mlock, from a real RLIMIT_MEMLOCK ceiling,
-// and a refused freeze of pages already mapped and locked. Afterwards VmLck,
-// the allocator's InUse and the shutdown ledger are back where they started.
-// It runs in a subprocess because it lowers the process's memlock ceiling.
+// TestNewFrozenCopy_FailedConstructionReturnsToBaseline pins the rollback of every copying constructor.
 func TestNewFrozenCopy_FailedConstructionReturnsToBaseline(t *testing.T) {
 	if os.Getenv(rollbackMarker) == "1" {
 		copyRollbackChild(t)

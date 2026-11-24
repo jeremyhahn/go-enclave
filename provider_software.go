@@ -142,11 +142,7 @@ func (s *softwareState) protectKeyLocked() (*lockedRegion, error) {
 	return k, nil
 }
 
-// deriveProtectKey derives the Protect key from root into a fresh locked
-// enclave: HKDF-SHA256 under softwareProtectKeyInfo. The root is uniformly
-// random, so no salt is needed; the info alone separates the two keys. The
-// HKDF output and HMAC state are heap memory, wiped or erased as for an AES
-// key schedule.
+// deriveProtectKey derives the Protect key from root with HKDF-SHA256 under softwareProtectKeyInfo.
 func deriveProtectKey(root *lockedRegion) (*lockedRegion, error) {
 	k, err := newMemorySized(RootKeyBytes)
 	if err != nil {
@@ -173,10 +169,7 @@ func deriveProtectKey(root *lockedRegion) (*lockedRegion, error) {
 	return k, nil
 }
 
-// liveRootLocked is the one statement of the provider's state: it reports
-// [ErrSealerDestroyed] after Destroy, [ErrSealerWiped] once a shutdown sweep
-// has destroyed the root or the Protect key, and otherwise the root, nil
-// before first use. The caller holds s.mu.
+// liveRootLocked reports the provider's state and its root; the caller holds s.mu.
 func (s *softwareState) liveRootLocked() (*lockedRegion, error) {
 	switch {
 	case s.destroyed:

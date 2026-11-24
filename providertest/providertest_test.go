@@ -93,13 +93,10 @@ func rootOnly(new func() (any, error)) Config {
 	return Config{New: new, Modes: []enclave.Mode{enclave.ModeRootKey}}
 }
 
-// software is a fresh conforming provider, which most violators wrap so that
-// the ONLY thing wrong with them is the property under test.
+// software is a fresh conforming provider for violators to wrap.
 func software() enclave.SoftwareProvider { return enclave.NewSoftwareProvider() }
 
-// ---------------------------------------------------------------------------
-// THE HEADLINE CONTROL: a provider that retains a copy on purpose
-// ---------------------------------------------------------------------------
+// A provider that retains a copy on purpose.
 
 // retainingProtector conforms in every visible way and keeps a copy of every
 // key it recovers. Only the residue sweep can catch it: the spy watches the
@@ -293,9 +290,7 @@ func TestSuiteCatchesAWriteBackIntoAWipedDestination(t *testing.T) {
 		"Unprotect does not write into a destination the caller has finished with")
 }
 
-// wipingProtector keeps the last destination and WIPES it on the next call —
-// the mirror defect, invisible to a zero-stays-zero check, and a fail-open in
-// the caller, which is left holding zeros where its key was.
+// wipingProtector keeps the last destination and wipes it on the next call.
 type wipingProtector struct {
 	inner enclave.SoftwareProvider
 	mu    sync.Mutex
@@ -480,12 +475,7 @@ func (p *unauthenticatedProtector) Unprotect(ctx context.Context, blob, key []by
 	return nil
 }
 
-// forgeableProtector carries an unauthenticated tail in the blob that chooses
-// what the blob opens to, the bare RSA-OAEP shape the KeyProtector contract
-// disqualifies. It is separate from unauthenticatedProtector because its
-// forgery yields something other than the real key, so only the "Unprotect
-// ACCEPTED this blob" arm catches it; the plaintext-in-destination check
-// cannot.
+// forgeableProtector carries an unauthenticated tail that chooses what the blob opens to.
 type forgeableProtector struct {
 	mu   sync.Mutex
 	n    int
@@ -540,20 +530,13 @@ func TestSuiteCatchesAForgeryOpeningToAttackerChosenMaterial(t *testing.T) {
 		"Unprotect ACCEPTED")
 }
 
-// publicKeyWrapProtector wraps each key to a P-256 public key (an ephemeral
-// key agreement, then AES-GCM under the agreed secret), the ECIES shape of a
-// TPM or KMS public-key wrap. Without a signer it is the bare wrap the
-// KeyProtector contract disqualifies: its tag refuses every tampered blob, so
-// it passes every other check, yet anyone holding the public key builds a blob
-// it opens. With a signer it signs each wrap and verifies before opening, the
-// composition the contract requires.
+// publicKeyWrapProtector wraps each key to a P-256 public key, optionally signing each wrap.
 type publicKeyWrapProtector struct {
 	priv   *ecdh.PrivateKey
 	signer ed25519.PrivateKey
 }
 
-// p256PublicBytes is the length of an uncompressed P-256 public key. P-256 is
-// used because X25519 is prohibited under GODEBUG=fips140=only.
+// p256PublicBytes is an uncompressed P-256 public key's length; X25519 is prohibited under fips140=only.
 const p256PublicBytes = 65
 
 func newPublicKeyWrapProtector(signed bool) (*publicKeyWrapProtector, error) {
@@ -1619,8 +1602,7 @@ func TestSuiteRequiresAnEndedContextToBeRefused(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := perOp(func() (any, error) { return tc.p(), nil })
-			// Each violator differs from the software provider only on calls
-			// made with an ENDED context, which the residue sweep never makes.
+			// Each violator differs only on calls made with an ended context.
 			cfg.SkipResidueSweep = "the violator under test differs from the software provider only on ended-context calls"
 			wantFail(t, cfg, property+": ", tc.want)
 		})
@@ -1965,13 +1947,7 @@ func assertAbortedOnly(t *testing.T, err error) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// A provider call that fails is a finding, never a pass
-// ---------------------------------------------------------------------------
-//
-// Every provider call a check makes can fail on a real device. These tests
-// drive each call ordinal to failure in turn and require the run to fail under
-// the right property, naming the call and carrying the device's own error.
+// A provider call that fails is a finding, never a pass.
 
 // errDeviceFault is the failure the planted providers below report.
 var errDeviceFault = errors.New("device: transient fault")
@@ -2029,9 +2005,7 @@ func (p *failingUnsealer) UnsealRoot(ctx context.Context, dst []byte) error {
 	return p.inner.UnsealRoot(ctx, dst)
 }
 
-// requireOnlyPropertyFailures runs cfg and requires a run that FAILED, did so
-// with nothing but property failures (not an abort, not a Config refusal),
-// and names every "<property>: <detail prefix>" in wants.
+// requireOnlyPropertyFailures requires a run that failed only on properties and names every want.
 func requireOnlyPropertyFailures(t *testing.T, cfg Config, wants ...string) {
 	t.Helper()
 	cfg.Logf = t.Logf

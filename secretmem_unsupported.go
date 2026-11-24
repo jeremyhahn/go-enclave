@@ -10,11 +10,7 @@
 
 package enclave
 
-// This is every GOOS but Linux, and every Linux architecture x/sys carries no
-// SYS_MEMFD_SECRET for: the build is the stub of the platform contract, so a
-// cross-platform main that registers the secretmem backend builds everywhere
-// and selects the memory enclave. The build tag is the exact complement of
-// secretmem_linux.go's.
+// Platforms without memfd_secret: the stub of the platform contract; the build tag is the complement of secretmem_linux.go's.
 
 // secretMemorySupported refuses: [NewSecretMemory] returns
 // [ErrMemfdSecretUnavailable] here.

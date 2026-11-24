@@ -17,14 +17,7 @@ import (
 
 const gib = 1024 * 1024 // KiB
 
-// trimFakeDocker answers the calls trim-ci-caches.sh makes:
-//   - volume ls: the lines of $FAKE_DOCKER/volumes;
-//   - run ... -v <vol>:/c:ro ...: du output from $FAKE_DOCKER/sizes
-//     ("<vol> <kib>" lines), nothing for a volume not listed;
-//   - ps -aq --filter volume=<vol>: an id when <vol> is in $FAKE_DOCKER/inuse;
-//   - volume rm <vol>: fails when <vol> is in $FAKE_DOCKER/unremovable.
-//
-// Every call's arguments are appended to $FAKE_DOCKER/log.
+// trimFakeDocker answers trim-ci-caches.sh's docker calls from files under $FAKE_DOCKER and logs every call.
 const trimFakeDocker = `#!/bin/sh
 d=$FAKE_DOCKER
 printf '%s\n' "$*" >> "$d/log"

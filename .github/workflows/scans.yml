@@ -1,25 +1,4 @@
-# scans-template: v1.0.0 (customized) — the scans on main.
-# ci-template v1.42 makes the CI Gate hermetic (owner ruling 742 (1)), so
-# every check that fails on the state of the world rather than on a change
-# runs here, and only here: `make deps-check`, `make security` (gosec,
-# govulncheck, go mod verify, trivy fs) and `trivy image` of the integration
-# image. It never runs on a pull_request or a push, and it is not the
-# workflow named CI, so a finding never reads as a red main and never blocks
-# a PR. A finding opens or updates ONE issue, found by its fixed title
-# (SCAN_ISSUE_TITLE), with the run link, and fails this job, so the Actions
-# run is red; a run with no finding closes that issue.
-#
-# CUSTOMIZE (go-enclave), against the template:
-#   - workflow_dispatch on main only, no `schedule:`: build/ci/buildgates
-#     allows ci.yml its one cron and no other workflow a schedule. A schedule
-#     comes with that test's change, in a code PR.
-#   - The images are built as ci.yml's image job builds them (`make -s
-#     it-image`, `make docker-build`), and trivy image keeps ci.yml's former
-#     flags, integration-image.sh's: vulnerabilities only, .trivyignore and
-#     no version check.
-#   - No bump half yet: the Makefile has no `make deps-bump` (depscheck
-#     v1.1.0); it comes with the full ci-template catch-up. Until then
-#     `make deps-check` runs as ci.yml v1.34.1 ran it.
+# Scans on main, on dispatch only: deps-check, security and trivy image; a finding opens or updates one issue by fixed title and fails the run.
 
 name: Scans
 
@@ -86,9 +65,7 @@ jobs:
           make docker-build GO_BUILD_PROXY="${GOPROXY:-}" IT_IMAGE="$it"
           echo "TOOLCHAIN_IMAGE=$(make -s toolchain-image)" >> "$GITHUB_ENV"
 
-      # The checks that left ci.yml (ruling 742 (1)). Each runs to the end;
-      # FIRED lists the ones that fail, and the step's own log keeps their
-      # output.
+      # Each check runs to the end; FIRED lists the ones that fail.
       - name: Scans (deps-check, make security, trivy image)
         id: scans
         if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' }}
@@ -110,10 +87,7 @@ jobs:
           echo "scans: ${fired:-none fired}"
           echo "fired=$fired" >> "$GITHUB_OUTPUT"
 
-      # ONE issue for the findings, found by its exact title among the open
-      # issues (pull requests excluded): created when none is open, its body
-      # replaced when one is, and closed with a comment by the first run with
-      # no finding.
+      # One issue for the findings, found by its exact title: created, updated, or closed by the first clean run.
       - name: Open, update or close the scan issue
         if: ${{ !cancelled() && steps.scans.outcome == 'success' }}
         env:

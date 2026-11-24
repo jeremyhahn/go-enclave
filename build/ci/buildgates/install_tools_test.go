@@ -126,8 +126,7 @@ func (f installFixture) calls(t *testing.T) []string {
 	return strings.Split(strings.TrimSpace(string(b)), "\n")
 }
 
-// requireScratchGone fails unless the scratch TOOLS_DIR every call logged,
-// and anything else under TMPDIR, has been removed.
+// requireScratchGone fails unless every scratch TOOLS_DIR and TMPDIR entry was removed.
 func (f installFixture) requireScratchGone(t *testing.T, calls []string) {
 	t.Helper()
 	for _, c := range calls {

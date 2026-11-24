@@ -57,10 +57,7 @@ func DiscoverLockedMemoryLimit() (LockedMemoryLimit, error) {
 	return classifyRlimit(rlimitUint64(rl.Cur), rlimInfinity, memlockRLimitEnforced()), nil
 }
 
-// rlimitUint64 widens an rlimit field to uint64 whichever its signedness: it is
-// signed on FreeBSD and DragonFly and unsigned elsewhere. A negative value has
-// no meaning as a byte count and maps to MaxUint64, which classifyRlimit reads
-// as unbounded.
+// rlimitUint64 widens an rlimit field to uint64; a negative value maps to MaxUint64.
 func rlimitUint64[T int64 | uint64](v T) uint64 {
 	if v < 0 {
 		return math.MaxUint64

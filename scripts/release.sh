@@ -1,50 +1,5 @@
 #!/bin/sh
-# release.sh — the first of a release's two steps: prepare a signed release
-# commit of one kind on release/<version>.
-#   make release-alpha     VERSION=vX.Y.Z-alpha
-#   make release-candidate VERSION=vX.Y.Z-rc.N
-#   make release           VERSION=vX.Y.Z
-# The second step, after the release pull request is merged, is
-# `make release-tag VERSION=…` (release-tag.sh).
-#
-# Usage: scripts/release.sh <alpha|candidate|release>   (from the repository root)
-#
-# The argument is the kind the Makefile target stands for; the version must be
-# of exactly that kind and the other two are refused (release-versioning §1,
-# §1a). All three targets run this one script.
-#
-# Environment (exported by the Makefile, read raw): VERSION, AGENT_GIT (the
-# commit/signing wrapper, no default: this fails closed without it) and
-# REPO_NAME (the literal repo name, which selects the signing identity). This
-# step does not read the forge.
-#
-# Every git operation that talks to dev (the tag-free and branch-free
-# ls-remote, the fetch of main and the push) runs through "$AGENT_GIT"
-# "$REPO_NAME", which carries the agent's credentials and URL rewrite; plain
-# git on a maintainer host has no key for dev. Local-only git (rev-parse,
-# status, remote get-url, checkout) stays plain.
-#
-# The version is explicit, never derived. Before anything is written: VERSION
-# must have the form of its kind, be cut from main, move forward
-# (release-version-check.sh), the tag and the branch release/<version> must be
-# free locally and on dev (ls-remote exit 2 is the only "free"; anything else
-# fails closed), the tree must be clean, HEAD must be dev's main (fetched, not
-# remembered), and the assembled tree must pass release-check-tag.sh (no
-# fragment left, a literal `## [vX.Y.Z…]` heading). VERSION is written
-# unprefixed, by overwriting, so repeating the step leaves the same bytes;
-# changelog.d/ fragments fold into CHANGELOG.md in the same commit.
-#
-# main's ruleset takes a commit only through a pull request whose CI Gate
-# passed, so this step pushes release/<version> and nothing else: never main,
-# never a tag. The local checkout returns to main. A maintainer opens the pull
-# request from the branch it prints; release-tag.sh tags the merge.
-#
-# This step does not read main's CI Gate. main can be red for exactly the
-# reason the release fixes (a backend module tested against the previous
-# released root goes green only once the release exists), and a gate here
-# would keep it red for ever. The gate is the release pull request's CI Gate:
-# under the main ruleset the pull request cannot merge without it, and
-# release-tag.sh requires it again (release-ci-gate.sh) before it tags.
+# release.sh <alpha|candidate|release>: prepare and push a signed release commit on release/<version> (make release-alpha, release-candidate or release VERSION=...).
 set -eu
 # shellcheck source=lib.sh
 . "${0%/*}/lib.sh"

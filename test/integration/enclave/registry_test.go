@@ -25,9 +25,7 @@ import (
 	enclave "github.com/jeremyhahn/go-enclave"
 )
 
-// Covers registry.go: WipeAll, the shutdown sweep a BINARY runs at exit. Every
-// test owns its process (the ledger is process-global), so each count it reads
-// is exactly its own enclaves.
+// Covers registry.go's WipeAll; every test owns its process.
 
 // TestShutdownSweep_WipeAllReclaimsEverythingAndLeavesNoResidue places one secret in every
 // kind of enclave a process accumulates and requires one WipeAll to leave a
@@ -164,9 +162,7 @@ func TestShutdownSweep_WipeAllWaitsForLiveBorrowsUntilItsDeadline(t *testing.T) 
 		}()
 		<-entered
 
-		// The deadline is the test's to end, and only once the sweep is shown
-		// WAITING on the borrow: it consults Err only after a full pass that
-		// left something held, immediately before it waits.
+		// End the deadline only once the sweep is shown waiting on the borrow.
 		dl := newManualDeadline()
 		bounded := make(chan sweepResult, 1)
 		go func() {
@@ -222,11 +218,7 @@ func TestShutdownSweep_WipeAllWaitsForLiveBorrowsUntilItsDeadline(t *testing.T) 
 	})
 }
 
-// manualDeadline is a context whose deadline the TEST decides: it ends when
-// expire is called, never by a clock, so a test can order "the library is
-// waiting" before "the deadline passed" instead of hoping a timer lands
-// between them. Done's first call closes observed, which is how a test learns
-// the library has started selecting on it.
+// manualDeadline is a context that ends when expire is called; Done's first call closes observed.
 type manualDeadline struct {
 	context.Context
 	once     sync.Once
@@ -294,12 +286,7 @@ type sweepResult struct {
 	err   error
 }
 
-// TestShutdownSweep_WipeAllTurnsAwayAConcurrentCaller: while one sweep runs — held open by a
-// borrow it is waiting for — a second caller whose context ends is turned away
-// with ErrSweepInProgress and the CURRENT count, having swept nothing, whether
-// its context had already ended on arrival or reached its deadline while
-// waiting to be admitted. The running sweep then finishes and reports to its
-// own caller.
+// TestShutdownSweep_WipeAllTurnsAwayAConcurrentCaller pins ErrSweepInProgress for a second caller whose context ends.
 func TestShutdownSweep_WipeAllTurnsAwayAConcurrentCaller(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		e := enclaveFromNeedle(t, newNeedle(t))
@@ -337,9 +324,7 @@ func TestShutdownSweep_WipeAllTurnsAwayAConcurrentCaller(t *testing.T) {
 			t.Fatalf("turned-away caller's count = %d, want 1 (the current count)", count)
 		}
 
-		// A second caller whose deadline passes WHILE it waits to be admitted.
-		// Admission selects on Done only when the slot is taken, so observing
-		// Done proves this caller was waiting, not refused on arrival.
+		// A second caller whose deadline passes while it waits to be admitted.
 		dl := newManualDeadline()
 		second := make(chan sweepResult, 1)
 		go func() {
@@ -411,10 +396,7 @@ func TestShutdownSweep_WipeAllReportsCanaryCorruptionWithoutPanicking(t *testing
 	})
 }
 
-// TestShutdownSweep_DestroyReturnsCanaryCorruptionAfterWiping: on the same simulated
-// underflow, Destroy wipes the material, releases the pages and RETURNS an
-// error matching ErrEnclaveCorrupted without panicking; the next WipeAll
-// reports the detection once more, and the one after it is clean.
+// TestShutdownSweep_DestroyReturnsCanaryCorruptionAfterWiping pins that Destroy wipes, releases and returns ErrEnclaveCorrupted.
 func TestShutdownSweep_DestroyReturnsCanaryCorruptionAfterWiping(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		n := newNeedle(t)
@@ -465,12 +447,7 @@ func underflowOneByte(t *testing.T, e enclave.ByteAccess) {
 	}
 }
 
-// TestShutdownSweep_RefusedCleanupLeavesAnOrphanTheSweepReclaims: construction fails (the
-// freeze is refused) and so does its rollback's unmap. The library must keep
-// the mapping — on the orphan ledger, counted by WipeAll — refund an admitted
-// charge for pages it managed to unlock, keep the charge for pages still
-// locked, and reclaim everything, refunding exactly once, when the refusal
-// lifts.
+// TestShutdownSweep_RefusedCleanupLeavesAnOrphanTheSweepReclaims pins orphan accounting when a rollback's unmap is refused.
 func TestShutdownSweep_RefusedCleanupLeavesAnOrphanTheSweepReclaims(t *testing.T) {
 	const n = 64
 	isolated(t, childOpts{}, func(t *testing.T) {

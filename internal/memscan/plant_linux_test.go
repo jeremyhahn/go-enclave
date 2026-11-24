@@ -30,12 +30,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// TestFindPlantsNoCopyOfTheNeedle sweeps for a 32-byte needle while signals
-// land on the sweeping thread, then sweeps again. A search that holds the
-// whole needle in registers (bytes.Contains does, for a needle this short)
-// has the kernel save it, byte-exact, into each signal frame on the
-// thread's signal stack, which lives in the Go heap and is never cleared:
-// the sweep itself would plant the residue it is looking for.
+// TestFindPlantsNoCopyOfTheNeedle sweeps while signals land on the sweeping thread, then sweeps again.
 func TestFindPlantsNoCopyOfTheNeedle(t *testing.T) {
 	// 16 bytes fit one vector register, 32 bytes four general registers: the
 	// lengths a short-needle search keeps whole in registers on amd64 and arm64.
@@ -85,14 +80,7 @@ func runSweepChild(mode string, n int, limit time.Duration) (out string, rounds 
 	if err := cmd.Start(); err != nil {
 		return "", rounds, -1, err
 	}
-	// The signals come from this process: a signal source inside the child
-	// needs the child's scheduler, which its spinning worker starves at one
-	// P. Each round the child names its sweeping thread; this process
-	// signals that thread, bracketing each signal with a byte before and
-	// after on the child's stdin. The child acknowledges the byte before
-	// once it has looked at its compare pass, and reports each signal that
-	// both looks found inside one comparison. Once enough are reported this
-	// process tells the child to sweep, or else to give up.
+	// This process signals the child's sweeping thread, bracketing each signal with bytes on the child's stdin.
 	var short error
 	var other strings.Builder
 	lines := make(chan string)
@@ -165,15 +153,7 @@ func runSweepChild(mode string, n int, limit time.Duration) (out string, rounds 
 					return ctx.Err()
 				}
 			}
-			// The child's pass state shows only that the marked pass has
-			// not returned; a thread parked inside it shows the same. So
-			// the signal counts only when this process saw the thread
-			// running just before it and running, with more time on the
-			// CPU, just after it, and saw the signal taken: no SIGURG
-			// pending on the thread before it (a pending one would absorb
-			// it) and none pending after it, so the kernel delivered this
-			// one to the running thread. Otherwise the child is told to
-			// drop it.
+			// A signal counts only when the thread ran before and after it and took it.
 			after := sendIdle
 			ran, running := runEvidence(pid, id, 0, false)
 			if running && urgPending(pid, id) {
@@ -462,10 +442,7 @@ func TestSweepUnderSignalsFailsAParkedChild(t *testing.T) {
 	}
 }
 
-// A thread that runs and takes every signal, SIGURG unblocked, in marked
-// windows it holds open as a compare pass does, but that only fills its
-// buffer and spins, never comparing: window, run and delivery evidence
-// alone must not count, so the round counts none and fails.
+// A thread that never compares must count no signals.
 func TestSweepUnderSignalsFailsABusyNonComparingChild(t *testing.T) {
 	requireRunEvidence(t)
 	out, sent, _, err := runSweepChild(childBusy, 32, controlDeadline)
@@ -519,9 +496,7 @@ func TestSweepUnderSignalsFailsSignalsInTheBufferClear(t *testing.T) {
 	}
 }
 
-// A signal the thread cannot take stays pending, and so must not count
-// as delivered: block SIGURG on a locked thread, send it, and the
-// delivery check must see it pending until the thread unblocks it.
+// A signal the thread cannot take stays pending and must not count.
 func TestUrgDeliveredNeedsTheSignalTaken(t *testing.T) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
@@ -555,9 +530,7 @@ func TestUrgDeliveredNeedsTheSignalTaken(t *testing.T) {
 	}
 }
 
-// A busy child fills and closes its window with SIGURG blocked, so a
-// signal sent meanwhile is not taken in the window: it stays pending
-// until the step returns, and only then is delivered.
+// A signal sent while SIGURG is blocked is delivered only after the step returns.
 func TestWithUrgBlockedHoldsTheSignalPending(t *testing.T) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
@@ -618,24 +591,14 @@ func TestSweepUnderSignalsBoundsAStalledSweep(t *testing.T) {
 	}
 }
 
-// sweepRound runs in the child. It names its locked thread to the parent,
-// which sends
-// that thread SIGURG (which the Go runtime takes and ignores) while it
-// compares memory dense with the needle's first byte, then runs
-// Find on that thread unless the parent gives up. Nothing here bounds
-// Find: the parent kills the child at its deadline.
+// sweepRound runs in the child: its locked thread compares under the parent's SIGURGs, then runs Find.
 func sweepRound(needle []byte, home uintptr, mode string) (hits []string, aborted bool, err error) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	var st passState
 	buf := make([]byte, denseFill+len(needle)-1)
 	pass := func(flag bool) error {
-		// Each search reads denseSpan a buffer at a time, and longer while
-		// a send is in flight. The flag is set only from the end of a fill
-		// to the start of the next read in the same search (see
-		// markedReader), so a counted bracket spans compares of the filled
-		// buffer: never a fill, the buffer clear before the search
-		// returns, nor this loop's clock checks.
+		// The marked flag spans compares of a filled buffer only.
 		r := markedReader{b: needle[0], st: &st, flag: flag, hi: denseSpan}
 		for start := time.Now(); ; {
 			_, err := mappingContains(r, 0, searchSpan, needle, buf)
@@ -659,13 +622,7 @@ func sweepRound(needle []byte, home uintptr, mode string) (hits []string, aborte
 		}
 	}
 	fmt.Printf("%s%d\n", roundTid, syscall.Gettid())
-	// Memory dense with the needle's first byte is where a search falls
-	// back from a byte scan to a whole-needle compare: the sweep stays on
-	// that path until the parent's verdict arrives, so the last signal
-	// lands mid-compare. Find then sweeps from the same thread, whose
-	// signal stack still holds that frame. This thread never reads stdin:
-	// readParent does, on another goroutine, and judges each signal by the
-	// pass state this thread publishes.
+	// Memory dense with the needle's first byte keeps the search on the whole-needle compare path.
 	done := make(chan error, 1)
 	go readParent(&st, done)
 	var wide []byte // childClear's buffer
@@ -694,11 +651,7 @@ func sweepRound(needle []byte, home uintptr, mode string) (hits []string, aborte
 			st.inside.Store(false)
 			done <- verdict // for the receive below
 		case childBusy:
-			// The same window protocol as a compare pass, with SIGURG
-			// taken as usual, but no compare: each fill opens a window
-			// that stays open, the thread running and busy in it, while
-			// a send holds it and for a compare's length after, and then
-			// closes without the search reading on. None may count.
+			// The window protocol without compares; none may count.
 			r := markedReader{b: needle[0], st: &st, flag: true, hi: denseSpan}
 			_, _ = r.ReadAt(buf[:denseFill], 0)
 			for t0 := time.Now(); st.hold.Load() == st.seq.Load() || time.Since(t0) < busySpan; {
@@ -752,33 +705,7 @@ type passState struct {
 	verdict atomic.Uint32
 }
 
-// readParent reads the parent's bytes from stdin for one round, on a
-// goroutine other than the sweeping thread's. At each sendBefore it takes
-// the pass state, seq first, and acknowledges it; the parent signals only
-// after that acknowledgement, and writes sendAfter after the signal. At
-// sendAfter it takes the state again, inside first. A signal counts only
-// when both show the thread in the same compare window: seq never moved
-// and inside was set at both looks, and only once a later look shows that
-// window closed, so a thread parked in a window, which the signal itself
-// wakes, never counts. A window runs from the end of one
-// buffer fill to the start of the next fill of the same search (see
-// markedReader), so the fills, the search's return, the buffer clear
-// before it and the pass loop's clock checks lie outside every window.
-// A sendBefore that finds a window open holds it (st.hold) until the send
-// is judged, so whether a signal counts does not hang on the parent's
-// round trip fitting in one compare. A window that already holds a
-// counted signal is not held again: it closes, and the signal reports.
-//
-// What a counted signal proves: it was delivered to the running
-// sweeping thread inside one marked compare window, that is while it ran
-// contains over a filled buffer or the few instructions of offset
-// arithmetic and the read's in-flight check between that compare and the
-// next, which never touch the needle. It did not land in the buffer clear: the read after which a
-// search returns opens no window. SIGURG was not pending on the thread
-// before it was sent, so it did not coalesce with an earlier one; it was
-// no longer pending after, so the thread took it; and the thread was
-// running, with its on-CPU time advancing, before and after it. On the
-// verdict byte readParent stores it in st and ends.
+// readParent reads the parent's bracket bytes on another goroutine and counts a signal only inside one closed compare window.
 func readParent(st *passState, done chan<- error) {
 	in := make([]byte, 512)
 	acked, signaled := 0, 0
@@ -843,18 +770,7 @@ func readParent(st *passState, done chan<- error) {
 	}
 }
 
-// signalRound sends SIGURG to the child's sweeping thread every
-// signalInterval. The interval leaves that thread room to make progress:
-// under the race detector a signal every few microseconds starves it. The
-// count is the child's own: signaled reports how many of its compare
-// passes a send landed in, so a thread that is named but descheduled, or
-// that stops comparing, adds nothing however many sends succeed. The round
-// ends once that count reaches minSignals and signalPhase has passed since
-// the first. Counts, not the clock, end the round: it fails once it has
-// made maxSends sends short of minSignals, so a slow runner, as under the
-// race detector and coverage, takes longer but is held to the same rule.
-// ctx only bounds a child that stops answering: a round that sees it end
-// reports false rather than pass unsignaled.
+// signalRound sends SIGURG every signalInterval until the child reports minSignals, failing after maxSends.
 func signalRound(ctx context.Context, signaled func() int, send func() error) (count int, ok bool) {
 	tick := time.NewTicker(signalInterval)
 	defer tick.Stop()
@@ -933,9 +849,7 @@ func runEvidence(pid, tid int, since uint64, strict bool) (uint64, bool) {
 	}
 }
 
-// urgPending reports whether SIGURG is pending on thread tid of process
-// pid, by its SigPnd mask in /proc; a read that fails counts as pending,
-// so it never lets a signal count.
+// urgPending reports whether SIGURG is pending on thread tid; a failed read counts as pending.
 func urgPending(pid, tid int) bool {
 	status, err := os.ReadFile(fmt.Sprintf("/proc/%d/task/%d/status", pid, tid))
 	if err != nil {
@@ -953,8 +867,7 @@ func urgPending(pid, tid int) bool {
 	return mask&(1<<(uint(syscall.SIGURG)-1)) != 0
 }
 
-// urgDelivered polls for up to runWait until SIGURG is no longer pending
-// on thread tid of process pid: the kernel took the signal sent to it.
+// urgDelivered polls up to runWait for SIGURG to leave thread tid's pending set.
 func urgDelivered(pid, tid int) bool {
 	deadline := time.Now().Add(runWait)
 	for {
@@ -968,10 +881,7 @@ func urgDelivered(pid, tid int) bool {
 	}
 }
 
-// withUrgBlocked runs f on the calling thread, which must be locked to
-// its goroutine, with SIGURG blocked. No SIGURG is taken while f runs, so
-// none lands in f and none preempts it there; one sent meanwhile stays
-// pending until f returns.
+// withUrgBlocked runs f on the locked calling thread with SIGURG blocked.
 func withUrgBlocked(f func()) error {
 	// Sigset_t's word size and the SIG_* values differ by architecture
 	// (mips among them), so the mask is built from x/sys/unix's own.
@@ -1070,25 +980,7 @@ func (r firstByteReader) ReadAt(p []byte, _ int64) (int, error) {
 	return len(p), nil
 }
 
-// markedReader is a firstByteReader over [0, hi) that clears st's
-// in-compare flag while it fills p. It then opens a new compare window,
-// seq moving on and the flag set to flag, after a full read with no
-// error, over memory dense with b, which cannot hold a needle that is not
-// one repeated byte. mappingContains then compares the buffer and reads
-// again, and that next read closes the window as it starts. So a window
-// spans one contains call and the loop's offset arithmetic, never a fill,
-// the return or the buffer clear before it. The search runs over a span
-// wider than hi: a read at or past hi ends it with io.EOF and opens no
-// window, so the buffer clear follows a closed window.
-//
-// While a send in flight holds the window (st.hold is its seq) the read
-// after it keeps it open: it returns the buffer still filled, seq and the flag
-// untouched, and the search compares it again. The window then outlasts
-// the parent's round trip, however slow the runner, and spans compares
-// and the few instructions of the hop between them.
-//
-// With none set it reads nothing and returns io.EOF, so the search skips
-// its compare and returns at once, clearing its buffer.
+// markedReader is a firstByteReader that opens a compare window after each full fill and closes it on the next read.
 type markedReader struct {
 	b    byte
 	st   *passState

@@ -1,9 +1,5 @@
 #!/bin/sh
-# fmt.sh — gofmt from the module's own toolchain.
-#
-# Usage: scripts/fmt.sh write|check   (from the repository root)
-#
-# check lists the unformatted files and fails; it changes nothing.
+# fmt.sh write|check: gofmt from the module's own toolchain.
 set -eu
 # shellcheck source=lib.sh
 . "${0%/*}/lib.sh"

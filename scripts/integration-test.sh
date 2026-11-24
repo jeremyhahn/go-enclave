@@ -1,29 +1,7 @@
 #!/bin/sh
-# integration-test.sh — one package's integration suite, in the devcontainer.
-#
-# Usage: scripts/integration-test.sh <package> <coverpkg> [docker-run-flag...]
-#
-# The body of `make integration-test-<package>` (and -fips, which adds -e flags
-# after <coverpkg>). The suite (test/integration/<package>/) runs in the
-# devcontainer, never on the host. The image bakes the source because on CI
-# runners compose talks to the host daemon, where bind-mount paths do not exist.
-# Each run uses a unique compose project, torn down on every exit. The package
-# is named exactly (no /...) so a wrong build tag errors instead of passing
-# vacuously. Every precondition fails rather than skips.
-#
-# The suite runs on an image that scripts/integration-image.sh built once and
+# integration-test.sh <package> <coverpkg> [docker-run-flag...]: one package's integration suite in the devcontainer, on an image scripts/integration-image.sh built once and
 # trivy-scanned (CRITICAL,HIGH, fixable only — devops §8): this script neither
-# builds nor scans. Unless GO_ENCLAVE_IT_IMAGE is set, which that script does,
-# this one runs through it, so a single suite is built and scanned the same way
-# and `make ci-integration` shares one scanned image across userns, default and
-# FIPS.
-#
-# <coverpkg> is the comma-separated import paths the suite's coverage floor
-# applies to, each package on its own.
-#
-# Environment (exported by the Makefile): DEVCONTAINER_COMPOSE,
-# DEVCONTAINER_SERVICE, INTEGRATION_TESTFLAGS, COVERAGE_THRESHOLD, TRIVY_VERSION
-# and optionally GO_ENCLAVE_IT_PROFILE_OUT.
+# builds nor scans it.
 set -eu
 # shellcheck source=lib.sh
 . "${0%/*}/lib.sh"

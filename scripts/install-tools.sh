@@ -1,13 +1,5 @@
 #!/bin/sh
-# install-tools.sh — install every pinned analysis tool into one directory.
-#
-# Usage: scripts/install-tools.sh <bindir>
-#
-# The devcontainer's tools stage runs this to bake the tools the toolchain
-# image carries. Each one is resolved by scripts/tool.sh with TOOL_INSTALL=1,
-# at the pins in scripts/tool-pins.sh, so it is built or downloaded and verified
-# exactly as `make lint` would do it on a developer's machine, then copied to
-# <bindir>. The scratch TOOLS_DIR is removed on exit.
+# install-tools.sh <bindir>: install every pinned analysis tool, verified by scripts/tool.sh, into bindir.
 set -eu
 # shellcheck source=lib.sh
 . "${0%/*}/lib.sh"

@@ -12,21 +12,7 @@ import (
 	"github.com/goccy/go-yaml/parser"
 )
 
-// Every `uses:` in every workflow must name a 40-hex commit, with the human
-// tag in a trailing comment:
-//
-//	uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-//
-// A tag can be moved by its owner and a branch is re-resolved on every run,
-// and these jobs hold write-scoped tokens. A one-line ref change inside a large
-// mechanical diff is what review misses, so a gate enforces it.
-//
-// The gate parses the YAML rather than grepping it. A regex misses spellings
-// Actions accepts (flow mapping, quoted key, anchor, alias, block scalar) and
-// fires on `uses:` inside block-scalar prose such as `run: |` scripts. After
-// parsing, a `uses` mapping key is structurally distinct from that text.
-// Every value the parser produces is either resolved to a ref or reported as
-// an error; nothing is silently dropped.
+// Every workflow `uses:` must name a 40-hex commit with the tag in a trailing comment; the YAML is parsed, not grepped.
 
 // pinnedRef is anything up to the last `@`, then exactly 40 lowercase hex.
 // Lowercase is required so one commit has one spelling in a diff.

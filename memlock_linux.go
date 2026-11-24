@@ -20,13 +20,7 @@ import (
 // unix.RLIM_INFINITY is untyped and per-architecture; a test asserts they agree.
 const rlimInfinity = ^uint64(0)
 
-// memlockRLimitEnforced reports whether RLIMIT_MEMLOCK binds this process's
-// mlock calls. It does not when the calling thread holds CAP_IPC_LOCK
-// (effective set, read with capget, not inferred from uid) in the initial user
-// namespace. A capget failure or a non-initial namespace answers enforced.
-// Capabilities are per-thread; a thread whose set was changed with capset can
-// disagree, and the cost is a skipped refusal, not an unsafe allocation. See
-// [LimitNotEnforced].
+// memlockRLimitEnforced reports whether RLIMIT_MEMLOCK binds this process's mlock calls.
 func memlockRLimitEnforced() bool {
 	if !inInitialUserNamespace() {
 		return true
@@ -49,10 +43,7 @@ func memlockRLimitEnforced() bool {
 // readUIDMap returns /proc/self/uid_map; a test seam.
 var readUIDMap = func() ([]byte, error) { return os.ReadFile("/proc/self/uid_map") }
 
-// inInitialUserNamespace reports whether this process runs in the initial user
-// namespace, the only one whose CAP_IPC_LOCK lifts RLIMIT_MEMLOCK. It matches
-// the identity map "0 0 4294967295"; an unreadable map answers false. A child
-// namespace given the same full map is indistinguishable and reads as initial.
+// inInitialUserNamespace reports whether this process runs in the initial user namespace.
 func inInitialUserNamespace() bool {
 	m, err := readUIDMap()
 	if err != nil {

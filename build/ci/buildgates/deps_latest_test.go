@@ -20,8 +20,7 @@ type depsFake struct {
 	fail     map[string]bool
 }
 
-// install writes the fake GOCMD and returns its path and the call log path.
-// Each call logs one line: the GOWORK it saw, then its arguments.
+// install writes the fake GOCMD, which logs GOWORK and its arguments, and returns both paths.
 func (f depsFake) install(t *testing.T) (string, string) {
 	t.Helper()
 	dir := t.TempDir()

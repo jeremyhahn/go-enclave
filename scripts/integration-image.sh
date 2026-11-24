@@ -1,35 +1,5 @@
 #!/bin/sh
-# integration-image.sh — name the integration image by its content, build it
-# when the daemon lacks it, scan it, and run a command against that exact image.
-#
-# Usage: scripts/integration-image.sh <command> [arg...]   (from the repository root)
-#
-# The command is what runs the suites: scripts/integration-test.sh and
-# scripts/userns-test.sh (directly, or through make). They find the image in
-# GO_ENCLAVE_IT_IMAGE, which this script sets, and they neither build nor scan:
-# the userns, default and FIPS suites all run on the one image that was scanned.
-# Rebuilding per suite could produce different bytes (the Dockerfile upgrades
-# packages), so a scan of the first build would say nothing about the later
-# ones. The scripts run it themselves when GO_ENCLAVE_IT_IMAGE is unset, so a
-# single suite is built and scanned the same way.
-#
-# The image is IT_IMAGE when the caller names it (ci.yml passes `make -s
-# it-image`), else scripts/devcontainer.sh it-tag: go-enclave-ci-it:<hash> of
-# the build context (ci-standard.md §9). Every job and run of one tree on one
-# Docker host names the same image, so it is built only when the daemon does
-# not hold that tag, and no run removes it: CI's reap step
-# (scripts/reap-stale-ci-stacks.sh) removes one that is old and unused.
-#
-# The image is identified by its ID: it is read before the scan, the scan must
-# leave it unchanged, GO_ENCLAVE_IT_IMAGE_ID carries it, and each suite refuses an
-# image that no longer has it (scripts/lib.sh, require_scanned_image).
-#
-# Environment (exported by the Makefile): DEVCONTAINER_COMPOSE,
-# DEVCONTAINER_SERVICE, TRIVY_VERSION and IT_IMAGE. IT_SCAN=0 builds and pins
-# the image with no trivy scan: CI's integration and soak jobs set it, so the
-# CI Gate never fails on an advisory database that changed with no change to
-# the tree (ci-template v1.42, owner ruling 742 (1)); scans.yml scans the
-# image on main. Any other value, or none, scans as before.
+# integration-image.sh <command> [arg...]: build the content-named integration image when missing, scan it unless IT_SCAN=0, and run command against that image ID.
 set -eu
 # shellcheck source=lib.sh
 . "${0%/*}/lib.sh"

@@ -10,10 +10,7 @@ package enclave
 
 import "sync"
 
-// processSingleton is a process-wide value the binary may install once, before
-// first use, and that is otherwise built lazily on first use. Once set it is
-// never replaced outside tests: replacing it would strand whatever the old
-// value holds.
+// processSingleton is a process-wide value installed once before first use, or built lazily; never replaced outside tests.
 type processSingleton[T any] struct {
 	mu    sync.Mutex
 	value *T

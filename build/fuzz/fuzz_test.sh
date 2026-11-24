@@ -1,7 +1,5 @@
 #!/bin/sh
-# Drives build/fuzz/fuzz.sh offline on a stub `go`: discovery across a root
-# module and two backend modules, the FUZZ and FUZZ_PKG selectors, FUZZTIME,
-# the first failure (package, target, failing input path), and the refusals.
+# Drives build/fuzz/fuzz.sh offline on a stub go.
 set -u
 
 here=$(cd "$(dirname "$0")" && pwd)
