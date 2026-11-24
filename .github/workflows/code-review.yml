@@ -780,9 +780,9 @@ jobs:
   # CI_FILE and GATE_JOB inside the step, per repository.
   scope:
     name: Review scope (InfoSec guard)
-    # Template v5.12.9 draft clause: a PR is
-    # reviewed once, when it is ready for merge, never as a draft; marking
-    # it ready fires ready_for_review and starts the review.
+    # Template v5.12.9 draft clause: a PR is reviewed once, when it is
+    # ready for merge, never as a draft; marking it ready fires
+    # ready_for_review, which starts the review.
     if: >-
       github.event.pull_request.draft != true
       && github.event.pull_request.state == 'open'
@@ -1229,9 +1229,9 @@ jobs:
     # re-run replays this payload, as it did before.
     # v5.10.6 (Tenant Agent m2331 (2)): a head in this repository only; a
     # fork's head never takes a codex runner.
-    # Template v5.12.9 draft clause: a PR is
-    # reviewed once, when it is ready for merge, never as a draft; marking
-    # it ready fires ready_for_review and starts the review.
+    # Template v5.12.9 draft clause: a PR is reviewed once, when it is
+    # ready for merge, never as a draft; marking it ready fires
+    # ready_for_review, which starts the review.
     if: >-
       github.event.pull_request.draft != true
       && github.event.pull_request.state == 'open'
@@ -3144,9 +3144,9 @@ jobs:
     name: Code Review (opencode)
     needs: review
     # Gitea only (v5.9.0): its token check and permission read are Gitea's.
-    # Template v5.12.9 draft clause: a PR is
-    # reviewed once, when it is ready for merge, never as a draft; marking
-    # it ready fires ready_for_review and starts the review.
+    # Template v5.12.9 draft clause: a PR is reviewed once, when it is
+    # ready for merge, never as a draft; marking it ready fires
+    # ready_for_review, which starts the review.
     if: >-
       github.event.pull_request.draft != true
       && needs.review.outputs.agent == 'opencode' && github.server_url != 'https://github.com'
