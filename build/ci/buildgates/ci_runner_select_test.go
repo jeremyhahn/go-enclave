@@ -25,7 +25,7 @@ const (
 
 	// preflightRunsOn: hosted off github.com and for a fork's pull request;
 	// the pool CI_PREFLIGHT_RUNS_ON names otherwise.
-	preflightRunsOn = `${{ github.server_url == 'https://github.com' && (!startsWith(github.event_name, 'pull_request') || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON(vars.CI_PREFLIGHT_RUNS_ON || '["self-hosted","linux","x64","bigdisk"]') || 'ubuntu-latest' }}`
+	preflightRunsOn = `${{ github.server_url == 'https://github.com' && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON(vars.CI_PREFLIGHT_RUNS_ON || '["self-hosted","linux","x64","bigdisk"]') || 'ubuntu-latest' }}`
 	// dockerRunsOn and gateRunsOn read the step's outputs.
 	dockerRunsOn = `${{ github.server_url == 'https://github.com' && fromJSON(needs.preflight.outputs.runner_docker) || 'bigdisk' }}`
 	gateRunsOn   = `${{ github.server_url == 'https://github.com' && fromJSON(needs.preflight.outputs.runner || '"ubuntu-latest"') || 'ci-gate' }}`
@@ -179,7 +179,7 @@ func TestRunnerSelectionIsTheBalancedPool_RefusesWhatItMustRefuse(t *testing.T) 
 		{"header back at v1.53", ciTemplateHeader, "# ci-template: v1.53 — canonical CI for all first-party Go repos."},
 		{"step renamed back", "- name: " + runnerSelectStep, "- name: " + runnerSelectOld},
 		{"HS from env again", "HS: ${{ vars.CI_HOSTED_SHARE }}", "LIMIT: ${{ env.HOSTED_JOBS_PER_REPO }}"},
-		{"preflight forgets the fork guard", "(!startsWith(github.event_name, 'pull_request') || github.event.pull_request.head.repo.full_name == github.repository) && ", ""},
+		{"preflight forgets the fork guard", "((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && ", ""},
 		{"a docker job on bigdisk outright", "    runs-on: " + dockerRunsOn, "    runs-on: [self-hosted, linux, x64, bigdisk]"},
 		{"gate output renamed", "runner: ${{ steps.runner.outputs.runner }}", "runner: ${{ steps.pool.outputs.runner }}"},
 	} {
