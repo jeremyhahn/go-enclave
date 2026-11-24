@@ -147,6 +147,59 @@ func TestNeedleIn_OversizedLineFailsClosed(t *testing.T) {
 	}
 }
 
+// appendRaw appends text to the console as QEMU does, with no newline added.
+func appendRaw(t *testing.T, serial, text string) {
+	t.Helper()
+	f, err := os.OpenFile(serial, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(text); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestNeedleIn_FragmentedNeedleWaitsForTheLine(t *testing.T) {
+	serial := writeConsole(t, "boot")
+	appendRaw(t, serial, guestcfg.NeedleMarker+testNeedle[:4])
+	if got, ok, err := needleIn(serial); ok || err != nil {
+		t.Fatalf("needleIn = %q, %v, %v on a partial needle; want no needle, nil", got, ok, err)
+	}
+	appendRaw(t, serial, testNeedle[4:])
+	if got, ok, err := needleIn(serial); ok || err != nil {
+		t.Fatalf("needleIn = %q, %v, %v on an unterminated needle line; want no needle, nil", got, ok, err)
+	}
+	appendRaw(t, serial, "\n")
+	if got, ok, err := needleIn(serial); !ok || got != testNeedle || err != nil {
+		t.Fatalf("needleIn = %q, %v, %v; want %q, true, nil", got, ok, err, testNeedle)
+	}
+	if err := heldThroughScan(serial, testNeedle); err != nil {
+		t.Fatalf("heldThroughScan = %v for the completed needle; want nil", err)
+	}
+}
+
+func TestNeedleIn_ShortNeedleIsNotANeedle(t *testing.T) {
+	serial := writeConsole(t, guestcfg.NeedleMarker+"aabb")
+	if got, ok, err := needleIn(serial); ok || err != nil {
+		t.Fatalf("needleIn = %q, %v, %v on a 4-hex needle; want no needle, nil", got, ok, err)
+	}
+	appendConsole(t, serial, guestcfg.NeedleMarker+testNeedle)
+	if got, ok, err := needleIn(serial); !ok || got != testNeedle || err != nil {
+		t.Fatalf("needleIn = %q, %v, %v; want %q, true, nil", got, ok, err, testNeedle)
+	}
+}
+
+func TestHeldThroughScan_PartialReleaseLineFails(t *testing.T) {
+	serial := writeConsole(t, guestcfg.NeedleMarker+testNeedle)
+	appendRaw(t, serial, guestcfg.ReleasedLine[:len(guestcfg.NeedleMarker)+3])
+	if err := heldThroughScan(serial, testNeedle); err == nil {
+		t.Fatal("heldThroughScan = nil while the release line is being written; want an error")
+	}
+}
+
 func TestHeldThroughScan_HeldNeedle(t *testing.T) {
 	serial := writeConsole(t, guestcfg.NeedleMarker+testNeedle)
 	if err := heldThroughScan(serial, testNeedle); err != nil {
