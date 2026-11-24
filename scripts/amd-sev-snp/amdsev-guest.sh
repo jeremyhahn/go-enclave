@@ -24,7 +24,8 @@
 #   --kernel PATH    AMDSEV_KERNEL   the direct-boot kernel
 #   --initrd PATH    AMDSEV_INITRD   the initrd; its init runs the test binary
 #   --append LINE    AMDSEV_APPEND   extra kernel command line, after the
-#                                    serial console (default empty)
+#                                    serial console and amdsev.mode=<mode>
+#                                    (default empty)
 #   --serial FILE    AMDSEV_SERIAL   the serial console file (default
 #                                    ./amdsev-<mode>.serial)
 #   --qemu PATH      AMDSEV_QEMU     the VMM (default qemu-system-x86_64)
@@ -135,7 +136,7 @@ case $mode in
 esac
 set -- timeout --kill-after=30 "$timeout" "$qemu" -machine "$machine" "$@" \
   -bios "$ovmf" -kernel "$kernel" -initrd "$initrd" \
-  -append "console=ttyS0 panic=-1${append:+ $append}"
+  -append "console=ttyS0 panic=-1 amdsev.mode=$mode${append:+ $append}"
 
 if [ -n "$dry" ]; then
   line=
