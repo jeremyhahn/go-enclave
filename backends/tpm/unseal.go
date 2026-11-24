@@ -12,7 +12,7 @@ import (
 	"github.com/jeremyhahn/go-enclave"
 )
 
-// TPM2_Create and TPM2_Unseal are marshalled here so the key stays in locked buffers; go-tpm would copy it to the heap.
+// TPM2_Create and TPM2_Unseal are marshaled here so the key stays in locked buffers; go-tpm would copy it to the heap.
 
 const (
 	tagSessions   = 0x8002 // TPM_ST_SESSIONS
