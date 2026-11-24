@@ -122,22 +122,24 @@ if err != nil {
 defer p.Destroy() // open late, destroy early
 ```
 
-Seal under a TPM instead of a software key:
+Seal under a TPM instead of a software key. The hardware provider is
+go-xkms's `enclaveprovider.NewKeyProtector`, in the package
+`github.com/jeremyhahn/go-xkms/pkg/enclaveprovider`, over a go-xkms TPM 2.0
+sealer and the sealing key's attributes
+([Upgrading](docs/README.md#hardware-keyprotector-providers-removed)):
 
 ```go
-tp, err := tpm.Open("") // /dev/tpmrm0
+protector, err := enclaveprovider.NewKeyProtector(sealer, attrs) // go-xkms
 if err != nil {
 	return err
 }
-defer tp.Close()
-
-sealer, err := enclave.NewSealer(enclave.WithKeyProtector(tp))
+s, err := enclave.NewSealer(enclave.WithKeyProtector(protector))
 if err != nil {
 	return err
 }
-defer sealer.Destroy()
+defer s.Destroy()
 
-s, err := sealer.Seal(ctx, credential)
+sealed, err := s.Seal(ctx, credential)
 ```
 
 Sweep at shutdown, in `main` and never in a library, with a deadline taken
