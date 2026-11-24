@@ -703,3 +703,25 @@ func TestCIForkRunner_RefusesWhatItMustRefuse(t *testing.T) {
 		})
 	}
 }
+
+func TestCIForkRunner_EvalAllReturnsEveryResult(t *testing.T) {
+	cands := func(ref string) []any {
+		if ref == "github.event_name" {
+			return []any{"push", "pull_request"}
+		}
+		return nil
+	}
+	got, err := evalAll("github.event_name == 'push' && 'self-hosted' || 'ubuntu-latest'", cands)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"self-hosted", "ubuntu-latest"}
+	if len(got) != len(want) {
+		t.Fatalf("got %d results %v, want %v", len(got), got, want)
+	}
+	for i, w := range want {
+		if exprString(got[i]) != w {
+			t.Fatalf("result %d: got %v, want %q", i, got[i], w)
+		}
+	}
+}
