@@ -70,6 +70,11 @@ func TestAMDSEVGuest_DryRunPrintsTheModesQEMUObjects(t *testing.T) {
 					t.Errorf("dry run %s lacks %q:\n%s", tc.mode, w, out)
 				}
 			}
+			// guestcfg.Parse refuses a command line without amdsev.mode, so
+			// the guest's init exits 2 in every mode without it.
+			if w := "amdsev.mode=" + tc.mode; !strings.Contains(out, w) {
+				t.Errorf("dry run %s lacks %q on the kernel command line:\n%s", tc.mode, w, out)
+			}
 			for _, w := range append([]string{"-netdev", "-net ", "user,", "tap,", "http"}, tc.without...) {
 				if strings.Contains(out, w) {
 					t.Errorf("dry run %s carries %q:\n%s", tc.mode, w, out)
