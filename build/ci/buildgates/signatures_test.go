@@ -337,6 +337,14 @@ var sigCases = []sigCase{
 		wantFail: true, want: "signed by a key not in the registry",
 	},
 	{
+		name: "the registry at the before: a registered key under another committer fails",
+		build: func(t *testing.T, r *sigRepo) (string, string) {
+			before := r.commit(t, sigAlice, sigKeyA, false, signaturesRegistry, sigRegistryA)
+			return before, r.commit(t, sigMallory, sigKeyA, false, "README", "z")
+		},
+		wantFail: true, want: "principal mismatch: the key is registered to " + sigAlice + ", the committer is an address not in the registry",
+	},
+	{
 		name:  "a pull request whose base has no registry fails: no head fallback",
 		event: "pull_request_target",
 		build: func(t *testing.T, r *sigRepo) (string, string) {
