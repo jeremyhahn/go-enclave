@@ -687,7 +687,7 @@ fuzz:
 check-fuzz-runner:
 	@sh build/fuzz/fuzz_test.sh
 
-## check-ci-python-suites: the CI template's carried Python suites: the LAN mask and the job-output handoff, with the mask step's placement, the runner selection and code-review.yml's v5.12.10 to v5.12.12 suites
+## check-ci-python-suites: the CI template's carried Python suites: the LAN mask and the job-output handoff, with the mask step's placement, the runner selection and code-review.yml's v5.12.13 and v5.12.14 suites
 # Go does not discover Python under testdata/, so this target runs each suite,
 # isolated (python3 -I), against the tree's ci.yml and scripts; no network.
 .PHONY: check-ci-python-suites
@@ -695,9 +695,8 @@ check-ci-python-suites:
 	@python3 -I testdata/ci-mask-lan-tests.py
 	@python3 -I testdata/job-output-handoff-tests.py
 	@python3 -I testdata/runner-select-tests.py
-	@python3 -I testdata/code-review-v51210-tests.py .github/workflows/code-review.yml
-	@python3 -I testdata/code-review-v51211-tests.py .github/workflows/code-review.yml
-	@python3 -I testdata/code-review-v51212-tests.py .github/workflows/code-review.yml
+	@python3 -I testdata/code-review-v51213-tests.py .github/workflows/code-review.yml
+	@python3 -I testdata/code-review-v51214-tests.py .github/workflows/code-review.yml
 
 ## lint-gates: the repository's own gates beside lint: check-buildgates, check-releasability, check-changelog-assembly, check-scripts, check-in-toolchain-image, check-project-scripts, check-it-runner, check-fuzz-runner, check-ci-python-suites (CI's lint-gates job)
 # ci.yml runs this as its own job, in parallel with `make lint`, so make lint
