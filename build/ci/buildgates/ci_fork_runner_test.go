@@ -367,7 +367,8 @@ func evalAll(expr string, cands func(ref string) []any) ([]any, error) {
 		}
 		return nil
 	}
-	return out, walk(0, map[string]any{})
+	err = walk(0, map[string]any{})
+	return out, err
 }
 
 var exprSpanRE = regexp.MustCompile(`\$\{\{(.*?)\}\}`)
