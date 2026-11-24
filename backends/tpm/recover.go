@@ -10,7 +10,14 @@ import (
 	"github.com/google/go-tpm/tpm2"
 )
 
-// An interrupted command can leave a handle only the TPM knows; reclaim flushes handles absent from the call's baseline list.
+// A command an interrupt cuts off may still run to completion in the TPM,
+// and the handle it creates is then known only to the TPM. Behind the
+// kernel's resource manager, reopening the device flushes it. On a device
+// without one, the provider holds the TPM's only connection, so a call
+// lists the TPM's transient objects and loaded sessions before its first
+// command; after an interrupt, the reclaim reopens the stream, lists them
+// again, and flushes each handle the first list lacks. A reclaim that
+// fails stays due, and the next call finishes it before sending a command.
 
 // maxListedHandles bounds one handle list: a TPM holds a few transient
 // objects and sessions, and this many leaves room for any TPM.
@@ -111,7 +118,11 @@ func (d *tpmDevice) handles(ctx context.Context) ([]tpm2.TPMHandle, error) {
 	return hs, nil
 }
 
-// listType lists one type's handles; errHandleOrder reports a listing out of ascending order.
+// listType lists the handles of one type, following MoreData.
+// errHandleOrder reports a handle listing that is not in the ascending
+// order the TPM defines. Such a listing cannot serve as an ownership
+// baseline: dropping a handle from it would let recovery flush an object
+// the call did not create.
 var errHandleOrder = errors.New("tpm: handle listing out of order")
 
 func (d *tpmDevice) listType(ctx context.Context, ht tpm2.TPMHT) ([]tpm2.TPMHandle, error) {
@@ -131,7 +142,13 @@ func (d *tpmDevice) listType(ctx context.Context, ht tpm2.TPMHT) ([]tpm2.TPMHand
 		if err != nil {
 			return nil, err
 		}
-		// Handles must be strictly ascending; an out-of-order page is refused, since the list is an ownership baseline.
+		// The TPM lists handles in strictly ascending order from next.
+		// Handles of another type are not taken. A page out of order is
+		// refused rather than trimmed: the listing is an ownership
+		// baseline, and a dropped handle would later read as created by
+		// the call. A handle below next is taken as a repeat only if an
+		// earlier page listed it, so a device repeating a page cannot
+		// list a handle twice.
 		n, start := len(hs), next
 		var prev tpm2.TPMHandle
 		for _, h := range got.Handle {

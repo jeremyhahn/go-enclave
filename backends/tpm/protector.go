@@ -45,7 +45,11 @@ var (
 	_ enclave.HealthReporter = (*KeyProtector)(nil)
 )
 
-// KeyProtector seals data-encryption keys into TPM 2.0 sealed-data objects; safe for concurrent use.
+// KeyProtector seals data-encryption keys into TPM 2.0 sealed-data objects
+// under a transient, label-bound ECC P-256 storage primary. It serves
+// [enclave.ModePerOperation]: pass it to [enclave.WithKeyProtector]. Its
+// methods are safe for concurrent use; one TPM command sequence runs at a
+// time.
 type KeyProtector struct {
 	// sem is a one-slot semaphore: holding it serializes the command
 	// sequences, and a waiting call can still honor its context.
@@ -90,7 +94,10 @@ func WithRetry(attempts int, backoff time.Duration) Option {
 	}
 }
 
-// Open opens the TPM at path ([DefaultPath] when empty, or a simulator socket) and returns a provider.
+// Open opens the TPM at path, the kernel's resource manager
+// [DefaultPath] when path is empty, and returns a provider over it. On
+// Linux, path may also name a TPM simulator's command socket as
+// "unix:<path>" or "tcp:<host:port>". The device stays open until Close.
 func Open(path string, opts ...Option) (*KeyProtector, error) {
 	if path == "" {
 		path = DefaultPath
@@ -163,7 +170,10 @@ func (p *KeyProtector) protect(ctx context.Context, key []byte, template tpm2.TP
 	return encodeBlob(public, private), nil
 }
 
-// Unprotect opens blob into key, refusing foreign blobs and wrong key lengths; key is written only on success.
+// Unprotect opens blob into key. It refuses, with an error matching
+// [enclave.ErrSealedAuthentication], a blob this provider's Protect did not
+// produce and a key whose length is not the sealed key's. key is written only
+// on success, as the last step.
 func (p *KeyProtector) Unprotect(ctx context.Context, blob, key []byte) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -210,7 +220,17 @@ func (p *KeyProtector) Unprotect(ctx context.Context, blob, key []byte) error {
 // Health returns nil: the key lives in the TPM, and Health does not block.
 func (p *KeyProtector) Health() error { return nil }
 
-// Close waits up to 2 seconds for the call in progress, interrupts it, reclaims left handles and closes the device.
+// Close waits up to 2 seconds for the call in progress, if any, then
+// interrupts it, and closes the device. An interrupted call returns a
+// [DeviceError] as soon as its exchange with a simulator socket or a
+// pollable device ends; on a device without deadlines, it ends when the
+// kernel's TPM command timeout does, and its recovery then takes at most
+// 5 seconds more. Without a resource manager, Close then finishes, within
+// 5 seconds, the reclaim of handles an interrupted call left and the flush
+// of handles the TPM refused to flush, and returns its failure joined with
+// the close's. A call waiting for the provider when Close starts, and a
+// call after Close, returns [ErrClosed] without reaching the device; a
+// second Close returns nil.
 func (p *KeyProtector) Close() error {
 	// Refuse the calls queued behind the one in progress first: the one
 	// interrupt below frees sem for Close only if none of them can take it.
@@ -231,7 +251,10 @@ func (p *KeyProtector) Close() error {
 	return errors.Join(p.closeLeft(), p.dev.close())
 }
 
-// closeLeft finishes left reclaims and flushes within cleanupTimeout when no resource manager drops them.
+// closeLeft finishes, within cleanupTimeout, the reclaim a call left due and
+// the flush of the handles a refused flush left, where closing the stream
+// does not drop them: without a resource manager. It reopens a stream left
+// out of step first, and flushes no handle the reclaim's baseline lists.
 func (p *KeyProtector) closeLeft() error {
 	defer func() { p.left, p.reclaimDue, p.baseline = nil, false, nil }()
 	if p.dev.managed() || (!p.reclaimDue && len(p.left) == 0) {
@@ -242,7 +265,11 @@ func (p *KeyProtector) closeLeft() error {
 	return p.settle(ctx)
 }
 
-// acquire takes the semaphore, then repairs any state an interrupted call left, within cleanupTimeout.
+// acquire takes the semaphore, or returns ctx.Err() without touching the
+// device if the context ends first, or ErrClosed once Close has begun. It
+// reopens a device an interrupted call left out of step, finishes a reclaim a
+// call left due, and flushes the handles a refused flush left, within
+// cleanupTimeout.
 func (p *KeyProtector) acquire(ctx context.Context) error {
 	select {
 	case <-ctx.Done():
@@ -371,7 +398,13 @@ func (c *call) parentAndSession(template tpm2.TPMTPublic, in bool) (object, sess
 	return parent, s, nil
 }
 
-// cleanup flushes every handle the call holds, newest first, or reclaims after an interrupt.
+// cleanup flushes every handle the call holds, newest first, whether or not
+// the context has ended, and returns the first flush error. If an interrupt
+// left the device out of step, it reclaims instead: reopening a device
+// behind the kernel's resource manager flushes what the old stream held,
+// and on a device without one the reclaim flushes each handle begin did not
+// find. Both run within cleanupTimeout, and a flush error stands whatever
+// the reclaim returns.
 func (c *call) cleanup() error {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(c.ctx), cleanupTimeout)
 	defer cancel()
@@ -418,7 +451,9 @@ func (p *KeyProtector) settle(ctx context.Context) error {
 	return p.flushLeft(ctx)
 }
 
-// flushLeft flushes the handles a refused flush left.
+// flushLeft flushes the handles a refused flush left. A handle whose flush
+// fails again stays while the TPM still lists it, and the call fails; one the
+// TPM no longer lists is gone.
 func (p *KeyProtector) flushLeft(ctx context.Context) error {
 	for len(p.left) > 0 {
 		h := p.left[0]
@@ -453,7 +488,10 @@ type session struct {
 	auth   tpm2.Session
 }
 
-// device is the TPM command seam, one method per command; each returns ctx.Err() once ctx ends.
+// device is the provider's TPM command seam: one method per command of the
+// sequences. tpmDevice implements it over go-tpm; the tests fake it.
+// Each command method returns ctx.Err() once ctx ends, interrupting the
+// exchange in progress where the device allows it.
 type device interface {
 	createPrimary(ctx context.Context, template tpm2.TPMTPublic) (object, error)
 	startSession(ctx context.Context, parent object, encryptIn bool) (session, error)
@@ -552,7 +590,11 @@ func (d *tpmDevice) close() error { return d.t.close() }
 // out of step: the response to the interrupted command may still arrive.
 var errOutOfStep = errors.New("an interrupted command left the stream out of step")
 
-// streamTransport carries commands over the device or a simulator socket, wiping commands and responses.
+// streamTransport carries commands over the device file or a simulator
+// socket. It wipes each command once written, and receives every response
+// into one locked buffer that the device wipes after the command. An
+// exchange that a context end interrupts, or that fails, leaves the stream
+// out of step until reopen.
 type streamTransport struct {
 	rw    io.ReadWriteCloser // replaced only by reopen, under mu
 	path  string

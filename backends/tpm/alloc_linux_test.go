@@ -105,7 +105,10 @@ func TestLockedAllocator_FailsClosedWhenAnExclusionIsRefused(t *testing.T) {
 	}
 }
 
-// TestLockedAllocator_TransientNotInForkedChild checks a forked child does not see the transient mapping.
+// TestLockedAllocator_TransientNotInForkedChild forks children that probe
+// whether a page is mapped: the child calls msync(2) on it and exits with the
+// errno, ENOMEM where nothing is mapped. A plain anonymous page is the
+// control: the child must see it mapped, and must not see the transient.
 func TestLockedAllocator_TransientNotInForkedChild(t *testing.T) {
 	a := newAllocator()
 	b, err := a.alloc(32)
@@ -144,7 +147,11 @@ func probeInChild(t *testing.T, p uintptr) syscall.Errno {
 	return syscall.Errno(ws.ExitStatus())
 }
 
-// forkProbe forks a child that calls msync(2) on [p, p+n) with raw syscalls and exits with its errno.
+// forkProbe forks; the child calls msync(2) on [p, p+n) and exits with its
+// errno. The child holds one thread of a copied runtime, so, as in the
+// runtime's own fork, it makes only raw system calls. clone's arguments past
+// the flags are zero, so their order, which differs by architecture, does not
+// matter.
 //
 //go:norace
 //go:nosplit

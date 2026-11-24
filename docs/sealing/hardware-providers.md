@@ -517,7 +517,7 @@ it.
    key would cross an IPC boundary the provider does not control, and a cgo
    binding would bring a C toolchain into the static and cross builds.
    Whether a third-party pure-Go loader dependency is preferable to cgo
-   confined to that package is open.
+   confined to that package is the owner's taste.
 9. **Secure element: test fixture.** SoftHSM in a CI fixture job, as `swtpm`
    for the TPM, is the obvious choice; whether its GCM behaviour matches the
    tokens the provider targets is not established. Open.
@@ -529,7 +529,7 @@ it.
    the provider's code. The suite asserts only the contract and the blob
    layout, not token-specific GCM behaviour, so a difference on another
    token shows as a failing run on that token; which hardware token, if
-   any, gets a recurring run is open.
+   any, gets a recurring run is the owner's choice.
 10. **Secure element: nonce and limits.** A random 96-bit nonce bounds a key
     at 2^32 encryptions (NIST SP 800-38D), a count no single process can
     enforce across processes; and some tokens in FIPS mode refuse a
@@ -544,7 +544,7 @@ it.
     processes, as the TPM provider writes no NV state; the blob already
     stores the nonce, so token-generated nonces can be added later without
     a layout change. Whether FIPS-mode tokens that refuse a caller nonce
-    are a target for the first code slice is open.
+    are a target for the first code slice is the owner's call.
 11. **Secure element: key provisioning and login.** Who creates the token key
     (the provider on first use, or an operator beforehand), and where the
     user PIN comes from without a credential in configuration.
@@ -557,4 +557,4 @@ it.
     a token with a protected authentication path logs in with no PIN, so
     no credential enters the provider's configuration, as the TPM provider
     takes no owner-auth option (question 1). Whether the PIN arrives as a
-    locked buffer or through a caller callback is open.
+    locked buffer or through a caller callback is the owner's taste.

@@ -1,6 +1,18 @@
-# go-enclave: locked-memory library. CI calls these targets only; the logic lives in scripts/.
+# go-enclave: locked-memory library. The Makefile is the contract: CI calls
+# these targets and carries no commands or flags of its own, so a red CI reproduces with the same `make` line locally. It stays
+# thin: the logic lives in scripts/, which share scripts/lib.sh.
+#
+# There is no binary and no protobuf: `proto` is a no-op, and docker-build /
+# docker-run build the devcontainer and run a gate in its toolchain stage.
 
-# AGENT_GIT has no default, so release fails closed without it; REPO_NAME is literal because it selects the signing identity.
+# Release tooling (maintainer-only). AGENT_GIT is the commit/signing wrapper; it
+# has no default on purpose and release fails closed without it. Set it in
+# the environment or a gitignored local.mk.
+#
+# REPO_NAME must be the LITERAL repo name, never $(notdir $(CURDIR)): it selects
+# the signing identity, which must not depend on the checkout directory name.
+#
+# HELP_MAKEFILE is captured before any include, so `make help` reads this file.
 export HELP_MAKEFILE := $(firstword $(MAKEFILE_LIST))
 
 -include local.mk
@@ -26,16 +38,25 @@ raw_bind = $(foreach v,$(1),$(eval override $(v) := $$(value $(v)))$(eval export
 # Paths may hold spaces or quotes: bind raw, read as "$$VAR".
 $(call raw_bind,GOCMD AGENT_GIT REPO_NAME COVERAGE_PROFILE COVERAGE_HTML)
 
-# Pinned tool versions and SHA-256s live only in scripts/tool-pins.sh.
+# ---------------------------------------------------------------------------
+# PINNED TOOLS: versions and SHA-256s live only in scripts/tool-pins.sh, which the
+# devcontainer's toolchain stage installs from too.
 include scripts/tool-pins.sh
 
-# TOOL_INSTALL=1 installs missing pins into TOOLS_DIR; TOOL_INSTALL=0 fails closed on a missing or mismatched tool.
+# TOOL_INSTALL=1 installs missing pins into TOOLS_DIR (inside the repo, keyed by
+# version and toolchain). TOOL_INSTALL=0 (CI) installs nothing: a missing or
+# mismatched tool fails closed, with no fallback install. actionlint alone
+# ignores TOOL_INSTALL=0: a verified PATH copy is used, else it is built into
+# TOOLS_DIR at its pin (#146).
 TOOL_INSTALL ?= 1
 TOOLS_DIR    := $(CURDIR)/bin/tools
 # TOOLS_DIR derives from the checkout path, so it is raw-bound.
 $(call raw_bind,TOOLS_DIR)
 
-# tool NAME,PREFIX: the pinned binary's path, or a failed lookup.
+# tool NAME,PREFIX: the pinned binary's path (NAME at $(PREFIX)_VERSION), or a
+# failed closed lookup. scripts/tool.sh reads the pins below from the
+# environment, and resolves the module's toolchain itself when it builds a tool.
+#   bin=$(call tool,trivy,TRIVY) && "$$bin" ...
 export GO := $(GOCMD)
 export TRIVY_VERSION
 export TRIVY_SHA256_LINUX_AMD64 TRIVY_SHA256_LINUX_ARM64 TRIVY_BIN_SHA256_LINUX_AMD64 TRIVY_BIN_SHA256_LINUX_ARM64
@@ -43,11 +64,19 @@ export SHELLCHECK_SHA256_LINUX_AMD64 SHELLCHECK_SHA256_LINUX_ARM64 SHELLCHECK_BI
 export XTOOLS_VERSION
 tool = $$(sh scripts/tool.sh $(1) $($(2)_VERSION))
 
-# gosec flags live only here; findings are fixed or annotated with #nosec, never excluded.
+# gosec flags live only here; CI runs `make gosec`. golangci-lint runs gosec
+# too (lint-go), but cannot write the SARIF code scanning reads.
+#   -concurrency=4: gosec sizes workers from host cores, ignoring cgroup limits.
+#   -exclude-dir=test: test/ is never shipped; shipped packages are always scanned.
+#     build/ci/buildgates is its own module, which `./...` from the root never
+#     reaches, so it needs no exclusion; trivy and govulncheck still cover it.
+#   SARIF for code scanning, plus text on stdout for Gitea logs.
+#   No -exclude rules: fix the finding or annotate `#nosec G### -- why`.
 GOSEC_FLAGS := -concurrency=4 -severity=medium -confidence=medium -exclude-dir=test \
 	-fmt=sarif -out=gosec.sarif -stdout -verbose=text
 
-# The same rules for the GOEXPERIMENT=runtimesecret pass, without SARIF.
+# The same rules for the GOEXPERIMENT=runtimesecret pass: no SARIF (the
+# default pass writes it), the build differs only by secret_erase.go.
 GOSEC_RUNTIMESECRET_FLAGS := -concurrency=4 -severity=medium -confidence=medium -exclude-dir=test \
 	-fmt=text -stdout -verbose=text
 
@@ -65,18 +94,33 @@ trivy_fs = bin=$(call tool,trivy,TRIVY) && "$$bin" fs $(1) $(TRIVY_FS_FLAGS) .
 # Coverage floor. `:=` so the environment cannot lower it; only the command line can.
 COVERAGE_THRESHOLD := 90
 
-# Caller-supplied values are raw-bound and read only as "$$VAR" in recipes; never write $(TAG), $(SHA), $(VERSION) and the like in a recipe.
+# VALUES FROM OUTSIDE ARE DATA, NEVER SHELL OR MAKE SOURCE.
+#
+# TAG/SHA/MAIN_REF/REF come from a pushed tag or ref (git allows v`id`),
+# VERSION from a maintainer, the rest from a workflow or command line. $(TAG)
+# in a recipe is pasted into shell source before any validator runs, and a
+# command-line variable is recursively expanded on export, so $(shell ...) in
+# it runs inside make. raw_bind stores each unexpanded and exports it; recipes
+# read only "$$TAG" and the scripts validate the whole string. Never write
+# $(TAG), $(SHA), $(MAIN_REF), $(REF), $(VERSION), $(TOOL_INSTALL) or
+# $(COVERAGE_THRESHOLD) in a recipe.
+#
+# Paths are raw-bound the same way. Only operator flag lists (TESTFLAGS,
+# GOSEC_FLAGS, TRIVY_FS_FLAGS, INTEGRATION_TESTFLAGS, CROSS_TARGETS) and
+# constants defined here are spliced into recipes.
 EXTERNAL_VARS := TAG SHA MAIN_REF REF VERSION TOOL_INSTALL COVERAGE_THRESHOLD
 $(call raw_bind,$(EXTERNAL_VARS))
 
-# CI variables, raw-bound like EXTERNAL_VARS.
+# CI VARIABLES: ci.yml passes them, so they are
+# data from a workflow and raw-bound like EXTERNAL_VARS.
 ## MODULE_ENV_FILE=<file>: integration-test: the forge module variables; never read here or printed
 ## GO_BUILD_PROXY=<url>: docker-build: the Go module proxy the image build fetches through, passed as the BuildKit secret goproxy when set (never a build argument: the image history keeps those) (CI: the hosted runner's GOPROXY, unset, #293); default the Dockerfile's public proxy
 ## IT_IMAGE=<tag>: docker-build, ci-integration: the integration image's tag (default `make -s it-image`)
 ## APK_INDEX_SUM=<sum>: docker-build, it-image: the Alpine package index checksum (scripts/apk-index-sum.sh); it-image hashes it, docker-build passes it as --build-arg
 ## IT_PROJECT=<name>: integration-test: accepted; each suite names its own compose project (go-enclave-it-*, go-enclave-userns-*)
 ## GO_BUILD_TAGS=<tags>: lint, build, coverage, security: must stay empty, no package is tag-gated (userns, integration and optee are their suites' tags)
-# GO_BUILD_TAGS is refused rather than ignored, so nothing reads as analysed that was not.
+# GO_BUILD_TAGS is refused rather than ignored: a tag that reached no target
+# would read as analysed while nothing saw it. The value is never printed.
 ifneq ($(strip $(value GO_BUILD_TAGS)),)
 $(error GO_BUILD_TAGS must be empty: no go-enclave package is gated by a build tag)
 endif
@@ -98,10 +142,22 @@ PKGDIR_providertest := ./providertest
 PKGDIR_backendtest  := ./backendtest
 PKGDIR_memscan      := ./internal/memscan
 
-# Backend modules under backends/<name>, each requiring a released root; the coverage floor measures the root packages only.
+# BACKEND MODULES: hardware backends, each its own module at backends/<name>
+# requiring a released root (#206), so the root never depends on them. lint-go,
+# tidy-check, govulncheck, test and cross-build run in each, as for
+# build/ci/buildgates. coverage runs their unit tests too, with -race, after
+# the root packages; the floor measures the root packages only (their device
+# paths need the device).
 BACKEND_MODULES := backends/armtrustzone backends/tpm
 
-# Features map in scripts/features.map to package, suite, test prefix and sources; build/ci/buildgates fails on an unmapped docs/<feature>/.
+# FEATURE MAPPING. A feature is a directory
+# docs/<feature>/, mapped in scripts/features.map to its package, its
+# integration suite, the name prefix of its integration tests and its source
+# globs; scripts/features.sh <base> <tip> prints the features a change touches,
+# which tooling uses to pick the tests a change needs. Each feature runs as test-<feature>,
+# its package's test-<pkg>, and integration-test-<feature>, which runs only the
+# tests named with the feature's prefix. A new docs/<feature>/ is mapped there;
+# build/ci/buildgates fails until it is.
 FEATURES := $(shell sh scripts/features.sh list)
 # The feature whose integration run also runs the user-namespace test.
 USERNS_FEATURE := locked-memory-budget
@@ -159,7 +215,9 @@ tidy-check:
 lint: fmt-check lint-go lint-actions lint-scripts
 
 ## lint-go: golangci-lint (pinned) over .golangci.yml: vet, staticcheck, gosec and the rest
-# build/ci/buildgates is a separate module, so it is linted there too.
+# .golangci.yml must enable staticcheck, errcheck, unused, ineffassign,
+# misspell and gocritic. build/ci/buildgates is a separate module, so it is
+# linted there too.
 .PHONY: lint-go
 lint-go:
 	@bin=$(call tool,golangci-lint,GOLANGCI) && "$$bin" $(GOLANGCI_FLAGS) $(PKG) && \
@@ -175,7 +233,10 @@ lint-actions:
 	bin=$(call tool,actionlint,ACTIONLINT) && "$$bin" -shellcheck "$$sc"
 
 ## lint-scripts: shellcheck (pinned) over scripts/*.sh, build/docker/devcontainer/*.sh, build/fuzz/*.sh and build/ci/*.sh
-# Each script names its own shell on its first line; -x follows the sourced lib.sh.
+# The scripts are POSIX sh, and release.yml runs them with a write token. -x
+# follows the `. lib.sh` every script sources. build/ci/*.sh are the workflows'
+# scripts, and CI_BASH_SCRIPTS the ci-template's bash ones, taken unchanged
+# from it; each names its own shell on its first line.
 CI_BASH_SCRIPTS := scripts/apk-index-sum.sh scripts/ci-image-cache.sh scripts/ci-image-history.sh scripts/ci-mask-lan.sh scripts/in-toolchain-image.sh scripts/in-toolchain-image_test.sh scripts/reap-stale-ci-stacks.sh scripts/trim-ci-caches.sh
 .PHONY: lint-scripts
 lint-scripts:
@@ -199,7 +260,8 @@ govulncheck:
 	@bin=$(call tool,govulncheck,GOVULNCHECK) && SCAN_MODULES=". build/ci/buildgates $(BACKEND_MODULES)" sh scripts/scan.sh govulncheck "a vulnerability (a CVE)" "$$bin" $(PKG)
 
 ## lint-runtimesecret: golangci-lint under GOEXPERIMENT=runtimesecret, which builds secret_erase.go (#136)
-# Only this lint sees the key-erasure file; it needs the module's own toolchain.
+# The default build never compiles the key-erasure file, so no other lint sees it.
+# The experiment needs the module's own toolchain, so it runs on that go.
 .PHONY: lint-runtimesecret
 lint-runtimesecret:
 	@bin=$(call tool,golangci-lint,GOLANGCI) && GOEXPERIMENT=runtimesecret "$$bin" $(GOLANGCI_FLAGS) $(PKG)
@@ -230,6 +292,7 @@ trivy:
 	@$(call trivy_fs,--scanners vuln$(,)secret --severity CRITICAL$(,)HIGH --exit-code 1 --format table)
 
 ## trivy-misconfig: misconfiguration scan, ADVISORY (reports, never fails on findings)
+# Advisory until the misconfiguration baseline is clean.
 .PHONY: trivy-misconfig
 trivy-misconfig:
 	@$(call trivy_fs,--scanners misconfig --exit-code 0 --format table)
@@ -240,11 +303,19 @@ trivy-sarif:
 	@$(call trivy_fs,--scanners vuln$(,)secret --exit-code 0 --format sarif --output trivy-results.sarif)
 
 ## security: the security stage — golangci-lint's gosec, gosec and govulncheck (default and runtimesecret builds), modverify, trivy fs
+# ci-security's scans are folded in, so CI's stage (#217) and this target are
+# one list; release.yml still calls ci-security and trivy.
 .PHONY: security
 security: lint-go gosec gosec-runtimesecret govulncheck govulncheck-runtimesecret modverify trivy
 	@echo "Security suite passed"
 
-# Test flags shared by local and CI runs: -race and -cpu=1,2,8 are required to catch the shutdown and reserve races.
+# CI's test flags, defined once so local and CI runs cannot drift; `:=` so an
+# exported TESTFLAGS cannot drop them. None is optional:
+#   -race (TEST_RACE) is the only detector for publication-ordering bugs in the shutdown registry.
+#   -cpu=1,2,8: the reserve retune-vs-admission race is caught only by
+#   contention, so core count is part of the oracle (one core never sees it).
+#   TEST_RACE is its own variable so a TESTFLAGS given on the command line
+#   (`make test TESTFLAGS=-run=X`) cannot drop -race.
 TEST_TIMEOUT := -timeout=900s
 TEST_RACE    := -race
 TESTFLAGS    := -count=1 -cpu=1,2,8 $(TEST_TIMEOUT)
@@ -272,7 +343,7 @@ test-backends:
 $(TEST_TARGETS): test-%:
 	"$$GOCMD" test $(TEST_RACE) $(TESTFLAGS) $(PKGDIR_$*)
 
-# The floor is checked to be a number before the suite runs.
+# The floor is checked to be a number BEFORE the suite spends minutes running.
 $(PROFILE_TARGETS): coverage-profile-%: coverage-threshold
 	"$$GOCMD" test $(TEST_RACE) $(TESTFLAGS) -covermode=atomic -coverprofile=coverage-$*.out $(PKGDIR_$*)
 
@@ -307,7 +378,9 @@ coverage-report: coverage-profile
 	@echo "Wrote $$COVERAGE_HTML"
 
 ## test-fips: build + unit tests under Go native FIPS 140-3 strict mode
-# Strict mode (fips140=only), run once without -race; a failure is a non-approved algorithm call.
+# Runs once, without -race or the CPU matrix: it hunts non-approved crypto.
+# STRICT mode (fips140=only), never `on`, which still permits non-approved
+# algorithms. A failure here is the finding: fix the call site.
 .PHONY: test-fips
 test-fips:
 	GOFIPS140=latest GODEBUG=fips140=only "$$GOCMD" build $(PKG)
@@ -324,7 +397,9 @@ test-runtimesecret:
 bench: $(BENCH_TARGETS)
 
 ## test-<feature>, integration-test-<feature>: one feature's unit and integration suites (see FEATURES)
-# The per-feature integration floor is 0; integration-test-<pkg> and ci-integration keep it.
+# integration-test-<feature> runs the suite's tests named with the feature's
+# prefix and nothing else, so it cannot meet the whole suite's coverage floor:
+# the floor is 0 here, and integration-test-<pkg> and ci-integration keep it.
 .PHONY: $(addprefix test-,$(FEATURES)) $(addprefix integration-test-,$(FEATURES))
 $(foreach f,$(FEATURES),$(eval test-$(f): test-$(FEATURE_PKG_$(f))))
 define FEATURE_INTEGRATION_RULE
@@ -334,7 +409,9 @@ integration-test-$(1): $(if $(filter $(1),$(USERNS_FEATURE)),integration-test-us
 endef
 $(foreach f,$(FEATURES),$(eval $(call FEATURE_INTEGRATION_RULE,$(f))))
 
-# Each package's integration suite runs in the devcontainer, on an image scripts/integration-image.sh builds once and scans.
+# INTEGRATION SUITE. Each package's suite (test/integration/<pkg>/) runs in the
+# devcontainer, never on the host: scripts/integration-test.sh, on an image that
+# scripts/integration-image.sh builds once and scans (ci-integration shares it).
 INTEGRATION_PACKAGES  := enclave
 DEVCONTAINER_COMPOSE  := build/docker/devcontainer/compose.yaml
 DEVCONTAINER_SERVICE  := integration
@@ -345,7 +422,10 @@ export INTEGRATION_TESTFLAGS
 # ("-" prints it). Caller-supplied, so raw-bound.
 GO_ENCLAVE_IT_PROFILE_OUT ?=
 $(call raw_bind,GO_ENCLAVE_IT_PROFILE_OUT)
-# Integration coverage is gated per suite on the packages it covers; the enclave suite also gates providertest.
+# Integration coverage is gated per suite on the packages it is FOR, against
+# COVERAGE_THRESHOLD, each package on its own. providertest has no suite of its
+# own: the enclave suite drives it in the devcontainer, so that suite is gated on
+# it too (comma-separated import paths, as run-integration-tests.sh takes them).
 INTEGRATION_COVERPKG_enclave := github.com/jeremyhahn/go-enclave,github.com/jeremyhahn/go-enclave/providertest
 # FIPS strict run: same suite with GOFIPS140=latest and fips140=only. The suite
 # fails unless the runtime reports the promised GO_ENCLAVE_IT_FIPS_MODE.
@@ -365,7 +445,9 @@ $(IT_TARGETS): integration-test-%: integration-test-userns
 	@sh scripts/integration-test.sh $* "$(INTEGRATION_COVERPKG_$*)"
 
 ## integration-test-userns: the root package's user-namespace test, in the devcontainer under a seccomp profile that permits CLONE_NEWUSER
-# Built with the userns tag; scripts/userns-test.sh runs it in the userns compose service.
+# It is built with the userns tag, so `make test` does not run it (the default
+# toolchain container refuses user namespaces and the test fails there, it does
+# not skip). scripts/userns-test.sh runs it in the `userns` compose service.
 .PHONY: integration-test-userns
 integration-test-userns:
 	@sh scripts/userns-test.sh
@@ -377,7 +459,11 @@ integration-test-userns:
 ## GO_ENCLAVE_OPTEE_SEAL=required: integration-test-arm-trustzone: fail, rather than skip, the KeyProtector test when the trusted application has no SEAL; empty (default) makes the fixture declare absent:<TRUSTED_FIRMWARE_TAG>, the pinned release lacking SEAL, which the test skips on; any other value is refused
 ## TRUSTED_FIRMWARE_URL=<url>: optee-fixture-check, integration-test-arm-trustzone: the forge's trusted-firmware clone URL; empty refuses a clone (the pinned commit, not the URL, is what is trusted)
 ## OPTEE_FIXTURE_IMAGE=<image@digest>: integration-test-arm-trustzone: run the harness in this OP-TEE fixture image, on its prebuilt stack (pinned in scripts/tool-pins.sh; empty runs it on the host); the CI optee job refuses an empty pin
-# The fixture image contract: docs/backend-conformance/engineering.md#fixture-image-contract.
+# The tag and commit come from scripts/tool-pins.sh; a command-line value
+# overrides them and is raw-bound like the other caller-supplied values. The
+# CI optee job (ci.yml) runs integration-test-arm-trustzone with
+# OPTEE_FIXTURE_IMAGE; the image's contract is in
+# docs/backend-conformance/engineering.md#fixture-image-contract.
 TRUSTED_FIRMWARE_URL      ?=
 TRUSTED_FIRMWARE_CACHE    ?=
 GO_ENCLAVE_OPTEE_ENDPOINT ?= /dev/tee0
@@ -400,7 +486,17 @@ optee-fixture-check:
 	@sh scripts/optee-fixture.sh check
 
 ## integration-test-arm-trustzone: backendtest against the arm-trustzone backend on OP-TEE: backends/armtrustzone's optee-tagged conformance test, built for linux/arm64 in the toolchain image, run in the pinned fixture's guest
-# scripts/optee-fixture.sh runs the arm64 test binary in the guest under make optee-run; a missing endpoint fails, and containers get a copy of the checkout, never a bind mount.
+# The toolchain image builds backends/armtrustzone (its own module) with
+# go test -c -tags=optee as a CGO-free linux/arm64 test binary;
+# scripts/optee-fixture.sh shares it with the guest and runs
+# TestBackendConformance_OnOPTEE and TestKeyProtectorConformance_OnOPTEE there
+# under make optee-run, whose status is the target's. The tests connect
+# in-process; a missing endpoint fails the run, never skips it. The root's optee-tagged harness
+# (test/integration/enclave) is not run: the root go.mod never requires the
+# nested module, so nothing registers the backend there. Both containers get a
+# copy of the checkout, never a bind mount (as scripts/in-toolchain-image.sh):
+# a CI job reaches the daemon through its socket, so a bind mount resolves on
+# the daemon's host. The fixture's copy is owned by its user tfw (uid 1000).
 ARM_TRUSTZONE_MODULE := backends/armtrustzone
 # The test binary, compiled in the toolchain image into the ignored bin/.
 ARM_TRUSTZONE_BIN := bin/optee/armtrustzone.test
@@ -431,7 +527,12 @@ SWTPM_CTRL_PORT ?= 2322
 $(call raw_bind,SWTPM_PORT SWTPM_CTRL_PORT)
 
 ## integration-test-tpm: providertest against the TPM provider on a throwaway swtpm: backends/tpm's swtpm-tagged conformance and blob-length tests, under -race, on the host (swtpm and swtpm-tools installed)
-# scripts/swtpm-fixture.sh runs swtpm on loopback TCP and removes its state on exit; without swtpm the target fails.
+# scripts/swtpm-fixture.sh starts swtpm on loopback TCP with its state in a
+# temporary directory, runs the tests with the host's Go against
+# GO_ENCLAVE_SWTPM=tcp:127.0.0.1:$(SWTPM_PORT), and stops swtpm and removes
+# its state on every exit. Not in the toolchain image: its container has no
+# network that reaches the host's loopback, and the image carries no swtpm.
+# Without swtpm on PATH the target fails, never skips.
 .PHONY: integration-test-tpm
 integration-test-tpm:
 	@sh scripts/swtpm-fixture.sh
@@ -446,14 +547,22 @@ $(IT_FIPS_TARGETS): integration-test-fips-%:
 	@sh scripts/integration-test.sh $* "$(INTEGRATION_COVERPKG_$*)" $(INTEGRATION_FIPS_ENV)
 
 ## lint-integration: golangci-lint over the integration suite, WITH its build tag
-# First proves the tag selects the test files and nothing builds without it.
+# `make lint` runs without the integration tag and never sees the suite. This
+# first proves the tag selects the test files and nothing builds without it.
 .PHONY: lint-integration
 lint-integration:
 	@sh scripts/lint-integration.sh $(INTEGRATION_PACKAGES)
 	@"$(GO)" test -count=1 -tags=integration ./test/internal/devcontainer/
 	@bin=$(call tool,golangci-lint,GOLANGCI) && "$$bin" $(GOLANGCI_FLAGS) --build-tags=integration ./test/integration/... ./test/internal/...
 
-# Devcontainer: a toolchain stage that runs every gate on the mounted checkout, and an integration stage with the source baked in; CMD is raw-bound and passed as one argument.
+# THE DEVCONTAINER (build/docker/devcontainer/): one Dockerfile, two stages.
+# `toolchain` is Go plus every pin in scripts/tool-pins.sh, and runs every gate
+# with the checkout mounted; `integration`, from the same base stage and
+# without the tools, has the source baked in and runs only the integration suite. scripts/devcontainer.sh does the work.
+#
+# CMD: the command docker-run runs, one string for bash -c. It is the caller's
+# command by design, so it is raw-bound (never parsed as make source) and
+# handed to the script as one argument.
 CMD ?=
 $(call raw_bind,CMD)
 
@@ -497,9 +606,12 @@ cross-build:
 	@sh scripts/cross-build.sh $(CROSS_TARGETS) -- $(PKG)
 	@for m in $(BACKEND_MODULES); do (cd "$$m" && sh ../../scripts/cross-build.sh $(CROSS_TARGETS) -- $(PKG)) || exit 1; done
 
-# Build gates are their own module under build/ci/buildgates; check-buildgates runs the tests no other gate claims.
+# BUILD GATES: their own module under build/ci/buildgates (it needs a YAML parser
+# the root module must not depend on). check-buildgates runs every test the
+# other gates do not claim.
 BUILDGATES_OTHER := ^(TestReleasability|TestChangelogAssemble|TestScripts)
-# gates TEST-FLAGS: run the gates module's tests.
+# gates TEST-FLAGS: run the gates module's tests. Every check-* target depends
+# on vet-buildgates, which make runs once per invocation.
 gates = cd build/ci/buildgates && "$$GOCMD" test -count=1 $(1) $(PKG)
 
 .PHONY: vet-buildgates
@@ -512,7 +624,8 @@ check-buildgates: vet-buildgates
 	@$(call gates,-skip '$(BUILDGATES_OTHER)')
 
 ## check-releasability: no tracked file names the lab fleet or is agent-only
-# Rules and waivers: build/ci/buildgates/releasability_test.go.
+# Every tracked file is published, so the scrub happens here. Rules and
+# waivers: build/ci/buildgates/releasability_test.go.
 .PHONY: check-releasability
 check-releasability: vet-buildgates
 	@$(call gates,-run '^TestReleasability')
@@ -559,7 +672,9 @@ check-it-runner:
 ## FUZZTIME=<d>: fuzz: how long each target fuzzes, a Go duration or Nx (default 30s)
 ## FUZZ=<regexp>: fuzz: only the targets whose name matches (extended regexp)
 ## FUZZ_PKG=<regexp>: fuzz: only the packages whose import path matches (extended regexp)
-# A failing input is written under testdata/fuzz/; commit it with the fix as a seed.
+# Plain `go test` only replays the seed corpora in testdata/fuzz/; this mutates
+# inputs. A failing input is written under the package's testdata/fuzz/ and
+# named in the output: commit it with the fix, as a seed. No CI job runs this.
 FUZZTIME ?= 30s
 $(call raw_bind,FUZZ FUZZ_PKG FUZZTIME)
 .PHONY: fuzz
@@ -584,12 +699,17 @@ check-ci-python-suites:
 	@python3 -I testdata/code-review-v51214-tests.py .github/workflows/code-review.yml
 
 ## lint-gates: the repository's own gates beside lint: check-buildgates, check-releasability, check-changelog-assembly, check-scripts, check-in-toolchain-image, check-project-scripts, check-it-runner, check-fuzz-runner, check-ci-python-suites (CI's lint-gates job)
-# CI runs this as its own job beside make lint.
+# ci.yml runs this as its own job, in parallel with `make lint`, so make lint
+# does not list it. tidy-check, lint-runtimesecret and lint-integration stay
+# in the image job.
 .PHONY: lint-gates
 lint-gates: check-buildgates check-releasability check-changelog-assembly check-scripts check-in-toolchain-image check-project-scripts check-it-runner check-fuzz-runner check-ci-python-suites
 	@echo "lint-gates completed successfully"
 
-# CI aggregates: one per workflow job, shared by ci.yml and release.yml so they cannot drift.
+# CI AGGREGATES. ci.yml and release.yml each call these, one per job, so a job
+# is one `make` line and the two workflows cannot drift apart. Each target runs
+# once per invocation, however many others depend on it: lint-go carries vet,
+# staticcheck and gosec for lint and security alike.
 
 ## ci-lint: every static check: tidy, lint (staticcheck included), the integration suite's lint, the build gates, releasability, changelog assembly, the scripts
 .PHONY: ci-lint
@@ -612,7 +732,13 @@ ci-test: coverage test-runtimesecret
 	@echo "ci-test completed successfully"
 
 ## ci-integration: both integration variants (default and FIPS 140-3 strict) in the devcontainer
-# One content-addressed image, built once and trivy-scanned, serves every suite; $(MAKE) is named through a variable so make -n only prints it.
+# One image serves the userns, default and FIPS suites (FIPS is a run-time
+# flag): scripts/integration-image.sh names it by content (IT_IMAGE, else
+# `make -s it-image`), builds it only when the daemon lacks it, trivy-scans
+# that exact image ID and runs both targets against it with no rebuild. No
+# run removes it: CI's reap step does, once it is old and unused.
+# The recipe names make through a variable, so `make -n ci-integration` prints it
+# instead of running it (a line with a literal $(MAKE) runs even under -n).
 IT_MAKE = $(MAKE) --no-print-directory
 .PHONY: ci-integration
 ci-integration:
@@ -641,7 +767,12 @@ deps-check:
 	@sh scripts/deps-check.sh
 
 ## release: Prepare a production release on release/<version> (VERSION=vX.Y.Z; refuses -alpha and -rc.N)
-# scripts/release.sh checks everything first and pushes only release/<version>; release-tag tags the merged commit.
+# The version is explicit, never derived. A release is two steps. The three
+# release targets run the one scripts/release.sh with their kind: every check
+# runs before anything is written, and it pushes only the branch
+# release/<version>, never main or a tag (main's ruleset takes commits only
+# through a pull request). After that pull request merges, release-tag tags
+# the merge commit and pushes the tag, which hands off to release.yml.
 .PHONY: release
 release:
 	@sh scripts/release.sh release
@@ -657,14 +788,17 @@ release-alpha:
 	@sh scripts/release.sh alpha
 
 ## release-tag: After the release pull request merged, tag main's HEAD and push only the tag (VERSION=vX.Y.Z[-alpha|-rc.N])
-# See scripts/release-tag.sh.
+# See scripts/release-tag.sh: HEAD must be the merged release commit, and the
+# release pull request's head (not main's run) must have CI Gate success.
 .PHONY: release-tag
 release-tag:
 	@sh scripts/release-tag.sh
 
-# Release targets release.yml calls; each takes TAG=vX.Y.Z[-pre].
+# RELEASE TARGETS: release.yml calls these, never the scripts directly. Each
+# takes TAG=vX.Y.Z[-pre].
 
 ## release-verify: TAG=vX.Y.Z[-pre] [MAIN_REF=<ref>] — the tag agrees with VERSION and CHANGELOG.md (and is on MAIN_REF)
+# See scripts/release-verify.sh. With MAIN_REF, HEAD must be an ancestor of it.
 .PHONY: release-verify
 release-verify:
 	@sh scripts/release-verify.sh "$$TAG" "$$MAIN_REF"

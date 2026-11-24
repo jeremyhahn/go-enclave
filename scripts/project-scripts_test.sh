@@ -1,5 +1,19 @@
 #!/bin/sh
-# Tests for the gate scripts swtpm-fixture, test-runtimesecret, cross-build, lint-integration and release-verify on stub tools (usage: scripts/project-scripts_test.sh).
+# Tests for five scripts that decide a gate: swtpm-fixture.sh,
+# test-runtimesecret.sh, cross-build.sh, lint-integration.sh and
+# release-verify.sh. Each runs on stub tools on a temporary PATH (go, swtpm,
+# swtpm_ioctl and sleep record every call; a knob in the environment makes one
+# fail), so no toolchain, TPM, network or Docker is needed. Per script: its
+# refusal of bad input, the success path with the exact calls (targets, tags,
+# flags, GOEXPERIMENT, CGO_ENABLED), each failure it reports and, for the ones
+# that make them, that no temporary directory or swtpm process is left.
+# release-verify runs the real release-check-tag.sh on a scratch git tree.
+#
+#   usage: scripts/project-scripts_test.sh   (also: make check-project-scripts)
+#
+# A case's conditions are single-quoted strings that `all` evaluates after the
+# run, so their expansions are meant to wait and the values they read look
+# unused to shellcheck.
 # shellcheck disable=SC2016,SC2034
 set -eu
 # shellcheck source=lib.sh
@@ -29,7 +43,8 @@ trap cleanup EXIT
 mkdir -p "$D/bin" "$D/goroot/bin" "$D/tmp" "$D/empty" "$D/only" "$D/root/backends/tpm"
 echo 'module example.com/tpm' > "$D/root/backends/tpm/go.mod"
 
-# rec FILE PREFIX ARG... appends "PREFIX ARG..." to FILE, with TMPDIR paths shown as <tmp>.
+# rec FILE PREFIX ARG...: append "PREFIX ARG..." to FILE, any path under
+# TMPDIR shown as <tmp>, so a mktemp name never reaches a comparison.
 cat > "$D/rec.sh" <<'STUB'
 rec() {
   _f=$1 _line=$2
@@ -48,7 +63,12 @@ rec() {
 }
 STUB
 
-# go stub: records its environment and arguments; STUB_* knobs set failures and answers.
+# go: records its environment and arguments. STUB_FAIL is a pattern over
+# "GOOS/GOARCH ARGS"; a match exits STUB_FAIL_RC (3). `env GOROOT` names
+# $D/goroot, whose bin/go is this same stub. `list` answers the file selection
+# (secret_erase.go on the targets in STUB_ERASE) or the integration file
+# counts (STUB_WITH with the tag, STUB_WITHOUT without, each with an _RC).
+# STUB_GO_HOLD makes `test` wait for HOLD.release after creating HOLD.started.
 cat > "$D/bin/go" <<'STUB'
 #!/bin/sh
 . "$STUB_D/rec.sh"
@@ -116,7 +136,8 @@ reset() {
   : > "$D/calls"
   rc=0
 }
-# run DIR [VAR=VALUE...] CMD... runs CMD on the stub PATH; status in $rc, output in $D/out.
+# run DIR [VAR=VALUE...] CMD...: CMD in DIR on the stub PATH, its status in
+# $rc, its output in $D/out.
 run() {
   reset
   _dir=$1

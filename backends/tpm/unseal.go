@@ -12,7 +12,14 @@ import (
 	"github.com/jeremyhahn/go-enclave"
 )
 
-// TPM2_Create and TPM2_Unseal are marshaled here so the key stays in locked buffers; go-tpm would copy it to the heap.
+// The provider marshals the two commands that carry the key, TPM2_Create and
+// TPM2_Unseal, itself. go-tpm marshals TPM2_Create's inSensitive in clear
+// into heap buffers before it encrypts it, and decrypts TPM2_Unseal's outData
+// in place in a heap buffer it never wipes, so a key passed through it would
+// outlive the call. Here the key is in clear only in the caller's buffer, a
+// locked parameter buffer, and the transport's locked response buffer, and
+// the session's exported Encrypt, Decrypt, Authorize and Validate work on
+// those buffers in place.
 
 const (
 	tagSessions   = 0x8002 // TPM_ST_SESSIONS
@@ -93,7 +100,11 @@ func (d *tpmDevice) unseal(ctx context.Context, obj object, s session, dst []byt
 	return len(out), nil
 }
 
-// execute sends a one-handle command authorized and encrypted by s and returns the validated response parameters.
+// execute sends a command with one handle, authorized by s, whose parameter
+// area is params as it goes on the wire, encrypted under s's nonceCaller,
+// which the caller has refreshed, and returns the response's
+// parameter area once s has validated it. The response aliases the
+// transport's buffer.
 func (d *tpmDevice) execute(ctx context.Context, cc tpm2.TPMCC, h object, s session, params []byte) ([]byte, error) {
 	names := []tpm2.TPM2BName{h.name}
 	auth, err := s.auth.Authorize(cc, params, nil, names, 0)

@@ -10,7 +10,16 @@ import (
 	"testing"
 )
 
-// scripts/features.map must place every library file, glob, integration test and docs/<feature>/ exactly once.
+// scripts/features.map is the one place a feature's source files and integration
+// tests are named. The Makefile, scripts/features.sh and these gates all read
+// it, so a file or test that the map does not place is found here, not by a
+// feature that silently stops running its tests:
+//
+//   - every non-test .go file of the library belongs to exactly one feature;
+//   - every glob matches at least one file;
+//   - every integration test carries exactly one feature's name prefix, in that
+//     feature's suite directory, and every prefix is used;
+//   - every docs/<feature>/ directory has a line, and every line a directory.
 
 // featureLine is one line of scripts/features.map.
 type featureLine struct {

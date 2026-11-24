@@ -14,7 +14,11 @@ import (
 // scripts/integration-image.sh built and scanned. These tests drive the real
 // scripts against a fake docker and trivy that log what they are asked.
 
-// fakeImageWorld puts a fake docker and trivy first on PATH for scripts/integration-image.sh.
+// fakeImageWorld puts a fake docker and trivy first on PATH. docker logs every
+// call with the GO_ENCLAVE_IT_IMAGE it saw, reports the image ID in idFile,
+// holds the image only when FAKE_HELD is set, and makes a `go test` run print
+// the userns test's PASS line. It returns the environment for
+// scripts/integration-image.sh and the log.
 func fakeImageWorld(t *testing.T) (env map[string]string, log, idFile string) {
 	t.Helper()
 	requireLinuxInstallPath(t)
@@ -170,7 +174,11 @@ func TestIntegrationImage_BuildsOnceScansThatImageAndRunsEverySuiteOnIt(t *testi
 	}
 }
 
-// TestIntegrationImage_ScanOffBuildsAndRunsWithoutTrivy: with IT_SCAN=0 the image is built and run with no trivy call.
+// TestIntegrationImage_ScanOffBuildsAndRunsWithoutTrivy: ci-template v1.42
+// (owner ruling 742 (1)). CI's integration and soak jobs set IT_SCAN=0, so the
+// gate never fails on an advisory database that changed with no change to
+// the tree: the image is built once and the three suites run on it, its ID
+// still pinned, with no trivy call at all; scans.yml scans it on main.
 func TestIntegrationImage_ScanOffBuildsAndRunsWithoutTrivy(t *testing.T) {
 	env, log, _ := fakeImageWorld(t)
 	env["IT_SCAN"] = "0"
@@ -248,7 +256,8 @@ func TestIntegrationImage_AHeldImageIsNotRebuilt(t *testing.T) {
 	}
 }
 
-// A suite refuses an image other than the one scanned.
+// A suite refuses an image that is no longer the one that was scanned, and the
+// script builds the image itself rather than being handed one.
 func TestIntegrationImage_SuiteRefusesAnImageThatWasNotScanned(t *testing.T) {
 	env, log, idFile := fakeImageWorld(t)
 	swap := "echo sha256:" + strings.Repeat("b", 64) + " > " + idFile + " && sh scripts/integration-test.sh enclave github.com/jeremyhahn/go-enclave"

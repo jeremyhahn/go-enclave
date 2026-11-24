@@ -61,7 +61,11 @@ func TestBackendConformance_OnOPTEE(t *testing.T) {
 	}
 }
 
-// TestKeyProtectorConformance_OnOPTEE runs the provider suite against the backend's KeyProtector.
+// TestKeyProtectorConformance_OnOPTEE runs the provider suite against the
+// backend's KeyProtector, on the same fixture. A SEAL error skips the test
+// only when the fixture declares, in GO_ENCLAVE_OPTEE_SEAL, that its pinned
+// trusted-firmware release has no SEAL (see sealDecision); any other failure
+// fails it.
 func TestKeyProtectorConformance_OnOPTEE(t *testing.T) {
 	endpoint := os.Getenv(opteeEndpointVar)
 	if endpoint == "" {
@@ -82,7 +86,9 @@ func TestKeyProtectorConformance_OnOPTEE(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Connect(%q): %v", endpoint, err)
 	}
-	// GET_INFO cannot tell whether the TA has SEAL; its answer to SEAL decides.
+	// GET_INFO cannot decide: trusted-firmware's TA reports interface
+	// version 1 and flags 0 with SEAL and without it, and Connect refuses any
+	// other pair. The TA's answer to SEAL decides.
 	version, flags, err := p.b.c.getInfo(ctx)
 	if err != nil {
 		t.Fatalf("GET_INFO: %v", err)

@@ -199,7 +199,8 @@ func TestOpenCharDevice(t *testing.T) {
 		// ENOENT, so the "not absolute" error shows nothing was touched.
 		{"relative", "no/such/tpmrm0", "not absolute"},
 		{"regular_file", regular, "not a character device"},
-		// Opening a directory read-write fails with EISDIR from the kernel.
+		// A read-write open of a directory fails with EISDIR before the
+		// mode check: the refusal comes from the kernel.
 		{"directory", dir, syscall.EISDIR.Error()},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -26,7 +26,17 @@ const (
 	fakeErrItemNotFound  uint32 = 0xffff0008 // TEE_ERROR_ITEM_NOT_FOUND
 )
 
-// fakeTEE stands in for the Linux TEE driver and a trusted application with GET_INFO, SEAL and UNSEAL.
+// fakeTEE is a teeDriver that stands in for the Linux TEE driver and, behind
+// it, for a trusted application with GET_INFO, SEAL and UNSEAL. It checks
+// what the driver checks (the device and shared-memory fds, the buffer
+// sizes, each memref's shared memory and bounds) and what a SEAL-capable TA
+// checks (the parameter types), and reads and writes the memrefs in the
+// shared memory the client allocated or registered, as the kernel does.
+//
+// SEAL's blob is the TA's own: a 12-byte nonce, then AES-256-GCM of the
+// plaintext under a key only the fake holds, with the associated data as
+// the AAD. UNSEAL answers TEE_ERROR_BAD_FORMAT for a blob too short to be
+// one and TEE_ERROR_MAC_INVALID for one that does not open.
 type fakeTEE struct {
 	regMem bool
 	aead   cipher.AEAD
@@ -193,7 +203,8 @@ func (f *fakeTEE) blockOnNth(cmd uint32, nth int) <-chan struct{} {
 	return f.entered
 }
 
-// failNth makes the nth call of cmd fail once, by errno or TA code.
+// failNth makes the nth (from 1) call of cmd fail once: its INVOKE ioctl
+// returns errno when errno is non-nil, else the TA answers code.
 func (f *fakeTEE) failNth(cmd uint32, nth int, code uint32, errno error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

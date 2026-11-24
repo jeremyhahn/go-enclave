@@ -21,7 +21,13 @@ import (
 	"github.com/goccy/go-yaml"
 )
 
-// Tests for the release and tooling scripts, run offline against scratch trees, a fake forge and a local proxy.
+// Tests for the release and tooling scripts: scripts/release-notes.sh,
+// release-check-tag.sh, consumer-check.sh and tool.sh.
+//
+// Most of these run for real only when a tag is pushed, some with a write
+// token, and tool.sh decides which binary every lint and security gate trusts.
+// Each is driven here offline on scratch inputs: a scratch tree, a local fake
+// of the forge API, a local module proxy, fake tool binaries.
 
 // runScript runs scripts/<name> with sh in dir, with env layered over the
 // process environment (an empty value unsets in effect: the variable is set to
@@ -516,7 +522,12 @@ files:
 	return proxy
 }
 
-// consumerEnv points the script at the local proxy and the verified module cache, so the run needs no network.
+// consumerEnv points the script at the local proxy, falling back to the
+// already-verified module cache for go-enclave's own dependencies, so the run
+// needs no network. GOSUMDB is off only in this subprocess: the module is the
+// working tree under a version no checksum database has seen, and the cache
+// verified the dependencies when it fetched them. release.yml exercises the
+// network path on every tag.
 func consumerEnv(t *testing.T, proxy string) map[string]string {
 	t.Helper()
 	root := repoRoot(t)
@@ -532,7 +543,9 @@ func consumerEnv(t *testing.T, proxy string) map[string]string {
 	if err != nil {
 		t.Fatalf("go env GOMODCACHE: %v", err)
 	}
-	// GOENV=off keeps the user's go env file from redirecting the fetch.
+	// GOENV=off: the go command reads an empty variable as unset and falls
+	// back to the user's go env file, whose GOPRIVATE could send the fetch
+	// past this proxy.
 	return map[string]string{
 		"GOENV":       "off",
 		"GOPROXY":     "file://" + proxy + ",file://" + filepath.Join(strings.TrimSpace(string(modcache)), "cache", "download"),
@@ -664,7 +677,8 @@ func requireAbsent(t *testing.T, env map[string]string, name string) {
 // fake.
 func toolEnv(t *testing.T, bin string, over map[string]string) map[string]string {
 	t.Helper()
-	// A fake go that reports TOOLCHAIN as every binary's builder and fails any install.
+	// A go that only reports the toolchain TOOLCHAIN names as the builder of
+	// any binary; every other invocation (an install attempt) fails loudly.
 	goCmd := filepath.Join(t.TempDir(), "go")
 	goScript := "#!/bin/sh\n" +
 		"if [ \"$1\" = version ] && [ $# -eq 2 ]; then echo \"$2: go1.27.1\"; exit 0; fi\n" +
@@ -927,7 +941,13 @@ func copyExec(t *testing.T, src, dst string) {
 	writeExecutable(t, dst, b)
 }
 
-// writeExecutable installs an executable by rename, so a running copy never causes ETXTBSY.
+// writeExecutable installs an executable file at path without ever opening
+// path for writing: the body goes to a temporary file beside it, which is
+// renamed into place. A process still executing the old file keeps its inode,
+// so the write cannot fail with ETXTBSY. The write descriptor is open only
+// under syscall.ForkLock's read side, so a concurrent fork (a parallel
+// test's exec.Command) cannot inherit it and hold the new file busy until it
+// execs.
 func writeExecutable(t *testing.T, path string, body []byte) {
 	t.Helper()
 	if err := installExecutable(path, body); err != nil {
@@ -968,7 +988,12 @@ func writeTempExecutable(dir string, body []byte) (string, error) {
 	return f.Name(), nil
 }
 
-// TestScriptsToolResolve_ActionlintIgnoresToolInstallZero: actionlint is resolved as under TOOL_INSTALL=1.
+// TestScriptsToolResolve_ActionlintIgnoresToolInstallZero pins #145/#146:
+// actionlint ignores TOOL_INSTALL=0 and is resolved as under TOOL_INSTALL=1. A
+// copy on PATH that reports exactly the pin (and was built by the module's Go)
+// is used; the CI image's copy, built from an untagged commit, reports a
+// pseudo-version and is not, so the pinned tag is built into TOOLS_DIR instead.
+// The version check still refuses an unversioned binary.
 func TestScriptsToolResolve_ActionlintIgnoresToolInstallZero(t *testing.T) {
 	requireLinuxInstallPath(t)
 	const pin = "v1.7.12"
@@ -1258,7 +1283,8 @@ func TestScriptsToolResolve_UsesAVerifiedCopyOnPath(t *testing.T) {
 // ---------------------------------------------------------------------------
 // release-version-check.sh
 
-// versionCheckTree makes an isolated scratch repository holding VERSION and the given tags.
+// versionCheckTree makes a scratch git repository holding VERSION and the
+// given tags, isolated from the user's and system git configuration.
 func versionCheckTree(t *testing.T, version string, tags ...string) (string, map[string]string) {
 	t.Helper()
 	dir := writeTree(t, map[string]string{"VERSION": version})
@@ -1396,7 +1422,14 @@ func TestScriptsRelease_ChecksTheVersionBeforeWritingAnything(t *testing.T) {
 	}
 }
 
-// releaseRepo is an isolated scratch repository for scripts/release.sh whose dev remote only the AGENT_GIT stand-in reaches.
+// releaseRepo is a scratch repository on main for scripts/release.sh: a dev
+// remote (a bare repository), one fragment to fold, and a wrapper standing in
+// for AGENT_GIT that signs nothing and logs the repo name it was given. It is
+// isolated from the user's and system git configuration.
+//
+// As on a maintainer host, plain git cannot reach dev: the remote's URL is
+// devRemote, which only the wrapper (and the test's own git) rewrites to the
+// bare repository, so a dev read or write that bypasses AGENT_GIT fails.
 type releaseRepo struct {
 	t         *testing.T
 	dir, bare string
@@ -1471,7 +1504,12 @@ func (r *releaseRepo) state() string {
 	}, "\x00")
 }
 
-// merge stands in for squash-merging the release pull request on dev's main.
+// merge stands in for GitHub squash-merging the release pull request: one
+// new commit on dev's main with the release branch's tree. The forge then
+// associates the merge commit with that pull request, whose head carries a
+// green CI Gate, and the local main is brought up to dev's. Where another
+// release merged first, the branch's side wins each conflict, as when its
+// author updates the pull request against main.
 func (r *releaseRepo) merge(version string) (mergeSHA, headSHA string) {
 	r.t.Helper()
 	branch := "release/" + version
@@ -1868,7 +1906,12 @@ func TestScriptsReleaseTag_RefusesWhatItMustNotTag(t *testing.T) {
 	}
 }
 
-// TestScriptsReleaseTag_OrdersAgainstTheParentAndTheTags checks release-tag refuses a tag below its parent's VERSION or the highest tag.
+// TestScriptsReleaseTag_OrdersAgainstTheParentAndTheTags prepares two release
+// pull requests, rc.1 and rc.2, from the same main. Merged in order, each is
+// tagged. Merged the other way round, rc.1 lands over rc.2's tagged release
+// and release-tag refuses it: it is not greater than its first parent's
+// VERSION or the highest release tag, and a tag below them would publish a
+// release Go's version selection never prefers.
 func TestScriptsReleaseTag_OrdersAgainstTheParentAndTheTags(t *testing.T) {
 	const older, newer = "v1.5.0-rc.1", "v1.5.0-rc.2"
 	prepare := func(t *testing.T) *releaseRepo {
@@ -2418,7 +2461,8 @@ func TestScriptsReleaseTreeCheck_ANonReleaseTagRefuses(t *testing.T) {
 	}
 }
 
-// A tree object is no commit; both inputs must name commits.
+// A tree object has the tag's tree but is no commit, so SPEC release criterion
+// 8 (one published commit) is not met by it: both inputs must name commits.
 func TestScriptsReleaseTreeCheck_ATreeInsteadOfACommitRefuses(t *testing.T) {
 	dir, git := treeCheckRepo(t)
 	tree := git("rev-parse", "v1.2.3^{tree}")
@@ -2541,7 +2585,7 @@ func TestScriptsMakefile_AHostileCheckoutPathIsOneLiteralOperand(t *testing.T) {
 		t.Fatalf("lint-scripts (ok=%v) passed shellcheck:\n%s\noutput:\n%s", ok, logged, out)
 	}
 
-	// GOCMD at a hostile path stays one word in recipes.
+	// GOCMD at a hostile path: one word in recipes (TOOLCHAIN is lazy, so no $(shell) runs it).
 	out, ok = makeIn(nil, "build", "GOCMD="+fakeGo)
 	if logged := readLog(t, log); !ok || !strings.Contains(logged, "--- go\n<build>\n<./...>\n") {
 		t.Fatalf("make build GOCMD=<hostile path> (ok=%v) logged:\n%s\noutput:\n%s", ok, logged, out)
