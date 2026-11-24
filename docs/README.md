@@ -1,6 +1,6 @@
 # go-enclave documentation
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-11-21
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-11-24
 > Conflicts with this document are defects. For shipped behavior the code is canonical: fix this document to match it.
 
 What go-enclave is and every feature it has: [SPEC](SPEC.md). What is done
@@ -81,14 +81,29 @@ hardware providers are removed from go-enclave:
 
 - **`backends/tpm`.** The nested module
   `github.com/jeremyhahn/go-enclave/backends/tpm` is gone from this
-  repository. Drop it from `go.mod` (`go mod tidy`), take the
-  TPM 2.0 provider from go-xkms, and pass it to
-  `enclave.WithKeyProtector` as before: the `KeyProtector` interface is
-  unchanged.
+  repository. Drop it from `go.mod` (`go mod tidy`). The TPM 2.0 provider is
+  `enclaveprovider.NewKeyProtector` in the package
+  `github.com/jeremyhahn/go-xkms/pkg/enclaveprovider`, built over go-xkms's
+  TPM 2.0 sealer (package `github.com/jeremyhahn/go-xkms/pkg/tpm2`, a
+  `types.Sealer` from `github.com/jeremyhahn/go-xkms/pkg/types`) and the
+  sealing key's `*types.KeyAttributes`. Pass it to `enclave.WithKeyProtector`
+  as before: the `KeyProtector` interface is unchanged.
+
+  ```go
+  protector, err := enclaveprovider.NewKeyProtector(sealer, attrs)
+  if err != nil { /* handle */ }
+  s, err := enclave.NewSealer(enclave.WithKeyProtector(protector))
+  ```
+
+  Where the root needs a `RootUnsealer` (`enclave.WithRootUnsealer`), the
+  same package has `NewRootUnsealer(sealer, attrs, sealedRoot)` and
+  `ProvisionRoot`.
 - **`(*armtrustzone.Backend).KeyProtector()`.** The method is gone from
-  `backends/armtrustzone`. Take the TrustZone provider from go-xkms and pass
-  it to `enclave.WithKeyProtector`. The arm-trustzone backend stays:
-  `Connect`, `Connector` and `Random` are unchanged.
+  `backends/armtrustzone`. The TrustZone provider is the same
+  `enclaveprovider.NewKeyProtector` from
+  `github.com/jeremyhahn/go-xkms/pkg/enclaveprovider`, over go-xkms's OP-TEE
+  sealer; pass it to `enclave.WithKeyProtector`. The arm-trustzone backend
+  stays: `Connect`, `Connector` and `Random` are unchanged.
 - **Without a device.** Seal with the memory provider instead:
 
   ```go
@@ -99,7 +114,9 @@ hardware providers are removed from go-enclave:
 
 No sealed value needs converting: a `Sealed` lives only in the memory of the
 process that sealed it ([configuration and
-persistence](sealing/engineering.md#configuration-and-persistence)).
+persistence](sealing/engineering.md#configuration-and-persistence)). A blob
+that the removed provider produced is opened by the go-xkms provider only
+where go-xkms documents that compatibility.
 
 #### Attestation removal (planned)
 

@@ -14,9 +14,13 @@ Two hardware providers used to ship here, and both were removed:
 
 - **TPM 2.0**: a nested module of its own (`tpm.Open`, sealing a data
   key under a TPM storage key). It now lives in
-  [go-xkms](https://github.com/jeremyhahn/go-xkms).
+  [go-xkms](https://github.com/jeremyhahn/go-xkms):
+  `enclaveprovider.NewKeyProtector` in the package
+  `github.com/jeremyhahn/go-xkms/pkg/enclaveprovider`, over go-xkms's TPM 2.0
+  sealer.
 - **TrustZone**: `(*armtrustzone.Backend).KeyProtector`, over the OP-TEE
-  trusted application's SEAL and UNSEAL commands. It also lives in go-xkms.
+  trusted application's SEAL and UNSEAL commands. It also lives in go-xkms:
+  the same `enclaveprovider.NewKeyProtector`, over go-xkms's OP-TEE sealer.
   The arm-trustzone backend itself stays in go-enclave
   ([arm-trustzone design](../backends/arm-trustzone-design.md)).
 
@@ -73,11 +77,9 @@ on its open questions are not lost.
   path logs in with no PIN. No credential enters the provider's
   configuration.
 
-**Not decided here.** go-xkms chooses: a third-party pure-Go loader versus
-cgo confined to the provider's package; which hardware token, if any, gets a
-recurring CI run; whether FIPS-mode tokens that refuse a caller-supplied
-nonce are a target of the first slice; and whether the PIN arrives as a
-locked buffer or through a caller callback.
+**Not decided here.** go-xkms chooses which hardware token, if any, gets a
+recurring CI run, and whether FIPS-mode tokens that refuse a caller-supplied
+nonce are a target of the first slice.
 
 Callers migrate as the [Upgrading notes](../README.md#upgrading) describe:
 move to go-xkms, or seal with `SoftwareProvider`. No sealed value needs
