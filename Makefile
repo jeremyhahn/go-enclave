@@ -237,7 +237,7 @@ lint-actions:
 # follows the `. lib.sh` every script sources. build/ci/*.sh are the workflows'
 # scripts, and CI_BASH_SCRIPTS the ci-template's bash ones, taken unchanged
 # from it; each names its own shell on its first line.
-CI_BASH_SCRIPTS := scripts/apk-index-sum.sh scripts/ci-image-cache.sh scripts/ci-image-history.sh scripts/ci-mask-lan.sh scripts/in-toolchain-image.sh scripts/in-toolchain-image_test.sh scripts/reap-stale-ci-stacks.sh scripts/trim-ci-caches.sh
+CI_BASH_SCRIPTS := scripts/apk-index-sum.sh scripts/apk-mirror.sh scripts/ci-image-cache.sh scripts/ci-image-history.sh scripts/ci-mask-lan.sh scripts/in-toolchain-image.sh scripts/in-toolchain-image_test.sh scripts/install-trivy.sh scripts/reap-stale-ci-stacks.sh scripts/trim-ci-caches.sh
 .PHONY: lint-scripts
 lint-scripts:
 	@sc=$(call tool,shellcheck,SHELLCHECK) && \
@@ -687,7 +687,7 @@ fuzz:
 check-fuzz-runner:
 	@sh build/fuzz/fuzz_test.sh
 
-## check-ci-python-suites: the CI template's carried Python suites: the LAN mask and the job-output handoff, with the mask step's placement
+## check-ci-python-suites: the CI template's carried Python suites: the LAN mask and the job-output handoff, with the mask step's placement, the runner selection and code-review.yml's v5.12.13 and v5.12.14 suites
 # Go does not discover Python under testdata/, so this target runs each suite,
 # isolated (python3 -I), against the tree's ci.yml and scripts; no network.
 .PHONY: check-ci-python-suites

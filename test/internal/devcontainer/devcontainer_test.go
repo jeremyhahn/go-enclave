@@ -36,6 +36,9 @@ func TestEnvUint64(t *testing.T) {
 		{val: "0", wantErr: `GO_ENCLAVE_IT_TEST_UINT="0": want a positive integer (set by compose.yaml)`},
 		{val: "-1", wantErr: `GO_ENCLAVE_IT_TEST_UINT="-1": want a positive integer (set by compose.yaml)`},
 		{val: "64k", wantErr: `GO_ENCLAVE_IT_TEST_UINT="64k": want a positive integer (set by compose.yaml)`},
+		{val: "9223372036854775808", want: 1 << 63},
+		{val: "18446744073709551615", want: 1<<64 - 1},
+		{val: "18446744073709551616", wantErr: `GO_ENCLAVE_IT_TEST_UINT="18446744073709551616": want a positive integer (set by compose.yaml)`},
 	} {
 		t.Run(tc.val, func(t *testing.T) {
 			got, err := envUint64(lookup(map[string]string{name: tc.val}), name)
@@ -56,6 +59,9 @@ func TestEnvInt64(t *testing.T) {
 		{val: "0", wantErr: `GO_ENCLAVE_IT_TEST_INT="0": want a positive integer (set by compose.yaml)`},
 		{val: "-5", wantErr: `GO_ENCLAVE_IT_TEST_INT="-5": want a positive integer (set by compose.yaml)`},
 		{val: "1MiB", wantErr: `GO_ENCLAVE_IT_TEST_INT="1MiB": want a positive integer (set by compose.yaml)`},
+		{val: "9223372036854775807", want: 1<<63 - 1},
+		{val: "9223372036854775808", wantErr: `GO_ENCLAVE_IT_TEST_INT="9223372036854775808": want a positive integer (set by compose.yaml)`},
+		{val: "18446744073709551616", wantErr: `GO_ENCLAVE_IT_TEST_INT="18446744073709551616": want a positive integer (set by compose.yaml)`},
 	} {
 		t.Run(tc.val, func(t *testing.T) {
 			t.Setenv(name, tc.val)
