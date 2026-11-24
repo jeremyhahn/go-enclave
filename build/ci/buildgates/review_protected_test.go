@@ -9,12 +9,12 @@ import (
 )
 
 // mergeGuardStems are the workflows that guard what reaches main: the review
-// gate, the signature check, the release and the red-main revert. A pull
+// gate, the signature check, automerge and the release. A pull
 // request that edits one must take a review round, so code-review.yml's scope
 // guard must name each one that exists in PROTECTED or match it by a word of
 // PROTECTED_WORDS; otherwise a signed same-repository pull request could
 // weaken it with no review.
-var mergeGuardStems = []string{"signatures", "code-review", "automerge", "release", "revert-red-main"}
+var mergeGuardStems = []string{"signatures", "code-review", "automerge", "release"}
 
 // reviewGuardLists returns PROTECTED and PROTECTED_WORDS from the scope
 // guard's script in code-review.yml.
@@ -86,7 +86,6 @@ func TestReviewGuard_GuardedMatchesTheScript(t *testing.T) {
 		{"release", true},
 		{"pre-release", true},
 		{"signatures", false},
-		{"revert-red-main", false},
 	} {
 		if got := guarded(tc.stem, protected, words); got != tc.want {
 			t.Errorf("guarded(%q) = %v, want %v", tc.stem, got, tc.want)

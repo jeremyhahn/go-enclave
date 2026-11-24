@@ -1121,7 +1121,7 @@ jobs:
           # PROTECTED: the workflow file names (stems) that always take a review round
           # (InfoSec Y-3): the review workflow(s), the automerge workflow and every
           # release, publish or nightly workflow in .github/workflows/.
-          PROTECTED = ["code-review", "nightly", "release", "ghcr-optee-fixture", "signatures", "revert-red-main"]
+          PROTECTED = ["code-review", "nightly", "release", "ghcr-optee-fixture", "signatures"]
           # CI_FILE and GATE_JOB: the CI workflow and its gate job, whose `needs` list
           # on main must still name jobs that exist at the head (InfoSec Y-4).
           CI_FILE = ".github/workflows/ci.yml"

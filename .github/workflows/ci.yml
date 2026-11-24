@@ -251,7 +251,7 @@
 # never on a pull_request or a push. That workflow opens or updates ONE fix
 # PR on ci/deps-bump with the bumps, and ONE issue for a finding the bump
 # cannot clear. It is not the CI workflow, so a finding never reads as a red
-# main and never starts revert-red-main.yml. gosec reads only the tree and
+# main. gosec reads only the tree and
 # stays on every event: the lint job runs `make gosec` again (v1.41 dropped
 # the step and ran gosec inside `make security`). The lint job drops the
 # deps-check steps and the image job drops `make security` and `trivy image`;
@@ -335,8 +335,8 @@
 # lint and other test jobs 60; integration, image builds, soak and release
 # 120; gates and aggregators 10. A repository sets a job at or under its
 # ceiling, sized at 1.5 x the job's longest green run; a job whose green
-# runs need more keeps its measured value. automerge.yml, nightly.yml and
-# revert-red-main.yml gain the timeouts they lacked.
+# runs need more keeps its measured value. automerge.yml and nightly.yml
+# gain the timeouts they lacked.
 # v1.36 (2026-11-13, Tenant Agent, owner approval 16:1xZ: keep CI caches
 # local): a self-hosted job never restores or saves the Actions cache, which
 # lives in Azure blob storage behind the office's internet line. The
@@ -535,8 +535,7 @@
 # `status`: go-qrdb run 65111 lists as in_progress with every job completed,
 # and no status filter returns it. It reads with the job token first, under
 # `actions: read`. No workflow had read the Actions API with the job token,
-# so a non-200 answer falls back to AGENT_TOKEN, which revert-red-main.yml
-# already reads runs with. The guard checks nothing out, and it receives
+# so a non-200 answer falls back to AGENT_TOKEN. The guard checks nothing out, and it receives
 # AGENT_TOKEN only on a schedule run. A repository adopts v1.29.3 in one
 # CI-file PR, which can ride its v1.29.2 adoption bump PR while that is open.
 # v1.29.2 (ruling 239(8), 2026-10-28): comments only; no job,
@@ -689,8 +688,7 @@
 # workflow_dispatch, and on a PR labelled ci:full (kept as the opt-in). A new
 # `soak` job loops the integration suite in the integration image for
 # SOAK_MINUTES. CI Gate stays the one required check; integration and soak are
-# `full` in it. A red full tier on main is reverted through a PR by the new
-# revert-red-main.yml (ships beside this file; ci-standard.md §8). A repo's
+# `full` in it. A repo's
 # CUSTOMIZE race job joins the PR tier (`pr` in CI Gate, no tier `if:`); its
 # other CUSTOMIZE suites take CI_FULL_TIER's expression and are `full`.
 # v1.23 also (Tenant Agent m674 item 3, 2026-10-18: per-run image tags filled
