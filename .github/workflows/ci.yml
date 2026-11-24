@@ -14,10 +14,10 @@
 # the run hosted with a ::warning: both are needed to place a run on the
 # Dells). Hosted use is H/HS; self-hosted use is the larger of S1/C1 and
 # S2/C2. The pool with the lower use wins, compared by cross-multiplication
-# in whole numbers, and a tie goes hosted; a full pool (H >= HS, or
+# in whole numbers, and a tie goes self-hosted; a full pool (H >= HS, or
 # S1 >= C1 or S2 >= C2) sends the run to the other; with both full, the run
 # takes the pool with fewer queued jobs (bigdisk and bigdisk-docker
-# together), and a tie goes hosted. The self-hosted units are shared across
+# together), and a tie goes self-hosted. The self-hosted units are shared across
 # repositories, so C1 and C2 can overstate this repository's free room;
 # counting its queued self-hosted jobs corrects for that: when the units
 # are busy elsewhere its jobs queue, its self-hosted use rises, and its
@@ -1282,11 +1282,11 @@ jobs:
       # hosted default with a ::warning). Hosted use is H/HS; self-hosted use
       # is the larger of S1/C1 and S2/C2. Then:
       #   - both below their limit: the lower use wins, compared by
-      #     cross-multiplication (self-hosted wins only when S1*HS < H*C1 and
-      #     S2*HS < H*C2); a tie goes hosted;
+      #     cross-multiplication (self-hosted wins when S1*HS <= H*C1 and
+      #     S2*HS <= H*C2); a tie goes self-hosted;
       #   - one pool full (H >= HS; or S1 >= C1 or S2 >= C2): the other pool;
       #   - both full: the pool with fewer queued jobs (bigdisk and
-      #     bigdisk-docker together for the Dells); a tie goes hosted.
+      #     bigdisk-docker together for the Dells); a tie goes self-hosted.
       # The units are shared across repositories, so C1 and C2 can overstate
       # this repository's free room: when they are busy elsewhere its jobs
       # queue, S1 or S2 rises, and its runs go hosted.
@@ -1416,15 +1416,15 @@ jobs:
           [ "$H" -lt "$HS" ] || hfull=1
           { [ "$S1" -lt "$C1" ] && [ "$S2" -lt "$C2" ]; } || sfull=1
           if [ "$hfull" = 1 ] && [ "$sfull" = 1 ]; then
-            [ "$SQ" -lt "$HQ" ] && pick=self
+            [ "$SQ" -le "$HQ" ] && pick=self
             why="both pools full: hosted $HQ queued, self-hosted $SQ queued"
           elif [ "$hfull" = 1 ]; then
             pick=self; why="the hosted pool is full ($H of $HS)"
           elif [ "$sfull" = 1 ]; then
             why="the self-hosted pool is full (bigdisk $S1 of $C1, bigdisk-docker $S2 of $C2)"
           else
-            # self-hosted use, max(S1/C1, S2/C2), below hosted use H/HS.
-            [ $((S1 * HS)) -lt $((H * C1)) ] && [ $((S2 * HS)) -lt $((H * C2)) ] && pick=self
+            # self-hosted use, max(S1/C1, S2/C2), at or below hosted use H/HS.
+            [ $((S1 * HS)) -le $((H * C1)) ] && [ $((S2 * HS)) -le $((H * C2)) ] && pick=self
             why="use hosted $H/$HS, bigdisk $S1/$C1, bigdisk-docker $S2/$C2"
           fi
           if [ "$pick" = self ]; then
@@ -3247,7 +3247,7 @@ jobs:
     # CUSTOMIZE (go-enclave): and only on the guard's run verdict, so
     # a refused workflow_dispatch does not check out and run its branch.
     if: ${{ (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/ci/deps-bump') && !github.event.pull_request.draft && needs.preflight.outputs.verdict == 'run' }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.server_url == 'https://github.com' && fromJSON(needs.preflight.outputs.runner_docker) || 'bigdisk' }}   # the preflight runner selection, as integration
     timeout-minutes: 11       # CUSTOMIZE: ceil(1.5 x this job's 72-hour p95), ci-standard.md §12
     env:
       CI_STACK_PREFIX: ${{ github.event.repository.name }}-ci-
@@ -3278,7 +3278,10 @@ jobs:
         run: scripts/ci-mask-lan.sh
 
       # A GitHub-hosted runner has about 14 GB free; the image build needs more.
+      # Only on a GitHub-hosted runner, as in the integration job (v1.48):
+      # a self-hosted runner has the disk and no sudo.
       - name: Free disk for the image build
+        if: runner.environment == 'github-hosted'
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
           df -h /
