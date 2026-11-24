@@ -45,12 +45,13 @@ const (
 )
 
 // templateRunners names, per workflow, the jobs that take the template's
-// runs-on rather than hostedRunner, each with the one value it must have.
+// runs-on or preflight's runner selection rather than hostedRunner, each with
+// the one value it must have.
 var templateRunners = map[string]map[string]string{
 	".github/workflows/ci.yml": {
 		"preflight": preflightRunner, "ci-gate": gateRunner, "publish-images": releaseRunner,
 		"lint": dockerRunner, "lint-gates": dockerRunner, "image": dockerRunner,
-		"integration": dockerRunner, "soak": dockerRunner,
+		"integration": dockerRunner, "soak": dockerRunner, "fips": dockerRunner,
 	},
 }
 
