@@ -6,7 +6,73 @@
 // This file is part of go-enclave. Use of this source code is governed by the
 // MIT license that can be found in the LICENSE file.
 
-// Package providertest is the conformance suite for the go-enclave provider seam; run [TestProvider] against a provider.
+// Package providertest is the conformance suite for the go-enclave provider
+// seam. Anything implementing [enclave.KeyProtector] or [enclave.RootUnsealer]
+// (a TPM, an HSM, a cloud KMS) runs [TestProvider] against its own provider in
+// its own repository. Like [testing/fstest.TestFS], it is one call that returns
+// an error naming every property that failed, and it does not import testing.
+//
+// # Retention
+//
+// The seam's signatures constrain where a provider writes plaintext, not what
+// it keeps:
+//
+//	Unprotect(ctx context.Context, blob, key []byte) error
+//	UnsealRoot(ctx context.Context, dst []byte) error
+//
+// A provider can write into the caller's locked slice and keep its own copy.
+// This suite checks that a KeyProtector does not. It does not require that a
+// provider never materializes plaintext in its own memory, since every real
+// backend decrypts into a fresh slice; it requires that the provider wipe that
+// transient, as [enclave.KeyProtector] states. Key expansion inside crypto/aes
+// is out of scope.
+//
+// Two instruments carry the retention checks:
+//
+//   - The spy. The suite owns every slice it hands the provider and watches it
+//     afterwards: a destination must not be overwritten or wiped by a later
+//     call, a destination the caller wiped must not be written again, and
+//     Protect must copy out of its input rather than keep the slice. Each
+//     assertion is preceded by a control that fails if its setup did not
+//     happen, so no assertion is vacuous.
+//   - The residue sweep (Linux only). After Unprotect returns and the caller
+//     wipes its destination, it searches the process's memory for a whole copy
+//     of the key. It first proves it can find the key while a legitimate copy
+//     is resident; a sweep that cannot run or is blind makes the run return an
+//     error matching [ErrNotMeasured], unless [Config.SkipResidueSweep] accepts
+//     that. It is the only instrument that sees a retained copy, but a copy
+//     stranded on a freed goroutine stack is out of any wipe's reach, so it
+//     corroborates the spy rather than replacing it.
+//
+// # Context
+//
+// [TestProvider] passes its context to every provider call. A run whose
+// context ends before it finishes returns an error matching [ErrAborted]; it
+// never returns nil.
+//
+// For each claimed mode the suite also checks the provider's half of the seam's
+// context contract (see [enclave.RootUnsealer]): a call made with a context
+// that is already canceled or past its deadline must fail with an error
+// matching that context's error, not [enclave.ErrSealedAuthentication], must
+// write no key material into its destination, and must consume nothing a later
+// call needs. Cancellation arriving mid-call is not measured. Ended-context
+// calls run on their own goroutine, so a provider that never returns cannot
+// hold a run whose context is bounded; the run is then reported aborted, not as
+// a provider failure. With an unbounded context such a provider hangs the run
+// until go test -timeout reports it.
+//
+// # Usage
+//
+//	func TestConformance(t *testing.T) {
+//		err := providertest.TestProvider(t.Context(), providertest.Config{
+//			New:   func() (any, error) { return NewTPMProvider(dev) },
+//			Modes: []enclave.Mode{enclave.ModePerOperation},
+//			Logf:  t.Logf,
+//		})
+//		if err != nil {
+//			t.Fatal(err)
+//		}
+//	}
 package providertest
 
 import (
@@ -29,22 +95,69 @@ const keyBytes = enclave.RootKeyBytes
 
 // Config describes the provider under test.
 type Config struct {
-	// New returns a fresh provider, a [enclave.KeyProtector], [enclave.RootUnsealer] or both.
+	// New returns a fresh provider ready for use. It is called at most once
+	// per check (twice by the mode-pairing check), so a check that leaves a provider in
+	// a terminal state does not affect the next. A nil or typed-nil result is
+	// reported as a failure.
+	//
+	// Instances need not be independent: a device-backed provider may hand
+	// every instance the same key, and the suite never requires one instance
+	// to refuse a blob another produced.
+	//
+	// The result is typed any because a provider implements
+	// [enclave.KeyProtector], [enclave.RootUnsealer], or both.
 	New func() (any, error)
 
-	// Modes lists the sealing modes the provider claims, checked in both directions.
+	// Modes lists the sealing modes this provider claims to serve. It must be
+	// non-empty and name only valid modes. The claim is checked in both
+	// directions: each named mode's interface must be implemented and accepted
+	// by [enclave.NewSealer], and each unnamed mode's interface must not be
+	// implemented. The second direction catches a stub method, such as a
+	// placeholder UnsealRoot on a per-operation provider, that would let a
+	// caller select a mode the provider does not really serve.
 	Modes []enclave.Mode
 
-	// SkipResidueSweep, when non-empty, is why the residue sweep is skipped; empty, an unmeasured sweep is [ErrNotMeasured].
+	// SkipResidueSweep, when non-empty, records why the process-memory residue
+	// sweep is not run against this provider, and skips it. The reason is
+	// echoed through Logf. It is also the only way to accept an unmeasured
+	// sweep: left empty, a sweep that cannot run (off Linux, without locked
+	// memory, or blind on this host) makes [TestProvider] return an error
+	// matching [ErrNotMeasured].
+	//
+	// The legitimate use is a transit the provider cannot wipe, such as a
+	// cloud KMS response body owned by net/http's reader. It is not a way to
+	// quiet a failure whose cause is unknown.
 	SkipResidueSweep string
 
-	// SingleUseRoot, when non-empty, is why UnsealRoot succeeds only once per instance; it relaxes the two second-call checks.
+	// SingleUseRoot, when non-empty, records why this provider's UnsealRoot can
+	// succeed only once per instance (for example, it consumes a one-shot
+	// handle), and relaxes the two checks that need a second call: the
+	// full-width-write and determinism proof, and the root destination spy.
+	// Retention of the root destination is then unmeasured. The reason is
+	// echoed through Logf. A [enclave.Sealer] calls UnsealRoot at most once,
+	// so such a provider still satisfies the seam.
 	SingleUseRoot string
 
-	// PublicKey declares that Protect needs no secret; set it with Forge, or SkipForgery accepts the gap.
+	// PublicKey declares that Protect needs no secret: anyone holding the
+	// provider's public key can build a blob for Unprotect (an RSA-OAEP, ECIES
+	// or HPKE wrap). The seam requires such a provider to authenticate the
+	// blob with something an attacker lacks, such as a signature by a device
+	// key. The tampered-blob cases cannot tell the difference, since a bare
+	// wrap's padding or tag refuses every malformed blob yet opens a well-formed
+	// one an attacker built, so the suite needs Forge to build one. Set without
+	// Forge, the property is unmeasured and [TestProvider] returns an error
+	// matching [ErrNotMeasured], unless SkipForgery accepts that. It requires
+	// [enclave.ModePerOperation].
 	PublicKey bool
 
-	// Forge builds a blob from the provider's public material only; Unprotect must refuse it.
+	// Forge plays the attacker against a public-key provider: given the
+	// provider under test and a key, it returns a blob wrapping that key built
+	// only from what an attacker has, the provider's public material. For
+	// example, the key encrypted to the provider's public key and signed, if
+	// the provider expects a signature, by a key the attacker generated.
+	// Unprotect must refuse it with an error matching
+	// [enclave.ErrSealedAuthentication]. Forge runs whether or not PublicKey is
+	// set. It requires [enclave.ModePerOperation].
 	Forge func(p enclave.KeyProtector, key []byte) ([]byte, error)
 
 	// SkipForgery, when non-empty, records why the forged-blob check is not
@@ -58,7 +171,25 @@ type Config struct {
 	Logf func(format string, args ...any)
 }
 
-// TestProvider runs the conformance suite against cfg's provider and returns nil or every finding.
+// TestProvider runs the conformance suite against the provider cfg describes
+// and returns nil if it conforms. Otherwise it returns a [*FindingsError]
+// holding one [*PropertyError] per failed assertion, each naming the property,
+// what was observed and what the seam requires.
+//
+// ctx is handed to every provider call the suite makes and bounds the run. If
+// it ends before the run finishes, the suite stops at the next check and the
+// returned error matches [ErrAborted] (an [*AbortedError] carrying the
+// context's error), alongside whatever properties had already failed while
+// the context was live. A call that failed only because the run's context
+// ended is not reported against the provider.
+//
+// A returned error means the provider does not honor the seam, except one
+// matching [ErrInvalidConfig] (a [*ConfigError]: cfg could not be run and no
+// provider was tested), [ErrAborted] (the run is incomplete), or
+// [ErrNotMeasured] (a [*NotMeasuredError]: a property could not be measured on
+// this host and cfg did not accept that). A nil return means every property was
+// measured and held, except those cfg explicitly relaxed; what those were, and
+// why, went to [Config.Logf].
 func TestProvider(ctx context.Context, cfg Config) error {
 	if cfg.New == nil {
 		return &ConfigError{Field: "New", Reason: "is nil; the suite has no provider to test"}

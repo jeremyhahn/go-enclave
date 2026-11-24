@@ -206,7 +206,43 @@ func sweepGeneration() uint64 { return sweepGen.Load() }
 // sweepInFlight reports whether g was taken while a sweep was running.
 func sweepInFlight(g uint64) bool { return g%2 == 1 }
 
-// WipeAll destroys every memory enclave not yet reclaimed and sweeps registered backends; for process shutdown only, never from a library or a borrow. See docs/shutdown-sweep/engineering.md.
+// WipeAll destroys every memory enclave this package has handed out and not
+// yet reclaimed, including [Sealer] and [SoftwareProvider] keys, and retries
+// the release of every mapping a failed construction could not give back. It
+// does not touch [Sealed] values; after a [ModeRootKey] sweep they fail
+// to open with [ErrSealerWiped] (see [Sealed.Openable]).
+//
+// It is for orderly shutdown and must be called only by the code that owns the
+// process, never by a library: it destroys enclaves belonging to every
+// subsystem. Never call it from inside a borrow.
+//
+// It raises no panic of its own (a panicking [Sweeper] is the backend's panic
+// and is not recovered) and never unmaps under a lock holder. A held enclave is
+// waited for until its holder lets go or ctx ends, then skipped and counted.
+// ctx bounds only waiting (for another sweep, for borrows, for contended
+// locks); everything not held is reclaimed even under a done or nil ctx. One
+// sweep runs at a time. Enclaves registered mid-sweep are tried but never
+// extend the sweep. Give it a deadline:
+//
+//	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+//	defer cancel()
+//	if n, err := enclave.WipeAll(ctx); n != 0 || err != nil {
+//	    log.Printf("enclave: %d still held at exit, err=%v", n, err)
+//	}
+//
+// It runs in two phases inside the one sweep slot: locked memory first (every
+// enclave, an [Allocator]'s included), then every registered backend other
+// than the default that implements [Sweeper], snapshotted under the registry's
+// read lock, sorted by name, and called after releasing it with ctx unchanged,
+// nil included. A backend registered after the snapshot waits for the next
+// WipeAll; a failing Sweep does not stop the rest.
+//
+// The count is how many locked-memory entries are still held at return, read
+// from the ledgers under their lock, plus every held count a Sweep returned.
+// The error is nil, [ErrSweepInProgress] if the call was never admitted (it
+// swept nothing), or a [*SweepError] with what the sweep found, each failed
+// Sweep included. A ctx ending during an admitted sweep is not an error. It is
+// safe to call repeatedly. See docs/shutdown-sweep/engineering.md.
 func WipeAll(ctx context.Context) (int, error) {
 	if !admitSweep(ctx) {
 		return ledgerCount(), ErrSweepInProgress

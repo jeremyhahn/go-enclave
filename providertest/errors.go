@@ -34,10 +34,16 @@ func (e *ConfigError) Error() string { return "providertest: Config." + e.Field 
 // Is reports whether target is [ErrInvalidConfig].
 func (e *ConfigError) Is(target error) bool { return target == ErrInvalidConfig }
 
-// ErrAborted matches the error [TestProvider] returns when its context ended before the run finished.
+// ErrAborted matches the error [TestProvider] returns when its context ended
+// before the run finished. The run is incomplete: it is neither a pass nor, by
+// itself, a finding against the provider. Properties that had already failed
+// while the context was live are reported alongside it and are real.
 var ErrAborted = errors.New("providertest: run aborted because its context ended")
 
-// AbortedError is the concrete error behind [ErrAborted]; it unwraps to the context's error.
+// AbortedError is the concrete error behind [ErrAborted]. Its Cause is the
+// run context's error: it matches ErrAborted under errors.Is and unwraps to
+// Cause, so a caller can also match context.Canceled or
+// context.DeadlineExceeded.
 type AbortedError struct {
 	// Cause is the run context's error.
 	Cause error
@@ -58,7 +64,10 @@ func (e *AbortedError) Is(target error) bool { return target == ErrAborted }
 // Unwrap returns the cause.
 func (e *AbortedError) Unwrap() error { return e.Cause }
 
-// FindingsError holds every finding of a [TestProvider] run in order, reachable through Unwrap.
+// FindingsError is what [TestProvider] returns when its run found anything:
+// every [*PropertyError], [*NotMeasuredError] and [*AbortedError] of the run,
+// in the order they were found. errors.Is and errors.As reach each one through
+// Unwrap.
 type FindingsError struct {
 	// Findings holds the run's findings, never empty in an error TestProvider
 	// returns.

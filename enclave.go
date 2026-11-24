@@ -44,7 +44,52 @@ type memoryState struct {
 // unset reports whether e is nil or the zero lockedRegion: no enclave at all.
 func (e *lockedRegion) unset() bool { return e == nil || e.memoryState == nil }
 
-// NewMemory moves data into a new frozen memory enclave and wipes the caller's slice on every path.
+// NewMemory moves data into a new memory enclave: locked, guarded, read-only
+// pages the package maps itself. The caller's slice is wiped on every return
+// path, including failure.
+//
+// It returns [ErrEmptyEnclave] for empty data and [ErrLockedMemoryUnavailable]
+// when the kernel refuses the pages (also matching [ErrReleasedWithoutWipe] if
+// the rollback had to unmap unwiped); a failure touches no other enclave. A
+// concurrent [WipeAll] can make a successful return an already-destroyed
+// enclave, so callers constructing during shutdown must check IsAlive.
+//
+// The enclave is handed out as a [ByteAccess]; reach its [Freezer] capability
+// with [As]. On failure the result is a nil interface. Every method holds the
+// enclave's lock for the whole access, so Destroy and Freeze wait out
+// in-flight borrows, and every copy of the handle is the same enclave, so one
+// Destroy reaches all of them. Beyond the [Handle], ByteAccess and Freezer
+// contracts:
+//
+//   - WithBytes holds the read lock across fn, so Destroy, Freeze and
+//     [WipeAll] wait for it. fn must not retain the view or call any method on
+//     the same enclave (deadlock); it may use other enclaves. A write through
+//     the view fills a sized enclave before Freeze and faults after. A nil fn
+//     is [ErrNilFunc] on an enclave that exists, and calls nothing.
+//   - EqualTo's timing reveals whether the lengths differ but not the
+//     contents.
+//   - Freeze returns [ErrEnclaveDestroyed] for a destroyed enclave, and
+//     [ErrLockedMemoryUnavailable] if mprotect is refused, leaving the enclave
+//     alive and writable. A frozen enclave whose later unprotect is denied is
+//     released unwiped ([ErrReleasedWithoutWipe] from Destroy).
+//   - Backend is the [Allocator] that admitted the enclave, or
+//     [DefaultBackend] for an unbudgeted one, also once destroyed.
+//   - String and GoString mask the contents.
+//
+// Destroy wipes the material, verifies the canary, and unlocks and unmaps the
+// pages. It is idempotent and never panics. It returns nil, or:
+//
+//   - [ErrReleasedWithoutWipe]: mprotect was denied, the pages were unmapped
+//     unwiped and are released.
+//   - [ErrLockedMemoryUnavailable]: munlock or munmap was refused. The pages,
+//     the [WipeAll] ledger entry and any [Allocator] reservation are kept;
+//     Destroy again resumes. Once wiped, the enclave reads as destroyed.
+//   - [ErrEnclaveCorrupted]: the canary or guards were overwritten. The pages
+//     are still wiped and released; if the release was also refused the error
+//     matches ErrLockedMemoryUnavailable too and the retry reports it again.
+//
+// Test ErrReleasedWithoutWipe first. A discarded error loses nothing: the next
+// WipeAll retries held pages and reports every detected corruption.
 func NewMemory(data []byte) (ByteAccess, error) {
 	return byteAccess(newMemory(data))
 }
@@ -59,7 +104,10 @@ func newMemory(data []byte) (*lockedRegion, error) {
 	return publish(m, err, nil, nil)
 }
 
-// NewMemoryCopy is [NewMemory] without wiping src, which the caller must [Wipe].
+// NewMemoryCopy is [NewMemory] without the wipe: src is left
+// untouched on every path. Prefer NewMemory; the src kept here is an
+// unprotected heap copy the caller must [Wipe] when done. The result is frozen
+// and the errors are NewMemory's.
 func NewMemoryCopy(src []byte) (ByteAccess, error) {
 	return byteAccess(newMemoryCopy(src))
 }
@@ -73,7 +121,30 @@ func newMemoryCopy(src []byte) (*lockedRegion, error) {
 	return publish(m, err, nil, nil)
 }
 
-// NewMemorySized returns an enclave over n zeroed, writable bytes; fill it, then Freeze.
+// NewMemorySized returns an enclave over n zeroed, WRITABLE bytes, so
+// generated material is produced in locked memory and never on the heap:
+//
+//	e, err := enclave.NewMemorySized(32)
+//	if err != nil {
+//	    return err
+//	}
+//	defer e.Destroy()
+//	if err := e.WithBytes(func(key []byte) error {
+//	    _, err := io.ReadFull(rand.Reader, key)
+//	    return err
+//	}); err != nil {
+//	    return err
+//	}
+//	var f enclave.Freezer
+//	enclave.As(e, &f) // every memory enclave is a Freezer
+//	if err := f.Freeze(); err != nil { // a refused Freeze leaves it writable
+//	    return err
+//	}
+//
+// Until Freeze succeeds, finish the fill before sharing the enclave, and know
+// that a retained slice silently corrupts the material instead of faulting.
+// It returns [ErrInvalidSize] or [ErrLockedMemoryUnavailable], otherwise as
+// [NewMemory].
 func NewMemorySized(n int) (ByteAccess, error) {
 	return byteAccess(newMemorySized(n))
 }
@@ -284,5 +355,8 @@ func (e *lockedRegion) Backend() Backend {
 	return e.admitter
 }
 
-// KeyScheduleErasure reports whether AES key schedules and HKDF temporaries are erased after use.
+// KeyScheduleErasure reports whether AES key schedules and HKDF temporaries
+// are erased after use. It is true only with GOEXPERIMENT=runtimesecret on
+// linux/amd64 or linux/arm64 (not Android), where they run under
+// runtime/secret.Do; elsewhere they stay on the heap until reused.
 func KeyScheduleErasure() bool { return keyScheduleErasure }

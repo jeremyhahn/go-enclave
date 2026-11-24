@@ -47,7 +47,13 @@ type Config struct {
 	// SkipResidueSweep, if set, is the reason the residue sweep may not run.
 	// Without it, a sweep that cannot run is reported as ErrNotMeasured.
 	SkipResidueSweep string
-	// VerifyEvidence, if set, judges whether evidence binds nonce; without it Attest is reported unchecked.
+	// VerifyEvidence, if set, returns nil when evidence binds nonce and an
+	// error when it does not, as the attestation's relying party would judge
+	// it. With it the suite checks that Attest binds its nonce: evidence for
+	// one nonce verifies against that nonce and not against another. Without
+	// it the suite cannot tell bound evidence from evidence that merely
+	// differs between calls, and reports CapabilityAttest as an
+	// [*UncheckedCapabilityError] for every Attester it meets.
 	VerifyEvidence func(nonce []byte, evidence enclave.Evidence) error
 	// Logf receives notes about skipped optional measurements.
 	Logf func(format string, args ...any)
@@ -57,7 +63,10 @@ type Config struct {
 type HandleCase struct {
 	// Name is unique among the cases and names the case in every failure.
 	Name string
-	// New returns a live handle of b; ByteAccess material should be random.
+	// New returns a live handle of b, such as a key the device generates. A
+	// ByteAccess handle's material should be random: the residue sweep cannot
+	// tell one repeated byte from the rest of the process and leaves it
+	// unmeasured.
 	New func(ctx context.Context, b enclave.Backend) (enclave.Handle, error)
 	// Import, for an Importer, is the option set the suite imports ImportSize
 	// random bytes with; the case then also checks the purpose's handle contract.
@@ -69,7 +78,10 @@ type HandleCase struct {
 	Capabilities []enclave.Capability
 }
 
-// TestBackend runs every check against cfg's backend and returns nil or a typed error.
+// TestBackend runs every check against cfg's backend and returns nil, a
+// [*ConfigError], an [*UncheckedCapabilityError] for a capability the suite
+// refuses from the configuration alone, or a [*FindingsError] holding every
+// finding of the run.
 func TestBackend(ctx context.Context, cfg Config) error {
 	if ctx == nil {
 		ctx = context.Background()

@@ -16,9 +16,29 @@ import (
 	"sync"
 )
 
-// The backend seam a hardware enclave module implements; see docs/backends/architecture.md.
+// The backend seam: what a hardware enclave module (a TEE, a secure element,
+// a TPM) implements so its enclaves stand where a
+// memory enclave ([NewMemory]) stands. Locked memory is the default backend; every other
+// backend ships as its own module. The design is docs/backends/architecture.md.
 
-// Handle is a reference to material a [Backend] holds; other abilities are capabilities found by type assertion.
+// Handle is the core every backend's enclave provides: a reference to
+// material a [Backend] holds. Everything else an enclave can do is an optional
+// capability, found by type assertion ([ByteAccess], [Freezer], [Deriver],
+// [AEAD], [Attester], and the standard library's crypto.Signer and
+// crypto.Decrypter); an operation that needs one a handle lacks fails with a
+// [*CapabilityError], never a panic and never a silent fallback.
+//
+// A Handle's dynamic type is a pointer to shared state, so every copy of the
+// handle refers to the same material and one Destroy reaches all of them.
+// Every method, the capabilities' included, is safe for concurrent use and
+// never panics on a live or destroyed handle. A nil receiver is outside the
+// contract: a backend whose type supports one documents it.
+//
+// After Destroy, every capability method that returns an error returns
+// [ErrEnclaveDestroyed], one sentinel for every backend. A method with no
+// error result reports a non-secret constant and keeps reporting it: [AEAD]'s
+// NonceSize and Overhead, and the public key from crypto.Signer's and
+// crypto.Decrypter's Public.
 type Handle interface {
 	// Size reports the length in bytes of the material held, or 0 once it is
 	// destroyed. For material that never leaves its device it is the key's
@@ -28,7 +48,11 @@ type Handle interface {
 	// IsAlive reports whether the handle still holds its material.
 	IsAlive() bool
 
-	// Destroy releases the material; it is idempotent and waits out in-flight borrows.
+	// Destroy releases the material: wiped, erased or deleted, as the backend
+	// does it. It is idempotent, waits out in-flight borrows and operations,
+	// and returns nil or a typed error. A nil error means the material is gone;
+	// a backend documents which errors leave it held and whether calling
+	// Destroy again resumes the release.
 	Destroy() error
 
 	// Backend returns the backend that made the handle, also once it is
@@ -36,9 +60,23 @@ type Handle interface {
 	Backend() Backend
 }
 
-// Backend makes and holds the material behind handles; capabilities are found by type assertion.
+// Backend makes and holds the material behind handles. The core is its name;
+// everything else is an optional capability found by type assertion
+// ([Importer], [Sweeper], [Confiner], [Attester], [Prober]). A backend reaches this package by
+// explicit injection or by [Register]; none registers itself at import.
+//
+// A backend's concrete type is its native interface. Callers reach it with a
+// type assertion, or with [As] when the backend wraps another.
 type Backend interface {
-	// Name is the backend's fixed registry label: 1 to 64 bytes of [a-z0-9.-], starting and ending alphanumeric.
+	// Name is the label the backend is registered and configured under: 1 to
+	// 64 bytes of lowercase ASCII letters, digits, '-' and '.', starting and
+	// ending with a letter or digit, such as "tdx" or "sev-snp". It must return
+	// the same value for the backend's whole life.
+	//
+	// It names a kind of backend, not an instance: two devices of one module,
+	// or a budgeted [Allocator] and the default, report the same name, and at
+	// most one of them is registered. Identity is the value h.Backend()
+	// returns, never a lookup by name.
 	Name() string
 }
 
@@ -58,7 +96,10 @@ type ByteAccess interface {
 	EqualTo(other []byte) (bool, error)
 }
 
-// Freezer is the capability of a handle that can be made read-only; Freeze is idempotent and irreversible.
+// Freezer is the capability of a handle that can be made read-only, so a
+// stray write faults. Freeze is idempotent and irreversible. A handle without
+// it is either read-only from birth (material that never leaves its device)
+// or cannot be protected; [ByteAccess] alone promises neither.
 type Freezer interface {
 	Handle
 
@@ -73,11 +114,25 @@ type Freezer interface {
 type Deriver interface {
 	Handle
 
-	// Derive returns a new handle from the same backend holding n bytes derived from this material and bound to info.
+	// Derive returns a new handle, from the same backend, holding n bytes
+	// derived from this handle's material and bound to info. The backend
+	// defines the function and documents it; ctx bounds the device work as
+	// [RootUnsealer] describes.
 	Derive(ctx context.Context, info []byte, n int) (Handle, error)
 }
 
-// AEAD is the capability of a handle that seals and opens with a key it holds; every failure is an error.
+// AEAD is the capability of a handle that seals and opens with an
+// authenticated cipher whose key it holds, so the key never enters this
+// process, such as a secure element's AES-GCM key. It is this package's own
+// rather than cipher.AEAD, whose Seal has no error result and so cannot report
+// a destroyed handle or a failed device call.
+//
+// Seal and Open follow cipher.AEAD's contract on dst, nonce and
+// additionalData, except that every failure is an error: [ErrEnclaveDestroyed]
+// once the handle is destroyed, [ErrInvalidNonce] for a nonce that is not
+// NonceSize bytes, [ErrAEADAuthentication] when Open cannot authenticate, and
+// the backend's own typed errors for the device. Neither panics, and a failed
+// Open returns no plaintext.
 type AEAD interface {
 	Handle
 
@@ -99,9 +154,16 @@ type AEAD interface {
 	Open(dst, nonce, ciphertext, additionalData []byte) ([]byte, error)
 }
 
-// Attester is the capability of producing evidence of what holds the material.
+// Attester is the capability of producing evidence of what holds the
+// material. A [Backend] that implements it attests the platform (a TDX quote,
+// an SEV-SNP report); a [Handle] that implements it attests that one key (a
+// TPM certification, a secure element's key attestation).
 type Attester interface {
-	// Attest returns evidence binding nonce (1 to 64 bytes); longer nonces are refused, never truncated.
+	// Attest returns evidence that binds nonce, which the caller chose and
+	// verifies in the evidence. nonce is 1 to 64 bytes; a caller with more
+	// hashes it first. A backend that cannot bind every byte it was given
+	// refuses rather than truncating. ctx bounds the device work as
+	// [RootUnsealer] describes.
 	Attest(ctx context.Context, nonce []byte) (Evidence, error)
 }
 
@@ -122,7 +184,15 @@ type Evidence struct {
 type Importer interface {
 	Backend
 
-	// Import moves material into a new handle for the purpose and algorithm in opts, wiping the caller's slice on every path.
+	// Import moves material into a new handle for the purpose and algorithm
+	// opts name, and wipes the caller's slice on every return path, as
+	// [NewMemory] does. The backend resolves opts with [NewImportSpec]
+	// and returns its error; the handle then follows the contract of the
+	// spec's [Purpose]. A backend that cannot hold that purpose and algorithm
+	// refuses with a [*CapabilityError] naming [CapabilityImport], and a
+	// material length the algorithm does not take is [ErrInvalidImport], both
+	// before any device work. ctx bounds the device work as [RootUnsealer]
+	// describes.
 	Import(ctx context.Context, material []byte, opts ...ImportOption) (Handle, error)
 }
 
@@ -133,13 +203,24 @@ type Purpose string
 
 // The purposes an import may name.
 const (
-	// PurposeMaterial is arbitrary material the caller reads back through [ByteAccess].
+	// PurposeMaterial is arbitrary material the caller reads back, such as
+	// what [Sealed] opens into a backend. It takes no algorithm. The
+	// handle implements [ByteAccess], its view holds exactly the material,
+	// and its Size is the material's length.
 	PurposeMaterial Purpose = "material"
 
-	// PurposeWrappingKey is a key that wraps other keys, through [AEAD], [ByteAccess] or both.
+	// PurposeWrappingKey is a key that wraps other keys: a [Sealer]'s
+	// wrapping key or one of its KEKs. It takes an algorithm. The handle
+	// implements [AEAD] for that algorithm, so it wraps in the device, or
+	// [ByteAccess], so the caller wraps in this process, or both; its Size is
+	// the key's length. A backend that enforces usage limits the key to
+	// wrapping.
 	PurposeWrappingKey Purpose = "wrapping-key"
 
-	// PurposeDataKey is a data-encryption key with the contract of [PurposeWrappingKey].
+	// PurposeDataKey is a key that encrypts data: a data-encryption key
+	// (DEK). It takes an algorithm, and its handle has the contract of
+	// [PurposeWrappingKey], except that a backend that enforces usage limits
+	// the key to encrypting data.
 	PurposeDataKey Purpose = "data-key"
 )
 
@@ -153,7 +234,12 @@ const (
 	AlgorithmAES256GCM Algorithm = "aes-256-gcm" // AES-256 in GCM mode
 )
 
-// ImportSpec is an [Importer.Import] request resolved by [NewImportSpec]; every import is transient.
+// ImportSpec is what an [Importer.Import] call asked for, resolved from its
+// [ImportOption] set by [NewImportSpec]. Every import is transient: the
+// material lives until its handle is destroyed or swept, and is never
+// persisted on the device. Usage and persistence attributes join it as new
+// fields and options, each defaulting to what the purpose implies and to
+// transient.
 type ImportSpec struct {
 	// Purpose is what the material is for. Every import names one.
 	Purpose Purpose
@@ -175,7 +261,10 @@ func WithAlgorithm(a Algorithm) ImportOption {
 	return func(s *ImportSpec) { s.Algorithm = a }
 }
 
-// NewImportSpec applies opts in order and returns [ErrInvalidImport] for an invalid result.
+// NewImportSpec applies opts in order and validates the result. It returns
+// [ErrInvalidImport] for a nil option, a missing or unknown purpose, an
+// algorithm on [PurposeMaterial], or a key purpose without a valid algorithm.
+// An [Importer] calls it first, so every backend reads opts the same way.
 func NewImportSpec(opts ...ImportOption) (ImportSpec, error) {
 	var s ImportSpec
 	for _, opt := range opts {
@@ -204,11 +293,20 @@ func NewImportSpec(opts ...ImportOption) (ImportSpec, error) {
 type Sweeper interface {
 	Backend
 
-	// Sweep releases every live handle the backend made and returns how many it could not release.
+	// Sweep releases every live handle the backend made and returns how many
+	// it could not release, with nil or a typed error, as [WipeAll] does for
+	// locked memory. ctx bounds only waiting, for in-flight operations and
+	// contended device sessions: everything not held is released even under
+	// a done or nil ctx, a nil ctx never waits and never panics, and a ctx
+	// ending during the sweep is not an error. It is safe to call repeatedly
+	// and never calls [WipeAll].
 	Sweep(ctx context.Context) (held int, err error)
 }
 
-// Confiner is the capability of a backend whose trust boundary holds this whole process.
+// Confiner is the capability of a backend whose trust boundary holds this
+// whole process, such as a TEE the process runs inside (TDX,
+// SEV-SNP). Memory the process leaves on its heap, an AES key
+// schedule included, is then unreadable from outside the boundary.
 type Confiner interface {
 	Backend
 
@@ -217,14 +315,28 @@ type Confiner interface {
 	ConfinesProcess() bool
 }
 
-// Prober is the capability of a backend [Detect] can select: it ranks itself and probes this host.
+// Prober is the capability of a backend [Detect] can select: it ranks its own
+// security and probes this host for what it needs. Both are the backend's own
+// code; this package only compares ranks and records probe results, and
+// holds no table of backends or ranks. A registered backend without it is
+// never selected.
 type Prober interface {
 	Backend
 
-	// Rank is the backend's fixed security rank: locked memory 0, secretmem 1, TEEs and secure elements above 1.
+	// Rank reports how secure the backend is: [Detect] prefers the usable
+	// backend with the highest rank. The locked-memory backend reports 0 and
+	// the secretmem backend ([NewSecretMemory]) 1; a backend that holds
+	// material beyond the reach of this process's own memory, such as a TEE
+	// or a secure element, reports more than 1. It is fixed for
+	// the backend's life, and it never blocks.
 	Rank() int
 
-	// Probe reports whether the backend is usable on this host: nil or a typed error naming what is missing.
+	// Probe reports whether the backend is usable on this host: nil, or the
+	// backend's own typed error saying what is missing, such as a device that
+	// is absent or refuses the process. It is safe to call repeatedly and
+	// concurrently, returns the same verdict while the host is unchanged,
+	// changes no process state that outlives the call, and never panics. ctx
+	// bounds only waiting, for a device or a service; a nil ctx never ends.
 	Probe(ctx context.Context) error
 }
 
@@ -292,7 +404,19 @@ var (
 // in this package uses. It is registered under [LockedMemoryBackendName].
 func DefaultBackend() Backend { return lockedMemory{} }
 
-// Register adds b to the process registry under b.Name(); a name is never rebound and a backend never unregistered.
+// Register adds b to the process's backend registry under b.Name(), so
+// [Lookup] can find it by name. Registering is always the caller's explicit
+// act: no backend registers itself at import.
+//
+// It returns [ErrInvalidBackend] for a nil or typed-nil b, or a name that is
+// not valid (see [Backend]), and a [*BackendExistsError] when the name is
+// taken, by an earlier Register or by the default ([LockedMemoryBackendName]).
+// A name is never rebound and a backend is never unregistered, so a
+// configuration that names a backend resolves to the same instance for the
+// process's life. Lookup(h.Backend().Name()) returns the backend that made h
+// only when the registered instance made it: an injected, unregistered
+// backend may share the name (see [Backend]). Register is safe for concurrent
+// use.
 func Register(b Backend) error {
 	if isNilInterface(b) {
 		return ErrInvalidBackend
@@ -377,7 +501,17 @@ func validName(name string) bool {
 	return true
 }
 
-// As reports whether v matches target and sets it, like errors.As without the chain; nil inputs return false.
+// As reports whether v matches target and, if so, sets target to it. It is
+// how a caller reaches a backend's, or a handle's, concrete type and so its
+// native interface: v matches when its dynamic type is assignable to the type
+// target points to, or when v has a method As(any) bool that returns true for
+// target, which is how a wrapper exposes what it wraps. The As method sets
+// target itself.
+//
+// It is errors.As without the chain, with one difference: a nil or typed-nil
+// v, or a target that is not a non-nil pointer, returns false instead of
+// panicking. A typed-nil v is refused before its As method could run on a nil
+// receiver. As does not recover a panic raised by v's own As method.
 func As(v, target any) bool {
 	if isNilInterface(v) || target == nil {
 		return false

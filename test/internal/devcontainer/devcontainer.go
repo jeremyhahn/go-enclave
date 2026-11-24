@@ -8,7 +8,12 @@
 
 //go:build integration
 
-// Package devcontainer is the integration suites' guard: Refuse exits unless the process runs with compose.yaml's posture and limits.
+// Package devcontainer is the integration suites' shared guard: every suite's
+// TestMain calls Refuse, which exits unless the process is running in
+// build/docker/devcontainer with exactly the security posture and limits
+// compose.yaml declares. A suite that passes only on a workstation is measuring
+// the workstation, and one that passes under CAP_IPC_LOCK is measuring a
+// ceiling that does not bind.
 package devcontainer
 
 import (

@@ -15,7 +15,10 @@ type RefusalConfig struct {
 	// endpoint. On a host without the hardware it must return a nil
 	// interface and the module's typed unavailable error.
 	New func() (enclave.Backend, error)
-	// Probe, if set, is the module's hardware probe that needs no backend; it must refuse as New does.
+	// Probe, if set, is the module's probe for its hardware that needs no
+	// backend from New. It must refuse as New does. A module whose only
+	// probe is the backend's own [enclave.Prober.Probe], run inside New,
+	// leaves it nil.
 	Probe func(ctx context.Context) error
 	// Step reports whether err is the module's typed unavailable error and,
 	// if so, the step it names as failing, such as "open". It is the
@@ -41,7 +44,16 @@ const (
 	PropertyRefusalBudget = "refusal-budget"
 )
 
-// CheckRefusal checks a hardware backend module refuses cleanly on a host without its hardware; do not run it in parallel.
+// CheckRefusal checks that a hardware backend module, on a host without its
+// hardware, refuses in New and in Probe with its typed unavailable error
+// naming the failing step, registers no backend, and leaves the process's
+// locked-memory budget unchanged.
+//
+// It returns a [*ConfigError] ([ErrInvalidConfig]) when New or Step is nil,
+// nil when the module refuses cleanly, and otherwise a [*FindingsError]
+// holding a [*PropertyError] for each property broken. It reads the
+// process-wide registry and budget, so it must not run in parallel with a
+// test that registers a backend or changes the budget. A nil ctx never ends.
 func CheckRefusal(ctx context.Context, cfg RefusalConfig) error {
 	if cfg.New == nil {
 		return &ConfigError{Field: "New", Reason: "is nil; CheckRefusal needs the module's constructor"}

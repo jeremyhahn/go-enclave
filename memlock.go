@@ -24,13 +24,26 @@ const (
 	// It is the only source for which [LockedMemoryLimit.Bounded] is true.
 	LimitRLimit
 
-	// LimitUnlimited means RLIMIT_MEMLOCK is unbounded; the budget must come from configuration.
+	// LimitUnlimited means RLIMIT_MEMLOCK is RLIM_INFINITY (or exceeds any
+	// int64 budget), as under `ulimit -l unlimited` and in many container
+	// runtimes. No budget is refused, but machine memory and cgroup limits
+	// still apply: the budget has to come from configuration.
 	LimitUnlimited
 
-	// LimitNotEnforced means a finite limit was read but CAP_IPC_LOCK in the initial user namespace lifts it.
+	// LimitNotEnforced means a finite RLIMIT_MEMLOCK was read, but the calling
+	// thread holds CAP_IPC_LOCK in the initial user namespace, so mlock may
+	// exceed it. The capability held only inside a child user namespace (a
+	// rootless container) reports [LimitRLimit]. The figure is in
+	// [LockedMemoryLimit.Bytes] for diagnostics and is never a ceiling.
+	// Capabilities are per-thread on Linux; if threads diverge, the effect is a
+	// skipped refusal and the allocation still fails with
+	// [ErrLockedMemoryUnavailable].
 	LimitNotEnforced
 
-	// LimitUnsupported means the platform exposes no per-process locked-memory limit.
+	// LimitUnsupported means the platform exposes no per-process
+	// locked-memory limit: Windows (which bounds a working-set size instead),
+	// AIX, Solaris and illumos. Unlike [LimitUnlimited] it says nothing was
+	// read, not that the host has no ceiling. Linux and the BSDs are always read.
 	LimitUnsupported
 )
 
@@ -54,7 +67,10 @@ func (s LimitSource) String() string {
 // by [DiscoverLockedMemoryLimit]. Any thread may change RLIMIT_MEMLOCK and a
 // container may be resized afterwards, so it describes the moment it was read.
 type LockedMemoryLimit struct {
-	// Bytes is the ceiling the kernel reported; rely on it only when Bounded is true.
+	// Bytes is the ceiling the kernel reported, in bytes. Rely on it only when
+	// Bounded is true: it is populated for [LimitNotEnforced] and zero when
+	// there was nothing to read, so a zero never means "may lock nothing"
+	// unless Bounded.
 	Bytes int64
 
 	// Bounded reports whether Bytes is a ceiling this process is held to.

@@ -37,7 +37,23 @@ var (
 	errNoProgress  = errors.New("read returned no more than the overlap")
 )
 
-// Find returns the maps lines of every swept mapping containing needle, except home's; it fails closed on unreadable mappings.
+// Find returns the /proc/self/maps lines of every swept mapping (see
+// sweptMapping) that contains needle, excluding the one that contains home.
+// Pass 0 for home to exclude nothing. The scan buffer is wiped after every
+// mapping (see mappingContains).
+//
+// It fails closed: a swept mapping it cannot read returns an
+// *UnreadableMappingError (ErrUnreadableMapping), and a sweep that read nothing
+// returns ErrEmptySweep. Only the kernel's own [vvar] and [vsyscall] regions,
+// and guard pages that /proc/self/pagemap reports as guard regions, are
+// excused. Callers must not discard these errors. A hit is never dropped:
+// one seen before an unreadable mapping is returned without error.
+//
+// It needs an unfiltered /proc that lets a process read its own
+// /proc/self/maps and /proc/self/mem; a caller fails rather than skips without
+// one. Callers must keep their needles out of plain heap or stack locals
+// (generate into locked pages, compare inside borrows), or the sweep finds
+// those copies.
 func Find(needle []byte, home uintptr) ([]string, error) {
 	r, err := Sweep(needle, home)
 	return r.Hits, err

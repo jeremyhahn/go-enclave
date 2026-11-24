@@ -39,7 +39,13 @@ type UnreadablePage struct {
 	PagemapErr error
 }
 
-// UnreadableMappingError carries the unreadable mapping's maps line, the read failure and page-probe evidence.
+// UnreadableMappingError carries the /proc/self/maps line of the mapping that
+// could not be read and the read failure, if the reader reported one. When the
+// reader is /proc/self/mem it also carries the evidence of a page-by-page probe
+// of the whole mapping: the first pages that failed and are not guard pages
+// (at most 16, with their pagemap entries; never their contents), how many
+// such pages there are, how many failing pages the pagemap marks as guard
+// pages, and the release of the running kernel.
 type UnreadableMappingError struct {
 	Mapping         string
 	Err             error
