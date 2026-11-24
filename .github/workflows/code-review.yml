@@ -744,6 +744,10 @@ env:
   NON_CODE_PATHS: '^(docs/.+|\.changelog/.+|(.+/)?changelog\.d/.+|(.+/)?[^/]+\.(md|yml|yaml|toml|json)|(.+/)?[^/]*\.env\.example|(.+/)?(CHANGELOG|LICENSE|ROADMAP)[^/]*|\.github/(CODEOWNERS|ISSUE_TEMPLATE/.+|PULL_REQUEST_TEMPLATE[^/]*)|(.+/)?\.(gitignore|gitattributes|editorconfig|dockerignore|trivyignore|gitleaksignore|markdownlintignore|prettierignore|mailmap))$'
   # A SPEC row branch, as the Row check reads it; code is reviewed only there or under main-fix.
   ROW_BRANCH: '^row/[0-9]+-'
+  # Authors whose non-code PR is approved without a review: the owner and the factory Apps.
+  TRUSTED_AUTHORS: '^(jeremyhahn|[A-Za-z0-9-]+-agent\[bot\])$'
+  # A live PR (jq) whose no-code change needs no review: its head in this repository, its author trusted.
+  TRUSTED_PR: '(env.TRUSTED_AUTHORS | length > 0) and .head.repo.full_name != null and .head.repo.full_name == .base.repo.full_name and ((.user.login // "") | test(env.TRUSTED_AUTHORS))'
   # Root's (0711: uid 1000 may pass through to its codex-home/, never list):
   # the token header, the prompt, the findings, the log of errors, all 0600.
   # Outside the checkout, so nothing here can be mistaken for the change.
@@ -801,6 +805,7 @@ jobs:
       skip: ${{ steps.scope.outputs.skip }}
       code: ${{ steps.code.outputs.code }}
       row: ${{ steps.code.outputs.row }}
+      trusted: ${{ steps.code.outputs.trusted }}
     steps:
       - name: Does the change touch code, and is it a SPEC row PR?
         id: code
@@ -839,13 +844,16 @@ jobs:
             [ "$page" -le 30 ] || code=true
           done
           [ "$seen" -gt 0 ] || code=true
-          labels=$(get "/pulls/$PR_NUM" | jq -c '[.labels[]?.name]')
+          pr=$(get "/pulls/$PR_NUM")
+          labels=$(jq -c '[.labels[]?.name]' <<<"$pr")
+          trusted=false
+          if jq -e "($TRUSTED_PR) == true" <<<"$pr" >/dev/null; then trusted=true; fi
           row=false
           if [[ $HEAD_REF =~ $ROW_BRANCH ]] || jq -e 'index("main-fix") != null' <<<"$labels" >/dev/null; then
             row=true
           fi
-          { echo "code=$code"; echo "row=$row"; } >> "$GITHUB_OUTPUT"
-          echo "code=$code row=$row ($seen files, branch $HEAD_REF)"
+          { echo "code=$code"; echo "row=$row"; echo "trusted=$trusted"; } >> "$GITHUB_OUTPUT"
+          echo "code=$code row=$row trusted=$trusted ($seen files, branch $HEAD_REF)"
       # Owner ruling 443 (2026-11-10): a pull request that changes only workflow
       # files gets no review, and only when InfoSec's guard passes (Y-1 to Y-8,
       # Y-10). FIRST, before the guard and any checkout: the step reads the event
@@ -1288,12 +1296,12 @@ jobs:
       || startsWith(github.event.label.name, 'agent:')
       || startsWith(github.event.label.name, 'model:')
       || startsWith(github.event.label.name, 'effort:'))
-      && (needs.scope.outputs.code == 'false'
+      && ((needs.scope.outputs.code == 'false' && needs.scope.outputs.trusted == 'true')
       || (contains(github.event.pull_request.labels.*.name, 'code-review')
       && contains(github.event.pull_request.labels.*.name, 'task:ready')
       && !contains(github.event.pull_request.labels.*.name, 'task:in-progress')
       && needs.scope.outputs.skip != 'true'
-      && needs.scope.outputs.row == 'true'))
+      && (needs.scope.outputs.row == 'true' || needs.scope.outputs.code == 'false')))
     # v5.9.7: on GitHub the group is the PR, its head sha and the run id, so
     # it never holds a pending run that a newer one could replace: a replaced
     # run is cancelled with no `Code Review (codex)` check-run, and a ruleset
@@ -1621,8 +1629,8 @@ jobs:
             echo "::error::PR $PR_NUM was retargeted to ${base_live:-unknown} since this run was created for $BASE_REF. Push a new head, or take code-review off and add it again, to review against the new base."
             exit 1
           fi
-          # No code changed: the post step approves the head; Codex does not run.
-          if [ "$CODE" = false ]; then
+          # No code changed on a trusted live PR: the post step approves the head; Codex does not run.
+          if [ "$CODE" = false ] && jq -e "($TRUSTED_PR) == true" <<<"$pr" >/dev/null; then
             { echo "requested=true"; echo "nocode=true"; } >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -3716,8 +3724,8 @@ jobs:
             printf '%s\n' "$all"
           }
 
-          # (a) No code changed: no review is required.
-          exempt=0
+          # (a) No code changed on a trusted PR: no review is required.
+          exempt=0 nocode=0
           if [ "$FORGE" = github ]; then
             [[ $BASE_SHA =~ ^[0-9a-f]{40}$ ]] || fail "the event names no base commit"
             files=$(get "/compare/$BASE_SHA...$EVENT_SHA" |
@@ -3735,16 +3743,23 @@ jobs:
             rc=0
             grep -Evq "$NON_CODE_PATHS" <<<"$names" || rc=$?
             [ "$rc" -le 1 ] || fail "NON_CODE_PATHS does not match"
-            [ "$rc" = 0 ] || exempt=1
+            if [ "$rc" = 1 ]; then
+              nocode=1
+              if get "/pulls/$PR_NUM" | jq -e "($TRUSTED_PR) == true" >/dev/null; then exempt=1; fi
+            fi
           fi
           if [ "$exempt" = 1 ]; then
             echo "All $n changed files are documentation or configuration: no code changed, so no code review is required."
             exit 0
           fi
           live_labels=$(get "/pulls/$PR_NUM" | jq -r '.labels[]?.name') || fail "cannot read the labels of PR $PR_NUM"
-          [[ $HEAD_REF =~ $ROW_BRANCH ]] || grep -qx main-fix <<<"$live_labels" ||
+          [ "$nocode" = 1 ] || [[ $HEAD_REF =~ $ROW_BRANCH ]] || grep -qx main-fix <<<"$live_labels" ||
             fail "PR $PR_NUM changes code but is not a SPEC row PR (branch row/<n>-*, or the main-fix label): code is reviewed only on a row PR, so it is not reviewed"
-          echo "$n changed files; at least one is code, so $REVIEWER must approve $EVENT_SHA."
+          if [ "$nocode" = 1 ]; then
+            echo "No code changed, but the PR is from a fork or an untrusted author, so $REVIEWER must approve $EVENT_SHA."
+          else
+            echo "$n changed files; at least one is code, so $REVIEWER must approve $EVENT_SHA."
+          fi
 
           # v5.12.6 (ruling 1046): NO TWIN WAIT. A twin run (same head, same
           # run-name) whose `Codex review` job is queued or in progress posts

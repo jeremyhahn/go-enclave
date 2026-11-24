@@ -15,8 +15,11 @@ the network.
      or a failed step); row=true on a row/<n>- branch or the main-fix label.
   J. Job conditions: a non-code PR runs the review job without labels; a
      code PR runs it only with code-review and task:ready on a row PR.
-  R. The guard: a non-code PR ends requested=true nocode=true before the
-     label checks; a code PR, or an unknown answer, goes on.
+  T. TRUSTED_PR: a non-code PR skips review only when its head is in this
+     repository and its author is trusted (owner, *-agent[bot]); a fork, an
+     outside author or dependabot takes the normal review path.
+  R. The guard: a trusted non-code PR ends requested=true nocode=true before
+     the label checks; a code PR, an untrusted one or an unknown answer goes on.
   B. The post step: a non-code PR is approved with "No code changed; code
      review not required.", through the same live checks and post; Codex's
      steps do not run.
@@ -29,6 +32,7 @@ import json
 import os
 import pathlib
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -322,23 +326,32 @@ def files_page(names):
     return json.dumps([{"filename": n} for n in names])
 
 
-def scope_routes(pages, labels=(), files_code=200, pr_code=200):
+TRUSTED = "o-agent[bot]"
+
+
+def live_pr(labels=(), author=TRUSTED, fork=False):
+    head = "x/r" if fork else REPO
+    return {"head": {"sha": HEAD, "repo": {"full_name": head}}, "base": {"ref": "main", "repo": {"full_name": REPO}},
+            "user": {"login": author}, "labels": [{"name": l} for l in labels]}
+
+
+def scope_routes(pages, labels=(), files_code=200, pr_code=200, author=TRUSTED, fork=False):
     routes = []
     for n, names in enumerate(pages, 1):
         routes.append([f"/pulls/7/files?*&page={n}", files_code, files_page(names)])
     routes.append(["/pulls/7/files?*", files_code, "[]"])
-    routes.append(["/pulls/7", pr_code, json.dumps({"labels": [{"name": l} for l in labels]})])
+    routes.append(["/pulls/7", pr_code, json.dumps(live_pr(labels, author, fork))])
     return routes
 
 
-def context(action, labels, code, row, label=None, draft=False):
+def context(action, labels, code, row, label=None, draft=False, trusted="true"):
     pr = {"number": 7, "state": "open", "draft": draft, "labels": [{"name": n} for n in labels],
           "head": {"repo": {"full_name": REPO}, "sha": HEAD}, "base": {"ref": "main"}}
     event = {"action": action, "pull_request": pr}
     if label is not None:
         event["label"] = {"name": label}
     return {"github": {"server_url": GH, "repository": REPO, "event": event},
-            "needs": {"scope": {"outputs": {"skip": "false", "code": code, "row": row}},
+            "needs": {"scope": {"outputs": {"skip": "false", "code": code, "row": row, "trusted": trusted}},
                       "review": {"outputs": {"agent": ""}}}}
 
 
@@ -348,7 +361,7 @@ def review_runs(src, ctx):
     return truthy(v)
 
 
-def gate_routes(names, labels, verdict):
+def gate_routes(names, labels, verdict, author=TRUSTED, fork=False):
     reviews = [] if verdict is None else [
         {"id": 1, "state": verdict, "commit_id": HEAD, "user": {"login": REVIEWER}, "submitted_at": "2026-11-20T00:00:00Z"}]
     return [
@@ -357,8 +370,7 @@ def gate_routes(names, labels, verdict):
         ["/actions/workflows/5/runs?*", 200, json.dumps({"workflow_runs": []})],
         ["/pulls/7/reviews?*page=1", 200, json.dumps(reviews)],
         ["/pulls/7/reviews?*", 200, "[]"],
-        ["/pulls/7", 200, json.dumps({"head": {"sha": HEAD}, "base": {"ref": "main"},
-                                      "labels": [{"name": l} for l in labels]})],
+        ["/pulls/7", 200, json.dumps(live_pr(labels, author, fork))],
     ]
 
 
@@ -369,7 +381,8 @@ def main():
     src = WORKFLOW.read_text()
     non_code = env_value(src, "NON_CODE_PATHS")
     row_branch = env_value(src, "ROW_BRANCH")
-    base_env = {"NON_CODE_PATHS": non_code, "ROW_BRANCH": row_branch}
+    base_env = {"NON_CODE_PATHS": non_code, "ROW_BRANCH": row_branch,
+                "TRUSTED_AUTHORS": env_value(src, "TRUSTED_AUTHORS"), "TRUSTED_PR": env_value(src, "TRUSTED_PR")}
 
     # P
     rx = re.compile(non_code)
@@ -401,6 +414,17 @@ def main():
         rc, out, reqs, o = run_fake(scope, scope_routes([["main.go"]], labels), dict(base_env, HEAD_REF=ref))
         check(rc == 0 and o.get("row") == want, f"S7 branch {ref} labels {list(labels)}: row={want} (got {o.get('row')})")
 
+    for author, fork, want, what in ((TRUSTED, False, "true", "a factory App, same repository"),
+                                     ("jeremyhahn", False, "true", "the owner, same repository"),
+                                     (TRUSTED, True, "false", "a fork head"),
+                                     ("outsider", False, "false", "an outside author"),
+                                     ("dependabot[bot]", False, "false", "dependabot"),
+                                     ("evil-agent[bot]x", False, "false", "a look-alike login")):
+        rc, out, reqs, o = run_fake(scope, scope_routes([["docs/a.md"]], author=author, fork=fork), env)
+        check(rc == 0 and o.get("trusted") == want and o.get("code") == "false", f"S8 {what}: trusted={want} (got {o})")
+    rc, out, reqs, o = run_fake(scope, scope_routes([["docs/a.md"]]), dict(env, TRUSTED_AUTHORS=""))
+    check(rc == 0 and o.get("trusted") == "false", f"S9 an empty TRUSTED_AUTHORS trusts nobody (got {o})")
+
     # J
     ready = ("code-review", "task:ready")
     check(review_runs(src, context("opened", (), "false", "false")), "J1 a non-code PR runs the review job without labels")
@@ -411,21 +435,28 @@ def main():
     check(not review_runs(src, context("opened", ready, "", "")), "J6 no scope answer: no review job")
     check(not review_runs(src, context("labeled", (), "false", "false", label="dept:software")),
           "J7 an unrelated label on a non-code PR runs no review job")
+    check(not review_runs(src, context("opened", (), "false", "false", trusted="false")),
+          "J8 an untrusted non-code PR without labels runs no review job")
+    check(review_runs(src, context("labeled", ready, "false", "false", label="code-review", trusted="false")),
+          "J9 an untrusted non-code PR with code-review and task:ready is reviewed, row or not")
 
     # R
     review = job(src, "review")
     guard = run_script(step(review, "Check the container, the request, the head and any standing verdict"))
-    m = re.search(r"(# No code changed[^\n]*\nif \[ \"\$CODE\" = false \]; then\n.*?\nfi\n)", guard, re.S)
+    m = re.search(r"(# No code changed[^\n]*\nif \[ \"\$CODE\" = false \] && [^\n]*; then\n.*?\nfi\n)", guard, re.S)
     block = m.group(1) if m else ""
     lab = guard.find("labels=$(jq -c '[.labels[]?.name]' <<<\"$pr\")")
-    nc = guard.find("if [ \"$CODE\" = false ]; then")
+    nc = guard.find("if [ \"$CODE\" = false ] && ")
     ret = guard.find("skip=retargeted")
     check(block and 0 < ret < nc < lab, "R1 the guard's no-code branch sits after the live PR checks, before the label checks")
     snippet = block
-    for code, want in (("false", {"requested": "true", "nocode": "true"}), ("true", {}), ("", {})):
-        rc, out, _, o = run_fake("set -euo pipefail\n" + snippet + "echo WENT_ON\n", [], {"CODE": code})
+    for code, author, fork, nocode in (("false", TRUSTED, False, True), ("true", TRUSTED, False, False), ("", TRUSTED, False, False),
+                                       ("false", TRUSTED, True, False), ("false", "outsider", False, False)):
+        want = {"requested": "true", "nocode": "true"} if nocode else {}
+        pre = "set -euo pipefail\npr=" + shlex.quote(json.dumps(live_pr((), author, fork))) + "\n"
+        rc, out, _, o = run_fake(pre + snippet + "echo WENT_ON\n", [], dict(base_env, CODE=code))
         went = "WENT_ON" in out
-        check(rc == 0 and o == want and went == (code != "false"), f"R2 CODE={code!r}: outputs {want}, went on={code != 'false'} (got {o}, {went})")
+        check(rc == 0 and o == want and went == (not nocode), f"R2 CODE={code!r} author {author} fork={fork}: no-code approval={nocode} (got {o}, {went})")
     env_ok = "          CODE: ${{ needs.scope.outputs.code }}\n" in review
     check(env_ok, "R3 the guard reads the scope job's code output")
 
@@ -460,6 +491,17 @@ def main():
     check(rc == 3 and past(out), f"G5 code on a row branch, no approval: fails at the verdict (rc={rc})")
     rc, out, _, _ = run_fake(gate, gate_routes(["docs/a.md"], (), None), dict(genv, HEAD_REF="row/12-x", NON_CODE_PATHS=""))
     check(rc == 3, f"G7 an empty NON_CODE_PATHS fails the gate (rc={rc})")
+    for author, fork, what in ((TRUSTED, True, "a fork head"), ("outsider", False, "an outside author")):
+        rc, out, _, _ = run_fake(gate, gate_routes(["docs/a.md"], (), None, author, fork), dict(genv, HEAD_REF="feature/x"))
+        check(rc == 3 and "fork or an untrusted author" in out and "no code changed, so" not in out,
+              f"G8 non-code from {what}, no approval: not exempt, the gate fails (rc={rc})")
+        rc, out, _, _ = run_fake(gate, gate_routes(["docs/a.md"], (), "APPROVED", author, fork), dict(genv, HEAD_REF="feature/x"))
+        check("fork or an untrusted author" in out and "not a SPEC row PR" not in out,
+              f"G9 non-code from {what}: the normal review path, no row rule (rc={rc})")
+    rc, out, _, _ = run_fake(gate, gate_routes(["docs/a.md"], (), None, "jeremyhahn"), dict(genv, HEAD_REF="feature/x"))
+    check(rc == 0 and "no code changed" in out, f"G10 non-code from the owner, same repository: passes (rc={rc})")
+    rc, out, _, _ = run_fake(gate, gate_routes(["docs/a.md"], (), None), dict(genv, HEAD_REF="feature/x", TRUSTED_PR=""))
+    check(rc == 3, f"G11 an empty TRUSTED_PR trusts nobody (rc={rc})")
     rc, out, _, _ = run_fake(gate, [["/compare/*", 500, "{}"]], dict(genv, HEAD_REF="row/12-x"))
     check(rc == 3, f"G6 the change cannot be read: fails closed (rc={rc})")
 
