@@ -270,18 +270,7 @@ func TestChangelogAssemble_RefusesWhatItCannotPlace(t *testing.T) {
 // always exercises the fold rather than the "section already exists" no-op.
 const gateVersion = "v999.0.0-gate"
 
-// checkReleaseQueue asserts that a tree (CHANGELOG.md plus changelog.d/
-// fragments) is in a releasable state. Two states are valid:
-//
-//   - the queue is empty: no fragment is waiting and [Unreleased] holds no
-//     entry, as straight after `make release`. The script must report
-//     "nothing to release" and change nothing.
-//   - entries are waiting: assembly must succeed, every entry line must
-//     appear as many times as before plus once per fragment carrying it, and
-//     every fragment must be deleted.
-//
-// Anything else (a malformed fragment, a missing [Unreleased] heading, a
-// whitespace-only fragment) fails.
+// checkReleaseQueue asserts a tree is releasable: an empty queue, or fragments that assemble cleanly.
 func checkReleaseQueue(t *testing.T, changelog string, fragments map[string]string) {
 	t.Helper()
 	for _, p := range releaseQueueProblems(t, changelog, fragments) {
@@ -573,8 +562,7 @@ func TestChangelogAssemble_RefusesACollapseItCannotWrite(t *testing.T) {
 	}
 }
 
-// checkSpec is a docs/SPEC.md with two Feature rows and a later table whose
-// first column is not a feature.
+// checkSpec is a docs/SPEC.md with two Feature rows and a non-feature table.
 const checkSpec = "# spec\n\n## Features\n\n| Feature | Status | Requirements | Detail |\n|---|---|---|---|\n" +
 	"| sealing | shipped | x | y |\n| backends | shipped | x | y |\n\n## Interfaces\n\n| Name | Kind |\n|---|---|\n| notafeature | x |\n"
 
@@ -633,8 +621,7 @@ func TestChangelogAssemble_CheckEnforcesTheEntryForm(t *testing.T) {
 	}
 }
 
-// TestChangelogAssemble_CheckRealTree holds this repository's own queue to the
-// entry form against its own docs/SPEC.md.
+// TestChangelogAssemble_CheckRealTree checks this repository's own queue.
 func TestChangelogAssemble_CheckRealTree(t *testing.T) {
 	if out, ok := runAssemble(t, repoRoot(t), "--check"); !ok {
 		t.Fatalf("this repository's changelog queue breaks the entry form:\n%s", out)

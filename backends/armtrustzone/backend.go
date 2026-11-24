@@ -13,8 +13,7 @@ const Name = "arm-trustzone"
 // from the secure world, beyond the reach of this process's memory.
 const rank = 2
 
-// The trusted application's interface (tfw_ta.h). The backend calls GET_INFO
-// and GET_RANDOM; SEAL and UNSEAL are used by the KeyProtector in protector.go.
+// The trusted application's commands (tfw_ta.h).
 const (
 	taUUID             = "23751b49-3a76-4e49-b63c-e5853742fa1f"
 	taCmdGetInfo       = 0x00000001 // TFW_TA_CMD_GET_INFO
@@ -24,19 +23,12 @@ const (
 	taRandomMax        = 4096       // TFW_TA_RANDOM_MAX
 )
 
-// Backend is a session with the trusted application in OP-TEE, reached
-// through the Linux TEE driver. It makes memory enclave handles filled with
-// random bytes the secure world produced. Its methods are safe for concurrent
-// use; calls to the TA are serialized on the session.
+// Backend is a session with the OP-TEE trusted application; its methods are safe for concurrent use.
 type Backend struct {
 	c *client
 }
 
-// Connect opens the TEE device at endpoint (such as "/dev/tee0"), opens a
-// session with the trusted application, and checks its interface with
-// GET_INFO. A missing or refusing device is a [DeviceError], a missing TA or
-// refused session a [SessionError], and an interface other than version 1 with
-// flags 0 an [InterfaceError]. Close the Backend to end the session.
+// Connect opens the TEE device at endpoint, opens a session with the trusted application and checks its interface.
 func Connect(endpoint string) (*Backend, error) {
 	uuid, err := parseUUID(taUUID)
 	if err != nil {
@@ -73,11 +65,7 @@ func (b *Backend) Probe(ctx context.Context) error {
 	return checkInfo(version, flags)
 }
 
-// Random returns a memory enclave handle of n bytes filled by GET_RANDOM, in
-// chunks of at most 4096 bytes, each written straight into the handle. n below
-// 1 is a [SizeError], refused before the TA is called. On any failure,
-// including a canceled ctx, no handle is returned and the bytes already
-// written are wiped.
+// Random returns a handle of n bytes from GET_RANDOM; on failure no handle is returned and written bytes are wiped.
 func (b *Backend) Random(ctx context.Context, n int) (enclave.Handle, error) {
 	if n < 1 {
 		return nil, &SizeError{N: n}

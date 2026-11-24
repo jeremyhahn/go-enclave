@@ -16,14 +16,7 @@ import (
 	"testing"
 )
 
-// TestMain is the guest startup path of the optee-tagged harness, the binary
-// scripts/optee-fixture.sh harness runs in the OP-TEE guest under make
-// optee-run. The guest has none of the devcontainer's environment, so this
-// build replaces main_test.go's devcontainer guard with its own: it refuses
-// unless the TEE client endpoint ($GO_ENCLAVE_OPTEE_ENDPOINT, default
-// /dev/tee0) exists, which it does only in the guest. The refusal is the
-// typed *fs.PathError from os.Stat (errors.Is fs.ErrNotExist). Every
-// non-optee build keeps main_test.go's devcontainer guard unchanged.
+// TestMain is the optee harness's guest startup, refusing unless the TEE client endpoint exists.
 func TestMain(m *testing.M) {
 	endpoint := os.Getenv(opteeEndpointVar)
 	if endpoint == "" {

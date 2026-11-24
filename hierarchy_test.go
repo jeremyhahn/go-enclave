@@ -87,8 +87,7 @@ func TestDeriveWrappingKey_MatchesHKDF(t *testing.T) {
 	}
 }
 
-// TestSealer_InitializationFailurePaths covers the steps of the first seal
-// that can fail only on a broken CSPRNG or HKDF.
+// TestSealer_InitializationFailurePaths covers first-seal failures on a broken CSPRNG or HKDF.
 func TestSealer_InitializationFailurePaths(t *testing.T) {
 	ctx := t.Context()
 
@@ -693,8 +692,7 @@ func TestSealer_RotationOverlappingASweepLeavesTheSealerWiped(t *testing.T) {
 	if _, err := s.sealData(ctx, []byte("after the sweep")); !errors.Is(err, ErrSealerWiped) {
 		t.Fatalf("Seal after rotation overlapped a sweep = %v, want ErrSealerWiped (no silent re-keying)", err)
 	}
-	// A value sealed BEFORE the sweep must not open afterwards either: its
-	// KEK generation's blob is retained, so a revived root would open it.
+	// A value sealed before the sweep must not open afterwards either.
 	if _, err := earlier.Open(ctx); !errors.Is(err, ErrSealerWiped) {
 		t.Fatalf("Open of a value sealed before the sweep = %v, want ErrSealerWiped", err)
 	}
@@ -771,10 +769,7 @@ func TestSealer_RotationCleanupReportsAndRetriesARefusedRelease(t *testing.T) {
 	if !errors.Is(err, ErrSealerWiped) || !errors.Is(err, ErrLockedMemoryUnavailable) {
 		t.Fatalf("rotateKEK with its cleanup refused = %v, want ErrSealerWiped joined with the refusal (ErrLockedMemoryUnavailable)", err)
 	}
-	// Through the PUBLIC path: a dead sealer never rotates again, so the
-	// retry of the keys it still references — the published root and KEK —
-	// rides on the seals and opens that keep arriving. While the kernel still
-	// refuses, each reports the outstanding failure...
+	// While the kernel refuses, each seal reports the outstanding failure.
 	if _, err := s.sealData(ctx, []byte("while unmap is still refused")); !errors.Is(err, ErrSealerWiped) || !errors.Is(err, ErrLockedMemoryUnavailable) {
 		t.Fatalf("Seal with the cleanup still refused = %v, want ErrSealerWiped joined with the refusal", err)
 	}
@@ -782,10 +777,7 @@ func TestSealer_RotationCleanupReportsAndRetriesARefusedRelease(t *testing.T) {
 		t.Fatalf("Open with the cleanup still refused = %v, want ErrSealerWiped joined with the refusal", err)
 	}
 
-	// ...and once it allows the unmap, the next seal releases them: a clean
-	// ErrSealerWiped, the published keys off the ledger WITHOUT a sweep. The
-	// discarded generation was never published; its refusal was reported
-	// above and the ledger owns it, so the next sweep reclaims it.
+	// Once the kernel allows the unmap, the next seal releases the published keys.
 	unmapMemory = prevUnmap
 	if _, err := s.sealData(ctx, []byte("after the refusal lifted")); !errors.Is(err, ErrSealerWiped) || errors.Is(err, ErrLockedMemoryUnavailable) {
 		t.Fatalf("Seal with unmap allowed = %v, want a clean ErrSealerWiped", err)
@@ -1255,12 +1247,7 @@ func TestSealer_KEKFailureDoesNotReunsealTheRoot(t *testing.T) {
 	}
 }
 
-// TestSealer_SweptPendingRootIsWipedNotReunsealed covers the retained root's
-// interaction with a shutdown sweep. A root unsealed but not yet published —
-// its KEK mint failed — is a live enclave on the ledger like any other, so
-// WipeAll must destroy it; and the sealer must then report ErrSealerWiped
-// rather than quietly unsealing a fresh root, which is both the silent re-keying
-// that sentinel exists to prevent and a second UnsealRoot call.
+// TestSealer_SweptPendingRootIsWipedNotReunsealed checks a swept pending root leaves the sealer wiped, not re-unsealed.
 func TestSealer_SweptPendingRootIsWipedNotReunsealed(t *testing.T) {
 	ru := &countingRootUnsealer{inner: fixedRootUnsealer{fill: 0x6B}}
 	ru.after = func() {
@@ -1301,15 +1288,7 @@ func TestSealer_SweptPendingRootIsWipedNotReunsealed(t *testing.T) {
 	}
 }
 
-// TestSealer_BlockedUnsealDoesNotStallOthers pins that a provider stuck in
-// UnsealRoot, ignoring its context, stalls only callers that need its
-// hierarchy, each until its own context ends:
-//
-//   - another, initialized Sealer seals and opens normally;
-//   - a second Seal on the SAME Sealer, queued for the init slot, returns
-//     DeadlineExceeded when its deadline passes, instead of waiting out the
-//     provider;
-//   - the stuck caller completes once the provider does.
+// TestSealer_BlockedUnsealDoesNotStallOthers pins that a stuck UnsealRoot stalls only callers needing its hierarchy.
 func TestSealer_BlockedUnsealDoesNotStallOthers(t *testing.T) {
 	stuck := newBlockingProvider()
 	stuck.release = make(chan struct{})
@@ -1417,9 +1396,7 @@ func TestSealer_UnsealRootAtMostOnceUnderConcurrentFirstUse(t *testing.T) {
 	}
 }
 
-// TestSealer_CanceledUnsealIsRetriedByTheNextCaller pins the other half of
-// at-most-once: a call refused because its context ended is a FAILED call,
-// so the next caller in the queue asks again — once — and succeeds.
+// TestSealer_CanceledUnsealIsRetriedByTheNextCaller pins that a canceled unseal is retried once by the next caller.
 func TestSealer_CanceledUnsealIsRetriedByTheNextCaller(t *testing.T) {
 	p := newBlockingProvider()
 	p.honor = true
@@ -1498,18 +1475,7 @@ func sweepAbandoningBorrow(t *testing.T) int {
 	return r.n
 }
 
-// TestSealer_SweepDuringABlockedUnsealLeavesTheSealerWiped pins the overlap
-// rule in initHierarchy against BOTH ways a sweep can meet a root the provider
-// is still writing into:
-//
-//   - the sweep's deadline ends while it waits on the borrow, so the root
-//     SURVIVES it — and publishing that root would leave the key that opens
-//     everything live after the sweep that exists to remove it;
-//   - the sweep waits the borrow out and destroys the root the moment the
-//     provider lets go.
-//
-// Either way the sealer must report ErrSealerWiped, hold no live root, and
-// never ask the provider again.
+// TestSealer_SweepDuringABlockedUnsealLeavesTheSealerWiped pins both ways a sweep can meet a root being written.
 func TestSealer_SweepDuringABlockedUnsealLeavesTheSealerWiped(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -1531,12 +1497,7 @@ func TestSealer_SweepDuringABlockedUnsealLeavesTheSealerWiped(t *testing.T) {
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			// gatedRootUnsealer, not blockingProvider: the provider must
-			// allocate NOTHING once released. A provider that builds an
-			// enclave of its own after release (SoftwareProvider's root) lets
-			// that allocation's borrow wake the waiting sweep, which can then
-			// destroy the provider's enclave before the provider borrows it —
-			// an unseal failure decided by the scheduler, not by the sealer.
+			// gatedRootUnsealer allocates nothing once released, so the sweep's timing is the sealer's.
 			p := &gatedRootUnsealer{entered: make(chan struct{}, 1), release: make(chan struct{})}
 			s, err := newEnvelopeSealer(WithRootUnsealer(p))
 			if err != nil {
@@ -1785,16 +1746,7 @@ func regionContains(region []byte, addr uintptr) bool {
 	return addr >= lo && addr < lo+uintptr(len(region))
 }
 
-// TestSealer_RefusedReleaseOfADiscardedKEKIsRetried pins that when a sweep
-// overlaps initialization after the unseal, publication destroys the root
-// and the minted KEK, and the kernel refuses the KEK's unmap, the sealer
-// keeps a reference and retries the KEK's release with the root's on the
-// next attempt.
-//
-// The overlap is placed deterministically. The KEK's own mlock — the first
-// step of the mint — runs a sweep while the test holds a borrow on the root,
-// and ends that sweep's context once it is waiting on the borrow: the
-// sequence moves, the root survives, and the mint then completes under it.
+// TestSealer_RefusedReleaseOfADiscardedKEKIsRetried pins that a refused KEK release is retried with the root's.
 func TestSealer_RefusedReleaseOfADiscardedKEKIsRetried(t *testing.T) {
 	u := &gatedRootUnsealer{}
 	s, err := newEnvelopeSealer(WithRootUnsealer(u))

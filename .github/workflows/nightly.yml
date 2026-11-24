@@ -1,33 +1,4 @@
-# nightly-template: v1.9 (customized)
-# The long-horizon checks, kept off the push path.
-# v1.9: a `lint-sweeps` job runs the repository's `make -k lint-sweeps` in its
-# toolchain image, nightly and on dispatch only, when the Makefile (or a
-# tracked *.mk) defines the target; without one it prints OK and passes. A
-# repository's lint sweeps never run in ci.yml. The job needs the scripts
-# ci.yml ships (in-toolchain-image.sh, ci-image-cache.sh, trim-ci-caches.sh).
-# CUSTOMIZE (go-enclave, #277): the job runs on ubuntu-latest like every job
-# (#293), frees disk before it builds the toolchain image, and builds it with
-# GO_BUILD_PROXY and no forge credential, as ci.yml's jobs do. The trivy job
-# and the schedule are go-enclave's own.
-#
-# Jobs that verify a slow-moving property, or that were known-red with tracked
-# issues, do NOT run per push — a known-red job burning 60-90 runner-minutes
-# per push produces information we already have. They run here, nightly on
-# a schedule, and are NOT in any merge gate. The owner order of 2026-11-22:
-# "the nightlys shouldnt require any manual executiion, it should be getting
-# run automatically!" It supersedes the 2026-10-11 no-schedule rule for this
-# Nightly workflow only. The slot is `25 5 * * *` (05:25 UTC);
-# workflow_dispatch stays as the manual trigger. ci.yml keeps its own
-# schedule: it runs the full tier and Soak nightly, so a check ci.yml's full
-# tier runs is not repeated here (ci-template v1.25). A job may
-# move back to ci.yml once its reason for being here is gone; that move is
-# deliberate, not automatic.
-#
-# Every step is a make target (#89, devops §4), exactly as in ci.yml: trivy's
-# version, checksum and flags, and the .trivyignore
-# wiring all live in the Makefile, so a nightly finding reproduces with the
-# same `make` line locally. The jobs run on the bare runner with actions/setup-go,
-# and get their pinned tools as ci.yml does (see its header).
+# Slow-moving and advisory checks, nightly and on dispatch, outside every merge gate; each step is a make target.
 
 name: Nightly
 
@@ -36,8 +7,7 @@ on:
   schedule:
     - cron: '25 5 * * *'
 
-# Read-only by default; only the Trivy job, which uploads SARIF on
-# github.com, is granted security-events: write, at job level.
+# Read-only by default; only the Trivy job gets security-events: write.
 permissions:
   contents: read
 
@@ -47,21 +17,12 @@ env:
   TOOL_INSTALL: ${{ github.server_url == 'https://github.com' && '1' || '0' }}
 
 jobs:
-  # The FIPS-strict unit run (`make test-fips`) moved to ci.yml in #154, so it
-  # gates every PR.
-
   # trivy is baked into the toolchain image at the pin in scripts/tool-pins.sh
-  # (the pinned release tarball, accepted only if it matches the SHA-256 pinned
-  # there), as on every other job. This replaced
-  # `curl …/contrib/install.sh from main | sh` — an unreviewed script from a
-  # moving branch, executed as the build user — and the trivy-action steps
-  # that ran on github.com, a third-party action the CLI makes unnecessary.
-  # v1.9: the repository's lint sweeps (whole-tree, slow lint passes beside
-  # `make lint`), off every push and PR path (ci-standard.md §12).
+  # lint-sweeps runs the repository's slow lint passes, off every push and PR path.
   lint-sweeps:
     name: Lint sweeps [toolchain image]
-    runs-on: ubuntu-latest    # CUSTOMIZE: every job takes the hosted runner (#293)
-    timeout-minutes: 131      # CUSTOMIZE: ceil(1.5 x this job's 72-hour p95); the template's value until this job has one
+    runs-on: ubuntu-latest    # every job takes the hosted runner
+    timeout-minutes: 131      # ceil(1.5 x this job's p95)
     env:
       CI_STACK_PREFIX: ${{ github.event.repository.name }}-ci-
       CI_CACHE_CLASS: main
@@ -114,7 +75,7 @@ jobs:
       - name: make lint-sweeps
         if: ${{ !cancelled() && steps.probe.outputs.has_target == 'true' && env.TOOLCHAIN_IMAGE != '' }}
         env:
-          IN_IMAGE_NETWORK: none   # CUSTOMIZE: bridge when a sweep needs the module proxy
+          IN_IMAGE_NETWORK: none   # bridge when a sweep needs the module proxy
         run: scripts/in-toolchain-image.sh "$TOOLCHAIN_IMAGE" "make -k lint-sweeps"
 
   trivy:
@@ -123,7 +84,7 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
-      security-events: write  # the Trivy SARIF upload on github.com; unused on Gitea
+      security-events: write  # the Trivy SARIF upload
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -133,13 +94,11 @@ jobs:
         with:
           go-version-file: go.mod
 
-      # Misconfiguration scanning, ADVISORY: findings surface daily without a
-      # new finding class blocking anything (owner direction: enable it).
-      # Promote it to a gate once its baseline is clean.
+      # Misconfiguration scan, advisory until its baseline is clean.
       - name: Trivy misconfiguration scan (advisory)
         run: make trivy-misconfig
 
-      # Code scanning on github.com only: Gitea has no code-scanning API.
+      # Code scanning upload on github.com only.
       - name: Trivy SARIF (github.com)
         if: github.server_url == 'https://github.com'
         run: make trivy-sarif
@@ -151,6 +110,4 @@ jobs:
           sarif_file: trivy-results.sarif
           category: trivy-fs
 
-      # No trivy gate here: `make trivy` (vulnerabilities and secrets,
-      # CRITICAL/HIGH) runs in ci.yml's `make security` on its full tier, the
-      # nightly schedule included, and release.yml runs it on every tag.
+      # No trivy gate here: ci.yml's make security and release.yml run it.

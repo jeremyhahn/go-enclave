@@ -13,12 +13,7 @@ import (
 	"testing"
 )
 
-// fakeDockerScript stands in for docker in scripts/apk-index-sum.sh. It logs
-// the image of each run (the word before -c) to FAKE_DOCKER_LOG and the whole
-// command line to FAKE_DOCKER_LOG.args, then answers from FAKE_DOCKER_FIXTURE,
-// one "image kind" line per image: kind "none" prints none, "fail" exits 3,
-// any other word prints a repository line and an index checksum line built
-// from it. An image the fixture does not list prints none.
+// fakeDockerScript stands in for docker in scripts/apk-index-sum.sh, answering from FAKE_DOCKER_FIXTURE.
 const fakeDockerScript = `#!/bin/sh
 prev=
 img=

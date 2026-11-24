@@ -19,12 +19,7 @@ import (
 	enclave "github.com/jeremyhahn/go-enclave"
 )
 
-// FuzzParseBlob hands parseBlob arbitrary bytes, as storage may return them.
-// It never panics and never writes the blob. A refusal matches
-// ErrSealedAuthentication. An accepted blob is exactly the framing encodeBlob
-// makes of its two areas: the public area is the sealed-object template with a
-// SHA-256 unique, the private area is no larger than Protect makes, and both
-// areas are the blob's own bytes at their framed offsets, not copies.
+// FuzzParseBlob checks parseBlob never panics, never writes, and accepts only what encodeBlob makes.
 func FuzzParseBlob(f *testing.F) {
 	// testPublic and testBlob take a *testing.T; f is a *testing.F, so the
 	// seeds are built from the same template here.

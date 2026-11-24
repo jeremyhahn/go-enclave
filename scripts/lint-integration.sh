@@ -1,11 +1,5 @@
 #!/bin/sh
-# lint-integration.sh — prove the integration build tag selects the suite's files.
-#
-# Usage: scripts/lint-integration.sh <package>...   (from the repository root)
-#
-# `make lint` runs without the integration tag and never sees the suite, so
-# `make lint-integration` first proves, per package, that the tag selects test
-# files and that nothing in test/integration/<package> builds without it.
+# lint-integration.sh <package>...: proves the integration tag selects each suite's files and nothing there builds without it.
 set -eu
 # shellcheck source=lib.sh
 . "${0%/*}/lib.sh"

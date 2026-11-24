@@ -16,13 +16,7 @@ import (
 	"github.com/jeremyhahn/go-enclave/internal/memscan"
 )
 
-// checkNoResidueAfterUnprotect is the residue sweep: the only instrument that
-// can see a retained copy, which the spy cannot. It protects a needle that
-// exists only in locked pages, recovers it into a second locked mapping, proves
-// the sweep finds it there, wipes and destroys that mapping, and then requires
-// the needle to appear nowhere in the process but its own mapping. Every
-// comparison happens inside a borrow, so the suite never creates a heap copy of
-// its own to find.
+// checkNoResidueAfterUnprotect requires a recovered key to appear nowhere in the process after it is wiped.
 func checkNoResidueAfterUnprotect(r *report, cfg Config) {
 	const property = "no copy of the key is findable in the process after Unprotect returns"
 
@@ -183,13 +177,7 @@ func sweepOutsideHome(probe enclave.ByteAccess, home uintptr) (memscan.Result, e
 	return res, scanErr
 }
 
-// sweepForKeyOrHalf sweeps for the whole needle and then for each half of
-// it, so a provider that keeps only part of the key is found as long as the
-// part holds either half whole. It returns each mapping once. A hit any
-// probe made is returned without error, even when another probe failed; with
-// no hit, the first probe error is returned, so an incomplete sweep is never
-// clean. GuardPages is the most any probe skipped: every probe walks the same
-// process, so the counts are of the same pages.
+// sweepForKeyOrHalf sweeps for the whole needle and each half; an incomplete sweep is never clean.
 func sweepForKeyOrHalf(needle []byte, home uintptr) (memscan.Result, error) {
 	half := len(needle) / 2
 	probes := [][]byte{needle}

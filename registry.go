@@ -19,12 +19,7 @@ import (
 // handler: it is touched on construction, on destruction and by WipeAll, and
 // never on the borrow path. See docs/shutdown-sweep/engineering.md.
 
-// The sweep waits for a held enclave by event, not by sleeping. sweepWaiting
-// is armed for a whole sweep; a lock holder reads it after letting go and only
-// then calls wakeSweep (see memoryState.unhold). sweepWake holds at most one
-// pending wake-up, so wake-ups coalesce and a sender never blocks. The sweep
-// drains it at the start of every pass, before trying any lock, so no release
-// is missed; the argument is on memoryState.holders.
+// The sweep waits for a held enclave by event: sweepWake holds at most one pending wake-up.
 var (
 	sweepWaiting atomic.Bool
 	sweepWake    = make(chan struct{}, 1)
@@ -132,8 +127,7 @@ var (
 	sweepAdmissionWaitForTest func()
 )
 
-// admitSweep takes the sweep slot, waiting for it no longer than ctx allows.
-// A free slot is taken even under a done ctx. A nil ctx only tries.
+// admitSweep takes the sweep slot, waiting no longer than ctx allows; a nil ctx only tries.
 func admitSweep(ctx context.Context) bool {
 	select {
 	case sweepSlot <- struct{}{}:
@@ -162,10 +156,7 @@ func ledgerCount() int {
 	return len(live) + len(orphans)
 }
 
-// adoptOrphan puts the mapping a failed construction's err carries onto the
-// orphan ledger, with refund to run when a sweep releases it. It is a no-op
-// when err left nothing mapped. Constructors call it after the refund
-// decision is made, so a sweep never reaches an orphan without its refund.
+// adoptOrphan puts a failed construction's mapping on the orphan ledger with its refund.
 func adoptOrphan(err error, refund func()) {
 	var held *pagesHeldError
 	if !errors.As(err, &held) || held.orphan == nil {
@@ -180,10 +171,7 @@ func adoptOrphan(err error, refund func()) {
 	registryMu.Unlock()
 }
 
-// register adds e to the shutdown ledger and returns its handle. It publishes
-// e to a concurrent [WipeAll], so it must be the last step of construction, after
-// every field a sweep reads (release in particular) is set; registryMu is the
-// happens-before edge that makes them visible to the sweep.
+// register adds e to the shutdown ledger; it must be the last step of construction.
 func register(e *memoryState) *lockedRegion {
 	registryMu.Lock()
 	live[e] = struct{}{}
@@ -191,12 +179,7 @@ func register(e *memoryState) *lockedRegion {
 	return &lockedRegion{memoryState: e}
 }
 
-// settleRelease books the outcome err of a release attempt on the ledger entry
-// e, live or orphan, and reports whether the pages went back. Only then does
-// it return e's Allocator reservation (at most once) and drop e from the
-// ledger; a detected corruption is noted either way, in the same step, so a
-// sweep sees the entry or the note and the next WipeAll reports it even when
-// the caller discarded err.
+// settleRelease books a release attempt's outcome on e and reports whether the pages went back.
 func settleRelease(e *memoryState, err error) bool {
 	released := releasedPages(err)
 	if released && e.release != nil {
@@ -223,43 +206,7 @@ func sweepGeneration() uint64 { return sweepGen.Load() }
 // sweepInFlight reports whether g was taken while a sweep was running.
 func sweepInFlight(g uint64) bool { return g%2 == 1 }
 
-// WipeAll destroys every memory enclave this package has handed out and not
-// yet reclaimed, including [Sealer] and [SoftwareProvider] keys, and retries
-// the release of every mapping a failed construction could not give back. It
-// does not touch [Sealed] values; after a [ModeRootKey] sweep they fail
-// to open with [ErrSealerWiped] (see [Sealed.Openable]).
-//
-// It is for orderly shutdown and must be called only by the code that owns the
-// process, never by a library: it destroys enclaves belonging to every
-// subsystem. Never call it from inside a borrow.
-//
-// It raises no panic of its own (a panicking [Sweeper] is the backend's panic
-// and is not recovered) and never unmaps under a lock holder. A held enclave is
-// waited for until its holder lets go or ctx ends, then skipped and counted.
-// ctx bounds only waiting (for another sweep, for borrows, for contended
-// locks); everything not held is reclaimed even under a done or nil ctx. One
-// sweep runs at a time. Enclaves registered mid-sweep are tried but never
-// extend the sweep. Give it a deadline:
-//
-//	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-//	defer cancel()
-//	if n, err := enclave.WipeAll(ctx); n != 0 || err != nil {
-//	    log.Printf("enclave: %d still held at exit, err=%v", n, err)
-//	}
-//
-// It runs in two phases inside the one sweep slot: locked memory first (every
-// enclave, an [Allocator]'s included), then every registered backend other
-// than the default that implements [Sweeper], snapshotted under the registry's
-// read lock, sorted by name, and called after releasing it with ctx unchanged,
-// nil included. A backend registered after the snapshot waits for the next
-// WipeAll; a failing Sweep does not stop the rest.
-//
-// The count is how many locked-memory entries are still held at return, read
-// from the ledgers under their lock, plus every held count a Sweep returned.
-// The error is nil, [ErrSweepInProgress] if the call was never admitted (it
-// swept nothing), or a [*SweepError] with what the sweep found, each failed
-// Sweep included. A ctx ending during an admitted sweep is not an error. It is
-// safe to call repeatedly. See docs/shutdown-sweep/engineering.md.
+// WipeAll destroys every memory enclave not yet reclaimed and sweeps registered backends; for process shutdown only, never from a library or a borrow. See docs/shutdown-sweep/engineering.md.
 func WipeAll(ctx context.Context) (int, error) {
 	if !admitSweep(ctx) {
 		return ledgerCount(), ErrSweepInProgress
@@ -310,10 +257,7 @@ sweep:
 			sweepPassForTest(pass)
 		}
 
-		// Snapshot and unlock before destroying: settleRelease takes
-		// registryMu. Every registered entry is tried on every pass, because a
-		// write TryLock loses to any momentary reader. Orphans are never held,
-		// so their TryLock always succeeds.
+		// Snapshot and unlock before destroying; every entry is tried on every pass.
 		registryMu.Lock()
 		batch := make([]*memoryState, 0, len(live)+len(orphans))
 		for e := range live {
@@ -408,11 +352,7 @@ sweep:
 	return remaining, nil
 }
 
-// sweepBackends is WipeAll's second phase: it calls Sweep, in name order, on
-// the registered sweepers snapshotted once, with ctx unchanged (nil included).
-// It returns the sum of their held counts, a negative count read as zero, and
-// one failure per Sweep that returned an error. A failure does not stop the
-// rest; a panic is the backend's own and is not recovered.
+// sweepBackends calls Sweep on the snapshotted sweepers in name order and sums their held counts.
 func sweepBackends(ctx context.Context) (int, []BackendSweepFailure) {
 	held := 0
 	var failures []BackendSweepFailure

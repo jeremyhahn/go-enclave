@@ -16,15 +16,7 @@ import (
 
 const usernsTestName = "TestMemlockRLimit_EnforcedInsideAnUnprivilegedUserNamespace"
 
-// usernsFakeDocker answers the calls userns-test.sh and require_scanned_image
-// make:
-//
-//	FAKE_NO_COMPOSE   non-empty: `docker compose version` fails
-//	FAKE_DAEMON_RC    exit status of `docker version`
-//	FAKE_IMAGE_ID     what `docker image inspect` prints (empty: it fails)
-//	FAKE_RUN_OUT      what `docker compose ... run` prints
-//	FAKE_RUN_RC       exit status of `docker compose ... run`
-//	FAKE_DOWN_RC      exit status of `docker compose ... down`
+// usernsFakeDocker answers userns-test.sh's docker calls, driven by the FAKE_* variables.
 const usernsFakeDocker = `#!/bin/sh
 echo "docker $*" >>"$DOCKER_LOG"
 case "$1 ${2-}" in

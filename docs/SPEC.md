@@ -21,7 +21,7 @@ scope: they belong to [go-xkms](https://github.com/jeremyhahn/go-xkms).
 Persistent secure-element storage (for example NXP SE05x) wears and is slow,
 so keys on it belong to go-xkms only. The NXP i.MX 95 EdgeLock Enclave holds
 keys only and gives applications no protected memory, so it moved to go-xkms
-(owner ruling 697). On the i.MX 95, TrustZone/OP-TEE (`backends/armtrustzone`)
+(see go-xkms). On the i.MX 95, TrustZone/OP-TEE (`backends/armtrustzone`)
 stays go-enclave's backend, but today it holds bytes in normal-world memory,
 readable by the process and kernel; secure-world storage (the vault trusted
 application) is planned.

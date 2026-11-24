@@ -1,32 +1,5 @@
 #!/bin/sh
-# devcontainer.sh — build, run and name the devcontainer images.
-#
-# Usage: scripts/devcontainer.sh tag | it-tag | inputs | build | run [command]
-#
-#   tag     print the toolchain image's content-addressed reference,
-#           go-enclave-toolchain:<12 hex> (`make toolchain-image`; lane-verify's
-#           VERIFY_IMAGE). It is a hash of the files that build the toolchain
-#           stage, so it names the image a checkout builds without Docker, and
-#           an unchanged tag means an existing image can be reused.
-#   it-tag  print the integration image's content-addressed reference,
-#           go-enclave-ci-it:<12 hex> (`make -s it-image`, ci-standard.md §9).
-#           It is a hash of the build arguments and the whole build context:
-#           the commit's tree, the checkout's diff against it, and every
-#           untracked file .gitignore does not exclude, so every job and run
-#           of one tree names one image and builds it once.
-#   inputs  print the toolchain tag's files, one per line.
-#   build   build both shipped stages (`make docker-build`): the toolchain,
-#           tagged <tag> and go-enclave-toolchain:latest, then the integration
-#           image through compose, tagged $GO_ENCLAVE_IT_IMAGE (default
-#           <it-tag>). A stage whose content tag the daemon holds already
-#           is not built (the toolchain's :latest is still set), and a build
-#           that fails while another job tags the same content counts as built.
-#   run     run a command in the toolchain image with the checkout mounted,
-#           offline, as the invoking user (`make docker-run CMD='make lint'`);
-#           the command is one string, run by bash -c. Without one, the
-#           image's default command.
-#
-# Runs from the repository root, wherever it is called from.
+# devcontainer.sh tag | it-tag | inputs | build | run [command]: build, run and name the content-addressed devcontainer images.
 set -eu
 # shellcheck source=lib.sh
 . "${0%/*}/lib.sh"
@@ -96,10 +69,7 @@ docker_ok() {
   command -v docker >/dev/null 2>&1 || die "docker is required for '$1'"
 }
 
-# held <ref>: the daemon holds the tag. Every tag build makes is content
-# addressed, so a held tag is the image this tree builds. Two jobs on one
-# daemon race to the same content tag: the loser's BuildKit export fails with
-# "already exists", and a tag held after a failed build counts as built.
+# held <ref>: the daemon holds the content tag, so the image is this tree's.
 held() {
   docker image inspect "$1" >/dev/null 2>&1
 }
@@ -122,11 +92,7 @@ case $1 in
     [ $# -eq 1 ] || die "usage: $0 build"
     docker_ok build
     ref=$(image)
-    # The backend modules' download fetches the public root module through
-    # GO_BUILD_PROXY, unset on CI's GitHub-hosted runners (#293); no forge
-    # credential reaches the build. It goes in as the BuildKit secret goproxy,
-    # never a build argument, which the image history would keep. Unset, the
-    # Dockerfile's public default applies.
+    # The proxy goes in as the BuildKit secret goproxy, never a build argument.
     set -- -f "$dockerfile" --target toolchain -t "$ref" -t "$repo:latest"
     if [ -n "${GO_BUILD_PROXY:-}" ]; then
       set -- "$@" --secret id=goproxy,env=GO_BUILD_PROXY

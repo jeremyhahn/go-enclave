@@ -6,73 +6,7 @@
 // This file is part of go-enclave. Use of this source code is governed by the
 // MIT license that can be found in the LICENSE file.
 
-// Package providertest is the conformance suite for the go-enclave provider
-// seam. Anything implementing [enclave.KeyProtector] or [enclave.RootUnsealer]
-// (a TPM, an HSM, a cloud KMS) runs [TestProvider] against its own provider in
-// its own repository. Like [testing/fstest.TestFS], it is one call that returns
-// an error naming every property that failed, and it does not import testing.
-//
-// # Retention
-//
-// The seam's signatures constrain where a provider writes plaintext, not what
-// it keeps:
-//
-//	Unprotect(ctx context.Context, blob, key []byte) error
-//	UnsealRoot(ctx context.Context, dst []byte) error
-//
-// A provider can write into the caller's locked slice and keep its own copy.
-// This suite checks that a KeyProtector does not. It does not require that a
-// provider never materializes plaintext in its own memory, since every real
-// backend decrypts into a fresh slice; it requires that the provider wipe that
-// transient, as [enclave.KeyProtector] states. Key expansion inside crypto/aes
-// is out of scope.
-//
-// Two instruments carry the retention checks:
-//
-//   - The spy. The suite owns every slice it hands the provider and watches it
-//     afterwards: a destination must not be overwritten or wiped by a later
-//     call, a destination the caller wiped must not be written again, and
-//     Protect must copy out of its input rather than keep the slice. Each
-//     assertion is preceded by a control that fails if its setup did not
-//     happen, so no assertion is vacuous.
-//   - The residue sweep (Linux only). After Unprotect returns and the caller
-//     wipes its destination, it searches the process's memory for a whole copy
-//     of the key. It first proves it can find the key while a legitimate copy
-//     is resident; a sweep that cannot run or is blind makes the run return an
-//     error matching [ErrNotMeasured], unless [Config.SkipResidueSweep] accepts
-//     that. It is the only instrument that sees a retained copy, but a copy
-//     stranded on a freed goroutine stack is out of any wipe's reach, so it
-//     corroborates the spy rather than replacing it.
-//
-// # Context
-//
-// [TestProvider] passes its context to every provider call. A run whose
-// context ends before it finishes returns an error matching [ErrAborted]; it
-// never returns nil.
-//
-// For each claimed mode the suite also checks the provider's half of the seam's
-// context contract (see [enclave.RootUnsealer]): a call made with a context
-// that is already canceled or past its deadline must fail with an error
-// matching that context's error, not [enclave.ErrSealedAuthentication], must
-// write no key material into its destination, and must consume nothing a later
-// call needs. Cancellation arriving mid-call is not measured. Ended-context
-// calls run on their own goroutine, so a provider that never returns cannot
-// hold a run whose context is bounded; the run is then reported aborted, not as
-// a provider failure. With an unbounded context such a provider hangs the run
-// until go test -timeout reports it.
-//
-// # Usage
-//
-//	func TestConformance(t *testing.T) {
-//		err := providertest.TestProvider(t.Context(), providertest.Config{
-//			New:   func() (any, error) { return NewTPMProvider(dev) },
-//			Modes: []enclave.Mode{enclave.ModePerOperation},
-//			Logf:  t.Logf,
-//		})
-//		if err != nil {
-//			t.Fatal(err)
-//		}
-//	}
+// Package providertest is the conformance suite for the go-enclave provider seam; run [TestProvider] against a provider.
 package providertest
 
 import (
@@ -95,69 +29,22 @@ const keyBytes = enclave.RootKeyBytes
 
 // Config describes the provider under test.
 type Config struct {
-	// New returns a fresh provider ready for use. It is called at most once
-	// per check (twice by the mode-pairing check), so a check that leaves a provider in
-	// a terminal state does not affect the next. A nil or typed-nil result is
-	// reported as a failure.
-	//
-	// Instances need not be independent: a device-backed provider may hand
-	// every instance the same key, and the suite never requires one instance
-	// to refuse a blob another produced.
-	//
-	// The result is typed any because a provider implements
-	// [enclave.KeyProtector], [enclave.RootUnsealer], or both.
+	// New returns a fresh provider, a [enclave.KeyProtector], [enclave.RootUnsealer] or both.
 	New func() (any, error)
 
-	// Modes lists the sealing modes this provider claims to serve. It must be
-	// non-empty and name only valid modes. The claim is checked in both
-	// directions: each named mode's interface must be implemented and accepted
-	// by [enclave.NewSealer], and each unnamed mode's interface must not be
-	// implemented. The second direction catches a stub method, such as a
-	// placeholder UnsealRoot on a per-operation provider, that would let a
-	// caller select a mode the provider does not really serve.
+	// Modes lists the sealing modes the provider claims, checked in both directions.
 	Modes []enclave.Mode
 
-	// SkipResidueSweep, when non-empty, records why the process-memory residue
-	// sweep is not run against this provider, and skips it. The reason is
-	// echoed through Logf. It is also the only way to accept an unmeasured
-	// sweep: left empty, a sweep that cannot run (off Linux, without locked
-	// memory, or blind on this host) makes [TestProvider] return an error
-	// matching [ErrNotMeasured].
-	//
-	// The legitimate use is a transit the provider cannot wipe, such as a
-	// cloud KMS response body owned by net/http's reader. It is not a way to
-	// quiet a failure whose cause is unknown.
+	// SkipResidueSweep, when non-empty, is why the residue sweep is skipped; empty, an unmeasured sweep is [ErrNotMeasured].
 	SkipResidueSweep string
 
-	// SingleUseRoot, when non-empty, records why this provider's UnsealRoot can
-	// succeed only once per instance (for example, it consumes a one-shot
-	// handle), and relaxes the two checks that need a second call: the
-	// full-width-write and determinism proof, and the root destination spy.
-	// Retention of the root destination is then unmeasured. The reason is
-	// echoed through Logf. A [enclave.Sealer] calls UnsealRoot at most once,
-	// so such a provider still satisfies the seam.
+	// SingleUseRoot, when non-empty, is why UnsealRoot succeeds only once per instance; it relaxes the two second-call checks.
 	SingleUseRoot string
 
-	// PublicKey declares that Protect needs no secret: anyone holding the
-	// provider's public key can build a blob for Unprotect (an RSA-OAEP, ECIES
-	// or HPKE wrap). The seam requires such a provider to authenticate the
-	// blob with something an attacker lacks, such as a signature by a device
-	// key. The tampered-blob cases cannot tell the difference, since a bare
-	// wrap's padding or tag refuses every malformed blob yet opens a well-formed
-	// one an attacker built, so the suite needs Forge to build one. Set without
-	// Forge, the property is unmeasured and [TestProvider] returns an error
-	// matching [ErrNotMeasured], unless SkipForgery accepts that. It requires
-	// [enclave.ModePerOperation].
+	// PublicKey declares that Protect needs no secret; set it with Forge, or SkipForgery accepts the gap.
 	PublicKey bool
 
-	// Forge plays the attacker against a public-key provider: given the
-	// provider under test and a key, it returns a blob wrapping that key built
-	// only from what an attacker has, the provider's public material. For
-	// example, the key encrypted to the provider's public key and signed, if
-	// the provider expects a signature, by a key the attacker generated.
-	// Unprotect must refuse it with an error matching
-	// [enclave.ErrSealedAuthentication]. Forge runs whether or not PublicKey is
-	// set. It requires [enclave.ModePerOperation].
+	// Forge builds a blob from the provider's public material only; Unprotect must refuse it.
 	Forge func(p enclave.KeyProtector, key []byte) ([]byte, error)
 
 	// SkipForgery, when non-empty, records why the forged-blob check is not
@@ -171,25 +58,7 @@ type Config struct {
 	Logf func(format string, args ...any)
 }
 
-// TestProvider runs the conformance suite against the provider cfg describes
-// and returns nil if it conforms. Otherwise it returns a [*FindingsError]
-// holding one [*PropertyError] per failed assertion, each naming the property,
-// what was observed and what the seam requires.
-//
-// ctx is handed to every provider call the suite makes and bounds the run. If
-// it ends before the run finishes, the suite stops at the next check and the
-// returned error matches [ErrAborted] (an [*AbortedError] carrying the
-// context's error), alongside whatever properties had already failed while
-// the context was live. A call that failed only because the run's context
-// ended is not reported against the provider.
-//
-// A returned error means the provider does not honor the seam, except one
-// matching [ErrInvalidConfig] (a [*ConfigError]: cfg could not be run and no
-// provider was tested), [ErrAborted] (the run is incomplete), or
-// [ErrNotMeasured] (a [*NotMeasuredError]: a property could not be measured on
-// this host and cfg did not accept that). A nil return means every property was
-// measured and held, except those cfg explicitly relaxed; what those were, and
-// why, went to [Config.Logf].
+// TestProvider runs the conformance suite against cfg's provider and returns nil or every finding.
 func TestProvider(ctx context.Context, cfg Config) error {
 	if cfg.New == nil {
 		return &ConfigError{Field: "New", Reason: "is nil; the suite has no provider to test"}
@@ -311,18 +180,7 @@ func (r *report) endedContexts() ([]endedContext, func()) {
 	}, release
 }
 
-// bounded runs call on its own goroutine and waits for it to return or for
-// the run's context to end, whichever is first. It is used only for calls made
-// with an already-ended context, which a provider that ignores the context
-// could otherwise hold forever.
-//
-// returned false is incompletion, never a finding: the goroutine may not even
-// have reached the provider. The caller records nothing and stops the check;
-// err reports the run aborted.
-//
-// Ownership of what call touches follows the outcome. Returned, the caller
-// owns it. Abandoned, the worker does: it runs cleanup (if non-nil) once the
-// provider returns, so nothing is wiped or freed under a running provider.
+// bounded runs call on its own goroutine until it returns or the run's context ends; an abandoned call's worker owns cleanup.
 func (r *report) bounded(call func() error, cleanup func()) (err error, returned bool) {
 	var (
 		mu                  sync.Mutex
@@ -386,10 +244,7 @@ func newProvider(cfg Config) (any, error) {
 	return p, nil
 }
 
-// isNilProvider reports whether p is the untyped nil or an interface wrapping
-// a nil value, by the same test as [enclave.NewSealer]'s provider check. The
-// kind switch covers exactly the kinds reflect.Value.IsNil accepts other than
-// reflect.Interface, which reflect.ValueOf never returns, so it never panics.
+// isNilProvider reports whether p is nil or wraps a nil value, as [enclave.NewSealer] checks.
 func isNilProvider(p any) bool {
 	if p == nil {
 		return true
@@ -495,10 +350,7 @@ func sealerOption(p any, m enclave.Mode) (enclave.SealerOption, bool) {
 	return enclave.WithRootUnsealer(ru), ok
 }
 
-// keyProtectorChecks are the ModePerOperation half of the suite. Each check
-// takes its own provider instance.
-// The spy properties that catch a provider writing into a destination after
-// its call returned, which checkConcurrentUse must not race with.
+// The spy properties that catch writes after a call returned, which checkConcurrentUse must not race with.
 const (
 	noWriteAfterWipeProperty = "Unprotect does not write into a destination the caller has finished with"
 	noDisturbanceProperty    = "a later provider call does not disturb an earlier destination"
@@ -562,11 +414,7 @@ func checkRoundTrip(r *report, cfg Config) {
 	}
 }
 
-// checkProtectDoesNotRetainTheKey is the spy pointed at Protect's input:
-// protect a key, wipe the caller's slice as go-enclave does, and require
-// Unprotect to still recover it. A provider that kept the slice rather than its
-// contents recovers zeros or fails. An unwiped round trip runs first as the
-// control, so a failure after the wipe is attributable.
+// checkProtectDoesNotRetainTheKey requires Unprotect to recover a key after the caller wipes Protect's input.
 func checkProtectDoesNotRetainTheKey(r *report, cfg Config) {
 	const property = "Protect does not retain the caller's key slice"
 
@@ -613,10 +461,7 @@ func checkProtectDoesNotRetainTheKey(r *report, cfg Config) {
 	}
 }
 
-// checkDestinationNotWrittenAfterTheCallerWipedIt records the destination
-// handed to Unprotect, proves it held the key at return time, wipes it as the
-// caller does, and requires it to stay zero across later provider calls. It
-// catches a provider that keeps the last destination and writes into it again.
+// checkDestinationNotWrittenAfterTheCallerWipedIt requires a wiped destination to stay zero across later calls.
 func checkDestinationNotWrittenAfterTheCallerWipedIt(r *report, cfg Config) {
 	const property = noWriteAfterWipeProperty
 
@@ -690,10 +535,7 @@ func checkDestinationNotWrittenAfterTheCallerWipedIt(r *report, cfg Config) {
 	}
 }
 
-// checkDestinationNotDisturbedByALaterCall is the same spy in the other
-// direction: a destination the caller is still using must not be overwritten
-// or wiped by a later call. A provider that wipes a retained destination passes
-// the zero-stays-zero check but leaves its caller holding zeros as a key.
+// checkDestinationNotDisturbedByALaterCall requires a destination in use to survive later calls.
 func checkDestinationNotDisturbedByALaterCall(r *report, cfg Config) {
 	const property = noDisturbanceProperty
 
@@ -760,12 +602,7 @@ func checkDestinationNotDisturbedByALaterCall(r *report, cfg Config) {
 	}
 }
 
-// checkTamperedBlobRefused checks that Unprotect refuses blobs this provider's
-// Protect did not produce (malformed, random and bit-flipped) with an error
-// matching ErrSealedAuthentication, and leaves no plaintext in the
-// destination. Confidentiality alone, such as bare RSA-OAEP under a public key,
-// does not satisfy the seam. A blob from a different instance is not tested:
-// for a TPM or KMS it is genuinely the provider's own.
+// checkTamperedBlobRefused requires Unprotect to refuse foreign blobs with ErrSealedAuthentication and leave no plaintext.
 func checkTamperedBlobRefused(r *report, cfg Config) {
 	const property = "a blob this provider did not produce is refused"
 
@@ -891,10 +728,7 @@ func checkDestinationLengthIsAuthenticated(r *report, cfg Config) {
 	}
 }
 
-// checkForgedBlobRefused submits the blob Config.Forge builds from the
-// provider's public material. The tampered-blob cases cannot catch a bare
-// public-key wrap: its padding or tag refuses every malformed blob, but a blob
-// an attacker encrypted to the public key is well formed.
+// checkForgedBlobRefused submits the blob Config.Forge builds from public material.
 func checkForgedBlobRefused(r *report, cfg Config) {
 	const property = "a blob forged from the provider's public key is refused"
 
@@ -968,17 +802,7 @@ const (
 	concurrentRounds  = 4
 )
 
-// checkConcurrentUse runs round trips from several goroutines at once, as a
-// Sealer does, each with keys of its own, and requires each to recover its
-// own. A provider staging keys or blobs in shared state mixes them up under
-// load, returning another call's key or a false ErrSealedAuthentication. The
-// check compares outputs, so it needs no race detector; under -race it is
-// also a data-race probe.
-//
-// It does not run against a provider the spies caught writing into a
-// destination after its call returned: those writes would race with this
-// check's own reads, and under -race the race report would end the caller's
-// test binary instead of the run reporting what the spies found.
+// checkConcurrentUse runs concurrent round trips and requires each to recover its own key.
 func checkConcurrentUse(r *report, cfg Config) {
 	const property = "Protect and Unprotect are safe for concurrent use"
 
@@ -1084,15 +908,7 @@ var rootUnsealerChecks = []func(*report, Config){
 	},
 }
 
-// checkUnsealRootFillsTheDestination proves the provider writes a real root
-// across the whole destination. Two calls write into destinations pre-filled
-// with different canaries; a byte the provider never wrote keeps its canary, so
-// requiring the two to be equal proves every position was written. The
-// equality also requires UnsealRoot to be deterministic within an instance, so
-// two Sealers over one device hold the same root; when the two differ, a third
-// call under a third canary tells unwritten bytes from a root that changes per
-// call. With Config.SingleUseRoot set
-// only one call is made and only the placeholder checks remain.
+// checkUnsealRootFillsTheDestination proves UnsealRoot writes every byte, deterministically, using canary-filled destinations.
 func checkUnsealRootFillsTheDestination(r *report, cfg Config) {
 	const property = "UnsealRoot writes a root across the whole destination"
 
@@ -1134,11 +950,7 @@ func checkUnsealRootFillsTheDestination(r *report, cfg Config) {
 		}
 
 		if !bytes.Equal(first, second) {
-			// A byte is UNWRITTEN only if it kept its own fill on three calls
-			// under three fills. Two fills alone misread a root that differs
-			// per call: it matches both by chance at a byte with probability
-			// 2^-16, about once in 2,000 runs; three take that to 2^-19 per
-			// run, while a real partial writer still keeps all three.
+			// A byte is unwritten only if it kept its fill on three calls under three fills.
 			fill(third, 0x3C)
 			if err := p.UnsealRoot(r.ctx, third); err != nil {
 				r.fail(property, "a third UnsealRoot on the same provider: %v. If this provider consumes a "+
@@ -1170,12 +982,7 @@ func checkUnsealRootFillsTheDestination(r *report, cfg Config) {
 	}
 }
 
-// withLocked runs fn over n fresh buffers of size bytes each, every one a
-// borrow of its own locked enclave held for the whole of fn, and destroys them
-// once fn returns. Every buffer that may hold a provider's root uses it, so the
-// suite never copies a real device root onto the heap. A call that can outlive
-// the check (a bounded one an ended run may abandon) must not be given these
-// buffers: they are unmapped when fn returns.
+// withLocked runs fn over n locked buffers and destroys them when fn returns.
 func withLocked(n, size int, fn func(bufs [][]byte) error) error {
 	encs := make([]enclave.ByteAccess, 0, n)
 	defer func() {
@@ -1278,11 +1085,7 @@ func checkRootDestinationNotDisturbedByALaterCall(r *report, cfg Config) {
 	}
 }
 
-// checkKeyProtectorRefusesAnEndedContext checks that Protect and Unprotect
-// called with an already-ended context fail with an error matching that
-// context's error (not ErrSealedAuthentication), write no key material, and
-// consume nothing. Live round trips before and after bracket the refusals, so
-// a provider that refuses everything, or is broken by a refusal, is caught.
+// checkKeyProtectorRefusesAnEndedContext checks Protect and Unprotect refuse an ended context and consume nothing.
 func checkKeyProtectorRefusesAnEndedContext(r *report, cfg Config) {
 	const property = "Protect and Unprotect refuse a context that has already ended"
 
@@ -1350,10 +1153,7 @@ func checkKeyProtectorRefusesAnEndedContext(r *report, cfg Config) {
 		"deadline-expired); cancellation arriving MID-call cannot be forced from outside a provider and is unmeasured")
 }
 
-// checkRootUnsealerRefusesAnEndedContext is the same contract for UnsealRoot.
-// A Sealer retries a failed unseal, so a refused call must consume nothing: a
-// live unseal on the same instance must succeed afterwards. It runs for a
-// Config.SingleUseRoot provider too, since refusals are not uses.
+// checkRootUnsealerRefusesAnEndedContext checks UnsealRoot refuses an ended context and consumes nothing.
 func checkRootUnsealerRefusesAnEndedContext(r *report, cfg Config) {
 	const property = "UnsealRoot refuses a context that has already ended, and consumes nothing"
 
@@ -1366,10 +1166,7 @@ func checkRootUnsealerRefusesAnEndedContext(r *report, cfg Config) {
 	ended, release := r.endedContexts()
 	defer release()
 
-	// Heap, not locked: an abandoned call can outlive this check, and only its
-	// worker may release its destination. Each holds root material only if
-	// the provider broke the contract, and is wiped by whichever side owns it
-	// last.
+	// Heap, not locked: an abandoned call can outlive this check.
 	const canary = 0xC3
 	var completed, refused [][]byte
 	defer func() {

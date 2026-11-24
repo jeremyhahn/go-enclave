@@ -14,9 +14,7 @@ import (
 	"github.com/jeremyhahn/go-enclave/providertest"
 )
 
-// These tests run the sealing transport, byte for byte through the client's
-// own methods, against fakeTEE: a stand-in for the TEE driver and for a
-// trusted application that implements SEAL and UNSEAL.
+// These tests run the sealing transport against fakeTEE.
 
 // dialFake connects a Backend to f as Connect does to a device, and closes
 // it when the test ends.
@@ -46,8 +44,7 @@ func connectFake(t *testing.T, f *fakeTEE) *KeyProtector {
 	return b.KeyProtector()
 }
 
-// forEachDriver runs fn against a driver that registers user memory and
-// against one that does not, so UNSEAL's output takes both paths.
+// forEachDriver runs fn with and without user-memory registration.
 func forEachDriver(t *testing.T, fn func(t *testing.T, f *fakeTEE)) {
 	for _, tc := range []struct {
 		name   string

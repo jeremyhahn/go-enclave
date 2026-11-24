@@ -37,23 +37,7 @@ var (
 	errNoProgress  = errors.New("read returned no more than the overlap")
 )
 
-// Find returns the /proc/self/maps lines of every swept mapping (see
-// sweptMapping) that contains needle, excluding the one that contains home.
-// Pass 0 for home to exclude nothing. The scan buffer is wiped after every
-// mapping (see mappingContains).
-//
-// It fails closed: a swept mapping it cannot read returns an
-// *UnreadableMappingError (ErrUnreadableMapping), and a sweep that read nothing
-// returns ErrEmptySweep. Only the kernel's own [vvar] and [vsyscall] regions,
-// and guard pages that /proc/self/pagemap reports as guard regions, are
-// excused. Callers must not discard these errors. A hit is never dropped:
-// one seen before an unreadable mapping is returned without error.
-//
-// It needs an unfiltered /proc that lets a process read its own
-// /proc/self/maps and /proc/self/mem; a caller fails rather than skips without
-// one. Callers must keep their needles out of plain heap or stack locals
-// (generate into locked pages, compare inside borrows), or the sweep finds
-// those copies.
+// Find returns the maps lines of every swept mapping containing needle, except home's; it fails closed on unreadable mappings.
 func Find(needle []byte, home uintptr) ([]string, error) {
 	r, err := Sweep(needle, home)
 	return r.Hits, err
@@ -97,13 +81,7 @@ func openProc() (procMem, func(), error) {
 // sweepAttempts bounds how many maps listings one sweep reads.
 const sweepAttempts = 3
 
-// resweep runs sweep over a fresh maps listing. A mapping the runtime unmaps
-// between the listing and its read fails that read; it held nothing then, so
-// resweep lists the mappings again and reads what is there. A mapping that is
-// still unreadable after sweepAttempts listings fails the sweep closed. A hit
-// any attempt made is kept and returned without error, even when that attempt
-// or a later one met an unreadable mapping: a copy seen once is a finding.
-// GuardPages is the count of the last attempt that read a listing.
+// resweep relists and rereads after a mapping vanishes, up to sweepAttempts; a hit is always kept.
 func resweep(readMaps func() (string, error), mem io.ReaderAt, needle []byte, home uintptr, buf []byte) (Result, error) {
 	var res Result
 	seen := map[string]bool{}
@@ -136,17 +114,7 @@ func resweep(readMaps func() (string, error), mem io.ReaderAt, needle []byte, ho
 	return res, nil
 }
 
-// find is Find over a maps listing and the memory it describes, reading
-// through buf. Chunks overlap by len(needle)-1 so a needle straddling a read
-// boundary is found, so buf must be longer than that.
-//
-// It fails closed. A swept mapping that cannot be read in full returns an
-// *UnreadableMappingError (ErrUnreadableMapping), with the hits made before
-// it, and a sweep that read no mapping returns ErrEmptySweep, so neither can
-// pass as a clean result. The excuses are a kernelMapping and a guard page
-// inside a mapping (see skipGuard), neither of which holds process data. A
-// home mapping is
-// excluded without being read, and does not count as read.
+// find is Find over a maps listing, reading through buf in overlapping chunks; it fails closed.
 func find(maps string, mem io.ReaderAt, needle []byte, home uintptr, buf []byte) ([]string, error) {
 	r, err := sweep(maps, mem, needle, home, buf)
 	return r.Hits, err
@@ -192,10 +160,7 @@ func sweep(maps string, mem io.ReaderAt, needle []byte, home uintptr, buf []byte
 	return r, nil
 }
 
-// kernelMapping reports whether a mapping is one the kernel provides to every
-// process and /proc/self/mem refuses to read ([vvar], [vsyscall]). They hold
-// no process data, so they are the only mappings the sweep may leave unread.
-// The vDSO is readable and is swept like any other.
+// kernelMapping reports whether a mapping is [vvar] or [vsyscall], the only mappings left unread.
 func kernelMapping(path string) bool {
 	switch path {
 	case "[vvar]", "[vvar_vclock]", "[vsyscall]":
@@ -204,18 +169,7 @@ func kernelMapping(path string) bool {
 	return false
 }
 
-// mappingContains reports whether the region [lo, hi) of mem contains needle,
-// reading it through the caller's scratch buffer. A region it could not read
-// in full, because a read failed or made no progress, is an error rather than
-// a miss; a match found before the failure is still a match. The one failure
-// it steps over is a kernel guard region (see skipGuard).
-//
-// It wipes buf before returning. Otherwise buf carries a copy of the needle
-// into the scan of a later mapping, possibly the one buf lives in, and the
-// sweep reports its own copy as a leak. It wipes exactly the largest prefix it
-// handed to ReadAt (io.ReaderAt may scribble on all of it even on a short
-// read); the rest of buf was never written. Wiping the whole 1 MiB buffer per
-// mapping makes the sweep too slow under the race detector.
+// mappingContains reports whether [lo, hi) of mem contains needle, and wipes the part of buf it used.
 func mappingContains(mem io.ReaderAt, lo, hi uintptr, needle, buf []byte) (bool, error) {
 	found, _, err := mappingScan(mem, lo, hi, needle, buf)
 	return found, err
@@ -266,10 +220,7 @@ func mappingScan(mem io.ReaderAt, lo, hi uintptr, needle, buf []byte) (bool, int
 	return false, guards, nil
 }
 
-// pmGuardRegion is PM_GUARD_REGION, bit 58 of a /proc/self/pagemap entry: the
-// page is a guard region installed with madvise(MADV_GUARD_INSTALL) (Linux
-// 6.15 and later report it). A guard page has no backing page and holds no
-// data; a read of it through /proc/self/mem fails with EIO.
+// pmGuardRegion is PM_GUARD_REGION, bit 58 of a pagemap entry (Linux 6.15+).
 const pmGuardRegion = 1 << 58
 
 // guardPages is a memory reader that can say whether a page is a guard
@@ -322,12 +273,7 @@ func (p procMem) pagemapEntry(addr uintptr) (uint64, error) {
 	return binary.NativeEndian.Uint64(entry[:]), nil
 }
 
-// probeMapping fills e with the evidence for a mapping the scan failed to
-// read: it reads one byte of each page of [lo, hi) through /proc/self/mem and
-// names the pages that fail and are not proven guard pages (EIO with
-// PM_GUARD_REGION set), with their raw pagemap entries. The probe only
-// reports; the scan has already failed closed. A reader that is not
-// /proc/self/mem has no pagemap and gets no probe.
+// probeMapping records which pages of an unreadable mapping fail and are not guard pages.
 func probeMapping(mem io.ReaderAt, lo, hi uintptr, e *UnreadableMappingError) {
 	p, ok := mem.(procMem)
 	if !ok || p.pageSize == 0 {
@@ -365,16 +311,7 @@ func kernelRelease() string {
 	return unix.ByteSliceToString(u.Release[:])
 }
 
-// skipGuard decides whether a read that failed at addr with rerr may step
-// over the page holding addr, and returns where that page ends. Only EIO on
-// a page the pagemap marks PM_GUARD_REGION qualifies: any other error, a
-// reader with no pagemap, a pagemap that cannot be read, or an entry without
-// the bit returns the read failure (joined with the pagemap's, if any), so
-// the sweep stays fail-closed.
-//
-// The failing page is the one at addr because ReadAt reports the bytes it
-// read before the failure: /proc/self/mem copies page by page and stops at
-// the first page it cannot read, and os.File.ReadAt returns that count.
+// skipGuard lets a read step over a page only on EIO with PM_GUARD_REGION set.
 func skipGuard(mem io.ReaderAt, addr uintptr, rerr error) (uintptr, error) {
 	g, ok := mem.(guardPages)
 	if !ok || !errors.Is(rerr, syscall.EIO) {
@@ -390,14 +327,7 @@ func skipGuard(mem io.ReaderAt, addr uintptr, rerr error) (uintptr, error) {
 	return end, nil
 }
 
-// contains reports whether hay holds needle without ever holding more than
-// one byte of the needle in a register. bytes.Contains keeps a short needle
-// whole in registers while it compares, and a signal that lands then has
-// the kernel save those registers, byte-exact, into a frame on the thread's
-// signal stack, which lives in the Go heap and is never cleared: the sweep
-// would plant the copy it looks for, and a later sweep would report it.
-// IndexByte broadcasts only the needle's first byte; the compare below
-// loads one byte at a time.
+// contains reports whether hay holds needle, never holding more than one needle byte in a register.
 func contains(hay, needle []byte) bool {
 	last := len(hay) - len(needle)
 	for i := 0; i <= last; i++ {

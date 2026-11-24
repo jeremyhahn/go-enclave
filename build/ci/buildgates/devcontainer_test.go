@@ -101,10 +101,7 @@ func TestScriptsDevcontainer_ToolsStayOutOfTheIntegrationImage(t *testing.T) {
 	}
 }
 
-// TestScriptsDevcontainer_ToolchainTagCoversEveryInput pins that the content
-// tag `make toolchain-image` prints hashes every file the tools, base and
-// toolchain stages COPY from the context: an input left out would let two
-// different toolchains share a tag, and lane-verify run the stale one.
+// TestScriptsDevcontainer_ToolchainTagCoversEveryInput pins that the toolchain tag hashes every file the stages COPY.
 func TestScriptsDevcontainer_ToolchainTagCoversEveryInput(t *testing.T) {
 	root := repoRoot(t)
 	want := []string{devcontainerDockerfile, devcontainerDockerfile + ".dockerignore"}
@@ -304,13 +301,7 @@ func TestScriptsDevcontainer_ITTagIsContentAddressed(t *testing.T) {
 	}
 }
 
-// dockerignoreAdmits evaluates the devcontainer allowlist for one slash-separated
-// path in the build context: the last pattern that matches decides, and a
-// leading ! admits. A pattern matches the path or any of its parent
-// directories (so `*` excludes everything below the root, as BuildKit does),
-// segment by segment with path.Match, where a `**` segment matches zero or
-// more segments. That covers every pattern the file uses: literal paths, `*`,
-// `*.go`, `dir/*.go` and `dir/**/*.go`.
+// dockerignoreAdmits evaluates the devcontainer allowlist for one path; the last matching pattern decides.
 func dockerignoreAdmits(t *testing.T, name string) bool {
 	t.Helper()
 	b, err := os.ReadFile(filepath.Join(repoRoot(t), filepath.FromSlash(devcontainerDockerfile+".dockerignore")))

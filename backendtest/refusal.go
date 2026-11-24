@@ -15,10 +15,7 @@ type RefusalConfig struct {
 	// endpoint. On a host without the hardware it must return a nil
 	// interface and the module's typed unavailable error.
 	New func() (enclave.Backend, error)
-	// Probe, if set, is the module's probe for its hardware that needs no
-	// backend from New. It must refuse as New does. A module whose only
-	// probe is the backend's own [enclave.Prober.Probe], run inside New,
-	// leaves it nil.
+	// Probe, if set, is the module's hardware probe that needs no backend; it must refuse as New does.
 	Probe func(ctx context.Context) error
 	// Step reports whether err is the module's typed unavailable error and,
 	// if so, the step it names as failing, such as "open". It is the
@@ -44,16 +41,7 @@ const (
 	PropertyRefusalBudget = "refusal-budget"
 )
 
-// CheckRefusal checks that a hardware backend module, on a host without its
-// hardware, refuses in New and in Probe with its typed unavailable error
-// naming the failing step, registers no backend, and leaves the process's
-// locked-memory budget unchanged.
-//
-// It returns a [*ConfigError] ([ErrInvalidConfig]) when New or Step is nil,
-// nil when the module refuses cleanly, and otherwise a [*FindingsError]
-// holding a [*PropertyError] for each property broken. It reads the
-// process-wide registry and budget, so it must not run in parallel with a
-// test that registers a backend or changes the budget. A nil ctx never ends.
+// CheckRefusal checks a hardware backend module refuses cleanly on a host without its hardware; do not run it in parallel.
 func CheckRefusal(ctx context.Context, cfg RefusalConfig) error {
 	if cfg.New == nil {
 		return &ConfigError{Field: "New", Reason: "is nil; CheckRefusal needs the module's constructor"}
@@ -89,10 +77,7 @@ func CheckRefusal(ctx context.Context, cfg RefusalConfig) error {
 		findings = append(findings, budgetErr)
 	}
 	names := enclave.BackendNames()
-	// Each call is measured on its own, right after it returns: Probe must
-	// not hide a change New made by undoing it, nor New one Probe makes.
-	// An empty slot is a measured baseline too: a call that installs the
-	// allocator moves it from "no process allocator" to the installed one.
+	// Each call is measured on its own, right after it returns.
 	measured := budgetErr == nil
 	checkBudget := func(call string) {
 		if !measured {
@@ -125,10 +110,7 @@ func CheckRefusal(ctx context.Context, cfg RefusalConfig) error {
 		judge("New", err)
 	}
 	checkBudget("New")
-	// An ended context aborts the check, as it does a TestBackend run: Probe
-	// is not called on it, and what Probe returns once it ends is no finding.
-	// New takes no context, so its refusal is judged even if ctx ended
-	// during it; the abort is recorded whether or not there is a Probe.
+	// An ended context aborts the check; New's refusal is still judged.
 	aborted := ctx.Err()
 	if aborted == nil && cfg.Probe != nil {
 		panicked, err := refusalProbe(ctx, cfg.Probe)
@@ -195,10 +177,7 @@ func (s budgetSnapshot) String() string {
 // default one; a variable so a test can stand in an unreadable allocator.
 var installedAllocator = enclave.InstalledAllocator
 
-// budgetOf snapshots the process allocator's identity, limit and reservations
-// without installing one: an empty slot is the "no process allocator"
-// snapshot, so a New that installs the allocator changes the budget. An
-// installed allocator that cannot be read is an error, never "unset".
+// budgetOf snapshots the process allocator without installing one.
 func budgetOf(when string) (budgetSnapshot, error) {
 	a, ok := installedAllocator()
 	if !ok {

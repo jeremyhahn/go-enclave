@@ -13,138 +13,25 @@ import (
 	"sync"
 )
 
-// Sealed holds material encrypted at rest and decrypts it into a new
-// memory enclave only when [Sealed.Open] is called. Use it for
-// material needed occasionally and held for a long time; use a memory enclave
-// ([NewMemory]) for material in continuous use.
-//
-// Each value is an envelope on the ordinary heap: the material sealed with
-// AES-256-GCM under a fresh 32-byte data key (DEK), and the DEK wrapped by
-// the [Sealer] (by its provider in [ModePerOperation], by its key hierarchy
-// in [ModeRootKey]). The wrapped DEK is bound as additional authenticated
-// data, so re-pairing halves from different values fails authentication.
-//
-// Recovered plaintext never reaches the ordinary heap, but AES key schedules
-// do: every in-process AES operation leaves its key's expanded schedule on
-// the heap, unerased unless the build has [KeyScheduleErasure], so a reader
-// of this process's memory can recover the keys of recent seals and opens
-// from it, and with them the values. This guarantee is weaker than the
-// plaintext's, and what it exposes depends on the [Mode] the value was
-// sealed under; see [Mode]. [WithRequireKeyScheduleErasure] refuses a sealer
-// that would leave a schedule there.
-//
-// There is no constructor for sealed bytes: the envelope format is internal,
-// unversioned and keyed to a process-lifetime Sealer.
-//
-// A Sealed owns no locked pages and is not destroyed by [WipeAll].
-// After a sweep it may still report [Sealed.IsAlive] while
-// [Sealed.Open] fails with [ErrSealerWiped]; [Sealed.Openable]
-// reports which.
-//
-// Construct one with [NewSealed], [NewSealedFrom], [Sealer.Seal] or
-// [Sealer.SealFrom]; the implementation is internal to this package. A Sealed
-// is safe for concurrent use, and Destroy reaches every reference to it.
+// Sealed holds material encrypted at rest and decrypts it into a new memory enclave only on [Sealed.Open]; see [Mode] for what each mode exposes.
 type Sealed interface {
-	// Open decrypts the material directly into a new memory enclave and returns
-	// it as a [ByteAccess]. The caller owns the result and must Destroy it;
-	// each call returns an independent enclave. Open late and destroy early.
-	//
-	// The destination and the transient key pages are allocated outside any
-	// [Allocator] budget; callers holding a budget, or opening into another
-	// backend, use [Sealed.OpenIn].
-	//
-	// It returns ErrEnclaveDestroyed once Destroy has run, ErrSealedAuthentication
-	// if the envelope does not authenticate, ErrLockedMemoryUnavailable when the
-	// kernel refuses a locked page (the value survives and the open can be
-	// retried), ErrSealerWiped when a shutdown sweep destroyed the sealer's keys,
-	// and ErrSealerDestroyed after [Sealer.Destroy]. In [ModePerOperation] a
-	// provider's own failure is joined under ErrOpenFailed. A failed open
-	// returns a nil interface.
-	//
-	// ctx bounds the open. In [ModePerOperation] it is passed to the provider's
-	// Unprotect; in [ModeRootKey] the open makes no provider call and ctx is
-	// checked on entry only. An ended context fails the open with an error
-	// matching both ErrOpenFailed and ctx.Err(), and not ErrSealedAuthentication
-	// unless the provider reported that first (see [ErrOpenFailed]). The value is
-	// left intact, and a destination recovered for an abandoned caller is
-	// destroyed.
+	// Open decrypts the material into a new memory enclave the caller must Destroy; ctx bounds the open.
 	Open(ctx context.Context) (ByteAccess, error)
 
-	// OpenIn is [Sealed.Open] into b, any backend that can hold the material.
-	//
-	// For locked memory it decrypts in place, as Open does: [DefaultBackend] is
-	// Open itself, and an [Allocator] from [NewAllocator] or
-	// [NewAllocatorWithinRLimit] admits the destination against its budget, as
-	// below. Into the secretmem backend ([NewSecretMemory]) it decrypts straight
-	// into the returned handle's memfd_secret pages, admitted against that
-	// backend's budget before anything is decrypted: the plaintext passes
-	// through no scratch enclave, no import and no heap buffer, and a refusal of
-	// those pages is the backend's failure, as an import's is below. Nothing
-	// falls back to the scratch path. For any other backend that implements
-	// [Importer] it decrypts into a locked scratch enclave and imports from it
-	// with [PurposeMaterial]; the
-	// importer wipes the scratch, which is then destroyed, so the plaintext never
-	// reaches the heap. The caller owns the returned handle and must Destroy it.
-	//
-	// It returns [ErrInvalidBackend] for a nil or typed-nil b, a
-	// [*CapabilityError] naming [CapabilityImport] for a backend that cannot
-	// import, before anything is decrypted, and one naming [CapabilityBytes]
-	// when the handle the backend returned has no [ByteAccess], which is
-	// destroyed. These checks precede the destroyed check. A backend's own
-	// failure is joined under [ErrOpenFailed], except [ErrInvalidImport] and the
-	// capability refusals, which are returned as they are. Otherwise it returns
-	// what Open returns.
-	//
-	// Into an Allocator, the destination is admitted against its budget,
-	// reserved before any locked memory is requested and returned when the
-	// caller destroys the result. Only the destination is admitted, in one
-	// reservation taken first, so an open the budget refuses allocates nothing.
-	// The transient DEK page (and, for a value under a retired [ModeRootKey]
-	// generation, a KEK page) are not charged, so peak use can exceed the budget
-	// by one page (two) per open in flight. A budget refusal, ErrBudgetExhausted
-	// as a [BudgetError], leaves the value intact and is retryable. A context
-	// already ended is refused before the reservation. Sealing is never
-	// budgeted.
+	// OpenIn is [Sealed.Open] into backend b, admitted against b's budget before anything is decrypted.
 	OpenIn(ctx context.Context, b Backend) (Handle, error)
 
-	// IsAlive reports whether this value still holds its ciphertext, that is,
-	// whether [Sealed.Destroy] has not run. It does not mean the value can
-	// be opened: after a shutdown [WipeAll] a value can report IsAlive while
-	// [Sealed.Open] fails with [ErrSealerWiped]. Use
-	// [Sealed.Openable] for that.
+	// IsAlive reports whether [Sealed.Destroy] has not run; use [Sealed.Openable] to know whether it can open.
 	IsAlive() bool
 
-	// Openable reports whether [Sealed.Open] could still recover this
-	// material, without recovering it. It returns nil if nothing known prevents
-	// it, [ErrEnclaveDestroyed] if this value was destroyed,
-	// [ErrSealerWiped] if a shutdown [WipeAll] destroyed in-process keys the
-	// sealer needs, [ErrSealerDestroyed] after [Sealer.Destroy], and
-	// [ErrOpenabilityUnknown] if a sweep has run since this value was sealed and
-	// a [ModePerOperation] provider does not implement [HealthReporter]. A
-	// provider's HealthReporter answer is believed.
-	//
-	// The answer is a snapshot for diagnostics, not a reservation, and nil is
-	// narrower than "will succeed": it does not predict
-	// [ErrSealedAuthentication], [ErrLockedMemoryUnavailable] or a device's own
-	// failures. It takes no context and calls no provider other than
-	// HealthReporter.Health, and holds no lock of this value's while consulting
-	// the sealer.
+	// Openable reports, without opening, whether anything known prevents [Sealed.Open] from recovering the material.
 	Openable() error
 
-	// Destroy wipes the sealed material and releases it. It is idempotent.
-	// Enclaves already returned by [Sealed.Open] are unaffected.
-	//
-	// It does not wait for opens in flight: they complete against the envelope
-	// they pinned, the last one wipes it, and every Open starting afterwards
-	// returns [ErrEnclaveDestroyed]. The error is always nil today; it matches
-	// [Handle.Destroy] and [Sealer.Destroy].
+	// Destroy wipes the sealed material once opens in flight finish; it is idempotent and always returns nil.
 	Destroy() error
 }
 
-// sealedValue is this package's [Sealed]. A nil *sealedValue is a valid
-// receiver for every method. It must not be copied; its state sits behind one
-// pointer, so even a copy is the same value, and destroying either destroys
-// both.
+// sealedValue is this package's [Sealed]; a nil receiver is valid and it must not be copied.
 type sealedValue struct {
 	_ noCopy
 
@@ -211,33 +98,7 @@ func sealedAAD(version uint8, blob []byte) ([]byte, error) {
 	return nil, ErrUnknownSealedVersion
 }
 
-// NewSealed encrypts data under the process [Sealer] and returns the sealed
-// enclave. The process Sealer is whatever [SetSealer] installed, or, if
-// nothing did before the first seal, a [SoftwareProvider] in [ModeRootKey].
-// [Sealer.Seal] does the same for an explicit sealer.
-//
-// It takes ownership of data as [NewMemory] does: the caller's slice
-// is wiped before it returns, on every path but one. Data this process cannot
-// write, such as a view into a frozen memory enclave, cannot be wiped and is
-// refused with [ErrSealSourceReadOnly] before anything else; seal such
-// material with [NewSealedFrom].
-//
-// It returns ErrEmptyEnclave when data is empty, ErrMaterialTooLarge above
-// AES-GCM's per-message ceiling, ErrSealFailed when the AEAD, the CSPRNG or
-// the provider fails, ErrLockedMemoryUnavailable when the kernel refuses a
-// locked page, ErrSealerWiped after a shutdown sweep destroyed the sealer's
-// keys, and ErrSealerDestroyed after [Sealer.Destroy] on the process Sealer.
-//
-// ctx bounds every step that can block: the first root unseal in
-// [ModeRootKey], and every Protect in [ModePerOperation]. An ended context
-// fails the seal with an error matching both ErrSealFailed and ctx.Err(), with
-// any underlying failure joined. A context already ended on entry is refused
-// before the process Sealer is looked up, so it never installs the default.
-// A root unsealed for a caller that then gave up is kept and used by the next
-// seal.
-//
-// On a GOEXPERIMENT=boringcrypto build it always returns ErrSealFailed. A
-// failed seal returns a nil interface.
+// NewSealed seals data under the process [Sealer], wiping the caller's slice; ctx bounds every blocking step.
 func NewSealed(ctx context.Context, data []byte) (Sealed, error) {
 	return sealedOut(newSealed(ctx, data))
 }
@@ -273,10 +134,7 @@ func sealedOut(v *sealedValue, err error) (Sealed, error) {
 	return v, err
 }
 
-// NewSealedFrom is [Sealer.SealFrom] under the process [Sealer], as
-// [NewSealed] is [Sealer.Seal]: it seals the material src holds and leaves
-// src as it was. A context already ended on entry is refused before the
-// process Sealer is looked up.
+// NewSealedFrom is [Sealer.SealFrom] under the process [Sealer]; src is left as it was.
 func NewSealedFrom(ctx context.Context, src Handle) (Sealed, error) {
 	return sealedOut(newSealedFrom(ctx, src))
 }
@@ -423,10 +281,7 @@ func (s *sealedValue) openImported(ctx context.Context, imp Importer) (Handle, e
 	return h, nil
 }
 
-// openIn is the shared body of Open and openAdmitted; dst makes the
-// destination. The value's lock only pins and unpins the envelope and is
-// not held across Sealer.open, which may block in a provider; Destroy takes
-// no context and must not wait on that.
+// openIn is the shared body of Open and openAdmitted; the value's lock is not held across Sealer.open.
 func (s *sealedValue) openIn(ctx context.Context, dst func(int) (*lockedRegion, error)) (*lockedRegion, error) {
 	if s == nil || s.sealedState == nil {
 		return nil, ErrEnclaveDestroyed

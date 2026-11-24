@@ -521,12 +521,7 @@ func TestProtector_FlushLostAfterUnseal(t *testing.T) {
 	}
 }
 
-// TestProtector_ReclaimAfterLostResponse loses the response of each command
-// of each sequence in turn, as an interrupt does on a stream: the command
-// ran, and a handle it made is unknown to the provider. Before the next call,
-// every handle the call made must be gone, and a handle the provider did not
-// make must stay. Behind a resource manager reopening is enough; without one,
-// the provider lists and flushes.
+// TestProtector_ReclaimAfterLostResponse loses each command's response and checks only the call's handles are flushed.
 func TestProtector_ReclaimAfterLostResponse(t *testing.T) {
 	for _, unmanaged := range []bool{false, true} {
 		for _, op := range []string{"Protect", "Unprotect"} {

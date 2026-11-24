@@ -6,14 +6,7 @@
 // This file is part of go-enclave. Use of this source code is governed by the
 // MIT license that can be found in the LICENSE file.
 
-// Package memscan is the one sweep of this process's own memory: it reads
-// every mapping that can hold a runtime copy of key material through
-// /proc/self/mem and reports the ones a needle is resident in. The root
-// package's Linux tests and providertest's residue check both prove with it
-// that a secret left no copy behind.
-//
-// It imports nothing from the module, so the root package's own tests can use
-// it without an import cycle.
+// Package memscan sweeps this process's own memory for a needle through /proc/self/mem; it imports nothing from the module.
 package memscan
 
 import (
@@ -60,12 +53,7 @@ func Addr(b []byte) (uintptr, error) {
 	return uintptr(addr), nil
 }
 
-// ParseMapsHeader recognizes a /proc/self/maps or /proc/self/smaps header line
-// ("7f0c…-7f0c… rw-p …") and returns its bounds; any other smaps line
-// ("Size:   4 kB") fails the hex parse. The bounds are parsed at
-// bits.UintSize, so on a 32-bit target a value that does not fit is reported
-// unparsable rather than narrowed. A low bound above the high one is not a
-// header: ok is false.
+// ParseMapsHeader returns the bounds of a /proc/self/maps or smaps header line; ok is false for any other line.
 func ParseMapsHeader(line string) (lo, hi uintptr, ok bool) {
 	first, _, cut := strings.Cut(line, " ")
 	if !cut {

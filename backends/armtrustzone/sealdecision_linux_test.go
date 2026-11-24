@@ -8,17 +8,10 @@ import (
 	"testing"
 )
 
-// opteeSealVar says whether the fixture's trusted application has SEAL:
-// empty or "required" expects it, and any SEAL error fails the KeyProtector
-// test; "absent:<release>", which scripts/optee-fixture.sh sets for its
-// pinned trusted-firmware release, lets the test skip a TA without SEAL.
+// opteeSealVar says whether the fixture's trusted application has SEAL.
 const opteeSealVar = "GO_ENCLAVE_OPTEE_SEAL"
 
-// opteeSealAbsentRelease is the trusted-firmware release, pinned as
-// TRUSTED_FIRMWARE_TAG in scripts/tool-pins.sh, whose trusted application is
-// known to have no SEAL. scripts/optee-fixture.sh declares it as
-// GO_ENCLAVE_OPTEE_SEAL=absent:<release>; a new pin without SEAL must raise
-// both.
+// opteeSealAbsentRelease is the pinned trusted-firmware release known to lack SEAL.
 const opteeSealAbsentRelease = "v0.4.2-alpha"
 
 // sealVerdict is what the OP-TEE KeyProtector test does after a first
@@ -43,16 +36,7 @@ func (v sealVerdict) String() string {
 	return fmt.Sprintf("sealVerdict(%d)", int(v))
 }
 
-// sealDecision decides, from GO_ENCLAVE_OPTEE_SEAL's value knob and err, the
-// error of a first Protect, what TestKeyProtectorConformance_OnOPTEE does,
-// and why. A SEAL that works runs the suite under every value. Otherwise,
-// with knob empty SEAL is expected and any error fails, as it does under
-// "required"; under "absent:<release>", the fixture's declaration that its
-// pinned trusted-firmware release lacks SEAL, TEE_ERROR_BAD_PARAMETERS or
-// TEE_ERROR_NOT_SUPPORTED from SEAL skips, if <release> is
-// opteeSealAbsentRelease. No error code alone shows that SEAL is absent: a
-// TA with SEAL can answer TEE_ERROR_BAD_PARAMETERS to a broken SEAL call and
-// to an unknown command alike.
+// sealDecision decides from GO_ENCLAVE_OPTEE_SEAL and a first Protect's error whether the OP-TEE test runs, skips or fails.
 func sealDecision(knob string, err error) (sealVerdict, string) {
 	const (
 		teecErrorBadParameters = 0xffff0006 // TEE_ERROR_BAD_PARAMETERS
@@ -84,11 +68,7 @@ func sealDecision(knob string, err error) (sealVerdict, string) {
 // fakeCmdUndefined is a command no TFW_TA_CMD_* names.
 const fakeCmdUndefined uint32 = 0x7fffffff
 
-// TestSealDecision runs a first Protect against the fake TEE, its SEAL
-// answering as each case says, and checks what the OP-TEE KeyProtector test
-// would do under each GO_ENCLAVE_OPTEE_SEAL value. The fake's TA has SEAL, so
-// only the fixture's declaration that its pinned release lacks SEAL may turn
-// a SEAL error into a skip.
+// TestSealDecision checks sealDecision under each GO_ENCLAVE_OPTEE_SEAL value.
 func TestSealDecision(t *testing.T) {
 	const legacy = "absent:" + opteeSealAbsentRelease
 	for _, tc := range []struct {
@@ -98,8 +78,7 @@ func TestSealDecision(t *testing.T) {
 		knob      string
 		want      sealVerdict
 	}{
-		// A SEAL-capable TA that answers BAD_PARAMETERS to a broken SEAL
-		// call and to unknown commands alike is not a TA without SEAL.
+		// BAD_PARAMETERS alone does not show that SEAL is absent.
 		{"bad parameters like an unknown command, knob unset", fakeErrBadParameters, fakeErrBadParameters, "", sealFail},
 		{"bad parameters, knob unset", fakeErrBadParameters, 0, "", sealFail},
 		{"not supported, knob unset", fakeErrNotSupported, 0, "", sealFail},

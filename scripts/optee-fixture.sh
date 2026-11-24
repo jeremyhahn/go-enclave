@@ -1,21 +1,5 @@
 #!/bin/sh
-# optee-fixture.sh — the OP-TEE fixture from the pinned trusted-firmware release.
-#
-# Usage: scripts/optee-fixture.sh check|harness   (from the repository root)
-#
-# The body of `make optee-fixture-check` (check) and of
-# `make integration-test-arm-trustzone` (harness). Both clone trusted-firmware
-# at TRUSTED_FIRMWARE_TAG into TRUSTED_FIRMWARE_CACHE/<tag>, outside the tree,
-# or use the checkout already there (in the CI optee job, the fixture image's
-# prebuilt stack: OPTEE_FIXTURE_PREBUILT=1 refuses to clone), and refuse unless the checkout's HEAD is TRUSTED_FIRMWARE_COMMIT: a moved tag
-# is refused, never followed. check runs the checkout's
-# `make integration-test-optee` (xtest and the TA's version and rng commands;
-# no go-enclave code). harness takes backends/armtrustzone's optee-tagged
-# conformance tests and benchmarks, a static linux/arm64 test binary the make
-# target compiled in the toolchain image ($ARM_TRUSTZONE_BIN), shares it with
-# the aarch64 guest, runs the conformance tests then BenchmarkOpenUseClose and
-# BenchmarkAccess, and exits with
-# the status of `make optee-run`, which is the binary's.
+# optee-fixture.sh check|harness: run the OP-TEE fixture at the pinned trusted-firmware commit, or the arm-trustzone harness in it.
 set -eu
 # shellcheck source=lib.sh
 . "${0%/*}/lib.sh"
@@ -44,11 +28,7 @@ case $commit in
 esac
 [ "${#commit}" -eq 40 ] || die "TRUSTED_FIRMWARE_COMMIT '$commit' is not a full 40-digit commit id"
 
-# One directory per tag; a clone lands in place only when it is complete. A
-# checkout already there (the fixture image's prebuilt stack) is used, never
-# re-cloned; in the fixture image (OPTEE_FIXTURE_PREBUILT=1) a missing one is
-# refused, so the job never builds the stack. Either way the commit check
-# below decides.
+# One directory per tag; an existing checkout is used, and OPTEE_FIXTURE_PREBUILT=1 refuses to clone.
 dir=$cache/$tag
 if [ ! -e "$dir/.git" ]; then
   [ "$prebuilt" != 1 ] || die "the fixture image holds no trusted-firmware checkout at $dir; see docs/backend-conformance/engineering.md#fixture-image-contract"
@@ -80,10 +60,7 @@ fi
 case $endpoint in
   *[!A-Za-z0-9/._-]*) die "GO_ENCLAVE_OPTEE_ENDPOINT '$endpoint' is not a device path" ;;
 esac
-# The pinned trusted-firmware release's TA has no SEAL: an empty knob
-# declares so, as absent:<tag>, which lets the KeyProtector test skip on a
-# missing SEAL only while <tag> is the release the test knows lacks it.
-# "required" makes a missing SEAL fail.
+# An empty knob declares the pinned release's TA has no SEAL (absent:<tag>); "required" makes a missing SEAL fail.
 case $seal in
   '') seal="absent:$tag" ;;
   required) ;;
@@ -95,13 +72,7 @@ trap 'rm -rf "$share"' EXIT
 case $share in
   *[,\ ]*) die "the share directory '$share' holds a comma or a space, which optee-run refuses; set TMPDIR" ;;
 esac
-# The conformance test is the nested module's: backends/armtrustzone
-# registers its backend in-process. The root's optee-tagged harness is not run:
-# the root go.mod never requires the nested module, so nothing can register
-# the backend in that binary and its conformance test can only refuse.
-# make integration-test-arm-trustzone compiles the binary in the toolchain
-# image (the pinned Go and verified module cache, offline) and names it in
-# ARM_TRUSTZONE_BIN; only the QEMU orchestration below runs on the host.
+# The conformance test is the nested backends/armtrustzone module's, compiled into ARM_TRUSTZONE_BIN in the toolchain image.
 bin=${OPTEE_TEST_BIN:-}
 case $bin in
   '' | .* | *[!A-Za-z0-9._-]*) die "OPTEE_TEST_BIN '$bin' is not a file name; make integration-test-arm-trustzone sets it to armtrustzone.test" ;;

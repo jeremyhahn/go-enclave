@@ -136,9 +136,7 @@ func destroyRetried(t *testing.T, s *envelopeSealer, b *stickyImporter) {
 	}
 }
 
-// TestSealed_OpenInRechecksTheSealerAfterImport reproduces Codex's P1: a
-// Sealer destroyed while OpenIn's import blocked handed out a live plaintext
-// handle. The import is released only after Destroy returned.
+// TestSealed_OpenInRechecksTheSealerAfterImport pins that OpenIn returns no live handle from a sealer destroyed during the import.
 func TestSealed_OpenInRechecksTheSealerAfterImport(t *testing.T) {
 	for _, refuse := range []bool{false, true} {
 		name := "destroyed"
@@ -196,9 +194,7 @@ func TestSealed_OpenInRechecksTheSealerAfterImport(t *testing.T) {
 	}
 }
 
-// TestSealed_OpenInKeepsAFailedImportsRefusedCleanup reproduces Codex's P1: an
-// importer returning a handle with its error, whose Destroy then failed, lost
-// both the handle and the cleanup failure.
+// TestSealed_OpenInKeepsAFailedImportsRefusedCleanup pins that a failed import's refused Destroy is kept and reported.
 func TestSealed_OpenInKeepsAFailedImportsRefusedCleanup(t *testing.T) {
 	s, err := newEnvelopeSealer()
 	if err != nil {
@@ -245,9 +241,7 @@ func TestSealer_ImportKeyKeepsARefusedCleanup(t *testing.T) {
 	destroyRetried(t, s, b)
 }
 
-// TestSealer_RotationKeepsARefusedOutgoingKEK reproduces Codex's P1: a
-// rotation whose outgoing backend KEK refused Destroy dropped it live and
-// reported success.
+// TestSealer_RotationKeepsARefusedOutgoingKEK pins that a rotation keeps an outgoing KEK that refused Destroy.
 func TestSealer_RotationKeepsARefusedOutgoingKEK(t *testing.T) {
 	b := newStickyImporter()
 	s, err := newEnvelopeSealer(WithBackend(b), WithKEKRotationLimit(1))
@@ -288,9 +282,7 @@ func TestSealer_RotationKeepsARefusedOutgoingKEK(t *testing.T) {
 	destroyRetried(t, s, b)
 }
 
-// TestReadOnly_ProbesEveryPage reproduces Codex's P2: a writable first and
-// last page around a read-only interior page passed the probe, and the wipe
-// that followed killed the process.
+// TestReadOnly_ProbesEveryPage pins that a read-only interior page is detected.
 func TestReadOnly_ProbesEveryPage(t *testing.T) {
 	ps := int(pageSize)
 	b, err := sysMap(3 * ps)

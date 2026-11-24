@@ -29,17 +29,10 @@ func (e *ConfigError) Error() string { return "backendtest: Config." + e.Field +
 // Is reports whether target is [ErrInvalidConfig].
 func (e *ConfigError) Is(target error) bool { return target == ErrInvalidConfig }
 
-// ErrAborted matches the error [TestBackend] returns when its context ended
-// before the run finished. The run is incomplete: it is neither a pass nor, by
-// itself, a finding against the backend. Properties that had already failed
-// while the context was live are reported alongside it and are real; a
-// failure observed after it ended is not reported.
+// ErrAborted matches the error [TestBackend] returns when its context ended before the run finished.
 var ErrAborted = errors.New("backendtest: run aborted because its context ended")
 
-// AbortedError is the concrete error behind [ErrAborted]. Its Cause is the
-// run context's error: it matches ErrAborted under errors.Is and unwraps to
-// Cause, so a caller can also match context.Canceled or
-// context.DeadlineExceeded.
+// AbortedError is the concrete error behind [ErrAborted]; it unwraps to the context's error.
 type AbortedError struct {
 	// Cause is the run context's error.
 	Cause error
@@ -80,10 +73,7 @@ func (e *BudgetNotMeasuredError) Error() string {
 // Is reports whether target is [ErrBudgetNotMeasured].
 func (e *BudgetNotMeasuredError) Is(target error) bool { return target == ErrBudgetNotMeasured }
 
-// FindingsError is what [TestBackend] returns when its run found anything:
-// every [*PropertyError], [*NotMeasuredError], [*UncheckedCapabilityError] and
-// [*AbortedError] of the run, in the order they were found. errors.Is and
-// errors.As reach each one through Unwrap.
+// FindingsError holds every finding of a [TestBackend] run in order, reachable through Unwrap.
 type FindingsError struct {
 	// Findings holds the run's findings, never empty in an error TestBackend
 	// returns.
@@ -146,10 +136,7 @@ func (e *NotMeasuredError) Error() string {
 // Is reports whether target is [ErrNotMeasured].
 func (e *NotMeasuredError) Is(target error) bool { return target == ErrNotMeasured }
 
-// ErrNoEndpoint matches the error a conformance harness reports when the
-// endpoint it reaches a backend's device through, such as a TEE client
-// device, is not set: the environment variable that names it is empty. No
-// backend was tested, which is neither a pass nor a finding.
+// ErrNoEndpoint matches a conformance harness's error when the device endpoint variable is empty.
 var ErrNoEndpoint = errors.New("backendtest: no endpoint is set for the backend")
 
 // EndpointError is the concrete error behind [ErrNoEndpoint]: which
@@ -168,11 +155,7 @@ func (e *EndpointError) Error() string {
 // Is reports whether target is [ErrNoEndpoint].
 func (e *EndpointError) Is(target error) bool { return target == ErrNoEndpoint }
 
-// ErrNoRegistration matches the error a conformance harness reports when the
-// test binary carries no in-process registration of the backend it tests: no
-// file built into it registers the backend with [enclave.Register]. A fixture
-// in another process cannot fill this process's registry. No backend was
-// tested, which is neither a pass nor a finding.
+// ErrNoRegistration matches a conformance harness's error when the test binary registers no backend.
 var ErrNoRegistration = errors.New("backendtest: no in-process registration of the backend is built in")
 
 // RegistrationError is the concrete error behind [ErrNoRegistration]: which
@@ -192,12 +175,7 @@ func (e *RegistrationError) Error() string {
 // Is reports whether target is [ErrNoRegistration].
 func (e *RegistrationError) Is(target error) bool { return target == ErrNoRegistration }
 
-// ErrUncheckedCapability matches the error [TestBackend] returns for a
-// capability the backend or a handle case declares but whose contract the
-// suite cannot exercise: one the enclave package does not name, or one whose
-// behavior the seam does not specify closely enough for the handle at hand.
-// The suite refuses such a backend rather than certify a capability it never
-// ran.
+// ErrUncheckedCapability matches the error for a declared capability whose contract the suite cannot exercise.
 var ErrUncheckedCapability = errors.New("backendtest: declared capability cannot be checked")
 
 // UncheckedCapabilityError is the concrete error behind

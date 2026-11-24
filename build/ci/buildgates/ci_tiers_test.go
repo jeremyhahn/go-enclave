@@ -14,29 +14,7 @@ import (
 	"github.com/goccy/go-yaml"
 )
 
-// CI runs in three tiers (ci-template v1.30). The PR tier runs on every
-// event; the full tier runs on every event but a pull_request (a
-// workflow_dispatch only on main), and on a PR labeled `ci:full` (from its
-// next push or update-branch: a label event starts no run); the nightly tier
-// runs on the schedule and on workflow_dispatch. A draft pull request runs no
-// job (v1.26): every job but CI Gate skips, and CI Gate fails on a draft, so
-// no skipped gate reads as passed. A PR whose every changed file is docs skips
-// the `code` jobs, and the lint-gates job (v1.27.0), the repository's own
-// gates, is `scoped` to LINT_GATES_PATTERN (v1.30). CI Gate, the one required
-// check, needs every job but publish-images and names each one in a
-// `check <job> <result> <tier>` line; its check() lets a skip pass only when
-// the run did not select the job's tier, the PR was docs-only (code), no file
-// matched (scoped), or the schedule guard proved the tree. These tests hold
-// ci.yml's jobs, `if:`s and gate tags to one another, so a job cannot be
-// added, moved between tiers or dropped from the gate without the rest
-// following: a PR-tier job given an `if:` would be skipped and fail the gate,
-// and a full-tier job tagged `pr` would fail every plain PR, but a full job
-// with a looser `if:` or an untagged gate line would pass quietly.
-//
-// Every workflow that runs on pull_request also cancels the superseded run of
-// its ref (devops §9b), and two schedules exist: ci.yml's,
-// which runs the full tier and Soak weekly, and nightly.yml's daily slot; no
-// other workflow has a schedule.
+// CI runs PR, full and nightly tiers; these tests hold ci.yml's jobs, ifs and gate tags to one another.
 
 const (
 	ciWorkflowFile = ".github/workflows/ci.yml"
@@ -45,10 +23,7 @@ const (
 	// preflight picked, a GitHub-hosted one unless it says otherwise. The gate
 	// uses no action (no checkout, no toolchain) and carries summary.sh inline.
 	ciGateRunner = `${{ github.server_url == 'https://github.com' && fromJSON(needs.preflight.outputs.runner || '"ubuntu-latest"') || 'ci-gate' }}`
-	// gateIf is the gate's `if:` (v1.29.3): on a schedule run the guard's
-	// `busy` skips it, so a nightly never posts a green gate. v1.53: always()
-	// on a pull request, the not-canceled check on every other event, so a
-	// superseded main run posts a skipped gate, not a failed one.
+	// gateIf is the gate's if: a busy schedule guard skips it, and a superseded main run posts a skipped gate.
 	gateIf = "${{ (startsWith(github.event_name, 'pull_request') && always() || !cancelled()) && (github.event_name != 'schedule' || needs.preflight.outputs.verdict != 'busy') }}" //nolint:misspell // GitHub Actions expression function cancelled()
 	// gateCheckFunc opens the gate's check() (v1.30), which judges each job's
 	// result against its tier.
@@ -60,15 +35,12 @@ const (
 	// draftIf is the `if:` that skips a job on a draft pull request (v1.26),
 	// which every PR-tier job carries or inherits through `needs:`.
 	draftIf = "${{ !github.event.pull_request.draft }}"
-	// fullTierJobIf is the `if:` a full-tier job carries (v1.26): the full
-	// tier, never on a draft, ci:full or not, and only on the schedule
-	// guard's run verdict (#277).
+	// fullTierJobIf is a full-tier job's if: full tier, never a draft, and only on the guard's run verdict.
 	fullTierJobIf = "${{ (" + termFull + ") && " + termDraft + " && " + termRun + " }}"
 	// guardedPRJobIf is the `if:` of a PR-tier job that reads nothing from
 	// the changes job: never on a draft, and only on the guard's run verdict.
 	guardedPRJobIf = "${{ " + termDraft + " && " + termRun + " }}"
-	// gateDraftEnv is the gate's DRAFT value, and gateDraftCheck the guard
-	// that fails the gate on a draft before it reads any result.
+	// gateDraftEnv is the gate's DRAFT value; gateDraftCheck fails the gate on a draft.
 	gateDraftEnv   = "${{ github.event.pull_request.draft == true }}"
 	gateDraftCheck = `[ "${DRAFT}" = true ]`
 	// lintGatesJob is the v1.27.0 job that runs the repository's own gates.
@@ -102,8 +74,7 @@ const (
 	// ciSchedule is the one CI schedule, ci.yml's weekly cron: Tuesday night,
 	// 04:00 UTC Wednesday.
 	ciSchedule = "0 4 * * 3"
-	// nightlyWorkflowFile runs on its own daily cron, nightlySchedule, by the
-	// owner order of 2026-11-22 that the Nightly workflow run automatically.
+	// nightlyWorkflowFile runs on its own daily cron, nightlySchedule.
 	nightlyWorkflowFile = ".github/workflows/nightly.yml"
 	nightlySchedule     = "25 5 * * *"
 )
@@ -129,32 +100,21 @@ var tierTerms = map[string][]string{
 	"nightly": {termNightly},
 }
 
-// ciJobTimeouts is every ci.yml job's timeout-minutes (#277): the measured
-// jobs at ceil(1.5 x p95), publish-images at the template's value, the swtpm
-// and OP-TEE jobs at the values they had before the template, preflight at
-// the template's 10 (v1.34), the rest at 5. Lint on a cold self-hosted runner
-// builds the toolchain image before make lint: ceil(1.5 x (19 + 8)) = 41, the
-// cold-cache run of main fc58102.
+// ciJobTimeouts is every ci.yml job's timeout-minutes.
 var ciJobTimeouts = map[string]int{
 	preflightJob: 10, publishJob: 60, lintJob: 41, "image": 48,
 	lintGatesJob: 20, "fips": 11, "integration": 22, "soak": 56, ciGateJob: 5,
 	"tpm-swtpm": 30, "optee": 180,
 }
 
-// lintSteps are go-enclave's four lint steps, which v1.30 moved from the
-// image job into the lint job (#277), and v1.31's private-pattern search
-// after make lint: they run there, in this order, and in no other job.
+// lintSteps are the four lint steps, in order, in the lint job only.
 var lintSteps = []string{"make lint GO_BUILD_TAGS", privatePatternSearch, "$RELEASABILITY_TEST", "make tidy-check lint-runtimesecret lint-integration", "scripts/assert-build-tags.sh"}
 
 // lintGatesTargets are the make targets `make lint-gates` runs (Makefile): no
 // job but lint-gates runs one, so each gate runs once per PR.
 var lintGatesTargets = []string{"lint-gates", "check-buildgates", "check-releasability", "check-changelog-assembly", "check-scripts"}
 
-// ciPullRequestTypes are ci.yml's pull_request activity types. `labeled` is
-// absent (DS-2281): Gitea maps every label add and remove to it, so each label
-// change started a run that canceled the PR's run in progress. A `ci:full`
-// label takes effect on the PR's next push or update-branch.
-// `ready_for_review` runs CI when a draft is marked ready.
+// ciPullRequestTypes are ci.yml's pull_request activity types; `labeled` is absent, so a ci:full label applies on the next push.
 var ciPullRequestTypes = []string{"opened", "synchronize", "reopened", "ready_for_review"}
 
 var (
@@ -284,8 +244,7 @@ func ciTierViolations(src []byte) ([]string, error) {
 		bad = append(bad, fmt.Sprintf("job %s: needs %v, want every job but %s once: %v", ciGateJob, gate.Needs, publishJob, gated))
 	}
 
-	// v1.30: publish-images is the one job outside the gate; no release
-	// runner serves this repository on github.com, so it never runs there (#277).
+	// publish-images is the one job outside the gate.
 	if pub, ok := wf.Jobs[publishJob]; !ok || !slices.Contains(ifTerms(pub.If), publishGuard) {
 		bad = append(bad, fmt.Sprintf("job %s: if is %v, want a top-level %s term: no release runner serves this repository on github.com (#277)", publishJob, pub.If, publishGuard))
 	}
@@ -329,7 +288,7 @@ func ciTierViolations(src []byte) ([]string, error) {
 	tierFlags := false
 	draftGuard := false
 	for _, st := range gate.Steps {
-		// v1.26: the gate fails on a draft before it reads any result.
+		// The gate fails on a draft before it reads any result.
 		if g := strings.Index(st.Run, gateDraftCheck); g >= 0 && st.Env["DRAFT"] == gateDraftEnv {
 			block := st.Run[g:]
 			if end := strings.Index(block, "\nfi"); end >= 0 && strings.Contains(block[:end], "exit 1") {
@@ -365,8 +324,7 @@ func ciTierViolations(src []byte) ([]string, error) {
 		bad = append(bad, fmt.Sprintf("job %s: no step fails on a draft pull request first: env DRAFT: %s and a `%s` block that exits 1 before check() runs", ciGateJob, gateDraftEnv, gateDraftCheck))
 	}
 
-	// v1.26: a PR-tier job is skipped on a draft by its own `if:` or by a
-	// needed job that is, so no job of a draft run reaches a docker daemon.
+	// A PR-tier job is skipped on a draft, so no job of a draft run reaches a docker daemon.
 	var skipsOnDraft func(name string, depth int) bool
 	skipsOnDraft = func(name string, depth int) bool {
 		j := wf.Jobs[name]
@@ -376,9 +334,7 @@ func ciTierViolations(src []byte) ([]string, error) {
 		return depth < len(wf.Jobs) && slices.ContainsFunc(j.Needs, func(n string) bool { return skipsOnDraft(n, depth+1) })
 	}
 
-	// v1.27.0: the lint-gates job runs the repository's own gates, on every
-	// PR whose changed files match LINT_GATES_PATTERN (v1.30: scoped), and
-	// nowhere else, so each gate runs once.
+	// The lint-gates job runs the repository's own gates on PRs matching LINT_GATES_PATTERN, and nowhere else.
 	for _, name := range jobs {
 		job := wf.Jobs[name]
 		runsLintGates := false
@@ -388,7 +344,7 @@ func ciTierViolations(src []byte) ([]string, error) {
 					bad = append(bad, fmt.Sprintf("job %s runs `%s`, which the %s job runs; the gates would run twice", name, target, lintGatesJob))
 				}
 			}
-			// v1.29.1: no -k, so the first failing gate ends the step.
+			// No -k, so the first failing gate ends the step.
 			if name == lintGatesJob && strings.Contains(st.Run, "make lint-gates") {
 				runsLintGates = true
 			}
@@ -412,10 +368,7 @@ func ciTierViolations(src []byte) ([]string, error) {
 		bad = append(bad, fmt.Sprintf("no %s job", lintGatesJob))
 	}
 
-	// v1.42 (owner ruling 742 (1)): the CI Gate is hermetic. No step runs a
-	// check whose answer changes with no change to the tree (deps-check,
-	// make security, trivy image); scans.yml runs them on main. gosec reads
-	// only the tree: one pr-tier step runs it on every tier.
+	// The CI Gate is hermetic: checks that change without a tree change run in scans.yml.
 	runsGosec := false
 	for _, name := range jobs {
 		for _, st := range wf.Jobs[name].Steps {
@@ -440,8 +393,7 @@ func ciTierViolations(src []byte) ([]string, error) {
 		bad = append(bad, "no step runs `make gosec`")
 	}
 
-	// v1.29.0: every job that names the integration image reads the Alpine
-	// package index into APK_INDEX_SUM first, so each names the same tag.
+	// Every job naming the integration image reads APK_INDEX_SUM first, so each names the same tag.
 	for _, name := range jobs {
 		readIndex := false
 		for _, st := range wf.Jobs[name].Steps {
@@ -454,8 +406,7 @@ func ciTierViolations(src []byte) ([]string, error) {
 		}
 	}
 
-	// v1.24 and v1.26.1: the docs-only pattern and the releasability test's
-	// arguments are declared, so a docs-only PR has a reduced set to run.
+	// The docs-only pattern and the releasability test's arguments are declared.
 	for _, k := range []string{"DOCS_ONLY_PATTERN", "RELEASABILITY_TEST", "LINT_GATES_PATTERN"} {
 		if _, ok := wf.Env[k]; !ok {
 			bad = append(bad, fmt.Sprintf("env %s is not declared", k))
@@ -477,8 +428,7 @@ func ciTierViolations(src []byte) ([]string, error) {
 			}
 		}
 		for _, term := range terms {
-			// v1.41: the template's code-tier integration job also holds the
-			// full-tier term; no other tier may.
+			// Only the code-tier integration job also holds the full-tier term.
 			fullInCode := term == termFull && t == "code"
 			if !slices.Contains(tierTerms[t], term) && term != termDraft && term != termRun && !fullInCode {
 				bad = append(bad, fmt.Sprintf("job %s is tagged %s but its if has %q, which the tier does not allow", name, t, term))
@@ -497,13 +447,7 @@ func ciTierViolations(src []byte) ([]string, error) {
 		}
 	}
 
-	// #277: the guard refuses a workflow_dispatch off main, and a refused run
-	// starts no job that checks out and runs the branch. So every gated job
-	// but the changes job and the guard itself needs the guard and requires
-	// its run verdict, in its own `needs:` and `if:`: a job skipped only
-	// through another job's skip would run again once that job's `if:` moved.
-	// What the guard answers for each kind of run is held by running its
-	// script (TestScheduleGuardDecidesTheVerdict).
+	// Every gated job but changes and the guard needs the guard's run verdict in its own needs and if.
 	for _, name := range gated {
 		if name == changesJob || name == scheduleGuardJob {
 			continue
@@ -575,11 +519,7 @@ func runsMakeTarget(run, target string) bool {
 	return false
 }
 
-// gateCheckViolations returns how ci.yml's gate departs from v1.30's check()
-// form (#277): one step sets BAD=0, defines check(), runs exactly one
-// `check <job> "${{ needs.<job>.result }}" <tier>` line for every job in the
-// gate's needs and none for a job outside them, and ends with `exit $BAD`.
-// TestCIGateCheckPassesOnlyExplainedSkips drives the check() it defines.
+// gateCheckViolations returns how ci.yml's gate departs from the check() form.
 func gateCheckViolations(src []byte) ([]string, error) {
 	var wf tieredWorkflow
 	if err := yaml.Unmarshal(src, &wf); err != nil {
@@ -1081,12 +1021,7 @@ func printsOnly(recipe string) bool {
 	return !strings.ContainsAny(shellQuoted.ReplaceAllString(rest, ""), ";&|$`")
 }
 
-// lintSweepsViolations lists the lint-sweeps rules of a Makefile that sweep
-// nothing: no prerequisite, and a recipe that is empty or only prints. The
-// nightly job builds the toolchain image whenever the rule exists, whatever
-// it runs, so a rule that only prints costs an image build on every nightly
-// run and checks nothing. A Makefile with no such rule has no violation: the
-// job then prints that there is nothing to run and builds no image.
+// lintSweepsViolations lists lint-sweeps rules that sweep nothing.
 func lintSweepsViolations(makefile string) []string {
 	lines := strings.Split(makefile, "\n")
 	var bad []string

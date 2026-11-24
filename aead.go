@@ -33,8 +33,7 @@ func sealableWithin(n, maxInt uint64) error {
 	return nil
 }
 
-// randRead is a test seam for a CSPRNG failure, which the standard library
-// does not produce on demand.
+// randRead is a test seam for a CSPRNG failure.
 var randRead = rand.Read
 
 func fillRandom(b []byte) error {
@@ -42,8 +41,7 @@ func fillRandom(b []byte) error {
 	return err
 }
 
-// newKeyEnclave returns a [lockedRegion] holding n bytes from the CSPRNG,
-// generated directly into locked memory.
+// newKeyEnclave returns a [lockedRegion] holding n CSPRNG bytes generated directly into locked memory.
 //
 //nolint:unparam // n is always 32 today because dekBytes, kekBytes and RootKeyBytes are three independent decisions that happen to agree; folding them into one constant here would couple them.
 func newKeyEnclave(n int) (*lockedRegion, error) {
@@ -57,15 +55,7 @@ func newKeyEnclave(n int) (*lockedRegion, error) {
 	return e, nil
 }
 
-// withAEAD runs fn with an AES-GCM AEAD built from the key in key, borrowed
-// for the duration of the call. Every AES operation in this package goes
-// through here, and it is the only place a key leaves locked memory:
-// aes.NewCipher puts the key schedule, whose first round key is the key
-// itself, on the heap, where it stays until the memory is reused. Under
-// GOEXPERIMENT=runtimesecret the call runs in secretDo and the schedule is
-// erased once unreachable ([KeyScheduleErasure]); no cipher.Block or
-// cipher.AEAD outlives the call. See docs/sealing/engineering.md,
-// "Key-schedule heap exposure".
+// withAEAD runs fn with an AES-GCM AEAD for the key in key; the key schedule reaches the heap (see docs/sealing/engineering.md).
 func withAEAD(key ByteAccess, fn func(cipher.AEAD) error) error {
 	var err error
 	secretDo(func() {
@@ -74,10 +64,7 @@ func withAEAD(key ByteAccess, fn func(cipher.AEAD) error) error {
 			if berr != nil {
 				return &SealError{Cause: berr}
 			}
-			// Never fall back to NewGCM: FIPS 140-only mode refuses
-			// caller-supplied IVs, and this removes nonce management from
-			// callers. It also means GOEXPERIMENT=boringcrypto builds fail
-			// here on every seal, by design.
+			// Random-nonce GCM only: FIPS 140-only mode refuses caller-supplied IVs.
 			gcm, gerr := cipher.NewGCMWithRandomNonce(block)
 			if gerr != nil {
 				return &SealError{Cause: gerr}
@@ -109,10 +96,7 @@ func sealWithKey(ke ByteAccess, plaintext, aad []byte) ([]byte, error) {
 	return sealed, nil
 }
 
-// openWithKeyInto decrypts sealed under the key in ke, verifying aad, into
-// dst and nowhere else. A plaintext whose length is not exactly len(dst) is
-// refused as an authentication failure before decrypting, because a longer
-// one would make the AEAD's append reallocate onto the heap.
+// openWithKeyInto decrypts sealed into dst only; a plaintext of the wrong length is refused before decrypting.
 func openWithKeyInto(ke ByteAccess, sealed, aad, dst []byte) error {
 	return withAEAD(ke, func(gcm cipher.AEAD) error {
 		return openInto(gcm, sealed, aad, dst)

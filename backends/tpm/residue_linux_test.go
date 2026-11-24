@@ -25,14 +25,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// fakeTPM is enough of a TPM, over an in-memory stream, for go-tpm's
-// unsalted HMAC session and the provider's TPM2_Create and TPM2_Unseal. It
-// checks each authorized command's HMAC, decrypts TPM2_Create's first
-// parameter, and encrypts TPM2_Unseal's response, as a TPM does (Part 1,
-// 19.6 and 21.3). The session is unsalted and unbound, so its session key is
-// empty and the fake derives every key from the nonces alone. The plaintext
-// lives only in locked mappings: secret, and received, which Create's
-// decrypted inSensitive lands in.
+// fakeTPM implements enough of a TPM for an unsalted HMAC session, TPM2_Create and TPM2_Unseal.
 type fakeTPM struct {
 	alloc    allocator
 	name     tpm2.TPM2BName // the one handle each authorized command names

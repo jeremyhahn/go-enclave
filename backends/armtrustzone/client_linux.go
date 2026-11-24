@@ -89,11 +89,7 @@ func (c *client) getInfo(ctx context.Context) (version, flags uint64, err error)
 	return params[0].A, params[0].B, nil
 }
 
-// fillRandom fills dst, the handle's locked pages, with TFW_TA_CMD_GET_RANDOM
-// in the chunks of plan. Where the driver accepts it, dst itself is
-// registered as the shared memory, so the TA writes into the handle; where it
-// does not, a driver shared buffer carries each chunk and is zeroed after
-// each copy and before it is unmapped, on every path.
+// fillRandom fills dst with GET_RANDOM in chunks, registering dst as shared memory where the driver allows.
 func (c *client) fillRandom(ctx context.Context, dst []byte, plan []chunk) error {
 	if err := c.lock(ctx); err != nil {
 		return err
@@ -175,10 +171,7 @@ func (c *client) getRandom(ctx context.Context, id int32, off uint64, n int) err
 	return nil
 }
 
-// seal runs SEAL (TFW_TA_CMD_SEAL) on plaintext under associated data ad and
-// returns the sealed blob. The output buffer starts at
-// len(plaintext)+sealOverhead bytes and grows once, to the size the TA
-// reports, on TEE_ERROR_SHORT_BUFFER (see sealNext).
+// seal runs SEAL on plaintext under ad and returns the sealed blob, growing the buffer once on TEE_ERROR_SHORT_BUFFER.
 func (c *client) seal(ctx context.Context, plaintext, ad []byte) ([]byte, error) {
 	if err := c.lock(ctx); err != nil {
 		return nil, err
@@ -201,9 +194,7 @@ func (c *client) seal(ctx context.Context, plaintext, ad []byte) ([]byte, error)
 	}
 }
 
-// sealOnce is one SEAL call with an output buffer of size bytes. Plaintext,
-// ad and the output share one driver shared memory allocation, wiped after
-// the call; got is the size the TA reported in its output memref.
+// sealOnce is one SEAL call with an output buffer of size bytes; shared memory is wiped after the call.
 func (c *client) sealOnce(ctx context.Context, plaintext, ad []byte, size int) (blob []byte, got uint64, err error) {
 	err = c.withDriverShm(len(plaintext)+len(ad)+size, func(id int32, shm []byte) error {
 		adOff, outOff := len(plaintext), len(plaintext)+len(ad)
@@ -223,12 +214,7 @@ func (c *client) sealOnce(ctx context.Context, plaintext, ad []byte, size int) (
 	return blob, got, err
 }
 
-// unseal runs UNSEAL (TFW_TA_CMD_UNSEAL) on blob under associated data ad,
-// writing the plaintext into dst. When the driver registers dst's pages the
-// TA writes into dst directly; otherwise the plaintext lands in driver
-// shared memory, is copied into dst and wiped. Errors are mapped by
-// unsealResult; on an error dst may hold partial output, which the caller
-// wipes.
+// unseal runs UNSEAL on blob under ad into dst; on error dst may hold partial output the caller wipes.
 func (c *client) unseal(ctx context.Context, blob, ad, dst []byte) error {
 	if err := c.lock(ctx); err != nil {
 		return err

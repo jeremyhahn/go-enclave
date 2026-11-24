@@ -1,23 +1,5 @@
 #!/bin/sh
-# release-notes.sh — print one version's CHANGELOG section, for a release body.
-#
-# Usage: scripts/release-notes.sh <vX.Y.Z[-pre]> [CHANGELOG.md]
-#
-# Prints the body of the `## [<version>] - <date>` section — everything after
-# the heading up to the next `#`/`##` heading — with leading and trailing blank
-# lines removed. The heading anchor is the one scripts/changelog-assemble.sh
-# writes and the release targets check, bracketed or not, so a version is
-# never matched by a longer one that starts with it (v0.6.2 is not v0.6.20,
-# v0.6.2-alpha is not v0.6.2-alpha.1).
-#
-# Link reference definitions at the very end of a section (`[v0.1.0]: https://…`,
-# the Keep a Changelog footer) belong to the file, not to the last section, and
-# are not printed.
-#
-# Fails, printing nothing, when the file has no section for the version, has
-# more than one (which section would be published is then a guess), or the
-# section is empty — a release whose notes say nothing is a release whose
-# CHANGELOG step was skipped.
+# release-notes.sh <vX.Y.Z[-pre]> [CHANGELOG.md]: print exactly one non-empty version section, without footer links.
 set -eu
 # shellcheck source=lib.sh
 . "${0%/*}/lib.sh"

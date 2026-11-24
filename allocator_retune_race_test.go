@@ -46,22 +46,7 @@ type retuneRaceCounts struct {
 	admitted, refused, transfers, lowerings, forced atomic.Int64
 }
 
-// TestAllocator_RetuneRace_AdmissionsDestroysAndTransfers races New, NewSized
-// and Destroy on two allocators against SetLimit up and down, ForceLimit
-// lowerings and TransferTo in both directions.
-//
-// In-run check: after each admission the admitter reads limit and free under
-// a.mu.RLock (a consistent pair, never a lock-free false alarm) and requires
-// InUse <= Limit, judged only when no ForceLimit lowering overlapped the
-// reading (forceEpoch even and unchanged), because a forced lowering
-// legitimately drives free negative beneath live enclaves.
-//
-// End-state check: SetLimit and ForceLimit run under the write side of a
-// test-only RWMutex and transfers under its read side, so a SetLimit or
-// ForceLimit sees a stable limit and its delta is exact, while transfers race
-// each other and every retune races admissions and destroys. Each forcer
-// restores its own lowering before releasing that lock. At the end the sum of
-// the limits is the start plus the SetLimit deltas: transfers conserve it.
+// TestAllocator_RetuneRace_AdmissionsDestroysAndTransfers races admissions and destroys against SetLimit, ForceLimit and TransferTo.
 func TestAllocator_RetuneRace_AdmissionsDestroysAndTransfers(t *testing.T) {
 	const (
 		startPages = 4

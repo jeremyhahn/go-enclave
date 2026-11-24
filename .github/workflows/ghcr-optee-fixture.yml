@@ -1,26 +1,4 @@
-# One-off publish of the OP-TEE test fixture image (owner ruling on item 226,
-# option (d)): no personal access token, ever. The job runs only when it is
-# dispatched by hand, never on push, pull request or schedule, and it is not
-# part of CI Gate.
-#
-# It runs twice, once per mode (Company Agent m2309):
-#   placeholder  pushes a one-layer image (a single text file) under the same
-#                package name, tag `placeholder`. A first publish is private;
-#                the owner then sets the package public, so the real image is
-#                never private.
-#   fixture      pushes the real image, after the package is public.
-#
-# The image was built from trusted-firmware v0.4.2-alpha (e0ae83d0) with
-# OP-TEE 4.11.0 and is handed to the self-hosted runner as a `docker save`
-# archive, mounted read-only at /fixture. The runner has no Docker daemon, so
-# the push uses crane (go-containerregistry), which reads the archive directly.
-# The image config blob is pushed unchanged, so its digest is the local image
-# ID. The job checks the archive's config blob against CONFIG_DIGEST before
-# anything is pushed, and the pushed manifest's config digest after.
-#
-# GITHUB_TOKEN carries packages: write and contents: read and nothing else; it
-# goes to crane on stdin and the credential file lives in RUNNER_TEMP, which
-# goes away with the runner.
+# Manual publish of the OP-TEE fixture image from a docker save archive with crane; modes placeholder and fixture; the config digest is checked before and after the push.
 name: Publish OP-TEE fixture
 
 on:

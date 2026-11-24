@@ -103,8 +103,7 @@ func TestSoftwareProvider_MessageLimit(t *testing.T) {
 		t.Errorf("Protect at the limit = %v, want ErrProviderMessageLimit", err)
 	}
 
-	// The refusal is on ENCRYPTION only: existing blobs still unprotect,
-	// because the bound protects nonce uniqueness, not decryption.
+	// The bound refuses encryption only; existing blobs still unprotect.
 	got := make([]byte, len(key))
 	if err := p.Unprotect(t.Context(), blob, got); err != nil {
 		t.Errorf("Unprotect past the Protect limit = %v; the bound must not strand existing blobs", err)

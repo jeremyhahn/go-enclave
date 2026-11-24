@@ -1,22 +1,5 @@
 #!/bin/sh
-# coverage-gate.sh — the one coverage floor, for unit and integration profiles.
-#
-# Usage: scripts/coverage-gate.sh <floor>
-#        scripts/coverage-gate.sh <floor> <profile> [<import-path>...]
-#        scripts/coverage-gate.sh merge <out> <profile>...
-#
-# With only a floor, checks that it is a number: `make coverage` does this
-# BEFORE the suite spends minutes running.
-#
-# With a profile, fails unless every package in it, or each named import path,
-# reaches the floor. The floor is compared on exact covered/total statements,
-# never on a rounded percentage (89.96% is not 90%). A block is counted once,
-# keyed by file and range, and the larger count wins should it appear twice.
-# A block's package is its file's directory. A named import path with no block
-# in the profile was never exercised, which is 0%, not "not applicable".
-# Without names the total is gated too.
-#
-# merge concatenates cover profiles (the first one's mode line) into <out>.
+# coverage-gate.sh <floor> [<profile> [<import-path>...]] | merge <out> <profile>...: the coverage floor, on exact statement counts.
 set -eu
 # shellcheck source=lib.sh
 . "${0%/*}/lib.sh"

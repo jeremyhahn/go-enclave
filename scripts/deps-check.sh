@@ -1,21 +1,5 @@
 #!/bin/sh
-# deps-check.sh — fail when a module a go.mod requires is behind its latest
-# release without a documented reason (handbook devops.md §9).
-#
-# Usage: scripts/deps-check.sh [module-dir ...]   (from the repository root;
-#        default: the root module and build/ci/buildgates)
-#
-# Every module each go.mod requires, direct and indirect, first-party and
-# third-party, is compared with its latest release by `go list -m -u`. One held
-# below latest passes only when its require or replace line in that go.mod ends
-# in the comment
-#
-#     // held: <reason>
-#
-# and the reason is not empty. One behind without a reason whose latest release
-# was published under 7 days ago is reported and passes; once that release is 7
-# days old, or its publish time is unknown, it fails. It needs the module proxy: with GOPROXY off, the
-# devcontainer's default, it uses https://proxy.golang.org,direct.
+# deps-check.sh [module-dir ...]: fails when a required module is behind its latest release for 7 days without a `// held: <reason>` comment.
 set -eu
 # shellcheck source=lib.sh
 . "${0%/*}/lib.sh"
@@ -25,9 +9,7 @@ GOWORK=off
 export GOWORK
 case ${GOPROXY:-} in off) GOPROXY=https://proxy.golang.org,direct; export GOPROXY ;; esac
 
-# held_reason GOMOD MODULE: prints "held <reason>" when MODULE's require or
-# replace line in GOMOD carries the comment, "listed" when it has a line
-# without one, and nothing when GOMOD does not require MODULE.
+# held_reason GOMOD MODULE prints "held <reason>", "listed", or nothing.
 held_reason() {
   _state=
   while IFS= read -r _line || [ -n "$_line" ]; do

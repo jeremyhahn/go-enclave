@@ -62,11 +62,7 @@ func closeSecret(fd int) error {
 	return nil
 }
 
-// mapSecret maps a secretmem file of len(inner) bytes MAP_SHARED over inner's
-// anonymous pages, closes it, and touches every page. inner is whole pages.
-// It is mapBacked's back for the secretmem backend, so the mapping layer then
-// applies MADV_DONTFORK, the canary and the guard pages as it does for locked
-// memory.
+// mapSecret maps a secretmem file over inner's pages and touches every page; inner is whole pages.
 func mapSecret(inner []byte) error {
 	fd, err := secretFile(len(inner))
 	if err != nil {
@@ -106,10 +102,7 @@ func probeSecret() error {
 	return failure
 }
 
-// touchSecret writes every page of p once, so the kernel allocates each and
-// removes it from the direct map now. A failure there is a SIGBUS, not an
-// error return; debug.SetPanicOnFault turns it into a panic this recovers.
-// p's pages are fresh and zero, so writing zero changes nothing.
+// touchSecret writes zero to every page of p, recovering a SIGBUS as an error.
 func touchSecret(p []byte) (err error) {
 	defer debug.SetPanicOnFault(debug.SetPanicOnFault(true))
 	defer func() {

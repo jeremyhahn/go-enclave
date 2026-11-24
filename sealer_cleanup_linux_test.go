@@ -22,12 +22,7 @@ const (
 	cleanupLoadFrozen = "SEAL-CLEANUP: loadFrozen's refused freeze returned its locked memory"
 )
 
-// TestSealer_RefusedAllocationsReturnLockedMemory drives the cleanup paths
-// that run once part of an operation's locked memory exists: Open refused its
-// DEK after allocating the destination, Seal refused a rotation's KEK after
-// allocating the DEK, and loadFrozen refused the freeze after mapping. Each
-// must return locked memory to its baseline. The ceiling is process-wide, so
-// it runs in a child.
+// TestSealer_RefusedAllocationsReturnLockedMemory pins that partly allocated operations return locked memory to baseline, in a child.
 func TestSealer_RefusedAllocationsReturnLockedMemory(t *testing.T) {
 	if os.Getenv(sealCleanupMarker) == "1" {
 		sealCleanupChild(t)

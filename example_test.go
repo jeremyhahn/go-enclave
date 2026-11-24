@@ -82,7 +82,7 @@ func ExampleNewMemorySized() {
 		log.Fatal(err)
 	}
 
-	// A refused Freeze leaves the enclave WRITABLE, so check the error.
+	// A refused Freeze leaves the enclave writable, so check the error.
 	var f enclave.Freezer
 	if !enclave.As(e, &f) {
 		log.Fatal("enclave cannot be frozen")

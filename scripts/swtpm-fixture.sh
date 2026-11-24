@@ -1,18 +1,5 @@
 #!/bin/sh
-# swtpm-fixture.sh — the TPM provider's conformance suite against a throwaway swtpm.
-#
-# Usage: scripts/swtpm-fixture.sh   (from the repository root)
-#
-# The body of `make integration-test-tpm`. It starts `swtpm socket --tpm2`
-# with its state in a temporary directory, its command port on
-# 127.0.0.1:SWTPM_PORT and its control port on 127.0.0.1:SWTPM_CTRL_PORT,
-# flagged to initialise and run TPM2_Startup(CLEAR) itself, and waits until
-# the control port answers. It then runs backends/tpm's swtpm-tagged tests
-# (TestProviderConformance_OnSWTPM and TestBlobLength_OnSWTPM) under the race
-# detector with GO_ENCLAVE_SWTPM=tcp:127.0.0.1:SWTPM_PORT, and exits with
-# their status. swtpm is stopped and its state removed on every exit path.
-# Without swtpm and swtpm_ioctl on PATH it refuses: a fixture that is absent
-# fails the run, never skips it.
+# swtpm-fixture.sh: run backends/tpm's swtpm-tagged tests against a throwaway swtpm, failing when swtpm is absent.
 set -eu
 # shellcheck source=lib.sh
 . "${0%/*}/lib.sh"

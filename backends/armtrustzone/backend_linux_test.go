@@ -197,10 +197,7 @@ func TestBackendRandomSizes(t *testing.T) {
 	}
 }
 
-// TestBackendRandomFailures fails the first, a middle and the last chunk of
-// a three-chunk Random with a TA error code, an INVOKE ioctl error and a
-// cancel while the chunk is blocked: no handle comes back, no shared memory
-// stays live, and no chunk after the failed one is asked for.
+// TestBackendRandomFailures fails the first, a middle and the last chunk of a Random.
 func TestBackendRandomFailures(t *testing.T) {
 	const chunks = 3
 	kinds := []struct {

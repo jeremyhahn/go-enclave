@@ -65,9 +65,7 @@ func TestMappingContainsWipesTheScanBufferOnAMiss(t *testing.T) {
 	}
 }
 
-// scratchingReader is an io.ReaderAt that uses the WHOLE slice it is handed as
-// scratch — filling it with fill — and then reports a short read, which the
-// io.ReaderAt contract explicitly permits.
+// scratchingReader fills the whole slice it is handed, then reports a short read.
 type scratchingReader struct {
 	fill     byte
 	calls    int
@@ -156,8 +154,7 @@ func TestMappingContainsStopsAtAnOffsetReadAtCannotTake(t *testing.T) {
 	}
 }
 
-// TestMappingContainsStopsWhenAReadCannotAdvance pins that a read no longer
-// than the overlap ends the scan rather than looping on the same offset.
+// TestMappingContainsStopsWhenAReadCannotAdvance pins that a stalled read ends the scan.
 func TestMappingContainsStopsWhenAReadCannotAdvance(t *testing.T) {
 	r := &shortReader{n: 3}
 	found, err := mappingContains(r, 0, 4096, []byte("needle"), scratch(64, len("needle")))

@@ -15,61 +15,7 @@ import (
 	"testing"
 )
 
-// The public-releasability gate: no tracked file may name the private
-// development fleet, and no tracked file may exist only for the fleet's own
-// agents, except the agent-instruction files the publish step strips.
-//
-// The public tree is byte-identical to the release tag, and the module zip
-// consumers hash is that same tree, so nothing can be scrubbed from what is
-// published: the scrub has to happen in the source, before tagging, and a gate
-// keeps the next commit from undoing it. The one exception is the set of agent
-// instruction files (CLAUDE.md, AGENTS.md, .claude/), which scaffold §7 has the
-// publish step strip from the public tree. They are tracked, reported by this
-// gate as strip-at-publish, and their content is not scanned, because it is
-// not published.
-//
-// Classes reported:
-//
-//   - lab-address: an address anywhere in the 192.168/16 private block. It is
-//     unreachable for public readers and publishes the network layout. The
-//     whole /16 is matched because a site network can span many /24s and this
-//     repository uses no RFC 1918 literal as an opaque test address.
-//   - lab-host: a site hostname or a private DNS zone.
-//   - owner-path: a path under a developer's home directory or a site mount.
-//   - internal-file: a tracked file that exists for the fleet's agents and is
-//     not stripped at publication: agent tool state, local Makefile overrides,
-//     and the retired `task-worker.yml` workflow.
-//
-// Reported, not refused: strip-at-publish files (CLAUDE.md, AGENTS.md,
-// .claude/), logged by the main test so the publish step's input is visible.
-//
-// The lab-address rule is generic and built in. The lab-host and owner-path
-// rules are site-specific, so they do not live in this public source: the
-// file the RELEASABILITY_PATTERNS environment variable names supplies them,
-// one `<class><TAB><regex>` rule per line, `#` comments and blank lines
-// skipped (see loadSitePatterns). Unset, only the built-in rules run and the
-// main test logs that it ran without the site rules.
-//
-// To fix a finding, in order of preference:
-//
-//   - Use a documentation value: RFC 5737 addresses (192.0.2.0/24,
-//     198.51.100.0/24, 203.0.113.0/24), RFC 2606 names (example.com,
-//     *.example, *.invalid), or the role instead of the machine ("a factory
-//     runner", "an 8-core host").
-//   - Move the value out of the tree (a CI repository variable, the private
-//     infra repository).
-//   - If the value is the point, waive the line in place: the text
-//     `lab-string-ok: <reason>` on the offending line or the line immediately
-//     above it, in any comment syntax. An empty reason is not a waiver. There
-//     is no file-level allow list.
-//
-// The file list is the git index (a file is published because it is tracked);
-// content is read from the working tree, so a local edit is judged before it
-// is committed. Matching is textual, so it covers every file type and works on
-// a tree that does not compile.
-//
-// Test names share the `TestReleasability` prefix, which `make
-// check-releasability` selects and `make check-buildgates` skips.
+// Releasability gate: no tracked file may name private addresses, hosts or home paths; waive a line with `lab-string-ok: <reason>`.
 
 // leakClass says what a finding leaks.
 type leakClass string
@@ -85,8 +31,7 @@ const (
 // after it is the reason and must not be empty.
 const waiverPrefix = "lab-string-ok:"
 
-// leakPattern is one content rule. expr matches the VALUE, not the whole line,
-// so the report quotes exactly what has to change.
+// leakPattern is one content rule; expr matches the value, not the line.
 type leakPattern struct {
 	class    leakClass
 	expr     *regexp.Regexp
@@ -197,8 +142,7 @@ type internalFileRule struct {
 	guidance string
 }
 
-// stripAtPublishRules are the agent-instruction files the publish step removes
-// from the public tree (scaffold §7). They may be tracked; they are reported.
+// stripAtPublishRules are the agent-instruction files the publish step removes.
 var stripAtPublishRules = []internalFileRule{
 	{name: "CLAUDE.md", guidance: "agent instructions: stripped from the public tree at publish (scaffold §7)"},
 	{name: "AGENTS.md", guidance: "agent instructions: stripped from the public tree at publish (scaffold §7)"},
@@ -590,10 +534,7 @@ func TestReleasability_AgentInstructionsAreStrippedAtPublish(t *testing.T) {
 	}
 }
 
-// End to end, against a real index: the planted address in a tracked file,
-// and a site host the site pattern file names, fail the gate, the same address in an untracked file does not, a tracked
-// file deleted from the working tree is skipped rather than erroring, and a
-// tracked CLAUDE.md, stripped at publish, is neither refused nor scanned.
+// End to end against a real index: tracked leaks fail, untracked and strip-at-publish files do not.
 func TestReleasability_PlantedTreeFailsTheGate(t *testing.T) {
 	root := t.TempDir()
 	rules := siteRules(t)
@@ -758,8 +699,7 @@ func internalFile(name string) (leakFinding, bool) {
 	return matchFileRule(name, internalFileRules)
 }
 
-// stripAtPublish reports whether a tracked path is an agent-instruction file
-// the publish step strips, so it is neither refused nor scanned.
+// stripAtPublish reports whether a path is stripped at publish.
 func stripAtPublish(name string) (leakFinding, bool) {
 	return matchFileRule(name, stripAtPublishRules)
 }

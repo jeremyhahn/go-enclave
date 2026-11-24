@@ -1,22 +1,5 @@
 #!/bin/sh
-# assert-build-tags.sh: the declared build-tag set must select code (ci-template
-# v1.9.2; a script from v1.21, run in the toolchain image). Ships beside ci.yml;
-# copy it to scripts/ with the workflow.
-#
-#   GO_BUILD_TAGS='desktop fido2' sh scripts/assert-build-tags.sh
-#
-# A misspelled tag is invisible: the analysers all run, report clean, and skip
-# the code the tag was meant to reach. This costs a few `go list` calls and
-# turns that silent miss into a red.
-#
-# Compares FILES, not packages: a tag very often adds a file to a package that
-# already exists, so the package count does not move. Test files count too: a
-# tag applied only to _test.go files is a valid GO_BUILD_TAGS. Each tag is then
-# checked by REMOVAL, not in isolation: a tag in a conjunction
-# (`//go:build desktop && fido2`) selects nothing on its own, and a total-count
-# test lets one real tag mask a misspelled sibling. The property is that each
-# tag CHANGES the selected set, not that it adds to it: the standard pattern
-# pairs a `//go:build !foo` stub with a `//go:build foo` body.
+# assert-build-tags.sh fails when a GO_BUILD_TAGS tag changes no selected file (usage: GO_BUILD_TAGS='a b' sh scripts/assert-build-tags.sh).
 set -eu
 # shellcheck source=lib.sh
 . "${0%/*}/lib.sh"

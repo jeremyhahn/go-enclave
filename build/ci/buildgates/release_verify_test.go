@@ -8,8 +8,7 @@ import (
 	"testing"
 )
 
-// releaseVerifyTag is the one tag the fixture repository's VERSION and
-// CHANGELOG.md agree with.
+// releaseVerifyTag is the tag the fixture's VERSION and CHANGELOG.md agree with.
 const releaseVerifyTag = "v1.2.3"
 
 // gitFixtureEnv keeps the fixture repository's git away from the runner's

@@ -24,20 +24,7 @@ type secretMemory struct {
 	allocator *budgetAllocator
 }
 
-// NewSecretMemory returns the secretmem backend: an [Importer] and [Prober]
-// whose handles are memory enclaves, a [ByteAccess] and [Freezer] each, with
-// their material pages in memfd_secret(2) memory, which is locked, out of core
-// dumps and the kernel's direct map, and refused to /proc/<pid>/mem, ptrace
-// and process_vm_readv. Each handle keeps the memory enclave's guard pages,
-// canary, wipe, freeze and release rules, and [WipeAll] sweeps it.
-//
-// a admits every handle against its budget, so one budget covers this backend
-// and locked memory; a nil or zero Allocator is [ErrNilAllocator] or
-// [ErrAllocatorNotConstructed]. Construction makes no system call: whether the
-// host allows memfd_secret is [Detect]'s question, through Probe, and an
-// [Importer.Import] the host refuses returns a [*MemfdSecretError], never a
-// memory enclave in its place. On a platform without memfd_secret it returns
-// [ErrMemfdSecretUnavailable].
+// NewSecretMemory returns the secretmem backend, whose memory enclaves keep their material in memfd_secret(2) pages admitted against a.
 func NewSecretMemory(a Allocator) (Backend, error) {
 	if err := secretMemorySupported(); err != nil {
 		return nil, err
@@ -55,10 +42,7 @@ func (s *secretMemory) Name() string { return SecretMemoryBackendName }
 // Rank is 1: above locked memory, below every hardware backend.
 func (s *secretMemory) Rank() int { return secretMemoryRank }
 
-// Probe checks ctx, then maps one page of memfd_secret memory, touches it and
-// releases it, leaving nothing behind. A refusal is a [*MemfdSecretError]
-// naming the call and its errno: ENOSYS (disabled or too old a kernel), EPERM
-// (filtered), EAGAIN or ENOMEM (no memory or no lock headroom).
+// Probe maps, touches and releases one page of memfd_secret memory; a refusal is a [*MemfdSecretError].
 func (s *secretMemory) Probe(ctx context.Context) error {
 	if ctx != nil {
 		if err := ctx.Err(); err != nil {

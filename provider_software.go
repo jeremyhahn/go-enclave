@@ -23,37 +23,13 @@ const softwareProtectLimit = 1 << 31
 // under to its one use, so it is never the root UnsealRoot exports.
 const softwareProtectKeyInfo = "go-enclave v1 SoftwareProvider Protect key"
 
-// SoftwareProvider is the pure-software provider, and the only one go-enclave
-// ships. It implements [RootUnsealer] (the default for [ModeRootKey]),
-// [KeyProtector] (AES-GCM under a key derived from the root, for tests and
-// development of [ModePerOperation]) and [HealthReporter]. Its root is
-// generated into a memory enclave at first use, and the Protect key,
-// HKDF-SHA256 of the root under its own info, at the first Protect.
-//
-// Because the root lives in this process, a reader of this process's live
-// memory can recover it, and AES key schedules reach the heap as described on
-// [Mode] and [KeyScheduleErasure]. Plaintext never reaches the heap, and the
-// root is never in a dump or swap.
-//
-// After a shutdown sweep destroys the root every method fails with
-// [ErrSealerWiped], and after [SoftwareProvider.Destroy] with
-// [ErrSealerDestroyed]; it never generates a fresh root. Every method refuses
-// a context already ended with ctx.Err() before the root is touched or
-// generated; no method blocks beyond a short critical section.
-//
-// Construct one with [NewSoftwareProvider]; the implementation is internal.
-// A SoftwareProvider is safe for concurrent use.
+// SoftwareProvider is the pure-software [RootUnsealer], [KeyProtector] and [HealthReporter]; its root lives in a memory enclave in this process.
 type SoftwareProvider interface {
 	KeyProtector
 	RootUnsealer
 	HealthReporter
 
-	// Destroy releases the provider's root and Protect key. Every later call
-	// fails closed with [ErrSealerDestroyed], so everything it protected, and
-	// every [Sealer] that uses it, is unrecoverable. It waits for an
-	// operation in progress, which is in-process and short. A release the
-	// kernel refuses is reported and stays on the [WipeAll] ledger; calling
-	// Destroy again retries it. Destroy is idempotent.
+	// Destroy releases the root and Protect key; every later call fails with [ErrSealerDestroyed].
 	Destroy() error
 }
 
@@ -142,11 +118,7 @@ func (s *softwareState) protectKeyLocked() (*lockedRegion, error) {
 	return k, nil
 }
 
-// deriveProtectKey derives the Protect key from root into a fresh locked
-// enclave: HKDF-SHA256 under softwareProtectKeyInfo. The root is uniformly
-// random, so no salt is needed; the info alone separates the two keys. The
-// HKDF output and HMAC state are heap memory, wiped or erased as for an AES
-// key schedule.
+// deriveProtectKey derives the Protect key from root with HKDF-SHA256 under softwareProtectKeyInfo.
 func deriveProtectKey(root *lockedRegion) (*lockedRegion, error) {
 	k, err := newMemorySized(RootKeyBytes)
 	if err != nil {
@@ -173,10 +145,7 @@ func deriveProtectKey(root *lockedRegion) (*lockedRegion, error) {
 	return k, nil
 }
 
-// liveRootLocked is the one statement of the provider's state: it reports
-// [ErrSealerDestroyed] after Destroy, [ErrSealerWiped] once a shutdown sweep
-// has destroyed the root or the Protect key, and otherwise the root, nil
-// before first use. The caller holds s.mu.
+// liveRootLocked reports the provider's state and its root; the caller holds s.mu.
 func (s *softwareState) liveRootLocked() (*lockedRegion, error) {
 	switch {
 	case s.destroyed:
@@ -189,10 +158,7 @@ func (s *softwareState) liveRootLocked() (*lockedRegion, error) {
 	}
 }
 
-// Health implements [HealthReporter]: it reports [ErrSealerDestroyed] after
-// Destroy, [ErrSealerWiped] once a shutdown sweep has destroyed this
-// provider's root, and nil otherwise, including when no root exists yet. It
-// never generates a root.
+// Health implements [HealthReporter] and never generates a root.
 func (p *softwareProvider) Health() error {
 	s, err := p.state()
 	if err != nil {
@@ -214,15 +180,7 @@ func swept(err error) error {
 	return err
 }
 
-// Protect implements [KeyProtector]: key is wrapped with AES-GCM under the
-// Protect key derived from the provider root, with the blob's frame bound as
-// AAD.
-//
-// It returns ctx.Err() if ctx has already ended, [ErrProviderMessageLimit]
-// once the key's encryption budget is spent, [ErrSealerWiped] after a
-// shutdown sweep, and [ErrLockedMemoryUnavailable] if the root or the Protect
-// key cannot be created on first use. A refused call charges nothing to the
-// budget.
+// Protect implements [KeyProtector] with AES-GCM under the Protect key, the blob frame as AAD.
 func (p *softwareProvider) Protect(ctx context.Context, key []byte) ([]byte, error) {
 	s, err := p.state()
 	if err != nil {
@@ -252,11 +210,7 @@ func (p *softwareProvider) Protect(ctx context.Context, key []byte) ([]byte, err
 	return blob, nil
 }
 
-// Unprotect implements [KeyProtector]: it recovers a Protect-produced blob
-// into key, refusing with [ErrSealedAuthentication] anything its own Protect
-// did not produce: tampered, truncated, misframed, or wrapped by a different
-// provider instance. A context already ended is refused with ctx.Err()
-// before the blob is examined.
+// Unprotect implements [KeyProtector], refusing anything its own Protect did not produce.
 func (p *softwareProvider) Unprotect(ctx context.Context, blob, key []byte) error {
 	s, err := p.state()
 	if err != nil {
@@ -285,12 +239,7 @@ func (p *softwareProvider) Unprotect(ctx context.Context, blob, key []byte) erro
 	return swept(unwrapKey(s.protectKey, blob, key))
 }
 
-// UnsealRoot implements [RootUnsealer]: it copies the provider root,
-// generated at first use, into dst, which must be exactly [RootKeyBytes]
-// long; any other length is [ErrInvalidSize]. A context already ended is
-// refused with ctx.Err() before the root is generated or copied. The root
-// then exists in two locked enclaves, the provider's and the Sealer's, and a
-// shutdown sweep destroys both. The root is never the key Protect uses.
+// UnsealRoot implements [RootUnsealer], copying the root into dst of exactly [RootKeyBytes].
 func (p *softwareProvider) UnsealRoot(ctx context.Context, dst []byte) error {
 	s, err := p.state()
 	if err != nil {

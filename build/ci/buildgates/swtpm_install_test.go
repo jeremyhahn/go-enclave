@@ -12,10 +12,7 @@ import (
 	"github.com/goccy/go-yaml"
 )
 
-// swtpmJob and swtpmInstallStep name the tpm-swtpm job's apt step. A
-// transient mirror or DNS error in it failed main (#326), so the step
-// retries: apt's own Acquire::Retries, and a bounded loop around both apt
-// calls.
+// swtpmJob and swtpmInstallStep name the tpm-swtpm job's apt step, which retries transient failures.
 const (
 	swtpmJob         = "tpm-swtpm"
 	swtpmInstallStep = "Install swtpm"
@@ -144,12 +141,7 @@ func runSwtpmInstall(t *testing.T, script string, updateFails, installFails int)
 	return swtpmRun{updates: count("update"), installs: count("install"), swtpmRan: serr == nil}, err
 }
 
-// TestSwtpmInstallRetriesBounded pins the step's retry loop around both apt
-// calls: one transient failure of update or of install does not fail the
-// step, and a failure that lasts stops the step, non-zero, before swtpm
-// --version: after two to five attempts when update keeps failing, and after
-// exactly three install attempts when install keeps failing, which fails if
-// install leaves the loop.
+// TestSwtpmInstallRetriesBounded pins the bounded retry loop around both apt calls.
 func TestSwtpmInstallRetriesBounded(t *testing.T) {
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skip("no bash")

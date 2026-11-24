@@ -1,15 +1,4 @@
-# ALLOWLIST for the devcontainer build context (BuildKit reads
-# <Dockerfile>.dockerignore in preference to a root .dockerignore).
-#
-# Everything is excluded, then exactly what the stages read is re-admitted:
-# the toolchain's inputs (every module's go.mod/go.sum and the tool installer
-# with its pins), and for the integration stage the sources of the
-# root package (its tests too, for the userns service), the non-test sources of
-# backendtest, providertest and internal/, the integration suite and the two scripts it runs. Each stage COPYs its own part by name, so the integration image
-# does not carry the toolchain's. Neither image can carry .git, local.mk, a
-# stray credentials file, the repository-local tool cache (bin/) or a coverage
-# profile — whatever lands in the checkout tomorrow, it is excluded until
-# someone admits it here on purpose.
+# Allowlist for the devcontainer build context: everything is excluded, then exactly what the stages read is re-admitted.
 *
 !go.mod
 !go.sum
@@ -31,12 +20,7 @@
 !test/internal/**/*.go
 !build/docker/devcontainer/run-integration-tests.sh
 !scripts/coverage-gate.sh
-# The root package's *_test.go files stay admitted (!*.go above): the `userns`
-# compose service runs TestMemlockRLimit_EnforcedInsideAnUnprivilegedUserNamespace
-# (memlock_userns_linux_test.go, -tags=userns) from this image, and it uses
-# helpers from the root package's other test files. Without them the package has
-# no test files and `go test` runs nothing. build/ci/buildgates pins this.
-# The unit tests of backendtest, providertest, internal/ and test/internal/ are not part of any suite here.
+# Root package tests stay admitted for the userns service; build/ci/buildgates pins this.
 backendtest/*_test.go
 providertest/*_test.go
 internal/**/*_test.go

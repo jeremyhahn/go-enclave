@@ -12,24 +12,7 @@ import (
 	"github.com/goccy/go-yaml"
 )
 
-// The changed-files step (ci.yml, job changes, step `diff`) decides what a
-// pull request may skip: docs_only=true skips the build and test steps of the
-// PR tier, lint_gates=false skips the lint-gates job (CI Gate reads that skip
-// as passed) and tpm=false skips the TPM suite. Each answer is a search of
-// the changed files for a pattern, so only a search that ran and selected no
-// file may give the answer that skips. A search that could not run (a
-// pattern that is no regular expression, or an empty one) must keep the
-// answer that runs the jobs and say so in a warning, or fail the step.
-//
-// Two kinds of check, as for the schedule guard:
-//
-//   - the job's text: the outputs the other jobs read are the step's, and the
-//     step reads the event and the pull request's two commits from the run
-//     (changesStepViolations);
-//   - what the script does: it is taken out of the real ci.yml and run with
-//     bash once per changesRuns row (runStepScript), with a stub `git` first
-//     in PATH that lists the row's changed files, and the answers are read
-//     from the file GITHUB_OUTPUT names.
+// The changed-files step decides what a pull request may skip; a search that could not run must not skip.
 const (
 	changesStep = "diff"
 	// The patterns the rows search with, unless a row sets its own. They are

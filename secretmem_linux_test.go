@@ -42,8 +42,7 @@ func withMemfdSecret(t *testing.T, fn func(flags int) (int, error)) {
 	t.Cleanup(func() { memfdSecret = prev })
 }
 
-// refuseMemfdSecret makes memfd_secret fail with errno, as a disabled kernel
-// (ENOSYS), a seccomp filter (EPERM) or memory pressure (ENOMEM) does.
+// refuseMemfdSecret makes memfd_secret fail with errno.
 func refuseMemfdSecret(t *testing.T, errno syscall.Errno) *atomic.Int32 {
 	t.Helper()
 	var calls atomic.Int32
@@ -337,8 +336,7 @@ func TestLinuxSecretmem_WipeAllSweepsItsHandles(t *testing.T) {
 }
 
 func TestLinuxSecretmem_TouchFaultIsTyped(t *testing.T) {
-	// A shared mapping past the end of an empty memfd faults with SIGBUS on
-	// first touch, as a secretmem page the kernel cannot allocate does.
+	// A shared mapping past the end of an empty memfd faults with SIGBUS on first touch.
 	fd, err := unix.MemfdCreate("secretmem-fault", unix.MFD_CLOEXEC)
 	if err != nil {
 		t.Skipf("memfd_create refused (%v): the fault stand-in needs it", err)

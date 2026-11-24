@@ -1,95 +1,4 @@
-# go-enclave devcontainer: one service per shipped stage of the Dockerfile.
-#
-#   integration  `make integration-test` (and -fips) is the entry point; it
-#                runs this file under a UNIQUE project name per run and tears
-#                it down with `down --volumes` on every exit. The image is not
-#                the project's: scripts/integration-image.sh names it by
-#                content, builds it when missing and scans it (below).
-#   userns       `make integration-test-userns`: the integration service under a
-#                seccomp profile that also permits CLONE_NEWUSER (see below).
-#   toolchain    `make docker-run CMD='make lint'`: a command in the toolchain
-#                image, as the invoking user, with the checkout bind-mounted.
-#                For a workstation: on a CI runner the bind mount would resolve
-#                on the daemon's host, so CI copies the checkout in instead
-#                (scripts/in-toolchain-image.sh, with this posture's
-#                capabilities, ulimits and network).
-#
-# Per-run isolation of the integration service (handbook integration-testing
-# §7): no container_name, no published ports, and the only volume is
-# per-project. The integration image's tag is its content
-# (go-enclave-ci-it:<hash> of the build context, `make -s it-image`,
-# GO_ENCLAVE_IT_IMAGE), set by scripts/integration-image.sh, which builds it
-# only when the daemon lacks it, scans it and runs the suites on it; no run
-# removes it. Two runs on one host — two agents, a push and a re-run — share
-# an image only when they build the same tree, and cannot claim each other's
-# containers or caches. The toolchain service
-# names its image, go-enclave-toolchain:<tag>, because `make docker-build`
-# builds and tags it; pull_policy: never means that name is never looked up in
-# a registry.
-#
-# SECURITY POSTURE (x-posture, both services), every setting justified. The
-# suite exercises locked memory, core-dump exclusion and process-memory
-# residue; NONE of that needs a privilege, and holding one would make the
-# suite measure the wrong thing.
-#
-#   cap_drop: [ALL], and NO cap_add. Each capability the suite might seem to
-#     want, and why it is absent:
-#       - CAP_IPC_LOCK: mlock below RLIMIT_MEMLOCK needs no capability (Linux
-#         2.6.9+). Holding it would make the kernel IGNORE RLIMIT_MEMLOCK, so
-#         every admission test would run against a ceiling that does not bind
-#         and pass vacuously. The suite asserts it is absent (CapEff, and the
-#         library's own LimitRLimit classification) and fails if it is not.
-#       - CAP_SYS_RESOURCE: lowering an rlimit needs none; RAISING a hard one
-#         does. Without it a lowered RLIMIT_MEMLOCK/RLIMIT_CORE is a ceiling the
-#         process cannot lift — the suite asserts exactly that refusal.
-#       - CAP_SYS_PTRACE: the suite reads only its OWN /proc/self/mem and
-#         /proc/self/smaps (same-thread-group access, which ptrace_may_access
-#         grants unconditionally) and its parent's world-readable
-#         /proc/<ppid>/limits.
-#       - Docker's default set (CHOWN, DAC_OVERRIDE, SETUID, NET_RAW, ...):
-#         a test run writes only to its own tmpfs and cache volume as its own
-#         user, binds nothing and changes no identity.
-#   security_opt no-new-privileges: nothing in the container can gain
-#     privilege through a setuid binary or file capabilities.
-#   Docker's default seccomp and AppArmor profiles stay ON (nothing here says
-#     unconfined): mmap, mlock, madvise, mprotect, setrlimit and /proc reads
-#     are all permitted by the default profile.
-#   user: not root, so a test that "passes" only because root bypasses a check
-#     cannot exist here. integration runs as the image's user 10001; toolchain
-#     as the invoking user (`make docker-run` passes `id -u`/`id -g`), so what
-#     it writes into the checkout is theirs.
-#   read_only: the root filesystem, the baked source and the baked module
-#     cache cannot be written. The only writable paths are /tmp (tmpfs, where
-#     `go test` links and executes the test binary, hence `exec`), the
-#     build-cache volume and, for toolchain, the mounted checkout.
-#   network_mode: none: a run needs no network. Modules are baked into the
-#     image and verified against go.sum at build time, and GOPROXY=off makes
-#     any attempt to fetch one fail instead of reaching out.
-#   init: true: a real PID 1 (docker-init) reaps the suite's re-exec'd child
-#     processes and forwards signals, so an interrupted run stops cleanly.
-#   pids_limit / mem_limit / memswap_limit / cpus: bounds, so a runaway test
-#     cannot starve a shared runner host. memswap_limit == mem_limit: no swap
-#     for this container at all. (Enclave pages are mlock'd regardless; this
-#     keeps the rest of the test process's memory off disk too.)
-#
-# ULIMITS, both finite and both load-bearing:
-#
-#   memlock 16 MiB soft = hard. RLIMIT_MEMLOCK is the ceiling the admission
-#     tests run against, so it must be FINITE (RLIM_INFINITY makes
-#     DiscoverLockedMemoryLimit report LimitUnlimited and NewAllocatorWithin-
-#     RLimit refuse nothing) and identical on every host (Docker's own default
-#     varies with the daemon: 8 MiB here, 64 KiB elsewhere, unlimited on some
-#     runners). soft = hard so nothing in the run can raise it. Tests that need
-#     a TIGHTER ceiling lower it further in a child process of their own; this
-#     figure only has to exceed what any single test locks. The suite reads it
-#     back and fails unless it equals GO_ENCLAVE_IT_MEMLOCK_BYTES below — keep
-#     the two in step.
-#   core 1 MiB soft = hard, deliberately NON-ZERO. go-enclave lowers
-#     RLIMIT_CORE to 0/0 when it is imported; a container that already started
-#     at 0 would let that test pass without the library doing anything. The
-#     suite checks the limit of its parent (`go`, which does not import the
-#     library) is this non-zero figure, and its own is 0/0.
-#   nofile: explicit rather than inherited from whatever the daemon defaults.
+# Devcontainer services (integration, userns, toolchain) under an unprivileged posture: no capabilities, read-only root, no network, finite memlock (16 MiB) and core (1 MiB) limits the suite asserts.
 
 x-posture: &posture
   init: true
@@ -117,17 +26,13 @@ x-posture: &posture
 
 x-integration: &integration_service
   <<: *posture
-  # One image per tree: scripts/integration-image.sh names it by content
-  # (GO_ENCLAVE_IT_IMAGE), builds it when missing, scans that exact image ID,
-  # and the userns, default and FIPS suites run on it with `run --pull never`.
-  # The default is for a hand-run `docker compose`, never for the make targets.
+  # The content-named image scripts/integration-image.sh builds and scans; this default is for a hand-run compose only.
   image: ${GO_ENCLAVE_IT_IMAGE:-go-enclave-it:local}
   build:
     context: ../../..
     dockerfile: build/docker/devcontainer/Dockerfile
     target: integration
-    # ci-template v1.29: the Alpine package index checksum the image's tag
-    # hashes (scripts/apk-index-sum.sh); empty outside CI.
+    # The Alpine package index checksum the image tag hashes; empty outside CI.
     args:
       APK_INDEX_SUM: ${APK_INDEX_SUM:-}
   user: "10001:10001"
@@ -139,14 +44,7 @@ x-integration: &integration_service
     GOTOOLCHAIN: local
     GOFLAGS: -mod=readonly
     GOPROXY: "off"
-    # The FIPS 140-3 configuration of the run. `make integration-test` runs
-    # with these defaults; `make integration-test-fips` overrides all three
-    # with `docker compose run -e` (GOFIPS140=latest, GODEBUG=fips140=only,
-    # GO_ENCLAVE_IT_FIPS_MODE=only). The suite asserts that the runtime
-    # matches GO_ENCLAVE_IT_FIPS_MODE in BOTH directions, so a FIPS run that
-    # silently lost its environment fails rather than passing as non-FIPS.
-    # GODEBUG is deliberately not set here: the default run uses Go's
-    # defaults.
+    # FIPS settings; make integration-test-fips overrides all three and the suite asserts they match the runtime.
     GOFIPS140: "off"
     GO_ENCLAVE_IT_FIPS_MODE: "off"
     # Must equal ulimits.memlock above (see there).
@@ -157,16 +55,7 @@ services:
   integration:
     <<: *integration_service
 
-  # The root package's user-namespace test (memlock_userns_linux_test.go): it
-  # re-executes the test binary as root of a new user namespace, which Docker's
-  # default seccomp profile refuses (clone with CLONE_NEWUSER needs
-  # CAP_SYS_ADMIN, and the posture drops every capability). seccomp-userns.json
-  # is Docker's default profile (moby/profiles seccomp/default.json, 2026-10-08)
-  # with one change: the clone rule's mask no longer covers CLONE_NEWUSER, so an
-  # unprivileged process may create a user namespace and no other kind. Nothing
-  # else differs from `integration`: no capability, no unconfined profile,
-  # AppArmor on. The test FAILS where the namespace is refused or carries no
-  # capabilities; scripts/userns-test.sh runs it here.
+  # The user-namespace test, under Docker's default seccomp profile changed only to permit CLONE_NEWUSER.
   userns:
     <<: *integration_service
     security_opt:

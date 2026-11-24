@@ -176,12 +176,7 @@ func liveHandles(t *testing.T, p *KeyProtector) (objects, sessions int) {
 	return count(tpm2.TPMHTTransient), count(tpm2.TPMHTLoadedSession)
 }
 
-// TestReclaimAfterInterrupt_OnSWTPM interrupts each handle-bearing command
-// of Protect and Unprotect, right after it reaches the TPM, more times than
-// the TPM has transient-object and session slots (swtpm has 3 of each). A
-// simulator socket has no resource manager, so every handle the calls made
-// must be flushed by the provider: the counts end where they began, and the
-// next Protect and Unprotect succeed.
+// TestReclaimAfterInterrupt_OnSWTPM interrupts each handle-bearing command and checks every handle is flushed.
 func TestReclaimAfterInterrupt_OnSWTPM(t *testing.T) {
 	p, tr := openTripSWTPM(t)
 	key := bytes.Repeat([]byte{0x5a}, 32)

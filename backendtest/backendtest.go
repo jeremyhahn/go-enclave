@@ -28,10 +28,7 @@ const (
 	// destroyAttempts bounds the Destroy calls the suite makes while a backend
 	// reports the release refused for a retry to resume.
 	destroyAttempts = 4
-	// holdBound is how long the concurrency check's first borrow stays open
-	// once Destroy is called. A backend that waits out the borrow, as the
-	// Destroy contract requires, gets it back after the bound; one that does
-	// not returns from Destroy while the borrow is still open, a finding.
+	// holdBound is how long the first borrow stays open once Destroy is called.
 	holdBound = 20 * time.Millisecond
 )
 
@@ -50,13 +47,7 @@ type Config struct {
 	// SkipResidueSweep, if set, is the reason the residue sweep may not run.
 	// Without it, a sweep that cannot run is reported as ErrNotMeasured.
 	SkipResidueSweep string
-	// VerifyEvidence, if set, returns nil when evidence binds nonce and an
-	// error when it does not, as the attestation's relying party would judge
-	// it. With it the suite checks that Attest binds its nonce: evidence for
-	// one nonce verifies against that nonce and not against another. Without
-	// it the suite cannot tell bound evidence from evidence that merely
-	// differs between calls, and reports CapabilityAttest as an
-	// [*UncheckedCapabilityError] for every Attester it meets.
+	// VerifyEvidence, if set, judges whether evidence binds nonce; without it Attest is reported unchecked.
 	VerifyEvidence func(nonce []byte, evidence enclave.Evidence) error
 	// Logf receives notes about skipped optional measurements.
 	Logf func(format string, args ...any)
@@ -66,10 +57,7 @@ type Config struct {
 type HandleCase struct {
 	// Name is unique among the cases and names the case in every failure.
 	Name string
-	// New returns a live handle of b, such as a key the device generates. A
-	// ByteAccess handle's material should be random: the residue sweep cannot
-	// tell one repeated byte from the rest of the process and leaves it
-	// unmeasured.
+	// New returns a live handle of b; ByteAccess material should be random.
 	New func(ctx context.Context, b enclave.Backend) (enclave.Handle, error)
 	// Import, for an Importer, is the option set the suite imports ImportSize
 	// random bytes with; the case then also checks the purpose's handle contract.
@@ -81,10 +69,7 @@ type HandleCase struct {
 	Capabilities []enclave.Capability
 }
 
-// TestBackend runs every check against cfg's backend and returns nil, a
-// [*ConfigError], an [*UncheckedCapabilityError] for a capability the suite
-// refuses from the configuration alone, or a [*FindingsError] holding every
-// finding of the run.
+// TestBackend runs every check against cfg's backend and returns nil or a typed error.
 func TestBackend(ctx context.Context, cfg Config) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -147,10 +132,7 @@ func (r *report) add(err error) {
 	r.findings = append(r.findings, err)
 }
 
-// record adds a finding observed while the run context was live. Once it has
-// ended, a backend that honors it fails its calls with the context's error, so
-// what the suite observes then is the abort, not the backend: the run reports
-// ErrAborted instead.
+// record adds a finding observed while the run context was live; after it ends the run reports ErrAborted.
 func (r *report) record(err error) {
 	if r.ctx.Err() != nil {
 		return
@@ -372,10 +354,7 @@ func checkHandleCore(r *report, cfg Config) {
 	}
 }
 
-// destroy calls h.Destroy, and again while it returns
-// ErrLockedMemoryUnavailable, the refusal the Destroy contract documents as
-// keeping the material for a retried Destroy to release, at most
-// destroyAttempts times. It returns the last call's error.
+// destroy calls h.Destroy, retrying on ErrLockedMemoryUnavailable up to destroyAttempts times.
 func destroy(h enclave.Handle) error {
 	var err error
 	for range destroyAttempts {
@@ -392,10 +371,7 @@ func checkDestroy(r *report, property, who string, h enclave.Handle) {
 	judgeDestroy(r, property, who, h, destroy(h))
 }
 
-// judgeDestroy fails property unless err, what destroy returned for h, is an
-// outcome the Destroy contract allows: a nil error leaves the handle dead, a
-// refusal to release is resumed by a retry, and any other error leaves the
-// handle dead too.
+// judgeDestroy fails property unless err is an outcome the Destroy contract allows.
 func judgeDestroy(r *report, property, who string, h enclave.Handle, err error) {
 	switch {
 	case err == nil && h.IsAlive():
@@ -461,10 +437,7 @@ func destroyedCore(h enclave.Handle, owner enclave.Backend) []string {
 	return wrong
 }
 
-// destroyedCapabilities calls every capability method of h and returns how
-// each departs from the destroyed state: each that returns an error must
-// return ErrEnclaveDestroyed, and each that cannot must keep its non-secret
-// constant.
+// destroyedCapabilities reports how each capability method of h departs from the destroyed state.
 func destroyedCapabilities(ctx context.Context, h enclave.Handle, c constants) []string {
 	var wrong []string
 	want := func(method string, err error) {
@@ -624,11 +597,7 @@ type destroyRace struct {
 // begin reports an operation under way.
 func (dr *destroyRace) begin() { dr.once.Do(func() { close(dr.started) }) }
 
-// hold, inside a borrow, makes the run's first borrow the one Destroy is
-// called against: it reports it under way and open, and keeps the view from
-// then until Destroy has returned or, for a Destroy that waits the borrow
-// out, holdBound has passed since Destroy was called. It reports whether this
-// borrow was held; the held borrow calls release as its fn returns.
+// hold keeps the run's first borrow open across Destroy and reports whether it held it.
 func (dr *destroyRace) hold() bool {
 	first := false
 	dr.once.Do(func() {
@@ -679,11 +648,7 @@ func (dr *destroyRace) observe(core, capabilities []string) {
 	}
 }
 
-// operations returns what the concurrency check races against Destroy: Size,
-// IsAlive and Backend always, Freeze for a Freezer, and one operation per
-// optional capability h has. A borrow that sees anything but material, on
-// entry or after it was held across Destroy, sets stale. Every operation
-// reports itself to dr, the borrow by holding and releasing.
+// operations returns what the concurrency check races against Destroy.
 func operations(ctx context.Context, b enclave.Backend, h enclave.Handle, material []byte, stale *atomic.Bool, dr *destroyRace) []operation {
 	// The borrows come first and Freeze, which waits them out, last, so a
 	// pending Freeze does not keep the other workers from the held borrow.
@@ -779,13 +744,7 @@ func operations(ctx context.Context, b enclave.Backend, h enclave.Handle, materi
 	return ops
 }
 
-// exercise runs ops in a worker goroutine, where report.run's recover cannot
-// reach: a panic is recovered here and returned as a *panicError. It runs them
-// in turn until one fails with an error other than ErrEnclaveDestroyed, or
-// until a pass begun after Destroy returned has run. After a nil Destroy that
-// last pass is dead's, which finds how the handle departs from the destroyed
-// state, its core methods and its capabilities apart; after an error, which
-// may leave the material held, it is one more pass of ops.
+// exercise runs ops in a worker goroutine, recovering a panic as a *panicError.
 func exercise(ops []operation, dr *destroyRace, dead func() (core, capabilities []string)) (err error) {
 	defer func() {
 		if p := recover(); p != nil {
@@ -918,8 +877,7 @@ func signArgs(pub crypto.PublicKey, msg []byte) ([]byte, crypto.SignerOpts) {
 	return sum[:], crypto.SHA256
 }
 
-// decryptArgs returns a well-formed ciphertext for pub where the suite knows
-// how to make one (RSA-OAEP with SHA-256), else filler bytes.
+// decryptArgs returns an RSA-OAEP SHA-256 ciphertext for pub where possible, else filler bytes.
 func decryptArgs(pub crypto.PublicKey) ([]byte, crypto.DecrypterOpts) {
 	opts := &rsa.OAEPOptions{Hash: crypto.SHA256}
 	if rp, ok := pub.(*rsa.PublicKey); ok {
