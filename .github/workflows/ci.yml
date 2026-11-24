@@ -509,7 +509,7 @@
 # v1.29.3 (ruling 255(10)/(11)(c), 2026-10-29): one schedule
 # run per repository, skipped when a main run is in flight. The 04:00Z
 # nightly cron on every repository started six main runs over the throttle
-# and drove ci-node-2 /mnt/disk1 to 93 %. Two changes:
+# and drove a runner disk to 93 %. Two changes:
 #   - a schedule run's concurrency group is `schedule-{repository}`, with no
 #     sha, so a repository has one schedule run at a time. cancel-in-progress
 #     stays a literal `true`, so a newer schedule run cancels an older one
@@ -694,7 +694,7 @@
 # CUSTOMIZE race job joins the PR tier (`pr` in CI Gate, no tier `if:`); its
 # other CUSTOMIZE suites take CI_FULL_TIER's expression and are `full`.
 # v1.23 also (Tenant Agent m674 item 3, 2026-10-18: per-run image tags filled
-# ci-node-1 at 100G per 17 minutes): one image tag per family, keyed by
+# a runner at 100G per 17 minutes): one image tag per family, keyed by
 # content. The integration image is <repo>-ci-it:<hash> (`make -s it-image`,
 # the go-qrdb #814 pattern), built once per runner and reused by every job and
 # run with that tree; no job removes it, and reap-stale-ci-stacks.sh v2
@@ -770,8 +770,8 @@
 # containers on the runner host runs scripts/reap-stale-ci-stacks.sh first
 # (ships beside this file). Its `if: always()` teardown dies with the job when
 # the host or the Docker daemon goes down, and nothing removed the stack after:
-# 11 exited stacks, with their networks and volumes, stayed on ci-node-1 and
-# ci-node-2 after the 2026-10-11/12 restarts. See the CUSTOMIZE note above
+# 11 exited stacks, with their networks and volumes, stayed on two
+# runners after the 2026-10-11/12 restarts. See the CUSTOMIZE note above
 # ci-gate.
 #
 # v1.17: third-party actions pinned by commit, the tag in a
