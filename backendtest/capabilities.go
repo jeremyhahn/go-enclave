@@ -64,9 +64,7 @@ func checkByteAccess(r *report, cfg Config) {
 	})
 }
 
-// checkFreezer freezes a fresh handle twice and requires the material intact,
-// readable and no longer writable. validateConfig has refused a Freezer
-// without ByteAccess, the only way to observe read-only material.
+// checkFreezer freezes a fresh handle twice and requires the material intact, readable and not writable.
 func checkFreezer(r *report, cfg Config) {
 	const property = "Freezer"
 	eachCase(r, cfg, property, enclave.CapabilityFreeze, func(hc HandleCase, _ enclave.Backend, h enclave.Handle, _ []byte) {
@@ -107,11 +105,7 @@ func checkFreezer(r *report, cfg Config) {
 	})
 }
 
-// canWrite reports whether any byte of p can be written. It probes one byte of
-// every page p spans, its first and last byte among them, so a view frozen
-// only in part answers true. A read-only page answers false instead of killing
-// the process, and the fault's panic never leaves the probe, so it never
-// unwinds through the backend's WithBytes.
+// canWrite reports whether any byte of p can be written, probing one byte per page without faulting.
 func canWrite(p []byte) bool {
 	if len(p) == 0 {
 		return false
@@ -154,11 +148,7 @@ func rewrite(b *byte, v byte) {
 	*b = v
 }
 
-// checkDeriver requires Derive to refuse an ended context, and to be a
-// function of the material and info: the same info gives the same material, a
-// different info a different one. The derived material is compared through
-// ByteAccess or AEAD; a derived handle with neither cannot be compared, and the
-// capability is refused as unchecked.
+// checkDeriver requires Derive to refuse an ended context and to be a function of material and info.
 func checkDeriver(r *report, cfg Config) {
 	const property = "Deriver"
 	eachCase(r, cfg, property, enclave.CapabilityDerive, func(hc HandleCase, _ enclave.Backend, h enclave.Handle, _ []byte) {
@@ -274,10 +264,7 @@ type signScheme struct {
 	verify func(digest, sig []byte) bool
 }
 
-// signSchemes returns the schemes a crypto.Signer with pub must serve, so its
-// handle plugs into tls.Certificate and x509.CreateCertificate: ECDSA over
-// SHA-256, RSA PKCS #1 v1.5 and PSS over SHA-256, and Ed25519. It returns nil
-// for a public key of any other type.
+// signSchemes returns the signature schemes a crypto.Signer with pub must serve.
 func signSchemes(pub crypto.PublicKey) []signScheme {
 	switch k := pub.(type) {
 	case *ecdsa.PublicKey:
@@ -333,9 +320,7 @@ func checkSigner(r *report, cfg Config) {
 	})
 }
 
-// checkDecrypter requires Decrypt to reverse RSA-OAEP encryption to Public and
-// to refuse a tampered ciphertext. A key that is not RSA is refused as
-// unchecked: the seam names no other encryption to Public the suite can make.
+// checkDecrypter requires Decrypt to reverse RSA-OAEP and refuse a tampered ciphertext.
 func checkDecrypter(r *report, cfg Config) {
 	const property = "crypto.Decrypter"
 	eachCase(r, cfg, property, enclave.CapabilityDecrypt, func(hc HandleCase, _ enclave.Backend, h enclave.Handle, _ []byte) {
@@ -470,11 +455,7 @@ func checkAttestation(r *report, cfg Config, property, caseName string, a enclav
 	}
 }
 
-// checkBinding checks that evidence, which Attest returned for nonce, binds
-// it: it verifies against nonce and not against a nonce one bit away. Without
-// [Config.VerifyEvidence] evidence that differs between calls is all the suite
-// can see, and an Attester that ignores the nonce but randomizes its evidence
-// shows the same, so the capability is reported unchecked, not certified.
+// checkBinding checks evidence verifies against nonce and not against a nonce one bit away.
 func checkBinding(r *report, cfg Config, property, caseName, who string, nonce []byte, evidence enclave.Evidence) {
 	if cfg.VerifyEvidence == nil {
 		r.unchecked(caseName, enclave.CapabilityAttest, "Config.VerifyEvidence is nil, so the suite cannot tell evidence "+
@@ -558,10 +539,7 @@ func checkImporter(r *report, cfg Config) {
 	checkRefusedImport(r, property, "with an already-canceled context", refused, err)
 }
 
-// checkRefusedImport fails property if an Import, which probe describes,
-// returned an error and a live handle: the Importer contract refuses before
-// any device work, so a refusal holds no material. Whatever the error, it
-// destroys any handle returned, so the probe leaks nothing.
+// checkRefusedImport fails property if a refused Import returned a live handle, and destroys any handle returned.
 func checkRefusedImport(r *report, property, probe string, h enclave.Handle, err error) {
 	if isNilInterface(h) {
 		return
@@ -572,10 +550,7 @@ func checkRefusedImport(r *report, property, probe string, h enclave.Handle, err
 	_ = destroy(h)
 }
 
-// checkImportedPurpose holds an imported handle to its purpose's contract: the
-// material for PurposeMaterial, and for a key the imported key, through the
-// view or, for an AES-256-GCM AEAD with a 12-byte nonce, by opening what this
-// process sealed with the imported key.
+// checkImportedPurpose holds an imported handle to its purpose's contract.
 func checkImportedPurpose(r *report, property string, hc HandleCase, h enclave.Handle, material []byte) {
 	spec, err := enclave.NewImportSpec(hc.Import...)
 	if err != nil {
@@ -612,11 +587,7 @@ func checkImportedPurpose(r *report, property string, hc HandleCase, h enclave.H
 	}
 }
 
-// checkImportedAESKey requires an AES-256-GCM handle to be that algorithm, and
-// to open what the imported key sealed in this process. A handle that draws
-// its own nonce carries it in a format the seam leaves to the backend, so only
-// its constants are checked. FIPS 140-only mode refuses this process a GCM
-// under a caller-chosen nonce, so there only the ciphertext body is checked.
+// checkImportedAESKey requires an AES-256-GCM handle to open what the imported key sealed.
 func checkImportedAESKey(r *report, property, name string, aead enclave.AEAD, key []byte) {
 	const nonceSize, overhead = 12, 16
 	if aead.Overhead() != overhead || aead.NonceSize() != nonceSize && aead.NonceSize() != 0 {
@@ -649,10 +620,7 @@ func checkImportedAESKey(r *report, property, name string, aead enclave.AEAD, ke
 	}
 }
 
-// checkImportedGCMBody is checkImportedAESKey under FIPS 140-only mode: it
-// requires the handle's ciphertext body under nonce to be GCM's, the plaintext
-// under AES-CTR from the nonce's second counter block, using the approved
-// AES-CTR the mode leaves this process. The tag is the handle's own.
+// checkImportedGCMBody is checkImportedAESKey under FIPS 140-only mode: it checks the GCM ciphertext body through AES-CTR.
 func checkImportedGCMBody(r *report, property, name string, aead enclave.AEAD, block cipher.Block, nonce, plaintext []byte) {
 	sealed, err := aead.Seal(nil, nonce, plaintext, nil)
 	if err != nil || len(sealed) != len(plaintext)+aead.Overhead() {
@@ -739,10 +707,7 @@ func checkConfiner(r *report, cfg Config) {
 	}
 }
 
-// checkProber checks what enclave.Detect relies on: Rank is fixed, and Probe
-// gives one verdict, nil or an error, under a live and a nil context, called
-// again and called concurrently. It cannot check that the verdict matches the
-// host; the backend's own tests do that.
+// checkProber checks Rank is fixed and Probe gives one verdict under a live, nil and concurrent context.
 func checkProber(r *report, cfg Config) {
 	const property = "Prober"
 	if !hasCap(cfg.BackendCapabilities, enclave.CapabilityProbe) {

@@ -26,13 +26,7 @@ import (
 	"github.com/jeremyhahn/go-enclave/providertest"
 )
 
-// The providers providertest's conformance suite is run against in
-// provider_failure_test.go. Each is a thin wrapper around a real
-// SoftwareProvider (or, for the bare public-key wrap, a few lines of real
-// arithmetic) that breaks exactly one property of the provider seam, so the
-// suite's failure paths run for real: real locked memory, a real residue sweep
-// through /proc/self/mem. Nothing here fakes the cryptography a property does
-// not depend on.
+// Providers that each break exactly one property of the provider seam, for provider_failure_test.go.
 
 // The properties providertest reports, as its documentation names them.
 const (
@@ -821,12 +815,7 @@ func (r *heapRoot) UnsealRoot(ctx context.Context, dst []byte) error {
 
 // --- A public-key wrap ------------------------------------------------------
 
-// bareWrap is a KeyProtector in the shape of a public-key wrap with nothing an
-// attacker lacks to authenticate it: a blob is the key masked with a public
-// pad, behind a magic and a tag over both. The tag and the pad are public, so
-// anyone can build a blob it accepts; yet it refuses every malformed,
-// truncated, extended or bit-flipped blob, which is why only providertest's
-// Config.Forge can tell it from a sound provider.
+// bareWrap is an unauthenticated public-key-wrap KeyProtector that only Config.Forge can tell from a sound one.
 type bareWrap struct {
 	// leak makes Unprotect write the unmasked key into the destination before
 	// it verifies the tag.

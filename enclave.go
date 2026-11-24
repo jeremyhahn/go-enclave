@@ -14,17 +14,7 @@ import (
 	"sync/atomic"
 )
 
-// lockedRegion is a memory enclave: a region of locked, guarded memory holding
-// sensitive material. [NewMemory], [NewMemoryCopy] and [NewMemorySized] hand
-// it out as a [ByteAccess] that is also a [Freezer], and NewMemory documents
-// the contract its methods keep. A nil *lockedRegion is a valid receiver: not
-// alive, borrows fail with [ErrEnclaveDestroyed], and Destroy returns nil. The
-// zero lockedRegion behaves as a nil one.
-//
-// It holds only a pointer to its state, so every copy of one is the same
-// enclave and one Destroy reaches all of them; go vet's copylocks check
-// reports a copy all the same, since a *lockedRegion is the handle to pass
-// around.
+// lockedRegion is a memory enclave of locked, guarded memory; a nil *lockedRegion is a valid, dead receiver.
 type lockedRegion struct {
 	_ noCopy
 	*memoryState
@@ -196,12 +186,7 @@ func (m *mapping) loadFrozen(src []byte) (*mapping, error) {
 	return m, nil
 }
 
-// publish is the last step of every constructor, admitted or not. On success
-// it registers m as an enclave whose release runs once its pages go back. On
-// failure it hands any pages err left mapped to the orphan ledger with
-// release, so release must be nil unless those pages are still locked: an
-// admitted caller refunds a charge nothing holds itself, at once. admitter is
-// the Allocator that admitted it, nil for an unbudgeted constructor.
+// publish registers m as an enclave, or hands pages a failure left mapped to the orphan ledger.
 func publish(m *mapping, err error, release func(), admitter *budgetAllocator) (*lockedRegion, error) {
 	if err != nil {
 		adoptOrphan(err, release)

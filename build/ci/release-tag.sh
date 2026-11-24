@@ -1,14 +1,5 @@
 #!/bin/sh
-# release-tag.sh — name the tag a release run is for, and the commit it names.
-#
-# Usage: sh build/ci/release-tag.sh
-#
-# Reads GITHUB_REF and writes `tag=` and `sha=` to $GITHUB_OUTPUT. Git accepts
-# tag names such as v`id` and v$(id), and release.yml's `v*` trigger matches
-# them. The tag is DATA from here on: every later step receives it through
-# `env:` and every make target reads it as a quoted shell variable. It is
-# refused here too, before it is echoed or becomes an output, unless it is a
-# plain version string.
+# release-tag.sh writes the tag and its commit to $GITHUB_OUTPUT, refusing anything but a plain version string.
 set -eu
 
 case ${GITHUB_REF:-} in

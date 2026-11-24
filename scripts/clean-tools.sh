@@ -1,10 +1,5 @@
 #!/bin/sh
-# clean-tools.sh — remove the repository-local pinned-tool cache (bin/tools).
-#
-# Usage: TOOLS_DIR=/abs/path scripts/clean-tools.sh   (from the repository root)
-#
-# Refuses a relative TOOLS_DIR, or one resolving to /, the checkout or $HOME
-# (itself resolved, so a symlinked HOME is still caught).
+# clean-tools.sh removes TOOLS_DIR, refusing a relative path, /, the checkout or $HOME (usage: TOOLS_DIR=/abs/path scripts/clean-tools.sh).
 set -eu
 # shellcheck source=lib.sh
 . "${0%/*}/lib.sh"

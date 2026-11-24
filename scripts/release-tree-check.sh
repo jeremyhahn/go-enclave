@@ -1,14 +1,5 @@
 #!/bin/sh
-# release-tree-check.sh — the published commit's tree is the tag's tree.
-#
-# Usage: scripts/release-tree-check.sh <tag> <published-ref>   (from the repository root)
-#
-# The body of `make release-tree-check TAG=… REF=…` (SPEC release criterion 8:
-# the release is published as one commit whose tree is byte-identical to the
-# tag's tree). Offline: it resolves <tag>^{commit} and <ref>^{commit} in the
-# local clone, compares the two commits' trees, and refuses when they differ or
-# either does not name a commit (a bare tree is refused), or when the
-# tag is not a release version. It writes nothing and makes no network call.
+# release-tree-check.sh <tag> <published-ref>: refuse unless both commits have the same tree.
 set -eu
 # shellcheck source=lib.sh
 . "${0%/*}/lib.sh"

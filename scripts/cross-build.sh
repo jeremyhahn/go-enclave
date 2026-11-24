@@ -1,13 +1,5 @@
 #!/bin/sh
-# cross-build.sh — compile, vet and link the test binaries of every
-# package for each GOOS/GOARCH given. No test runs: linking catches what vet
-# cannot (a test file that compiles nowhere but on the host).
-#
-# Every target builds with cgo off: the project is pure Go, and with cgo on a
-# package that imports net makes the cross target build runtime/cgo with the
-# host's C compiler, which cannot assemble for another architecture.
-#
-# Usage: scripts/cross-build.sh <goos/goarch>... -- <package>...
+# cross-build.sh <goos/goarch>... -- <package>...: compile, vet and link test binaries per target with cgo off.
 set -eu
 # shellcheck source=lib.sh
 . "${0%/*}/lib.sh"

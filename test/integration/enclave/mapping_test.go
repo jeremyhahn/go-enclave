@@ -26,20 +26,9 @@ import (
 	"github.com/jeremyhahn/go-enclave/test/internal/devcontainer"
 )
 
-// What every enclave's pages look like to the kernel (locked, undumpable,
-// guarded, read-only once final), the process-wide RLIMIT_CORE hardening, and
-// the recovery paths. Each Refused/Denied test runs in a child with the
-// seccomp fault injector (seccomp_test.go), makes the kernel refuse one memory
-// syscall, and checks the public outcome: what is returned, held and charged,
-// and that a later Destroy or WipeAll finishes once the refusal lifts. Each
-// first requires that the injector actually refused something.
+// Enclave pages as the kernel sees them, RLIMIT_CORE hardening, and recovery from seccomp-injected refusals.
 
-// TestMemoryEnclave_EnclaveMappingsAreLockedUndumpableAndGuarded creates an enclave by every
-// public route and reads each mapping back from /proc/self/smaps: VmFlags has
-// lo, dd and dc; the size is exactly LockedSize(n); permissions are r--p once
-// final (rw-p only for an unfrozen sized enclave); the neighbors are unlocked
-// ---p guard pages. Every locked mapping in the process, the sealer's
-// included, is dd and together they make up VmLck; after WipeAll none remain.
+// TestMemoryEnclave_EnclaveMappingsAreLockedUndumpableAndGuarded checks every enclave mapping's smaps flags, size, permissions and guards.
 func TestMemoryEnclave_EnclaveMappingsAreLockedUndumpableAndGuarded(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		ctx := context.Background()
@@ -196,14 +185,7 @@ func TestMemoryEnclave_EnclaveMappingsAreLockedUndumpableAndGuarded(t *testing.T
 	})
 }
 
-// TestMemoryEnclave_CoreDumpLimitUnchangedByImport pins that importing go-enclave
-// leaves RLIMIT_CORE where the parent set it, and that CoreDumpsDisabled says
-// nothing was applied; lowering the limit is HardenProcess's
-// (TestMemoryEnclave_HardenProcess_KernelReportsNotDumpable).
-//
-// It runs in the top-level process so its parent is the `go` command, which
-// does not import go-enclave; the test requires that parent's limit to be the
-// non-zero figure compose.yaml declares, or "unchanged" would be unfalsifiable.
+// TestMemoryEnclave_CoreDumpLimitUnchangedByImport pins that importing go-enclave leaves RLIMIT_CORE unchanged.
 func TestMemoryEnclave_CoreDumpLimitUnchangedByImport(t *testing.T) {
 	if isChild() {
 		t.Fatalf("must run in the top-level test process, whose parent is the go command")

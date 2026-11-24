@@ -19,12 +19,7 @@ import (
 // handler: it is touched on construction, on destruction and by WipeAll, and
 // never on the borrow path. See docs/shutdown-sweep/engineering.md.
 
-// The sweep waits for a held enclave by event, not by sleeping. sweepWaiting
-// is armed for a whole sweep; a lock holder reads it after letting go and only
-// then calls wakeSweep (see memoryState.unhold). sweepWake holds at most one
-// pending wake-up, so wake-ups coalesce and a sender never blocks. The sweep
-// drains it at the start of every pass, before trying any lock, so no release
-// is missed; the argument is on memoryState.holders.
+// The sweep waits for a held enclave by event: sweepWake holds at most one pending wake-up.
 var (
 	sweepWaiting atomic.Bool
 	sweepWake    = make(chan struct{}, 1)
@@ -132,8 +127,7 @@ var (
 	sweepAdmissionWaitForTest func()
 )
 
-// admitSweep takes the sweep slot, waiting for it no longer than ctx allows.
-// A free slot is taken even under a done ctx. A nil ctx only tries.
+// admitSweep takes the sweep slot, waiting no longer than ctx allows; a nil ctx only tries.
 func admitSweep(ctx context.Context) bool {
 	select {
 	case sweepSlot <- struct{}{}:
@@ -162,10 +156,7 @@ func ledgerCount() int {
 	return len(live) + len(orphans)
 }
 
-// adoptOrphan puts the mapping a failed construction's err carries onto the
-// orphan ledger, with refund to run when a sweep releases it. It is a no-op
-// when err left nothing mapped. Constructors call it after the refund
-// decision is made, so a sweep never reaches an orphan without its refund.
+// adoptOrphan puts a failed construction's mapping on the orphan ledger with its refund.
 func adoptOrphan(err error, refund func()) {
 	var held *pagesHeldError
 	if !errors.As(err, &held) || held.orphan == nil {
@@ -180,10 +171,7 @@ func adoptOrphan(err error, refund func()) {
 	registryMu.Unlock()
 }
 
-// register adds e to the shutdown ledger and returns its handle. It publishes
-// e to a concurrent [WipeAll], so it must be the last step of construction, after
-// every field a sweep reads (release in particular) is set; registryMu is the
-// happens-before edge that makes them visible to the sweep.
+// register adds e to the shutdown ledger; it must be the last step of construction.
 func register(e *memoryState) *lockedRegion {
 	registryMu.Lock()
 	live[e] = struct{}{}
@@ -191,12 +179,7 @@ func register(e *memoryState) *lockedRegion {
 	return &lockedRegion{memoryState: e}
 }
 
-// settleRelease books the outcome err of a release attempt on the ledger entry
-// e, live or orphan, and reports whether the pages went back. Only then does
-// it return e's Allocator reservation (at most once) and drop e from the
-// ledger; a detected corruption is noted either way, in the same step, so a
-// sweep sees the entry or the note and the next WipeAll reports it even when
-// the caller discarded err.
+// settleRelease books a release attempt's outcome on e and reports whether the pages went back.
 func settleRelease(e *memoryState, err error) bool {
 	released := releasedPages(err)
 	if released && e.release != nil {
@@ -310,10 +293,7 @@ sweep:
 			sweepPassForTest(pass)
 		}
 
-		// Snapshot and unlock before destroying: settleRelease takes
-		// registryMu. Every registered entry is tried on every pass, because a
-		// write TryLock loses to any momentary reader. Orphans are never held,
-		// so their TryLock always succeeds.
+		// Snapshot and unlock before destroying; every entry is tried on every pass.
 		registryMu.Lock()
 		batch := make([]*memoryState, 0, len(live)+len(orphans))
 		for e := range live {
@@ -408,11 +388,7 @@ sweep:
 	return remaining, nil
 }
 
-// sweepBackends is WipeAll's second phase: it calls Sweep, in name order, on
-// the registered sweepers snapshotted once, with ctx unchanged (nil included).
-// It returns the sum of their held counts, a negative count read as zero, and
-// one failure per Sweep that returned an error. A failure does not stop the
-// rest; a panic is the backend's own and is not recovered.
+// sweepBackends calls Sweep on the snapshotted sweepers in name order and sums their held counts.
 func sweepBackends(ctx context.Context) (int, []BackendSweepFailure) {
 	held := 0
 	var failures []BackendSweepFailure

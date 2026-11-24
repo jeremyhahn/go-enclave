@@ -11,13 +11,7 @@ import (
 	"github.com/goccy/go-yaml"
 )
 
-// Runner selection (ci-template v1.54). Preflight's step runnerSelectStep
-// picks, once per run, the runner every later job of the run takes:
-// GitHub-hosted, or the self-hosted bigdisk pools, whichever this repository
-// uses less, with limits from repository variables. A pull request whose head
-// is not this repository (a fork) never reaches a self-hosted runner: Preflight
-// itself runs hosted for it (preflightRunsOn), and the step outputs the hosted
-// default without a call.
+// Runner selection picks hosted or self-hosted once per run; a fork's PR always runs hosted.
 const (
 	runnerSelectStep  = "Balanced runner pool (ruling 1137)"
 	runnerSelectOld   = "Hosted or overflow runner (ruling 1024)"

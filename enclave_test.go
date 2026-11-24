@@ -216,7 +216,7 @@ func TestMemory_WithBytes(t *testing.T) {
 	}
 	defer e.Destroy()
 
-	// The verdict is taken INSIDE the borrow; the material never leaves it.
+	// The verdict is taken inside the borrow.
 	var saw bool
 	if err := e.WithBytes(func(b []byte) error {
 		saw = bytes.Equal(b, []byte("borrowed"))
@@ -460,12 +460,7 @@ func TestMemory_ConcurrentReadersAndDestroy(t *testing.T) {
 	}
 }
 
-// TestLockedMemoryError pins the typed error's contract: it matches
-// ErrLockedMemoryUnavailable, keeps the diagnostic text, and unwraps a cause
-// that is an error.
-// TestEqualToSeparatesMismatchFromDestroyed pins that a mismatch is
-// (false, nil) and a missing enclave is (false, ErrEnclaveDestroyed): an
-// inverted test must never read a destroyed enclave as a definite mismatch.
+// TestEqualToSeparatesMismatchFromDestroyed pins (false, nil) for a mismatch and (false, ErrEnclaveDestroyed) for a missing enclave.
 func TestEqualToSeparatesMismatchFromDestroyed(t *testing.T) {
 	const material = "the real material"
 
@@ -536,10 +531,7 @@ func panicValue(fn func()) (r any) {
 	return nil
 }
 
-// generateInto fills the sized enclave e from the CSPRNG and copies the result,
-// from inside the same borrow, into a second locked enclave (the yardstick), so
-// the material never exists outside locked memory. The caller must Destroy the
-// yardstick.
+// generateInto fills e from the CSPRNG and copies it into a second locked enclave the caller destroys.
 func generateInto(t *testing.T, e *lockedRegion) *lockedRegion {
 	t.Helper()
 	yardstick, err := newMemorySized(e.Size())
@@ -1855,8 +1847,7 @@ func BenchmarkBorrowSerial(b *testing.B) {
 	}
 }
 
-// BenchmarkBorrowParallelShared is GOMAXPROCS goroutines borrowing one enclave,
-// where any write added to the bracket contends on the lock's cache line.
+// BenchmarkBorrowParallelShared is GOMAXPROCS goroutines borrowing one enclave.
 func BenchmarkBorrowParallelShared(b *testing.B) {
 	e := newBenchEnclave(b)
 
@@ -1872,8 +1863,7 @@ func BenchmarkBorrowParallelShared(b *testing.B) {
 	})
 }
 
-// BenchmarkBorrowParallelDistinct is GOMAXPROCS goroutines each borrowing its
-// own enclave, exposing any package-level state a borrow writes.
+// BenchmarkBorrowParallelDistinct is GOMAXPROCS goroutines each borrowing its own enclave.
 func BenchmarkBorrowParallelDistinct(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()

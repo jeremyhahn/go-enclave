@@ -15,12 +15,7 @@ import (
 	"testing"
 )
 
-// FuzzOpenWithKeyInto feeds openWithKeyInto mutated ciphertexts, mutated AADs
-// and destinations of every length. It never panics, opens only the one
-// payload sealWithKey produced, and refuses everything else with
-// ErrSealedAuthentication. A destination of the wrong length is refused before
-// anything is decrypted, so it is left untouched; any other refusal leaves dst
-// untouched or wiped.
+// FuzzOpenWithKeyInto checks that only the sealed payload opens and every other input fails with ErrSealedAuthentication.
 func FuzzOpenWithKeyInto(f *testing.F) {
 	key := newWrappingKey(f)
 	plaintext := make([]byte, dekBytes)

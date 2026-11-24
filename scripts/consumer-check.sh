@@ -1,32 +1,5 @@
 #!/bin/sh
-# consumer-check.sh — build and run a throwaway consumer of a published version.
-#
-# Usage: scripts/consumer-check.sh <module> <vX.Y.Z[-pre]>
-#
-# Handbook release-versioning §2 (ratified 2026-08-14): post-tag verification
-# MUST build a throwaway consumer. Every build inside this repository resolves
-# the module from the working tree, so what `go get <module>@<tag>` actually
-# hands a consumer — the module zip as the forge serves it, its go.mod, its
-# recorded requirements and their checksums — is exercised by nothing else.
-#
-# In a fresh directory outside the repository, with GOWORK=off and a fresh
-# module cache, this:
-#   1. `go mod init`s a scratch module and `go get`s <module>@<version>;
-#   2. asserts the build list really selected <version> from the module cache
-#      — not a replacement, not a different version;
-#   3. `go mod verify`s the downloaded modules against go.sum;
-#   4. builds scripts/testdata/consumer/main.go and runs it, requiring its
-#      success marker.
-#
-# Resolution is whatever the environment says, deliberately untouched here
-# (dependency-resolution §1, §6): on a Gitea runner the act_runner injects
-# GOPRIVATE and the git insteadOf rewrite carrying a read token, so the module
-# is fetched from Gitea; on GitHub and for public consumers there is no
-# rewrite and it comes from the public proxy. This script sets neither, never
-# prints either, and clears GOFLAGS and sets no GONOSUMDB or GOINSECURE.
-#
-# The fresh module cache is the point, not a cost: a cache already holding the
-# module would answer from local bytes and prove nothing about the forge.
+# consumer-check.sh <module> <vX.Y.Z[-pre]> builds and runs a throwaway consumer of the published version in a fresh module cache.
 set -eu
 # shellcheck source=lib.sh
 . "${0%/*}/lib.sh"

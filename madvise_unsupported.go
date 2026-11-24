@@ -10,17 +10,7 @@
 
 package enclave
 
-// This is every platform with no per-mapping dump or fork advice that x/sys
-// exposes: darwin (and ios), NetBSD, AIX, Solaris (and illumos), Windows, and
-// any GOOS the package does not support. Both hooks report success so the lock,
-// guard pages and canary still apply; RLIMIT_CORE is the only dump control on
-// the unix ones, and [CoreDumpsDisabled] reports whether it took. A child
-// forked on them inherits a copy-on-write view of the enclave pages, and Windows
-// has no fork.
-//
-// Windows excludes nothing from any dump, so dump exposure must be governed by
-// host policy. See docs/memory-enclave/engineering.md, Platform contract, for
-// why WerRegisterExcludedMemoryBlock is not used.
+// Platforms with no per-mapping dump or fork advice: the hooks report success; see docs/memory-enclave/engineering.md, Platform contract.
 
 // coreDumpMapFlags is empty: there is no mapping-time exclusion here.
 const coreDumpMapFlags = 0

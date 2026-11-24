@@ -1,19 +1,5 @@
 # shellcheck shell=sh disable=SC2034
-# tool-pins.sh — THE pins of every analysis tool, and nowhere else. Sourced,
-# never run, like lib.sh.
-#
-# Read by the Makefile (`include`) and by the devcontainer's tools stage
-# (scripts/install-tools.sh sources it), so the version a gate runs on a
-# developer's machine, in CI and in go-enclave-toolchain is the same one.
-# NAME=value lines only, comments on their own lines: the file is both make
-# and sh, and make would keep a trailing comment's leading space in the value.
-#
-# Every pin tracks the tool's latest upstream release; a pin exists only so a
-# build is reproducible. Never @latest, never an older version than upstream's.
-#
-# Raise with `go list -m github.com/golangci/golangci-lint/v2@latest`.
-# golangci-lint runs vet, staticcheck and gosec (.golangci.yml), so they have
-# no pin of their own.
+# tool-pins.sh: the pin of every analysis tool, read by the Makefile and install-tools.sh; NAME=value lines only, comments on their own lines.
 GOLANGCI_VERSION=v2.14.0
 # Raise with `go list -m github.com/securego/gosec/v2@latest`.
 GOSEC_VERSION=v2.29.0
@@ -43,21 +29,8 @@ SHELLCHECK_SHA256_LINUX_AMD64=8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b
 SHELLCHECK_SHA256_LINUX_ARM64=12b331c1d2db6b9eb13cfca64306b1b157a86eb69db83023e261eaa7e7c14588
 SHELLCHECK_BIN_SHA256_LINUX_AMD64=4da528ddb3a4d1b7b24a59d4e16eb2f5fd960f4bd9a3708a15baddbdf1d5a55b
 SHELLCHECK_BIN_SHA256_LINUX_ARM64=127f13925eadd52c341bca0ebaf9ab0dbd78c6468f30a8f262a528bf8de47546
-#
-# The OP-TEE fixture (#250): trusted-firmware's `make optee-run` at a release
-# tag, run by scripts/optee-fixture.sh. The tag is pinned with the commit it
-# peels to; a checkout at any other commit is refused, so a moved tag is never
-# followed. Raise the tag and its commit together, by an ordinary PR. The clone
-# URL is the forge's and caller-supplied (TRUSTED_FIRMWARE_URL, Makefile).
+# The OP-TEE fixture's trusted-firmware tag and the commit it peels to; raise both together.
 TRUSTED_FIRMWARE_TAG=v0.4.2-alpha
 TRUSTED_FIRMWARE_COMMIT=e0ae83d062b45dccc0e4cf08c87bf6def80a946c
-# The OP-TEE QEMU fixture image the CI optee job runs the arm-trustzone harness
-# in, holding the stack prebuilt at TRUSTED_FIRMWARE_COMMIT.
-# Published to ghcr by the repository's ghcr-optee-fixture.yml workflow (tag
-# v0.4.2-alpha-optee-4.11.0, config sha256:38725a25…6bdb). The package is
-# public, so the GitHub-hosted job pulls it by manifest digest with no login.
-# Pinned as ghcr.io/<owner>/<name>@sha256:<64 hex>; raise it with the
-# trusted-firmware pins by re-running that workflow. The optee job fails if it
-# is emptied.
-# The contract: docs/backend-conformance/engineering.md#fixture-image-contract.
+# The OP-TEE QEMU fixture image, pinned by manifest digest; see docs/backend-conformance/engineering.md#fixture-image-contract.
 OPTEE_FIXTURE_IMAGE=ghcr.io/jeremyhahn/go-enclave-optee-fixture@sha256:107175c7463eddbe14bd9feca741e9ba6b29a18d5412cd04e92bdbf7a7d6a012

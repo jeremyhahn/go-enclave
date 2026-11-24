@@ -1,20 +1,5 @@
 #!/bin/sh
-# userns-test.sh — the root package's user-namespace test, in the devcontainer.
-#
-# Usage: scripts/userns-test.sh      (from the repository root)
-#
-# The body of `make integration-test-userns`. The test re-executes the test
-# binary as root of a new user namespace (memlock_userns_linux_test.go, built
-# with -tags=userns). Docker's default seccomp profile refuses that, so it runs
-# in the compose file's `userns` service, whose profile
-# (build/docker/devcontainer/seccomp-userns.json) permits CLONE_NEWUSER and
-# nothing else beyond Docker's default. The test fails, never skips, where the
-# namespace cannot be created. Like integration-test.sh: devcontainer only, a
-# unique compose project torn down on every exit, every precondition fails
-# rather than skips. The image is the integration suite's: built once and
-# scanned by scripts/integration-image.sh (see there), which this script runs
-# through unless GO_ENCLAVE_IT_IMAGE is set, so the test runs on the scanned
-# image and neither builds nor scans.
+# userns-test.sh: the root package's user-namespace test in the devcontainer's userns service (make integration-test-userns).
 set -eu
 # shellcheck source=lib.sh
 . "${0%/*}/lib.sh"

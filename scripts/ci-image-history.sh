@@ -1,15 +1,5 @@
 #!/usr/bin/env bash
-# scripts/ci-image-history.sh: fail when an image carries a private address
-# (Tenant Agent ruling 888). A pool build takes the LAN caches as BuildKit
-# secrets, which no layer and no history entry keeps; a build argument's
-# value, by contrast, is recorded in every RUN of the history. A pool-built
-# image may one day be pushed beyond the LAN, and ruling 887 keeps internal
-# addresses out of everything public, metadata included. For each image it
-# reads the history (every entry's command and comment) and the config (env,
-# labels, command) and fails on any RFC 1918 address. It names the image and
-# the history entry, never the address.
-#
-#   usage: scripts/ci-image-history.sh <image>...
+# ci-image-history.sh <image>...: fails when an image's history or config carries a private address, naming the image, never the address.
 set -euo pipefail
 
 if [ $# -eq 0 ]; then

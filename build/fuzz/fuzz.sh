@@ -1,23 +1,5 @@
 #!/bin/sh
-# fuzz.sh MODULE...: fuzz every native Go fuzz target in each module for a
-# bounded time, one target at a time, and stop at the first failure.
-#
-# Run from the repository root; each MODULE is a module directory relative to
-# it (`.` for the root module). Every package of each module is listed, its
-# fuzz targets are found with `go test -list '^Fuzz'`, and each target runs as
-#   go test -run '^$' -fuzz '^Name$' -fuzztime "$FUZZTIME" <package>
-# from its module's directory.
-#
-# Environment:
-#   GOCMD     the go command (default go)
-#   FUZZTIME  how long each target fuzzes: a Go duration or Nx (default 30s)
-#   FUZZ      an extended regexp; only targets whose name matches run
-#   FUZZ_PKG  an extended regexp; only packages whose import path matches run
-#
-# Prints one line per target (ok or FAIL, package, target, seconds). A failure
-# prints go's output, the package, the target and the failing input under the
-# package's testdata/fuzz/, and exits 1. Nothing to fuzz exits 1; a bad
-# argument or variable exits 2 before go runs.
+# fuzz.sh MODULE...: fuzz every Go fuzz target for FUZZTIME, one at a time, stopping at the first failure (env GOCMD, FUZZTIME, FUZZ, FUZZ_PKG).
 set -eu
 
 die() {

@@ -141,10 +141,7 @@ type Sealed interface {
 	Destroy() error
 }
 
-// sealedValue is this package's [Sealed]. A nil *sealedValue is a valid
-// receiver for every method. It must not be copied; its state sits behind one
-// pointer, so even a copy is the same value, and destroying either destroys
-// both.
+// sealedValue is this package's [Sealed]; a nil receiver is valid and it must not be copied.
 type sealedValue struct {
 	_ noCopy
 
@@ -423,10 +420,7 @@ func (s *sealedValue) openImported(ctx context.Context, imp Importer) (Handle, e
 	return h, nil
 }
 
-// openIn is the shared body of Open and openAdmitted; dst makes the
-// destination. The value's lock only pins and unpins the envelope and is
-// not held across Sealer.open, which may block in a provider; Destroy takes
-// no context and must not wait on that.
+// openIn is the shared body of Open and openAdmitted; the value's lock is not held across Sealer.open.
 func (s *sealedValue) openIn(ctx context.Context, dst func(int) (*lockedRegion, error)) (*lockedRegion, error) {
 	if s == nil || s.sealedState == nil {
 		return nil, ErrEnclaveDestroyed

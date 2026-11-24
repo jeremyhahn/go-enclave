@@ -1,14 +1,5 @@
 #!/bin/sh
-# forge-resolution.sh — assert the runner configured module resolution for the
-# forge (dependency-resolution §6).
-#
-# Usage: sh build/ci/forge-resolution.sh
-#
-# On our runners the module resolves from the forge only through GOPRIVATE plus
-# a git insteadOf rewrite carrying a read token, both injected by act_runner.
-# Without them `go get` asks the public proxy, which has never seen an internal
-# tag, and fails with an unrelated-looking "unknown revision". Checked by SHAPE
-# only: the rewrite's KEY contains the token, so nothing here is printed.
+# forge-resolution.sh asserts the runner configured GOPRIVATE and a tokened git rewrite, checking shape only and printing nothing.
 set -eu
 
 if [ -z "$(go env GOPRIVATE)" ]; then

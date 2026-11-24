@@ -567,10 +567,7 @@ func (e *KeyScheduleExposedError) Error() string { return nameText(ErrKeySchedul
 // Is reports every KeyScheduleExposedError as [ErrKeyScheduleExposed].
 func (e *KeyScheduleExposedError) Is(target error) bool { return target == ErrKeyScheduleExposed }
 
-// contextError reports that the caller's context ended before or during an
-// operation. It unwraps to each of its non-nil fields, so the error matches
-// ctx.Err(), a distinct [context.Cause], and a provider failure that arrived
-// after the context ended.
+// contextError reports that the caller's context ended; it unwraps to each non-nil field.
 type contextError struct {
 	ended    error // ctx.Err(), or the provider's error that already matches it
 	cause    error // context.Cause when distinct from ctx.Err(), or nil
@@ -957,13 +954,7 @@ func withCause[E causeShape, P causeError[E]](cause error) error {
 	return newCause[E, P](cause)
 }
 
-// withCleanupFailure reports failure together with the cleanup failures that
-// followed it, such as a refused release after a failed operation, as one
-// [CleanupError]; every one stays reachable with errors.Is and errors.As. Nil
-// cleanups are skipped, and a CleanupError among them contributes its own
-// failure and causes, so the report stays flat; so does a failure that is
-// already a CleanupError, which is extended. With no cleanup failure, failure
-// is returned unchanged; with one and a nil failure, so is that one.
+// withCleanupFailure joins failure and the cleanup failures after it into one flat [CleanupError].
 func withCleanupFailure(failure error, cleanups ...error) error {
 	var causes []error
 	var last error
@@ -1011,10 +1002,7 @@ func destroyOnFailure(failure error, e *lockedRegion) error {
 	return withCleanupFailure(failure, e.Destroy())
 }
 
-// contextFailure returns nil while ctx is live; otherwise the operation's
-// error (an E) carrying a contextError. A provider error cause is kept: it
-// replaces the bare context error when it already matches it, and is carried
-// alongside otherwise. A distinct [context.Cause] is carried too.
+// contextFailure returns nil while ctx is live, else the operation's error carrying a contextError.
 func contextFailure[E causeShape, P causeError[E]](ctx context.Context, cause error) error {
 	ended := ctx.Err()
 	if ended == nil {
@@ -1047,10 +1035,7 @@ var providerVerdicts = map[error][]error{
 	},
 }
 
-// providerFailure shapes a provider's failure as an E: one of its
-// providerVerdicts passes through, and anything else is wrapped in a
-// [SealError] or [OpenError], so an open failure that is not a verdict cannot
-// be mistaken for one.
+// providerFailure passes a provider verdict through and wraps anything else in a [SealError] or [OpenError].
 func providerFailure[E causeShape, P causeError[E]](err error) error {
 	if err == nil {
 		return nil

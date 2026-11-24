@@ -1,26 +1,5 @@
 #!/bin/sh
-# release-ci-gate.sh — read the forge's CI Gate check run on the release pull
-# request before release-tag.sh tags.
-#
-# Usage (from the repository root; release-tag.sh runs it):
-#   scripts/release-ci-gate.sh merged <sha> <branch>
-#       <sha> must be the merge commit of a merged pull request from <branch>
-#       into main, and CI Gate on that pull request's head must be success.
-#       Prints the pull request's number and head.
-#
-# Environment: FORGE_API_URL (the API root, https://api.github.com),
-# FORGE_REPOSITORY (owner/repo) and FORGE_TOKEN (a read token). GitHub is the
-# repository's only forge (dev is its remote), so GitHub's REST API is the
-# only one read here.
-#
-# CI Gate is the one check the main ruleset requires, and GitHub reports it
-# as a check run, not a commit status: the legacy combined status of a commit
-# whose CI is all check runs reads `pending` with no statuses for ever. So the
-# read is GET /repos/<owner>/<repo>/commits/<sha>/check-runs?check_name=CI%20Gate,
-# and the latest run (the highest id) must be completed with conclusion
-# success. Anything else (no run, a run in progress, any other conclusion, an
-# HTTP error, an answer that does not parse) refuses: an unanswered check is
-# never a pass.
+# release-ci-gate.sh merged <sha> <branch>: require a success CI Gate check run on the merged release pull request's head.
 set -eu
 # shellcheck source=lib.sh
 . "${0%/*}/lib.sh"
@@ -77,10 +56,7 @@ ci_gate() {
   [ "$state" = success ] || die "CI Gate is not success on $2 $1 (check run '${state:-unreadable}'); a release is tagged only when its pull request's CI Gate passed"
 }
 
-# main's own CI Gate run is not the one read here: when a release ships the
-# fix for a red main job, main's run of the merge commit can still be red for
-# exactly the reason the release fixes. The ruleset let the merge in on the
-# pull request's CI Gate, so that run is the one required.
+# The release pull request's CI Gate is read, not main's.
 code=$(get "commits/$sha/pulls" "$work/pulls") || code=000
 [ "$code" = 200 ] || die "could not read the forge's pull requests for $sha (HTTP $code); refusing to release on an unanswered check"
 pr=$(jq -r --arg sha "$sha" --arg branch "$branch" '

@@ -2,11 +2,7 @@ package armtrustzone
 
 import "encoding/binary"
 
-// The GP TEE Client API's semantics this client reimplements over the TEE
-// ioctls instead of inheriting them from libteec: TEEC_UUID and its byte
-// order, and the TEEC_Result and TEEC_ORIGIN values it reports. The calls
-// themselves (TEEC_InitializeContext, TEEC_OpenSession, TEEC_InvokeCommand)
-// are client_linux.go's.
+// GP TEE Client API semantics (TEEC_UUID byte order, TEEC_Result, TEEC_ORIGIN) reimplemented over the TEE ioctls.
 
 // TEEC_Result values this client acts on.
 const (

@@ -1,76 +1,5 @@
 #!/bin/sh
-# changelog-assemble.sh — fold changelog.d/ fragments into CHANGELOG.md, or
-# check them.
-#
-# Usage: scripts/changelog-assemble.sh <vX.Y.Z[-pre]> <YYYY-MM-DD>
-#        scripts/changelog-assemble.sh --check
-#
-# Run from the repository root.
-#
-# THE FORM. The changelog has one entry per feature row of docs/SPEC.md, not
-# one per pull request. A change that callers can see edits
-# changelog.d/<feature>.md, where <feature> is the row's Feature slug, and
-# every pull request on that feature edits the same file. Each entry is one
-# line under a Keep a Changelog subsection (### Added, Changed, Deprecated,
-# Removed, Fixed or Security):
-#
-#   - **<feature>**: <outcome for a caller, at most two sentences>. ([#N](<issue URL>))
-#
-# The issue link is optional. A breaking change goes under ### Changed as
-# `- **BREAKING** <feature>: ...` and links its migration note in
-# docs/README.md#upgrading.
-#
-# --check enforces the form and changes nothing. It fails when a fragment's
-# name is not a Feature slug of docs/SPEC.md, or when an entry in a fragment or
-# under `## [Unreleased]` breaks the form: an unknown subsection, text outside
-# an entry, a continuation line, an unknown feature, a fragment entry naming
-# another feature, more than two sentences, no closing period, or a BREAKING
-# entry outside ### Changed or without its migration link. Every failure is
-# reported, not just the first.
-#
-# ASSEMBLY. The release step folds the queue into a version section and
-# deletes each fragment it folds in. It is a committed step performed before
-# tagging, because release.yml never edits CHANGELOG.md: it reads the
-# committed file at the tag, refuses the tag when a fragment or an
-# [Unreleased] entry was left out or the version has no section
-# (scripts/release-check-tag.sh), and publishes that section verbatim as the
-# release body (scripts/release-notes.sh). `make release` runs this script
-# and commits the result with VERSION.
-#
-#   - The body of `## [Unreleased]` and every fragment, in file-name order,
-#     are merged under their `### <Subsection>` headings, one heading per
-#     distinct subsection in order of first appearance, into a new
-#     `## [<version>] - <date>` section directly below an emptied
-#     `## [Unreleased]`. Every folded fragment is deleted;
-#     changelog.d/.gitkeep stays.
-#   - Link reference definitions (`[label]: URL`) are the file's footer and
-#     stay at its end. When the footer has `[Unreleased]: <repo>/compare/<tag>...HEAD`,
-#     it moves to compare from the new version, and a `[<version>]` link to
-#     the version's tag range is added.
-#
-# PRUNING at a release boundary, so the file does not accumulate:
-#
-#   - A final release (vX.Y.Z, no pre-release suffix) folds the sections of
-#     its own pre-releases (vX.Y.Z-alpha, vX.Y.Z-rc.N) into its section and
-#     removes them and their links. Within each subsection an entry repeated
-#     verbatim is kept once, and the entries of one feature are placed
-#     together, in order of first appearance. Nothing else is merged.
-#   - A final release of a new major version (v1.0.0 included) collapses
-#     each earlier major N's version sections into one `## [vN.x]` summary
-#     that lists the features those sections named, with a `[vN.x]` link to
-#     their tag range. The forge release notes keep every release's full
-#     text, so pruning loses nothing.
-#
-# Assembly fails, changing nothing, when: the version section already exists
-# and fragments are still waiting, or `## [Unreleased]` still holds an entry
-# (either would be silently left out); there is no `## [Unreleased]` heading;
-# a fragment, the Unreleased body or a folded pre-release section has text
-# outside a `### ` subsection, or a fragment has a `#`/`##` heading; there is
-# nothing at all to release; or a major collapse meets an entry that names no
-# feature or a footer with no `[Unreleased]` compare link to take the
-# repository URL from. When the version section already exists, no fragment
-# is waiting and [Unreleased] is empty it is a no-op, so a section written by
-# hand still releases.
+# changelog-assemble.sh <vX.Y.Z[-pre]> <YYYY-MM-DD> | --check: folds changelog.d/ fragments into CHANGELOG.md, or checks the entry form; run from the repository root.
 set -eu
 # shellcheck source=lib.sh
 . "${0%/*}/lib.sh"
@@ -109,8 +38,7 @@ check() {
 
   FEATURES=$features EMPTY=$empty awk -v changelog="$changelog" -v spec="$spec" '
     function err(where, msg) { print "changelog-assemble: " where ": " msg > "/dev/stderr"; bad++ }
-    # entry checks one entry line; want is the feature it must name ("" for any
-    # SPEC feature).
+    # entry checks one entry line; want is the feature it must name ("" for any).
     function entry(where, line, want,   rest, i, feat, text, t, n) {
       if (line ~ /^- \*\*BREAKING\*\* /) {
         rest = substr(line, 16)
@@ -214,8 +142,7 @@ fi
 
 if grep -Eq "$(version_anchor "$version")" "$changelog"; then
   [ $# -eq 0 ] || die "$changelog already has a section for $version but $# fragment(s) are still in $fragdir/ — they would be left out of the release: $*"
-  # The same hazard from the other side: entries still under [Unreleased]
-  # would be tagged OUTSIDE the release they were written for.
+  # Entries still under [Unreleased] would be left out of the release.
   pending=$(unreleased_pending "$changelog")
   [ -z "$pending" ] || die "$changelog already has a section for $version but [Unreleased] still holds entries — they would be left out of the release: $pending"
   echo "changelog-assemble: $changelog already has a section for $version, no fragment is waiting and [Unreleased] is empty; nothing to do"

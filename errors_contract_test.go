@@ -319,10 +319,7 @@ func hasStringField(t reflect.Type) bool {
 	return false
 }
 
-// TestErrorContract holds every exported error type of the package to one
-// contract (#345): its message, its sentinels, errors.As and Unwrap through
-// wrapping, and that raw bytes in a caller-supplied field never reach the
-// message verbatim.
+// TestErrorContract holds every exported error type to one contract: message, sentinels, errors.As and Unwrap.
 func TestErrorContract(t *testing.T) {
 	for name, row := range contractRows() {
 		t.Run(name, func(t *testing.T) {

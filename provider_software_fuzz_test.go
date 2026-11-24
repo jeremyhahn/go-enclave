@@ -17,12 +17,7 @@ import (
 	"time"
 )
 
-// FuzzSoftwareProviderUnprotect hands Unprotect blobs from storage it did not
-// write, with a live, canceled or expired context. It never panics. An ended
-// context is refused with ctx.Err() before the blob is read, leaving key
-// untouched. A live context opens only the one blob Protect produced, into the
-// key Protect was given; every other blob is refused with
-// ErrSealedAuthentication, leaving key untouched or wiped.
+// FuzzSoftwareProviderUnprotect checks Unprotect opens only Protect's blob and refuses ended contexts first.
 func FuzzSoftwareProviderUnprotect(f *testing.F) {
 	p := newSoftwareProvider()
 	f.Cleanup(func() { _ = p.Destroy() })

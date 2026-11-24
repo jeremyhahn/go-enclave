@@ -72,9 +72,6 @@ func lockedSize(n int64) (int64, bool) {
 //
 //	| preguard | canary … data | postguard |
 //	|<- page ->|<-- innerLen ->|<- page  ->|
-//
-// Both guard pages hold a copy of the canary. The canary is empty when the
-// size is a page multiple.
 type mapping struct {
 	// memory is the whole allocation. Every other field is a sub-slice of it.
 	memory []byte
@@ -119,11 +116,7 @@ func mapLocked(size int, innerLen int64) (*mapping, error) {
 	return mapBacked(size, innerLen, nil)
 }
 
-// mapBacked is mapLocked with back, when non-nil, replacing the anonymous
-// pages of inner before anything is locked or written: the secretmem backend
-// maps its file over them there (mapSecret). The guard pages stay anonymous.
-// back's error is the construction's failure, and the pages are released. A
-// backed inner is not mlock'd: the backing is locked by the kernel already.
+// mapBacked is mapLocked with back, when non-nil, replacing inner's anonymous pages before anything is locked.
 func mapBacked(size int, innerLen int64, back func(inner []byte) error) (*mapping, error) {
 	total := int(innerLen) + 2*int(pageSize)
 
@@ -189,10 +182,7 @@ func mapBacked(size int, innerLen int64, back func(inner []byte) error) (*mappin
 	return m, nil
 }
 
-// abandon rolls back an empty, partially built mapping and returns cause with
-// any cleanup failure. A refused munlock still goes on to munmap, which drops
-// the lock. If munmap is refused, the mapping is handed out in a
-// pagesHeldError, marked verified so its half-built canary is never checked.
+// abandon rolls back an empty, partially built mapping and returns cause with any cleanup failure.
 func (m *mapping) abandon(cause error, locked bool) error {
 	failure := error(&LockedMemoryError{Cause: cause})
 	if errors.As(cause, new(*MemfdSecretError)) {
@@ -240,10 +230,7 @@ func (m *mapping) freeze() error {
 	return nil
 }
 
-// wipeAndVerify zeroes the whole mapping, then checks the canary and guards.
-// The check runs at most once; a retry returns the first result. It returns
-// ErrEnclaveCorrupted, or the refused mprotect's own error for release to
-// classify.
+// wipeAndVerify zeroes the mapping, then checks the canary and guards, at most once.
 func (m *mapping) wipeAndVerify() error {
 	if m.verified {
 		if m.corrupted {
@@ -287,19 +274,12 @@ func (m *mapping) wipeAndVerify() error {
 	return nil
 }
 
-// release wipes and verifies, munlocks (at most once) and munmaps. A refused
-// munlock or munmap keeps the mapping intact behind a pagesHeldError so a
-// retry resumes; a refused mprotect unmaps anyway, as an UnwipedReleaseError
-// unless the data was already wiped.
+// release wipes and verifies, munlocks and munmaps; a refused munlock or munmap keeps the mapping for a retry.
 func (m *mapping) release() error {
 	// Step 1. Corruption falls through and is reported once the pages are
 	// gone; any other error is the refused mprotect.
 	if err := m.wipeAndVerify(); err != nil && !errors.Is(err, ErrEnclaveCorrupted) {
-		// A frozen region cannot be wiped without the denied mprotect, and
-		// under a permanent denial (seccomp) keeping it would leave the
-		// material resident for the process lifetime. Unmap it unwiped: it
-		// was mlock'd throughout and the kernel zeroes anonymous pages before
-		// reuse. No munlock first; munmap drops the lock.
+		// A frozen region under a denied mprotect is unmapped unwiped; the kernel zeroes the pages before reuse.
 		if uerr := unmapMemory(m.memory); uerr != nil {
 			// Refused too: keep everything for a retry.
 			return &pagesHeldError{

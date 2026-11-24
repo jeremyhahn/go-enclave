@@ -18,15 +18,7 @@ import (
 	"testing"
 )
 
-// The known-answer vectors in testdata/contract-v1 pin blob contract v1
-// (docs/sealing/engineering.md, "Blob contract v1" and "Envelope version").
-// They are checked twice: rebuilt byte for byte by contractRef, an encoder
-// written from the document with the standard library only, and opened
-// through the package's own unwrap and open paths. Regenerate them with
-//
-//	go test -run ContractV1 -update-vectors ./
-//
-// which is a format change: the document says so for any changed byte.
+// Known-answer vectors pinning blob contract v1; regenerate with go test -run ContractV1 -update-vectors ./ (a format change).
 var updateVectors = flag.Bool("update-vectors", false, "rewrite testdata/contract-v1 from the reference encoder")
 
 // The documented constants, copied from the document, not from the package.

@@ -1,60 +1,7 @@
 #!/bin/sh
-# tool.sh — resolve a PINNED analysis tool and print its absolute path.
-#
-# Usage: scripts/tool.sh <tool> <vX.Y.Z>
-#
-# The Makefile calls this for every analyser it runs, so the version a lint or
-# security target uses is the version the Makefile pins, on a developer's
-# machine and in CI alike. Diagnostics go to stderr; stdout carries exactly one
-# line, the path, so a recipe can write `bin=$(scripts/tool.sh ...) && "$bin"`.
-#
-# Environment:
-#   TOOL_INSTALL  1 (the Makefile's default) installs the pinned version into
-#                 TOOLS_DIR, unless a verified copy is already on PATH or
-#                 there (verified as below). 0
-#                 installs NOTHING: the tool must already be on PATH at
-#                 exactly the pinned version, and anything else — absent,
-#                 another version, a build that cannot say which version it is
-#                 — fails closed. An archive tool (trivy, shellcheck) must also
-#                 hash to its pinned binary SHA-256, checked before it is run:
-#                 the version a binary reports about itself proves nothing. CI on our runners sets 0, because the runner
-#                 image bakes the tools at its own pinned versions and a
-#                 network install over them is the substitution that image
-#                 exists to prevent. Any other value is refused rather than
-#                 read as either. actionlint ignores TOOL_INSTALL=0 and is
-#                 otherwise resolved like TOOL_INSTALL=1 (see projectbuilt
-#                 below): a PATH copy that verifies at the pin is used, and
-#                 anything else is built at the pin into TOOLS_DIR.
-#   TOOLS_DIR     where TOOL_INSTALL=1 installs (absolute path).
-#   TOOLCHAIN     the Go toolchain to build Go tools with, e.g. go1.27.4 — this
-#                 module's own, resolved inside the module when unset (#83):
-#                 `go install tool@version` runs outside the module, and
-#                 under GOTOOLCHAIN=auto it would build with the TOOL's go
-#                 floor, producing an analyser too old to load this module.
-#   GO            the go command (default: go).
-#   <TOOL>_SHA256_LINUX_{AMD64,ARM64}, <TOOL>_BIN_SHA256_LINUX_{AMD64,ARM64}
-#                 for the two tools installed from release archives (TRIVY,
+# tool.sh <tool> <vX.Y.Z>: resolve a pinned analysis tool and print its path; see TOOL_INSTALL, TOOLS_DIR, TOOLCHAIN, GO and the pinned hashes (TRIVY,
 #                 SHELLCHECK): the archive's SHA-256 and the extracted
-#                 binary's, pinned in scripts/tool-pins.sh beside the version.
-#   XTOOLS_VERSION the golang.org/x/tools gosec is built against (see
-#                 build_gosec), pinned in scripts/tool-pins.sh.
-#
-# What a cached install, or a copy on PATH, must prove before it is used
-# (TOOL_INSTALL=1):
-#   - a Go tool lives at TOOLS_DIR/<tool>-<version>-<toolchain>/, and its
-#     embedded build metadata (`go version <binary>`) must name TOOLCHAIN and
-#     its reported version must be the pin. The path alone is not trusted:
-#     keyed by version only, a binary built by one compiler was reused when
-#     another was requested, and a binary copied into the right directory
-#     would be trusted on its name;
-#   - a downloaded tool lives at TOOLS_DIR/<tool>-<version>/, and its bytes
-#     must hash to the pinned binary SHA-256. Its self-reported version is not
-#     a trust anchor — any binary can print any string.
-# Anything else is reinstalled, and the reinstall is verified the same way.
-#
-# Why TOOLS_DIR and not $(go env GOPATH)/bin: installing into GOPATH/bin as a
-# side effect of `make lint` overwrote whatever version the developer had
-# there — a target mutating the machine outside the repository (devops §4).
+# binary's) in scripts/tool-pins.sh. A cached or PATH copy is used only when it verifies at the pin.
 set -eu
 # shellcheck source=lib.sh
 . "${0%/*}/lib.sh"
@@ -68,21 +15,10 @@ go=${GO:-go}
 
 matches "$want" '^v[0-9]+\.[0-9]+\.[0-9]+$' || die "$tool: '$want' is not a pinned vX.Y.Z version"
 
-# kind: go (built with `go install` under TOOLCHAIN) or archive (a release
-# download verified against pinned hashes). ldflags: what the tool's own
-# release build stamps and a plain `go install` leaves empty — gosec then
-# reports "Version: dev" (go-luks2 #21), which no pin can be checked against.
-# The value stamped is the version requested from the module proxy, so it
-# states a fact rather than asserting one.
+# kind: go (built under TOOLCHAIN) or archive (verified against pinned hashes); ldflags stamp the requested version.
 ldflags=
 kind=go
-# projectbuilt: TOOL_INSTALL=0 is ignored and the tool is resolved as under
-# TOOL_INSTALL=1: a copy on PATH that verifies at the pin (version and build
-# toolchain) is used, anything else is built here, at the pin, into TOOLS_DIR.
-# For a tool whose runner-image copy may not carry a release version: the CI
-# image's actionlint is built from an untagged commit and reports a
-# pseudo-version, which version_of rightly refuses, so it is built instead
-# (#145, #146). The offline gate and the devcontainer bake it at the pin.
+# projectbuilt: TOOL_INSTALL=0 is ignored and the tool is built at the pin unless a PATH copy verifies.
 projectbuilt=0
 case $tool in
   golangci-lint) pkg=github.com/golangci/golangci-lint/v2/cmd/golangci-lint ;;
@@ -96,12 +32,7 @@ case $tool in
   *) die "unknown tool '$tool' (known: golangci-lint staticcheck gosec govulncheck actionlint trivy shellcheck)" ;;
 esac
 
-# version_of prints the version a binary reports about ITSELF, v-prefixed, or
-# nothing. Each tool is parsed by its own marker, never by "the first version
-# on the line": golangci-lint and govulncheck also print the Go version they
-# were built with, and which line comes first depends on how the binary was
-# built — a positional parse once read the Go toolchain and compared it to the
-# scanner pin.
+# version_of prints the version a binary reports about itself, parsed by the tool's own marker.
 version_of() {
   case $tool in
     golangci-lint) out=$("$1" --version 2>&1) || return 0
@@ -176,15 +107,7 @@ archive_pins() {
 # install_archive writes the pinned release binary to $tmp/$tool.
 #
 # trivy and shellcheck are NOT built with `go install`: shellcheck is not Go,
-# and trivy built from source took over four minutes and ~1150 CPU-seconds on
-# a many-core workstation and reports its version as "dev" unless stamped —
-# too heavy for a memory-capped runner. Their release archives are trusted
-# only through SHA-256s pinned IN THIS REPOSITORY, never through a checksum
-# file published next to the archive (shellcheck publishes none): a checksum
-# fetched from the same origin as the artifact proves the download was not
-# truncated, not that the release is the one that was reviewed. Nothing
-# downloaded is ever executed as a script — this replaces nightly.yml's
-# `curl …/contrib/install.sh from main | sh`.
+# Archive tools are trusted only through SHA-256s pinned in this repository.
 install_archive() {
   for t in curl tar; do
     command -v "$t" >/dev/null 2>&1 || die "$tool: $t is required to install it and was not found"
@@ -202,10 +125,7 @@ install_archive() {
   chmod 0755 "$tmp/$tool"
 }
 
-# retry runs "$@" up to three times, 10 s then 20 s apart, each attempt from
-# a clean $tmp (no $tmp/mod, no $tmp/$tool, the only paths a Go build
-# writes there) so a partial build from a failed one is never used: a
-# transient module-proxy error must not fail the toolchain image (m850).
+# retry runs "$@" up to three times from a clean $tmp.
 retry() {
   attempt=0
   until rm -rf "${tmp:?}/mod" "${tmp:?}/$tool" && "$@"; do
@@ -229,10 +149,7 @@ gosec_once() {
     )
 }
 
-# build_gosec writes gosec to $tmp/gosec, built in a throwaway module so
-# golang.org/x/tools can be raised to XTOOLS_VERSION: the version gosec's
-# go.mod names cannot read the export data Go 1.27 writes, so every import
-# fails to type-check (ci-template; go-quicraft and go-luks2 build it so).
+# build_gosec builds gosec in a throwaway module with golang.org/x/tools at XTOOLS_VERSION.
 build_gosec() {
   matches "${XTOOLS_VERSION-}" '^v[0-9]+\.[0-9]+\.[0-9]+$' ||
     die "gosec: XTOOLS_VERSION '${XTOOLS_VERSION-}' is not a pinned vX.Y.Z version (scripts/tool-pins.sh)"

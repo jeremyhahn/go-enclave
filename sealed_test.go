@@ -299,8 +299,7 @@ func TestSealed_SealIsNonDeterministic(t *testing.T) {
 	if bytes.Equal(first.sealed, second.sealed) {
 		t.Fatal("sealing identical material twice produced identical bytes: the nonce is fixed or reused")
 	}
-	// The wrapped DEKs must differ too: identical blobs would mean the same
-	// DEK was drawn twice, i.e. the CSPRNG is not being consulted per value.
+	// Identical wrapped DEKs would mean the CSPRNG is not consulted per value.
 	if bytes.Equal(first.blob, second.blob) {
 		t.Fatal("two seals produced identical wrapped-DEK blobs: per-value keys are not per-value")
 	}
@@ -318,11 +317,7 @@ func TestSealed_SealIsNonDeterministic(t *testing.T) {
 	}
 }
 
-// TestSealed_DetectsTampering covers the A in AEAD, on BOTH envelope
-// halves. Every region is covered — the nonce at the front of the sealed
-// bytes, the ciphertext body, the tag at the end, and the blob's frame, body
-// and tail — so a mutation that authenticated only part of the envelope would
-// show up as a position that opens successfully after being altered.
+// TestSealed_DetectsTampering checks every region of both envelope halves fails authentication when altered.
 func TestSealed_DetectsTampering(t *testing.T) {
 	freshProcessSealer(t)
 	half := func(s *sealedValue, sealed bool) []byte {
@@ -441,8 +436,7 @@ func TestSealed_Lifecycle(t *testing.T) {
 		t.Fatalf("NewSealed: %v", err)
 	}
 
-	// Held to check the wipe after Destroy nils the fields: BOTH halves of
-	// the envelope are wiped, not just the ciphertext.
+	// Both envelope halves are wiped.
 	sealed, blob := s.sealed, s.blob
 
 	s.Destroy()
@@ -686,8 +680,7 @@ func TestSealed_WipeAllFailsClosed(t *testing.T) {
 	}
 	defer s.Destroy()
 
-	// Non-vacuity: it opens BEFORE the sweep, so the refusal afterwards is
-	// the sweep's doing and not a value that never worked.
+	// It opens before the sweep.
 	e, err := s.Open(t.Context())
 	if err != nil {
 		t.Fatalf("Open before the sweep: %v", err)
@@ -712,9 +705,7 @@ func TestSealed_WipeAllFailsClosed(t *testing.T) {
 			"what a caller has instead of a swept handle", err)
 	}
 
-	// Open fails with the DISTINCT error — not ErrSealedAuthentication,
-	// which would read as tampering, and not ErrEnclaveDestroyed, which
-	// would point at a handle the caller never destroyed.
+	// Open fails with ErrSealerWiped, not ErrSealedAuthentication or ErrEnclaveDestroyed.
 	if _, err := s.Open(t.Context()); !errors.Is(err, ErrSealerWiped) {
 		t.Errorf("Open after the sweep = %v, want ErrSealerWiped", err)
 	}
@@ -777,8 +768,7 @@ func TestSealed_OpenableReportsTheSweep(t *testing.T) {
 	}
 	defer v.Destroy()
 
-	// Non-vacuity: openable BEFORE the sweep, so what follows is the sweep's
-	// doing and not a value that was never openable.
+	// Openable before the sweep.
 	if err := v.Openable(); err != nil {
 		t.Fatalf("Openable before the sweep = %v, want nil", err)
 	}
@@ -963,8 +953,7 @@ func TestWipeAll_DoesNotSweepSealeds(t *testing.T) {
 		values = append(values, v)
 	}
 
-	// The sealed values are not on the ledger; the sealer's KEYS are, and they
-	// are what the sweep is for.
+	// The sealer's keys are on the ledger, not the sealed values.
 	freshProcessSealer(t)
 
 	if remaining := sweep(t); remaining != 0 {
@@ -1012,8 +1001,7 @@ func TestSealed_OpenableClosesTheExternalProviderFailOpen(t *testing.T) {
 	}
 	defer v.Destroy()
 
-	// Non-vacuity: openable BEFORE the sweep. Without this the assertion below
-	// would also pass for a value that was never openable at all.
+	// Openable before the sweep.
 	if err := v.Openable(); err != nil {
 		t.Fatalf("Openable before the sweep = %v, want nil", err)
 	}
@@ -1090,9 +1078,7 @@ func TestSealed_OpenableBelievesAProviderThatReports(t *testing.T) {
 
 		sweepForOpenableTest(t)
 
-		// The PRECISE answer, not the fallback: a provider that can tell the
-		// difference reports ErrSealerWiped, and the caller learns what
-		// actually happened instead of that we could not tell.
+		// A provider that can tell reports ErrSealerWiped.
 		if err := v.Openable(); !errors.Is(err, ErrSealerWiped) {
 			t.Errorf("Openable = %v, want ErrSealerWiped: an opted-in provider that knows its key "+
 				"was destroyed must report it, not fall back to ErrOpenabilityUnknown", err)
@@ -1118,8 +1104,7 @@ func TestSealed_OpenableUnknownOnlyAfterASweep(t *testing.T) {
 	}
 	defer v.Destroy()
 
-	// No sweep has run. The value demonstrably opens, so nil is the TRUE
-	// answer and anything else is a false alarm on the common path.
+	// No sweep has run, so nil is the true answer.
 	if err := v.Openable(); err != nil {
 		t.Errorf("Openable with no sweep = %v, want nil: this value opens right now, and an "+
 			"answer that never says so is not honesty", err)
@@ -1132,19 +1117,13 @@ func TestSealed_OpenableUnknownOnlyAfterASweep(t *testing.T) {
 
 	sweepForOpenableTest(t)
 
-	// Only now does it become unknown. The answer CHANGED, which is what makes
-	// it a signal rather than a shrug.
+	// Only now does it become unknown.
 	if err := v.Openable(); !errors.Is(err, ErrOpenabilityUnknown) {
 		t.Errorf("Openable after the sweep = %v, want ErrOpenabilityUnknown", err)
 	}
 }
 
-// TestSealed_OpenableGenerationDoesNotAffectModeRootKey pins that the
-// fallback is scoped to the mode that needs it.
-//
-// In ModeRootKey the hierarchy is this package's own enclaves and it inspects
-// them directly, so a nil there is KNOWLEDGE, not ignorance, and a sweep that
-// provably did not take them must not downgrade it.
+// TestSealed_OpenableGenerationDoesNotAffectModeRootKey pins that the unknown fallback applies only to ModePerOperation.
 func TestSealed_OpenableGenerationDoesNotAffectModeRootKey(t *testing.T) {
 	// Bump the generation before sealing so a value exists that was sealed
 	// under an older generation than the current one — the precondition the
@@ -1269,7 +1248,7 @@ func TestSealed_OpenableSuspectsASealThatOverlappedASweep(t *testing.T) {
 		openableInWindow error
 	)
 
-	// Seal from INSIDE the sweep window, between the bump and the destruction.
+	// Seal from inside the sweep window, between the bump and the destruction.
 	swapSeam(t, &sweepParkedForTest, func() {
 		mu.Lock()
 		defer mu.Unlock()
@@ -1533,7 +1512,7 @@ func TestSealed_OpenInRefusesANilAllocator(t *testing.T) {
 		t.Errorf("OpenIn(nil) on a destroyed value = %v, want ErrNilAllocator", err)
 	}
 
-	// A nil RECEIVER is a different mistake and keeps its own answer.
+	// A nil receiver keeps its own answer.
 	var nilValue *sealedValue
 	if _, err := openInAllocator(t.Context(), nilValue, nil); !errors.Is(err, ErrEnclaveDestroyed) {
 		t.Errorf("(*sealedValue)(nil).OpenIn(ctx, (*budgetAllocator)(nil)) = %v, want ErrEnclaveDestroyed", err)
@@ -1569,10 +1548,7 @@ func TestSealed_OpenAllocatesOutsideAnyBudget(t *testing.T) {
 	}
 }
 
-// TestSealed_OpenInRefusesWhatTheBudgetCannotCover pins the refusal
-// path and, more importantly, what a refusal COSTS: nothing. The sealed value
-// survives a budget refusal intact and opens afterwards, so a tight budget is
-// backpressure rather than a lost credential.
+// TestSealed_OpenInRefusesWhatTheBudgetCannotCover pins that a budget refusal leaves the value intact and openable.
 func TestSealed_OpenInRefusesWhatTheBudgetCannotCover(t *testing.T) {
 	v := sealForBudgetTest(t)
 
@@ -1671,7 +1647,7 @@ func TestSealed_OpenInGatesOnTheDestination(t *testing.T) {
 		e.Destroy()
 	}
 
-	// The refusal named the DESTINATION, so that is what was reserved first.
+	// The refusal named the destination, reserved first.
 	if be.Requested != LockedSize(len(material)) {
 		t.Errorf("the refused reservation asked for %d bytes, want %d (the destination). "+
 			"A key-page figure here would mean something was reserved ahead of the gate",
@@ -1688,10 +1664,7 @@ func TestSealed_OpenInGatesOnTheDestination(t *testing.T) {
 			"it should never have reached", got, beforeLedger)
 	}
 
-	// Non-vacuity, and the single-reservation property in one number: a budget
-	// of EXACTLY the destination admits the open. Charging the DEK as a second
-	// reservation would refuse this, so the two halves of this test also pin
-	// that an open costs the budget one reservation and not two.
+	// A budget of exactly the destination admits the open: one reservation, not two.
 	exact, err := newBudgetAllocator(LockedSize(len(material)))
 	if err != nil {
 		t.Fatalf("NewAllocator: %v", err)
@@ -1777,14 +1750,7 @@ func TestSealed_OpenInConcurrentCallersDoNotStarveEachOther(t *testing.T) {
 	}
 }
 
-// TestSealed_OpenInOnARetiredGeneration covers the open path with the
-// most locked memory in flight: a value sealed under a retired KEK generation
-// materializes that generation's key for a single unwrap, on top of the DEK.
-//
-// Both are transient and neither is charged, so the budget the caller needs is
-// still one destination — which is the claim being pinned. What the caller
-// gives up for that is stated on OpenIn: the process peak exceeds the budget
-// by up to two pages while this open is in flight.
+// TestSealed_OpenInOnARetiredGeneration pins that an open under a retired KEK still needs a budget of one destination.
 func TestSealed_OpenInOnARetiredGeneration(t *testing.T) {
 	short := []byte("short-credential")
 
@@ -1940,16 +1906,9 @@ func TestSealed_OpenInPerOperationMode(t *testing.T) {
 	}
 }
 
-// TestSealed_NoForeignBytesConstructor pins that no exported API turns
-// caller-supplied bytes into an openable *sealedValue besides the plaintext
-// constructors. The envelope format is internal, unversioned and keyed to a
-// process-lifetime Sealer; an unmarshaller would make it accidentally
-// permanent. If persistence is ever designed, amend this test as part of that
-// design.
+// TestSealed_NoForeignBytesConstructor pins that no exported API turns caller bytes into a *sealedValue.
 func TestSealed_NoForeignBytesConstructor(t *testing.T) {
-	// The sanctioned constructors: both take PLAINTEXT and produce a sealed
-	// value, which is the direction the contract permits. Nothing else may
-	// combine bytes-in with *sealedValue-out.
+	// The sanctioned constructors take plaintext.
 	allowed := map[string]bool{
 		"NewSealed": true, // package-level, process sealer
 		"Seal":      true, // (*envelopeSealer), explicit sealer
@@ -1979,10 +1938,7 @@ func TestSealed_NoForeignBytesConstructor(t *testing.T) {
 				continue
 			}
 
-			// Decoder-shaped methods on the sealed types are refused BY NAME,
-			// whatever their signature: these are the interfaces (encoding,
-			// gob, json) through which foreign bytes arrive implicitly, where
-			// no reviewer sees a call site at all.
+			// Decoder-shaped methods on the sealed types are refused by name.
 			if recv := receiverTypeName(fn); recv == "sealedValue" || recv == "Sealer" {
 				switch fn.Name.Name {
 				case "UnmarshalBinary", "UnmarshalText", "UnmarshalJSON", "GobDecode", "DecodeMsgpack", "UnmarshalCBOR":
