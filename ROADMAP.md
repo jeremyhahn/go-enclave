@@ -29,7 +29,7 @@ What it owns and never does: [SPEC purpose](docs/SPEC.md#purpose) and [SPEC boun
 - **enclave-interface** — the one public interface callers consume; constructors return it — [#138](../../issues/138) — done
 - **linux-secretmem** — a Linux-only software backend on `memfd_secret(2)`, ranked above the memory enclave and below every hardware backend — [#261](../../issues/261) — done
 - **open-in-secretmem** — `Sealed.OpenIn` decrypts straight into a linux-secretmem handle's pages, with no scratch enclave or import — [#263](../../issues/263) — done
-- **keyprotector-providers** — the memory provider (`SoftwareProvider`) and the `KeyProtector` seam ship; the TPM and TrustZone providers are removed and their callers are on go-xkms ([key-operation API removal](docs/SPEC.md#key-operation-api-removal)) — [#264](../../issues/264) — done
+- **keyprotector-providers** — the memory provider (`SoftwareProvider`) and the `KeyProtector` seam ship; the TPM and TrustZone providers are removed and their callers are on go-xkms ([key-operation API removal](docs/SPEC.md#key-operation-api-removal)); the secure-element (PKCS#11) provider's design is decided and the provider is go-xkms's ([decided design](docs/sealing/hardware-providers.md#secure-element-provider-decided-design)) — [#264](../../issues/264) — done
 
 ## Now
 
