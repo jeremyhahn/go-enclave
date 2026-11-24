@@ -68,3 +68,5 @@ self-hosted-runner:
     - dells
     - release
     - fixture-push
+    - amd-sev
+    - amd-sev-snp

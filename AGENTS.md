@@ -68,6 +68,7 @@ empty; the Makefile refuses any other value.
 | `userns` | `memlock_userns_linux_test.go`, the user-namespace test (`make integration-test-userns`) |
 | `optee` | The OP-TEE conformance tests in `backends/armtrustzone` and the OP-TEE harness in the integration suite |
 | `swtpm` | The `swtpm` conformance tests in `backends/tpm` |
+| `amdsev` | The SEV, SEV-ES and SEV-SNP hardware tests in `backends/amdsev` (`make integration-test-amd-sev`) |
 | `goexperiment.runtimesecret` | Set by `GOEXPERIMENT=runtimesecret`; builds `secret_erase.go` on linux/amd64 and linux/arm64 (not Android) |
 
 The other constraints are GOOS and GOARCH: per-OS files such as

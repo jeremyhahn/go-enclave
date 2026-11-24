@@ -49,6 +49,8 @@ inputs() {
     go.sum \
     build/ci/buildgates/go.mod \
     build/ci/buildgates/go.sum \
+    backends/amdsev/go.mod \
+    backends/amdsev/go.sum \
     backends/armtrustzone/go.mod \
     backends/armtrustzone/go.sum \
     backends/tpm/go.mod \

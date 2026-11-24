@@ -1,0 +1,145 @@
+# The AMD SEV hardware jobs: the amd-sev tests on self-hosted runners whose
+# hosts are AMD EPYC with SEV enabled in firmware and in kvm_amd.
+#
+# amd-sev runs the SEV and SEV-ES guests (AMDSEV_GUESTS "sev sev-es") on the
+# runner labelled amd-sev. That host has no SEV-SNP, and this job runs no SNP
+# step, so it does not prove the SNP row's hardware acceptance.
+#
+# amd-sev-snp runs the SEV-SNP guest (backendtest and the host scan in an SNP
+# guest) on the runner labelled amd-sev-snp. Its first check fails the job
+# when kvm_amd does not report sev_snp: a green run of this job is an SNP run.
+# It runs once an SEV-SNP host is registered and the repository variable
+# AMD_SEV_SNP_RUNNER is 'online'; until then the SNP row's hardware acceptance
+# stays open.
+#
+# Each job runs make integration-test-amd-sev for the guests AMDSEV_GUESTS
+# lists: it records the host (CPU family and model, SEV firmware API version,
+# host kernel, QEMU and OVMF versions), builds the guest kit from pinned inputs
+# (scripts/amd-sev-snp/pins.sh, each by version and sha256), boots a fresh
+# guest for each mode and a plain-KVM control guest from the same image, runs
+# the in-guest tests as root, and scans each QEMU process from the host. A
+# runner that cannot run a listed mode fails the job with a message naming
+# what is missing.
+#
+# The repository variable AMD_SEV_RUNNER (AMD_SEV_SNP_RUNNER for the SNP job)
+# is 'online' while that hardware runner is registered; unset, the job does
+# not start, so no run waits on a runner that is not there.
+#
+# Neither job is a need of CI Gate: one hardware host must not hold every pull
+# request. They run on dispatch, on a push to main, and on a pull request from
+# this repository that touches the backend, the kit or its tests; a fork's head
+# never reaches a hardware runner.
+name: AMD SEV hardware
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - backends/amdsev/**
+      - scripts/amd-sev-snp/**
+      - .github/workflows/amd-sev.yml
+  pull_request:
+    paths:
+      - backends/amdsev/**
+      - scripts/amd-sev-snp/**
+      - .github/workflows/amd-sev.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'schedule' && format('schedule-{0}', github.repository) || github.ref == 'refs/heads/main' && format('main-{0}', github.event_name) || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  amd-sev:
+    name: SEV and SEV-ES guests
+    if: ${{ vars.AMD_SEV_RUNNER == 'online' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: [self-hosted, amd-sev] # self-hosted: hardware: AMD SEV host
+    # A cold cache builds QEMU from source (about 15 minutes) and fetches the
+    # pinned packages; each guest boots in under a minute and the in-guest
+    # suite takes a few; two guests plus the host scans fit well inside 90.
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    env:
+      # The host provides SEV and SEV-ES; the amd-sev-snp job runs the SNP guest.
+      AMDSEV_GUESTS: sev sev-es
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: backends/amdsev/go.mod
+          cache: false
+      - name: Record the host
+        run: sh scripts/amd-sev-snp/host-record.sh
+      - name: SEV and SEV-ES guest tests and the host scan
+        env:
+          AMDSEV_CACHE: ${{ runner.temp }}/amd-sev-cache
+          AMDSEV_RESULTS: ${{ runner.temp }}/amd-sev-results
+        run: make integration-test-amd-sev
+      - name: Guest consoles
+        if: always()
+        env:
+          AMDSEV_RESULTS: ${{ runner.temp }}/amd-sev-results
+        run: |
+          set -eu
+          for f in "$AMDSEV_RESULTS"/*; do
+            [ -f "$f" ] || continue
+            echo "::group::$(basename "$f")"
+            cat -- "$f"
+            echo "::endgroup::"
+          done
+
+  amd-sev-snp:
+    name: SEV-SNP guest
+    if: ${{ vars.AMD_SEV_SNP_RUNNER == 'online' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: [self-hosted, amd-sev-snp] # self-hosted: hardware: AMD SEV-SNP host
+    # A cold cache builds QEMU from source (about 15 minutes) and fetches the
+    # pinned packages; the SNP guest and its control boot in under a minute
+    # each and the in-guest suite takes a few.
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    env:
+      # The SNP guest; the plain-KVM control always boots beside it.
+      AMDSEV_GUESTS: snp
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: backends/amdsev/go.mod
+          cache: false
+      - name: Record the host
+        run: sh scripts/amd-sev-snp/host-record.sh
+      - name: Require SEV-SNP on the host
+        run: |
+          set -eu
+          p=/sys/module/kvm_amd/parameters/sev_snp
+          v=$(cat -- "$p" 2>/dev/null || true)
+          if [ "$v" != Y ] && [ "$v" != 1 ]; then
+            echo "::error title=SEV-SNP::SNP not available on this runner ($p is '${v:-absent}'): the amd-sev-snp job needs an SEV-SNP host"
+            exit 1
+          fi
+      - name: SEV-SNP guest tests and the host scan
+        env:
+          AMDSEV_CACHE: ${{ runner.temp }}/amd-sev-cache
+          AMDSEV_RESULTS: ${{ runner.temp }}/amd-sev-results
+        run: make integration-test-amd-sev
+      - name: Guest consoles
+        if: always()
+        env:
+          AMDSEV_RESULTS: ${{ runner.temp }}/amd-sev-results
+        run: |
+          set -eu
+          for f in "$AMDSEV_RESULTS"/*; do
+            [ -f "$f" ] || continue
+            echo "::group::$(basename "$f")"
+            cat -- "$f"
+            echo "::endgroup::"
+          done

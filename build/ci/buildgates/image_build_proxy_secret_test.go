@@ -1,6 +1,7 @@
 package buildgates
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -227,6 +228,75 @@ ENV GOPROXY=off
 	} {
 		if len(buildScriptProxyViolations(tc.src)) == 0 {
 			t.Errorf("build path %s: no violation; want a refusal", tc.name)
+		}
+	}
+}
+
+// moduleDownloadProxyViolations lists every RUN of a Dockerfile that runs go
+// mod download other than the way the module downloads take the proxy: the
+// goproxy secret mounted, the public proxy as the default, the secret read
+// into proxy when it is set, and GOPROXY="$proxy" on the download. A RUN that
+// expands $GO_BUILD_PROXY is refused: the build argument no longer exists, so
+// under set -u the RUN stops before it downloads anything.
+func moduleDownloadProxyViolations(src string) []string {
+	const (
+		defaultProxy = `proxy=https://proxy.golang.org;`
+		readSecret   = `[ ! -s /run/secrets/goproxy ] || proxy=$(cat /run/secrets/goproxy);`
+		useProxy     = `GOPROXY="$proxy"`
+	)
+	var bad []string
+	for _, ins := range dockerfileInstructions(src) {
+		if !strings.HasPrefix(ins, "RUN ") {
+			continue
+		}
+		if strings.Contains(ins, "$GO_BUILD_PROXY") || strings.Contains(ins, "${GO_BUILD_PROXY") {
+			bad = append(bad, "a RUN expands $GO_BUILD_PROXY: "+ins)
+		}
+		if !strings.Contains(ins, "go mod download") {
+			continue
+		}
+		for _, want := range []string{"RUN " + proxySecretRun + " ", defaultProxy, readSecret, useProxy} {
+			if !strings.Contains(ins, want) {
+				bad = append(bad, fmt.Sprintf("a go mod download RUN lacks %q: %s", want, ins))
+			}
+		}
+	}
+	return bad
+}
+
+// TestModuleDownloadsTakeTheProxySecret holds every go mod download in the
+// toolchain Dockerfile, the backend modules' included, to the goproxy secret.
+func TestModuleDownloadsTakeTheProxySecret(t *testing.T) {
+	const dockerfile = "build/docker/devcontainer/Dockerfile"
+	for _, b := range moduleDownloadProxyViolations(readRepoFile(t, dockerfile)) {
+		t.Errorf("%s: %s", dockerfile, b)
+	}
+}
+
+// TestModuleDownloadsTakeTheProxySecret_RefusesWhatItMustRefuse pins the
+// check against a module download added in the old build-argument form.
+func TestModuleDownloadsTakeTheProxySecret_RefusesWhatItMustRefuse(t *testing.T) {
+	df := `FROM x AS tools
+# A comment may name $GO_BUILD_PROXY.
+RUN --mount=type=secret,id=goproxy set -eu; \
+    proxy=https://proxy.golang.org; [ ! -s /run/secrets/goproxy ] || proxy=$(cat /run/secrets/goproxy); \
+    n=0; until GOPROXY="$proxy" go mod download; do n=$((n + 1)); done
+RUN go build ./...
+`
+	if b := moduleDownloadProxyViolations(df); len(b) != 0 {
+		t.Fatalf("a good Dockerfile is refused: %v", b)
+	}
+	for _, tc := range []struct{ name, src string }{
+		{"build argument", strings.Replace(df, `"$proxy"`, `"$GO_BUILD_PROXY"`, 1)},
+		{"braced build argument", strings.Replace(df, `"$proxy"`, `"${GO_BUILD_PROXY}"`, 1)},
+		{"build argument outside a download", df + "RUN echo \"$GO_BUILD_PROXY\"\n"},
+		{"secret not mounted", strings.Replace(df, proxySecretRun+" ", "", 1)},
+		{"no default proxy", strings.Replace(df, "proxy=https://proxy.golang.org; ", "", 1)},
+		{"secret not read", strings.Replace(df, "[ ! -s /run/secrets/goproxy ] || proxy=$(cat /run/secrets/goproxy); ", "", 1)},
+		{"proxy not used", strings.Replace(df, `GOPROXY="$proxy" `, "", 1)},
+	} {
+		if len(moduleDownloadProxyViolations(tc.src)) == 0 {
+			t.Errorf("Dockerfile %s: no violation; want a refusal", tc.name)
 		}
 	}
 }
