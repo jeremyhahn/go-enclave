@@ -788,10 +788,10 @@ ci: ci-fast ci-integration
 deps-latest:
 	@sh scripts/deps-latest.sh
 
-## deps-check: fail on any module a go.mod requires that is behind its latest release without a "// held: <reason>" comment on its require or replace line, except one whose latest release is under 7 days old, which is reported (needs the module proxy)
+## deps-check: in the root, build/ci/buildgates and each BACKEND_MODULES module, fail on any module a go.mod requires that is behind its latest release without a "// held: <reason>" comment on its require or replace line, except one whose latest release is under 7 days old, which is reported (needs the module proxy)
 .PHONY: deps-check
 deps-check:
-	@sh scripts/deps-check.sh
+	@sh scripts/deps-check.sh . build/ci/buildgates $(BACKEND_MODULES)
 
 ## release: Prepare a production release on release/<version> (VERSION=vX.Y.Z; refuses -alpha and -rc.N)
 # The version is explicit, never derived. A release is two steps. The three
