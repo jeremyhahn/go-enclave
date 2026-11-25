@@ -8,7 +8,7 @@ GOSEC_VERSION=v2.30.0
 # export data (version 5) Go 1.27 writes, so every import fails to type-check.
 XTOOLS_VERSION=v0.53.0
 # Raise with `go list -m golang.org/x/vuln@latest`.
-GOVULNCHECK_VERSION=v1.8.0
+GOVULNCHECK_VERSION=v1.10.0
 # Raise with `go list -m github.com/rhysd/actionlint@latest`.
 ACTIONLINT_VERSION=v1.7.12
 #
