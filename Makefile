@@ -68,16 +68,20 @@ tool = $$(sh scripts/tool.sh $(1) $($(2)_VERSION))
 # too (lint-go), but cannot write the SARIF code scanning reads.
 #   -concurrency=4: gosec sizes workers from host cores, ignoring cgroup limits.
 #   -exclude-dir=test: test/ is never shipped; shipped packages are always scanned.
-#     build/ci/buildgates is its own module, which `./...` from the root never
-#     reaches, so it needs no exclusion; trivy and govulncheck still cover it.
+#   -exclude-dir=backends -exclude-dir=build/ci/buildgates: the nested modules.
+#     gosec from v2.30.0 descends into them from `./...`, where go list does
+#     not; golangci-lint's gosec scans each backend module, and trivy and
+#     govulncheck still cover buildgates.
 #   SARIF for code scanning, plus text on stdout for Gitea logs.
 #   No -exclude rules: fix the finding or annotate `#nosec G### -- why`.
 GOSEC_FLAGS := -concurrency=4 -severity=medium -confidence=medium -exclude-dir=test \
+	-exclude-dir=backends -exclude-dir=build/ci/buildgates \
 	-fmt=sarif -out=gosec.sarif -stdout -verbose=text
 
 # The same rules for the GOEXPERIMENT=runtimesecret pass: no SARIF (the
 # default pass writes it), the build differs only by secret_erase.go.
 GOSEC_RUNTIMESECRET_FLAGS := -concurrency=4 -severity=medium -confidence=medium -exclude-dir=test \
+	-exclude-dir=backends -exclude-dir=build/ci/buildgates \
 	-fmt=text -stdout -verbose=text
 
 # golangci-lint flags. --allow-serial-runners waits for golangci-lint's
