@@ -1,6 +1,6 @@
 # Build and release
 
-> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-11-24
+> **Status: NORMATIVE** · Scope: go-enclave · Last verified: 2026-11-25
 > Conflicts with this document are defects. For shipped behavior the Makefile, `scripts/` and `build/ci/` are canonical: fix this document to match them.
 
 How a change is built and gated, and how a signed release is cut, verified and
@@ -522,7 +522,7 @@ rules.
 | `devcontainer.sh`, `integration-image.sh`, `integration-test.sh`, `userns-test.sh`, `lint-integration.sh` | The devcontainer images; the scanned integration image and suites; the user-namespace test; proof the `integration` tag selects the suite |
 | `release.sh`, `release-tag.sh`, `release-ci-gate.sh`, `release-version-check.sh`, `release-check-tag.sh`, `changelog-assemble.sh`, `release-notes.sh` | Cutting a release ([above](#what-releasesh-refuses)) |
 | `release-verify.sh`, `consumer-check.sh` | The [post-tag targets](#post-tag-targets) |
-| `deps-check.sh`, `deps-latest.sh` | `make deps-check`: fail on a module behind its latest release; `make deps-latest`: bump every direct `github.com/jeremyhahn/` dependency to its latest tag, then tidy |
+| `deps-check.sh`, `deps-latest.sh` | `make deps-check`: in the root, `build/ci/buildgates` and each `BACKEND_MODULES` module, fail on a module behind its latest release; `make deps-latest`: bump every direct `github.com/jeremyhahn/` dependency to its latest tag, then tidy |
 | `swtpm-fixture.sh` | `make integration-test-tpm`: a throwaway `swtpm` on loopback TCP for `backends/tpm`'s swtpm-tagged tests |
 | `optee-fixture.sh`, `optee-selected.sh` | `make optee-fixture-check` and `make integration-test-arm-trustzone`: the pinned trusted-firmware OP-TEE fixture; whether a change reaches it |
 | `ci-image-cache.sh`, `apk-index-sum.sh`, `in-toolchain-image_test.sh` | CI only: the toolchain image's registry cache; a checksum of the Alpine package indexes the integration image's tag hashes; the tests of `in-toolchain-image.sh` (`make check-in-toolchain-image`) |

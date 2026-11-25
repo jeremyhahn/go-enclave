@@ -2,6 +2,7 @@ package buildgates
 
 import (
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -172,5 +173,38 @@ func TestScriptsMakefile_T3bContract(t *testing.T) {
 	}
 	if strings.Contains(mk, `"$$GOCMD" vet $(PKG) && "$$GOCMD" test`) {
 		t.Error("the gates macro vets again on every check; vet runs once, in vet-buildgates")
+	}
+}
+
+// TestScriptsMakefile_DepsCheckCoversEveryModule holds make deps-check to
+// every module of the repository: the root, build/ci/buildgates and each of
+// the Makefile's BACKEND_MODULES, so a stale requirement in any of them fails
+// the gate.
+func TestScriptsMakefile_DepsCheckCoversEveryModule(t *testing.T) {
+	root := repoRoot(t)
+	mk := readFile(t, filepath.Join(root, "Makefile"))
+	m := regexp.MustCompile(`(?m)^BACKEND_MODULES := (.+)$`).FindStringSubmatch(mk)
+	if m == nil {
+		t.Fatal("Makefile: no BACKEND_MODULES := line")
+	}
+	modules := strings.Fields(m[1])
+	if len(modules) == 0 {
+		t.Fatal("Makefile: BACKEND_MODULES is empty")
+	}
+	for _, mod := range modules {
+		readFile(t, filepath.Join(root, mod, "go.mod"))
+	}
+	r := regexp.MustCompile(`(?m)^deps-check:\n\t@?sh scripts/deps-check\.sh(.*)$`).FindStringSubmatch(mk)
+	if r == nil {
+		t.Fatal("Makefile: the deps-check recipe does not run scripts/deps-check.sh")
+	}
+	args := map[string]bool{}
+	for _, a := range strings.Fields(r[1]) {
+		args[a] = true
+	}
+	for _, want := range []string{".", "build/ci/buildgates", "$(BACKEND_MODULES)"} {
+		if !args[want] {
+			t.Errorf("make deps-check does not pass %q to scripts/deps-check.sh", want)
+		}
 	}
 }
