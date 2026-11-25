@@ -1,7 +1,11 @@
 package buildgates
 
 import (
+	"fmt"
+	"io/fs"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -172,5 +176,122 @@ func TestScriptsMakefile_T3bContract(t *testing.T) {
 	}
 	if strings.Contains(mk, `"$$GOCMD" vet $(PKG) && "$$GOCMD" test`) {
 		t.Error("the gates macro vets again on every check; vet runs once, in vet-buildgates")
+	}
+}
+
+// gosecUnscanned names the trees `make gosec` skips: test/, which is never
+// shipped, and the nested modules, which gosec from v2.30.0 walks into from
+// `./...` where go list does not.
+var gosecUnscanned = []string{"test", "backends", "build/ci/buildgates"}
+
+// makeVarValue returns the value of the simply expanded Makefile variable
+// name, with its backslash continuation lines joined.
+func makeVarValue(t *testing.T, mk, name string) string {
+	t.Helper()
+	var b strings.Builder
+	found := false
+	for _, line := range strings.Split(mk, "\n") {
+		if !found {
+			rest, ok := strings.CutPrefix(line, name+" := ")
+			if !ok {
+				continue
+			}
+			found, line = true, rest
+		}
+		more := strings.HasSuffix(line, `\`)
+		b.WriteString(strings.TrimSuffix(line, `\`) + " ")
+		if !more {
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("Makefile defines no %s", name)
+	}
+	return b.String()
+}
+
+// gosecExcludes compiles each -exclude-dir value of flags the way gosec's
+// ExcludedDirsRegExp does: the value is an unanchored regular expression
+// matched against the slash-separated directory gosec walks from `./...`.
+func gosecExcludes(t *testing.T, flags string) map[string]*regexp.Regexp {
+	t.Helper()
+	res := map[string]*regexp.Regexp{}
+	for _, f := range strings.Fields(flags) {
+		v, ok := strings.CutPrefix(f, "-exclude-dir=")
+		if !ok {
+			continue
+		}
+		re, err := regexp.Compile(fmt.Sprintf(`([\\/])?%s([\\/])?`, strings.ReplaceAll(v, "/", `\/`)))
+		if err != nil {
+			t.Fatalf("-exclude-dir=%s is no regular expression gosec accepts: %v", v, err)
+		}
+		res[v] = re
+	}
+	return res
+}
+
+// TestScriptsMakefile_GosecScansEveryShippedPackage walks the repository as
+// gosec does and holds the -exclude-dir values of both gosec passes to the
+// unscanned trees: a bare word such as `test` also matched providertest/ and
+// backendtest/, so the standalone scan skipped two shipped packages.
+func TestScriptsMakefile_GosecScansEveryShippedPackage(t *testing.T) {
+	root := repoRoot(t)
+	mk := readFile(t, filepath.Join(root, "Makefile"))
+	var dirs []string
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		rel = filepath.ToSlash(rel)
+		if d.IsDir() {
+			if rel != "." && (strings.HasPrefix(d.Name(), ".") || rel == "bin") {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if filepath.Ext(rel) == ".go" {
+			dirs = append(dirs, filepath.ToSlash(filepath.Dir(rel)))
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	slices.Sort(dirs)
+	dirs = slices.Compact(dirs)
+	for _, must := range []string{"providertest", "backendtest", "test/integration/enclave", "backends/tpm", "build/ci/buildgates"} {
+		if !slices.Contains(dirs, must) {
+			t.Fatalf("the walk found no Go files in %s", must)
+		}
+	}
+	for _, name := range []string{"GOSEC_FLAGS", "GOSEC_RUNTIMESECRET_FLAGS"} {
+		excludes := gosecExcludes(t, makeVarValue(t, mk, name))
+		if len(excludes) == 0 {
+			t.Errorf("%s excludes nothing; test/ and the nested modules must stay out", name)
+		}
+		for _, dir := range dirs {
+			want := false
+			for _, tree := range gosecUnscanned {
+				if dir == tree || strings.HasPrefix(dir, tree+"/") {
+					want = true
+				}
+			}
+			var by []string
+			for v, re := range excludes {
+				if re.MatchString(dir) {
+					by = append(by, v)
+				}
+			}
+			switch {
+			case want && len(by) == 0:
+				t.Errorf("%s scans %s, which is outside the shipped tree", name, dir)
+			case !want && len(by) > 0:
+				t.Errorf("%s skips %s, outside test/ and the nested modules (-exclude-dir=%s)", name, dir, strings.Join(by, ", "))
+			}
+		}
 	}
 }
