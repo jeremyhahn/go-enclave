@@ -1,6 +1,6 @@
 # shellcheck shell=sh disable=SC2034
 # tool-pins.sh: the pin of every analysis tool, read by the Makefile and install-tools.sh; NAME=value lines only, comments on their own lines.
-GOLANGCI_VERSION=v2.14.0
+GOLANGCI_VERSION=v2.15.0
 # Raise with `go list -m github.com/securego/gosec/v2@latest`.
 GOSEC_VERSION=v2.29.0
 # gosec is built against this x/tools: the v0.49.0 its go.mod names cannot read
