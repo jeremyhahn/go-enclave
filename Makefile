@@ -67,21 +67,24 @@ tool = $$(sh scripts/tool.sh $(1) $($(2)_VERSION))
 # gosec flags live only here; CI runs `make gosec`. golangci-lint runs gosec
 # too (lint-go), but cannot write the SARIF code scanning reads.
 #   -concurrency=4: gosec sizes workers from host cores, ignoring cgroup limits.
-#   -exclude-dir=test: test/ is never shipped; shipped packages are always scanned.
-#   -exclude-dir=backends -exclude-dir=build/ci/buildgates: the nested modules.
+#   -exclude-dir takes an unanchored regular expression over the directories
+#   gosec walks from `./...` (test, providertest, ...), so each value is
+#   anchored with ^: a bare `test` also skipped providertest/ and backendtest/.
+#   -exclude-dir=^test/: test/ is never shipped; shipped packages are always scanned.
+#   -exclude-dir=^backends/ -exclude-dir=^build/ci/buildgates: the nested modules.
 #     gosec from v2.30.0 descends into them from `./...`, where go list does
 #     not; golangci-lint's gosec scans each backend module, and trivy and
 #     govulncheck still cover buildgates.
 #   SARIF for code scanning, plus text on stdout for Gitea logs.
 #   No -exclude rules: fix the finding or annotate `#nosec G### -- why`.
-GOSEC_FLAGS := -concurrency=4 -severity=medium -confidence=medium -exclude-dir=test \
-	-exclude-dir=backends -exclude-dir=build/ci/buildgates \
+GOSEC_FLAGS := -concurrency=4 -severity=medium -confidence=medium -exclude-dir=^test/ \
+	-exclude-dir=^backends/ -exclude-dir=^build/ci/buildgates \
 	-fmt=sarif -out=gosec.sarif -stdout -verbose=text
 
 # The same rules for the GOEXPERIMENT=runtimesecret pass: no SARIF (the
 # default pass writes it), the build differs only by secret_erase.go.
-GOSEC_RUNTIMESECRET_FLAGS := -concurrency=4 -severity=medium -confidence=medium -exclude-dir=test \
-	-exclude-dir=backends -exclude-dir=build/ci/buildgates \
+GOSEC_RUNTIMESECRET_FLAGS := -concurrency=4 -severity=medium -confidence=medium -exclude-dir=^test/ \
+	-exclude-dir=^backends/ -exclude-dir=^build/ci/buildgates \
 	-fmt=text -stdout -verbose=text
 
 # golangci-lint flags. --allow-serial-runners waits for golangci-lint's
