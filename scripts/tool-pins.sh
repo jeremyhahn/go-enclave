@@ -1,13 +1,14 @@
 # shellcheck shell=sh disable=SC2034
 # tool-pins.sh: the pin of every analysis tool, read by the Makefile and install-tools.sh; NAME=value lines only, comments on their own lines.
-GOLANGCI_VERSION=v2.14.0
+GOLANGCI_VERSION=v2.15.0
 # Raise with `go list -m github.com/securego/gosec/v2@latest`.
-GOSEC_VERSION=v2.29.0
-# gosec is built against this x/tools: the v0.49.0 its go.mod names cannot read
-# the export data (version 5) Go 1.27 writes, so every import fails to type-check.
-XTOOLS_VERSION=v0.52.0
+GOSEC_VERSION=v2.30.0
+# gosec is built against this x/tools: the latest release, never older than the
+# v0.52.0 gosec's go.mod names. An old x/tools such as v0.49.0 cannot read the
+# export data (version 5) Go 1.27 writes, so every import fails to type-check.
+XTOOLS_VERSION=v0.53.0
 # Raise with `go list -m golang.org/x/vuln@latest`.
-GOVULNCHECK_VERSION=v1.8.0
+GOVULNCHECK_VERSION=v1.10.0
 # Raise with `go list -m github.com/rhysd/actionlint@latest`.
 ACTIONLINT_VERSION=v1.7.12
 #
@@ -15,12 +16,12 @@ ACTIONLINT_VERSION=v1.7.12
 # archive per Linux arch and the binary inside it (see scripts/tool.sh).
 # Raise a version and all four of its hashes together, or not at all.
 #
-# trivy's archive hashes are from the release's trivy_0.75.0_checksums.txt.
-TRIVY_VERSION=v0.75.0
-TRIVY_SHA256_LINUX_AMD64=c6e65abddb348e25f10549df887045629cf28cc72453cd1c63acb717316b3f3f
-TRIVY_SHA256_LINUX_ARM64=a1ee9f6ffb7d112b64ff726a2a0717c21175c1114361391f4a132956751a13b3
-TRIVY_BIN_SHA256_LINUX_AMD64=93f9da8e4ba5e0c1c76d8234ed2494cf9afb0a96fd21953e424bb795f3299b8e
-TRIVY_BIN_SHA256_LINUX_ARM64=869e310e208f0f2e3e90e4f842cc6adaa2b2c046fecbaade481e6b23fcc8f2a9
+# trivy's archive hashes are from the release's trivy_0.76.2_checksums.txt.
+TRIVY_VERSION=v0.76.2
+TRIVY_SHA256_LINUX_AMD64=bc0fc726e017b8927a62b2d3531d7a84ee01769daf5c99ed866dced54089fdbf
+TRIVY_SHA256_LINUX_ARM64=ab9d51f86e6a5fb936f605faff6b593ac51bc378fff4d3e8b9d58358b9c367c3
+TRIVY_BIN_SHA256_LINUX_AMD64=6a972c69606c7b3ea4c6bdcc6fc9332ea9ad38381624310c1e85cc77345909f3
+TRIVY_BIN_SHA256_LINUX_ARM64=7844c3851b28470b6d7f0975fa0b3262c5b2272c9a54a91f522801bb8926f51f
 # The shellcheck pin (actionlint and lint-scripts). Upstream publishes no
 # checksums; these are the SHA-256s of the v0.11.0 release archives and of the
 # binaries inside them, computed from the downloads.
