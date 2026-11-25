@@ -263,9 +263,7 @@ func checkUnwrap(t *testing.T, row errorContractRow) {
 	}
 }
 
-// TestErrorContractIsComplete fails on any exported ...Error type without a
-// row in errorContractRows and any exported Err... sentinel missing from
-// packageSentinels, and on rows or sentinels the package no longer declares.
+// TestErrorContractIsComplete fails on error types or sentinels missing from, or stale in, the contract tables.
 func TestErrorContractIsComplete(t *testing.T) {
 	types, sentinels := exportedErrorDecls(t)
 	rows := make(map[string]bool)

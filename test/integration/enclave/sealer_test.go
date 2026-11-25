@@ -25,27 +25,11 @@ import (
 	"github.com/jeremyhahn/go-enclave/internal/memscan"
 )
 
-// Covers sealer.go: sealing end to end with the shipped SoftwareProvider
-// behind the provider seam, in both modes; the context contract through to the
-// provider; the root-unseal serialization; the one-shot process Sealer; KEK
-// rotation through WithKEKRotationLimit; locked memory refused at each step of
-// the hierarchy; and what a shutdown sweep does to a sealer's keys.
-//
-// The 2^31 ceilings (ErrSealerExhausted, and the software provider's Protect
-// budget) are not configurable and take 2^31 locked-memory operations to
-// reach; the in-package unit tests position those counters at the boundary.
+// Covers sealer.go end to end with SoftwareProvider behind the provider seam, in both modes.
 
 var sealerModes = []enclave.Mode{enclave.ModeRootKey, enclave.ModePerOperation}
 
-// TestSealing_SealerRoundTripsManyValuesInBothModes seals many distinct values from
-// concurrent goroutines and opens every one of them, in both modes, through a
-// consumer-injected provider backed by the SoftwareProvider. It checks the
-// ownership contract (each caller slice is wiped by Seal), that every value
-// opens to exactly its own material, how often the Sealer reached the
-// provider (ModeRootKey: one root unseal for the sealer's whole life and no
-// per-value calls; ModePerOperation: one Protect per seal and one Unprotect per
-// open), that two opens are independent enclaves, and the lifecycle answers
-// of IsAlive/Openable/Open after Destroy and after a shutdown sweep.
+// TestSealing_SealerRoundTripsManyValuesInBothModes seals and opens many values concurrently, checking provider calls and lifecycle answers.
 func TestSealing_SealerRoundTripsManyValuesInBothModes(t *testing.T) {
 	for _, mode := range sealerModes {
 		t.Run(mode.String(), func(t *testing.T) {
@@ -148,12 +132,7 @@ func TestSealing_SealerRoundTripsManyValuesInBothModes(t *testing.T) {
 					t.Errorf("Openable after Destroy: %v, want ErrEnclaveDestroyed", err)
 				}
 
-				// A shutdown sweep destroys the sealer's in-process keys: in
-				// ModeRootKey the hierarchy, in ModePerOperation the
-				// SoftwareProvider's root behind the device. The values keep their
-				// ciphertext, none opens, and the sealer fails closed. Openable
-				// answers ErrSealerWiped in ModeRootKey and, with no HealthReporter,
-				// ErrOpenabilityUnknown (never nil) in ModePerOperation.
+				// A sweep destroys the sealer's in-process keys; values keep ciphertext but none opens.
 				if n, err := enclave.WipeAll(ctx); n != 0 || err != nil {
 					t.Fatalf("WipeAll = (%d, %v), want (0, nil)", n, err)
 				}
@@ -181,21 +160,7 @@ func TestSealing_SealerRoundTripsManyValuesInBothModes(t *testing.T) {
 	}
 }
 
-// TestSealing_SealerContextReachesTheProvider exercises the context contract with a
-// provider that blocks until told otherwise (ModePerOperation, where every
-// seal and open calls the provider):
-//
-//   - a context that ended before the call fails the seal (ErrSealFailed) and
-//     the open (ErrOpenFailed), each also matching context.Canceled, never
-//     ErrSealedAuthentication; the provider is not called; the caller's slice
-//     is still wiped; and the value opens afterwards with a live context;
-//   - a DEADLINE reaches a stalled provider: the seal and the open return
-//     ErrSealFailed/ErrOpenFailed matching context.DeadlineExceeded, and the
-//     value is intact;
-//   - no Sealer or Sealed lock is held across a provider call:
-//     while one seal and one open are stalled inside the provider, a second
-//     seal and open on the SAME sealer complete, and Destroy of the value
-//     being opened returns without waiting for that open.
+// TestSealing_SealerContextReachesTheProvider checks ended contexts, deadlines and that no lock is held across a provider call.
 func TestSealing_SealerContextReachesTheProvider(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		live := context.Background()
@@ -298,13 +263,7 @@ func TestSealing_SealerContextReachesTheProvider(t *testing.T) {
 	})
 }
 
-// TestSealing_SealerRootUnsealIsSerializedAndAbandonable is the ModeRootKey first-use
-// path. The first seal unseals the root through the provider; a second caller
-// arriving meanwhile QUEUES behind it rather than unsealing a second time, and
-// leaves the queue as soon as ITS OWN context ends — while the first is still
-// stuck in the provider. When the first caller gives up too, nothing was
-// unsealed, so the next caller unseals the root (once) and every later seal
-// reuses it.
+// TestSealing_SealerRootUnsealIsSerializedAndAbandonable pins that waiting callers queue behind one root unseal and leave on their own context.
 func TestSealing_SealerRootUnsealIsSerializedAndAbandonable(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		live := context.Background()
@@ -426,14 +385,7 @@ func TestSealing_ProcessSealerIsInstalledOnce(t *testing.T) {
 	})
 }
 
-// TestSealing_SealerRotatesKEKGenerationsUnderRealLockedMemory drives ModeRootKey KEK
-// rotation through the public crypto-period option against real locked
-// memory: concurrent seals at a three-wrap crypto-period cross many
-// generations; every value — sealed under the current generation or a retired
-// one — opens to its own material; rotation never goes back to the provider
-// (one root unseal for the sealer's life); and a retired generation costs no
-// locked memory, so the locked footprint after many rotations is the same as
-// after one.
+// TestSealing_SealerRotatesKEKGenerationsUnderRealLockedMemory checks rotation opens every generation and costs no locked memory.
 func TestSealing_SealerRotatesKEKGenerationsUnderRealLockedMemory(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		ctx := context.Background()
@@ -538,13 +490,7 @@ func TestShutdownSweep_SealerIsWipedForGoodAfterASweep(t *testing.T) {
 	})
 }
 
-// TestSealing_SealerFailsCleanlyWhenLockedMemoryRunsOutMidHierarchy refuses the
-// kernel lock at each step of building and using a ModeRootKey hierarchy —
-// the root destination, the provider's own root, the first KEK, a rotated KEK, a retired KEK materialized for an
-// open, and an open's own DEK — and requires every one to fail with
-// ErrLockedMemoryUnavailable, keep what already succeeded (a root unsealed is
-// never unsealed again), leave every existing value openable, and succeed on
-// the next attempt once memory is available again.
+// TestSealing_SealerFailsCleanlyWhenLockedMemoryRunsOutMidHierarchy refuses the lock at each hierarchy step and requires a clean retry.
 func TestSealing_SealerFailsCleanlyWhenLockedMemoryRunsOutMidHierarchy(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		ctx := context.Background()
@@ -586,15 +532,12 @@ func TestSealing_SealerFailsCleanlyWhenLockedMemoryRunsOutMidHierarchy(t *testin
 		if got := dev.unsealAttempts.Load(); got != 0 {
 			t.Fatalf("UnsealRoot attempts = %d before any root had locked pages, want 0", got)
 		}
-		// The provider's own root (the SoftwareProvider behind this device
-		// generates it at first use): the unseal FAILS, so asking again is
-		// permitted.
+		// The provider's own root: the unseal fails, so asking again is permitted.
 		refusedAt("Seal (the provider's root)", 2, seal)
 		if a, ok := dev.unsealAttempts.Load(), dev.unseals.Load(); a != 1 || ok != 0 {
 			t.Fatalf("after the provider's root was refused: %d unseal attempts, %d succeeded; want 1 and 0", a, ok)
 		}
-		// The first KEK: the unseal SUCCEEDED, so the root is kept for the
-		// retry and never unsealed again.
+		// The first KEK: the unseal succeeded, so the root is kept for the retry.
 		refusedAt("Seal (the first KEK)", 3, seal)
 		if a, ok := dev.unsealAttempts.Load(), dev.unseals.Load(); a != 2 || ok != 1 {
 			t.Fatalf("after the KEK mint was refused: %d unseal attempts, %d succeeded; want 2 and 1", a, ok)
@@ -685,14 +628,7 @@ func (g *gatedUnsealer) UnsealRoot(ctx context.Context, dst []byte) error {
 	return g.soft.UnsealRoot(ctx, dst)
 }
 
-// TestSealing_SealerOverlappingASweepIsWiped runs a shutdown sweep while a
-// ModeRootKey sealer is unsealing its root. The sweep cannot reclaim the
-// root's destination — the unseal is writing into it — and a successful
-// unseal may never be repeated, so the only fail-closed outcome is the one
-// required here: the seal reports ErrSealerWiped, the surviving root is
-// destroyed rather than published, and every later seal is refused without
-// asking the provider again. A sealer that published that root would hand
-// back working keys after a WipeAll.
+// TestSealing_SealerOverlappingASweepIsWiped pins that a sweep during the root unseal leaves the sealer wiped for good.
 func TestSealing_SealerOverlappingASweepIsWiped(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		ctx := context.Background()
@@ -734,13 +670,7 @@ func TestSealing_SealerOverlappingASweepIsWiped(t *testing.T) {
 	})
 }
 
-// TestSealing_SealerKeyUseOverlappingASweepIsWiped parks the lock of a hierarchy
-// key being minted or materialized, runs a shutdown sweep while it is parked,
-// then lets it finish. The key it is about to use the root with is fresh, but
-// the root is gone, so the operation must report ErrSealerWiped rather than a
-// destroyed per-call key, and the sealer stays wiped. With every key release
-// refused, the refusals are reported alongside and the keys stay on the
-// ledger until the next sweep reclaims them.
+// TestSealing_SealerKeyUseOverlappingASweepIsWiped pins ErrSealerWiped for key use that overlaps a sweep.
 func TestSealing_SealerKeyUseOverlappingASweepIsWiped(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -1016,12 +946,7 @@ func forEach(t *testing.T, n, workers int, fn func(i int) error) {
 	}
 }
 
-// deadlineContext is a context with a deadline that passes when the test says
-// so rather than when a clock does. Its Deadline reports a time, its Done
-// closes and its Err becomes context.DeadlineExceeded exactly when expire is
-// called — which is everything the code under test can observe of a deadline,
-// and lets a test expire it only after the provider is known to be blocked.
-// A real timer would race the code path it is meant to interrupt.
+// deadlineContext is a context whose deadline passes when expire is called.
 type deadlineContext struct {
 	context.Context
 	done    chan struct{}
@@ -1164,8 +1089,7 @@ func TestSealing_SealerRefusesInvalidArgumentsBeforeAnyLockedMemory(t *testing.T
 	})
 }
 
-// TestSealing_NewSealerRefusesMisconfiguration: the provider option fixes the mode,
-// and two providers are refused at CONSTRUCTION rather than resolved by order.
+// TestSealing_NewSealerRefusesMisconfiguration: two providers are refused at construction.
 func TestSealing_NewSealerRefusesMisconfiguration(t *testing.T) {
 	ro := rootOnly{soft: enclave.NewSoftwareProvider()}
 	if s, err := enclave.NewSealer(enclave.WithRootUnsealer(ro)); err != nil || s.Mode() != enclave.ModeRootKey {

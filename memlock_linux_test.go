@@ -428,9 +428,7 @@ func retuneEnforcedContract(t *testing.T, high, low uint64, setCeiling func(uint
 	}
 	t.Log(retuneOverCeilingRefused)
 
-	// Freshness, downward: lower the ceiling under the running allocator. A
-	// previously legal raise must now be refused, naming the new figure; a
-	// ceiling cached at construction would admit it.
+	// Lower the ceiling under the running allocator; a raise must now be refused.
 	setCeiling(low)
 	target := hi - pageSize/2 // above lo, below hi: legal before, illegal now
 	err = a.SetLimit(target)

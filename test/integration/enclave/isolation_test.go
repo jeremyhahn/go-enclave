@@ -24,12 +24,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// Per-test process isolation. WipeAll's ledger, the one-shot process Sealer
-// and Allocator, and RLIMIT_MEMLOCK are process-global, so a test that touches
-// them re-executes this binary running only itself: isolated(t, opts, body)
-// runs body in the child and fails the parent with the child's output if it
-// failed. The parent also requires a completion marker, because a -test.run
-// pattern that matches nothing exits 0.
+// Per-test process isolation: isolated(t, opts, body) runs body in a re-executed child and requires its completion marker.
 const (
 	envChild        = "GO_ENCLAVE_IT_CHILD"
 	envChildMemlock = "GO_ENCLAVE_IT_CHILD_MEMLOCK"

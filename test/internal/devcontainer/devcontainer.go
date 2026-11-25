@@ -141,9 +141,7 @@ func problemsFrom(in inputs) []string {
 	return problems
 }
 
-// checkFIPSMode checks the runtime's FIPS 140-3 state in both directions: a
-// FIPS run that lost GOFIPS140/GODEBUG would otherwise pass as an ordinary run.
-// enabled and enforced are fips140.Enabled() and fips140.Enforced().
+// checkFIPSMode checks the runtime's FIPS 140-3 state in both directions.
 func checkFIPSMode(mode string, enabled, enforced bool) string {
 	switch mode {
 	case "only":

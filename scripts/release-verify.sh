@@ -1,10 +1,5 @@
 #!/bin/sh
-# release-verify.sh — the tag agrees with VERSION and CHANGELOG.md (and is on MAIN_REF).
-#
-# Usage: scripts/release-verify.sh <tag> [<main-ref>]   (from the repository root)
-#
-# The body of `make release-verify TAG=… [MAIN_REF=…]`. See release-check-tag.sh.
-# With a main ref, HEAD must be an ancestor of it.
+# release-verify.sh <tag> [<main-ref>]: release-check-tag.sh, plus HEAD must be an ancestor of main-ref.
 set -eu
 # shellcheck source=lib.sh
 . "${0%/*}/lib.sh"

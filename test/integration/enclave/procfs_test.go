@@ -195,11 +195,7 @@ func newNeedle(t *testing.T) needle {
 	return n
 }
 
-// heapBytes returns a zeroed slice guaranteed to live on the heap. Every
-// buffer that holds the material must come from here: a non-escaping `make`
-// lands on the stack, and stack growth copies it and frees the old stack
-// unwiped, leaving a stale copy the sweep would report. Heap objects do not
-// move, so wiping one reaches the only copy. noinline forces the escape.
+// heapBytes returns a zeroed slice that escapes to the heap, so wiping it reaches the only copy.
 //
 //go:noinline
 func heapBytes(n int) []byte { return make([]byte, n) }
@@ -253,13 +249,7 @@ type sweepScanned struct {
 	bytes    int64
 }
 
-// sweep reads every readable mapping of this process through /proc/self/mem
-// and returns each address at which the material is found. Only two regions
-// are skipped: the kernel's [vvar]/[vvar_vclock]/[vsyscall] pages, and the
-// sweep's own scan buffer, whose contents are copies of already-scanned bytes
-// and would show up as phantom hits. Any other unreadable mapping fails the
-// sweep, since a blind spot could hide the material. The scan buffer is wiped
-// after every window.
+// sweep returns every address in readable mappings where the material is found; an unreadable mapping fails it.
 func sweep(t *testing.T, n needle) ([]residueHit, sweepScanned) {
 	t.Helper()
 	maps, err := os.ReadFile("/proc/self/maps")

@@ -12,24 +12,7 @@ import (
 	"github.com/goccy/go-yaml"
 )
 
-// ci.yml's lint job carries the template's private-pattern gate (#277; v1.32
-// to v1.33.2 since ci-template v1.34.1). The patterns are values that must not
-// appear in a public tree, so they are not in the repository: the step takes
-// them from the RELEASABILITY_PATTERNS secret, whose lines are
-// `class<TAB>regex`, checks each line, searches the tracked tree with the
-// regexes and prints the path and line of a match, never the matched text. A
-// malformed line, an unknown class or a regex grep -E refuses fails the step
-// with the line number only. A matched line that carries the waiver
-// `lab-string-ok: <reason>` is listed, path and line only, and does not fail;
-// a bare marker does. A push without the secret fails; any other run without
-// it (a pull request from a fork) passes with a notice. A search that fails
-// is not a search without a match: only git grep's status 0 or 1 is read, and
-// any status above it fails the step. The tracked releasability test still
-// runs; this step is beside it, not in its place.
-//
-// The step is checked twice: its text by privatePatternGateViolations, and
-// what it does by running its script in a repository that tracks one private
-// value (privatePatternRuns).
+// ci.yml's private-pattern gate searches the tracked tree with RELEASABILITY_PATTERNS and prints only path and line.
 const (
 	ciTemplateHeader     = "# ci-template: v1.54 — canonical CI for all first-party Go repos."
 	privatePatternStep   = "Releasability (private patterns)"

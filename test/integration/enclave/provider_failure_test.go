@@ -23,13 +23,7 @@ import (
 	"github.com/jeremyhahn/go-enclave/providertest"
 )
 
-// Covers providertest's failure paths, which the conformance run of a sound
-// provider (provider_test.go) never takes: each case here runs
-// providertest.TestProvider, in the devcontainer, against a provider that breaks
-// one property of the seam (provider_fakes_test.go), and requires the run to
-// report that property, by type, and nothing else. What a case reaches that a
-// unit test cannot is the real thing underneath: locked memory for the
-// suite's destinations and the residue sweep through /proc/self/mem.
+// Covers providertest's failure paths against providers that each break one property of the seam.
 
 var (
 	perOperation = []enclave.Mode{enclave.ModePerOperation}

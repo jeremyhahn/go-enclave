@@ -128,8 +128,7 @@ func TestCleanToolsRemoves(t *testing.T) {
 	}
 }
 
-// fakeGofmt makes a GOCMD that prints a temp GOROOT whose bin/gofmt logs its
-// argv and prints fixture.
+// fakeGofmt makes a GOCMD whose gofmt logs its argv and prints fixture.
 func fakeGofmt(t *testing.T, fixture string) (map[string]string, string) {
 	t.Helper()
 	root := t.TempDir()

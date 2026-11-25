@@ -1,0 +1,3 @@
+### Added
+
+- **confiner-sev-snp**: A new module, backends/amdsev, whose New(a) returns an enclave.Backend named "sev-snp" only inside an AMD SEV-SNP guest on Linux whose attestation report has the POLICY DEBUG bit clear: an enclave.Confiner whose ConfinesProcess is true and an enclave.Importer whose handles are locked-memory enclaves admitted through the Allocator a. On the host, in a plain KVM guest, in an SEV or SEV-ES guest without SNP and in an SNP guest launched with DEBUG set (its Cause a *PolicyError matching ErrDebugPolicy), New returns a *GuestError naming the refused step and matching ErrSNPGuestUnavailable, and claims nothing, as it does off Linux, and nothing registers at import.

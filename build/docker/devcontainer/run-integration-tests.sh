@@ -1,21 +1,5 @@
 #!/bin/sh
-# run-integration-tests.sh <package> — the devcontainer side of
-# `make integration-test-<package>` (testing-guidelines: "ALWAYS make sure ALL
-# packages have at least 90% integration test coverage").
-#
-# Runs one integration suite with the LIBRARY instrumented for coverage, then
-# fails unless every library package reaches the floor. Coverage is collected
-# from the parent test process AND from every child it re-executes (see
-# test/integration/enclave/isolation_test.go): the binary is built with -cover,
-# GOCOVERDIR names a directory every process writes its counters into on exit,
-# and the harness hands the same directory to each child. A child that wrote
-# nothing would simply under-count, which can only make the gate stricter.
-#
-# Environment (set by the Makefile through `docker compose run -e`):
-#   GO_ENCLAVE_IT_TESTFLAGS        go test flags (tags, -race, -count, -v, timeout)
-#   GO_ENCLAVE_IT_COVERAGE_FLOOR   per-package floor, percent (integer or decimal)
-#   GO_ENCLAVE_IT_COVERPKG         comma-separated import paths to instrument
-#   GO_ENCLAVE_IT_PROFILE_OUT      optional: write the merged profile here
+# run-integration-tests.sh <package> runs one integration suite with library coverage from every process and enforces the per-package floor.
 set -eu
 
 # Every refusal exits 2. (${VAR:?} would leave the status to the shell:
@@ -48,19 +32,12 @@ trap 'rm -rf "$covdir"' EXIT
 # shellcheck disable=SC2086
 GOCOVERDIR=$covdir go test $flags -cover -coverpkg="$coverpkg" "./$dir" -args -test.gocoverdir="$covdir"
 
-# One merged profile, written outside the covdata directory, is the source of
-# both the gate and anything printed: per-block statement counts, so the floor
-# is compared on exact covered/total statements. (`covdata percent` rounds to
-# one decimal first, which would pass 89.96% as 90.0%.)
+# One merged profile drives the gate, compared on exact statement counts.
 profile=$(mktemp /tmp/profile.XXXXXX)
 trap 'rm -rf "$covdir" "$profile"' EXIT
 go tool covdata textfmt -i="$covdir" -pkg="$coverpkg" -o "$profile"
 
-# For whoever is raising coverage: GO_ENCLAVE_IT_PROFILE_OUT names a path to
-# copy the merged profile to (cover -func / -html format), or "-" to print it
-# between BEGIN/END marker lines — the container's filesystem is read-only, so
-# "-" is how `make integration-test GO_ENCLAVE_IT_PROFILE_OUT=-` gets it to the
-# host. The gate below does not depend on it.
+# GO_ENCLAVE_IT_PROFILE_OUT copies the merged profile to a path, or prints it between markers for "-".
 if [ "${GO_ENCLAVE_IT_PROFILE_OUT:-}" = "-" ]; then
   echo "BEGIN GO_ENCLAVE_IT_PROFILE"
   cat "$profile"
@@ -79,8 +56,7 @@ set -- $coverpkg
 IFS=$old_ifs
 sh "$(dirname -- "$0")/../../../scripts/coverage-gate.sh" "$floor" "$profile" "$@" || status=$?
 if [ "$status" -ne 0 ]; then
-  # Say WHERE the suite falls short, not only by how much: the least-covered
-  # functions of the instrumented packages, from the same profile.
+  # List the least-covered functions.
   echo "Least-covered functions (integration):" >&2
   go tool cover -func="$profile" | grep -v '^total:' | awk '{ pct = $NF; sub("%", "", pct); if (pct + 0 < 100) print }' | sort -k3 -n | head -60 >&2
 fi

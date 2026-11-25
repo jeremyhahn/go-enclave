@@ -11,13 +11,7 @@ import (
 	"github.com/goccy/go-yaml"
 )
 
-// Runner selection (ci-template v1.54). Preflight's step runnerSelectStep
-// picks, once per run, the runner every later job of the run takes:
-// GitHub-hosted, or the self-hosted bigdisk pools, whichever this repository
-// uses less, with limits from repository variables. A pull request whose head
-// is not this repository (a fork) never reaches a self-hosted runner: Preflight
-// itself runs hosted for it (preflightRunsOn), and the step outputs the hosted
-// default without a call.
+// Runner selection picks hosted or self-hosted once per run; a fork's PR always runs hosted.
 const (
 	runnerSelectStep  = "Balanced runner pool (ruling 1137)"
 	runnerSelectOld   = "Hosted or overflow runner (ruling 1024)"
@@ -25,7 +19,7 @@ const (
 
 	// preflightRunsOn: hosted off github.com and for a fork's pull request;
 	// the pool CI_PREFLIGHT_RUNS_ON names otherwise.
-	preflightRunsOn = `${{ github.server_url == 'https://github.com' && (!startsWith(github.event_name, 'pull_request') || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON(vars.CI_PREFLIGHT_RUNS_ON || '["self-hosted","linux","x64","bigdisk"]') || 'ubuntu-latest' }}`
+	preflightRunsOn = `${{ github.server_url == 'https://github.com' && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON(vars.CI_PREFLIGHT_RUNS_ON || '["self-hosted","linux","x64","bigdisk"]') || 'ubuntu-latest' }}`
 	// dockerRunsOn and gateRunsOn read the step's outputs.
 	dockerRunsOn = `${{ github.server_url == 'https://github.com' && fromJSON(needs.preflight.outputs.runner_docker) || 'bigdisk' }}`
 	gateRunsOn   = `${{ github.server_url == 'https://github.com' && fromJSON(needs.preflight.outputs.runner || '"ubuntu-latest"') || 'ci-gate' }}`
@@ -41,6 +35,7 @@ var runnerSelectEnv = map[string]string{
 	"SERVER":    "${{ github.server_url }}",
 	"EVENT":     "${{ github.event_name }}",
 	"HEAD_REPO": "${{ github.event.pull_request.head.repo.full_name }}",
+	"REF":       "${{ github.ref }}",
 	"REPO":      "${{ github.repository }}",
 	"API":       "${{ github.api_url }}/repos/${{ github.repository }}/actions",
 	"RUN_ID":    "${{ github.run_id }}",
@@ -178,7 +173,7 @@ func TestRunnerSelectionIsTheBalancedPool_RefusesWhatItMustRefuse(t *testing.T) 
 		{"header back at v1.53", ciTemplateHeader, "# ci-template: v1.53 — canonical CI for all first-party Go repos."},
 		{"step renamed back", "- name: " + runnerSelectStep, "- name: " + runnerSelectOld},
 		{"HS from env again", "HS: ${{ vars.CI_HOSTED_SHARE }}", "LIMIT: ${{ env.HOSTED_JOBS_PER_REPO }}"},
-		{"preflight forgets the fork guard", "(!startsWith(github.event_name, 'pull_request') || github.event.pull_request.head.repo.full_name == github.repository) && ", ""},
+		{"preflight forgets the fork guard", "((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && ", ""},
 		{"a docker job on bigdisk outright", "    runs-on: " + dockerRunsOn, "    runs-on: [self-hosted, linux, x64, bigdisk]"},
 		{"gate output renamed", "runner: ${{ steps.runner.outputs.runner }}", "runner: ${{ steps.pool.outputs.runner }}"},
 	} {
@@ -216,7 +211,7 @@ func runSelect(t *testing.T, script string, env map[string]string) (outputs, log
 		"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"GITHUB_OUTPUT="+out, "RUNNER_TEMP="+dir)
 	base := map[string]string{
-		"SERVER": "https://github.com", "EVENT": "pull_request", "HEAD_REPO": "o/r",
+		"SERVER": "https://github.com", "EVENT": "pull_request", "HEAD_REPO": "o/r", "REF": "refs/pull/1/merge",
 		"REPO": "o/r", "API": "https://api.github.invalid/repos/o/r/actions",
 		"RUN_ID": "100", "JOB_TOKEN": "t", "HS": "12", "C1": "4", "C2": "4",
 	}
@@ -258,6 +253,9 @@ func TestRunnerSelectionKeepsForksHosted(t *testing.T) {
 		{"same repository, CI_SELF_HOSTED_BIGDISK unset", map[string]string{"C1": ""}, false, "CI_SELF_HOSTED_BIGDISK=''"},
 		{"same repository, CI_SELF_HOSTED_BIGDISK_DOCKER 0", map[string]string{"C2": "0"}, false, "CI_SELF_HOSTED_BIGDISK_DOCKER='0'"},
 		{"same repository, the API unreachable", nil, true, "::warning::"},
+		{"schedule, which the self-hosted runners refuse", map[string]string{"EVENT": "schedule", "REF": "refs/heads/main"}, false, "which the self-hosted runners refuse"},
+		{"workflow_dispatch, which the self-hosted runners refuse", map[string]string{"EVENT": "workflow_dispatch", "REF": "refs/heads/main"}, false, "which the self-hosted runners refuse"},
+		{"push of another branch", map[string]string{"EVENT": "push", "REF": "refs/heads/feature"}, false, "which the self-hosted runners refuse"},
 		{"off github.com", map[string]string{"SERVER": "https://forge.invalid", "HEAD_REPO": "fork/r"}, false, "no selection"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

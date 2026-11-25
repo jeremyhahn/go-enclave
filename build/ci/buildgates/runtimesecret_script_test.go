@@ -30,10 +30,7 @@ func runtimesecretWrong(file string) string {
 	return "secret_erase.go"
 }
 
-// runtimesecretFixture is a fake toolchain: GOCMD (a fakeTool) prints a
-// GOROOT whose bin/go answers list from selection, keyed by GOOS/GOARCH, and
-// logs every call to the returned log file. FAKE_GO_LIST_FAIL (a target) makes
-// that list fail; FAKE_GO_TEST_FAIL (-skip or -run) makes that test call fail.
+// runtimesecretFixture is a fake toolchain whose list and test calls fail on request.
 func runtimesecretFixture(t *testing.T, selection map[string]string, extra map[string]string) (map[string]string, string) {
 	t.Helper()
 	root := t.TempDir()

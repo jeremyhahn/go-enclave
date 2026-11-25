@@ -90,10 +90,7 @@ func (l LockedMemoryLimit) refuse(maxBytes int64) error {
 	return nil
 }
 
-// classifyRlimit turns a raw RLIMIT_MEMLOCK soft value into a
-// LockedMemoryLimit. It takes the platform's RLIM_INFINITY because Linux and
-// the BSDs disagree on it, and it is separate from the syscall so every case
-// is unit-testable without privilege or a BSD host.
+// classifyRlimit turns a raw RLIMIT_MEMLOCK soft value into a LockedMemoryLimit.
 func classifyRlimit(cur, infinity uint64, enforced bool) LockedMemoryLimit {
 	// Checked first: Linux's RLIM_INFINITY as an int64 is -1, which would
 	// refuse every budget.

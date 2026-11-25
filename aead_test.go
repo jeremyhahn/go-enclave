@@ -59,12 +59,7 @@ func TestSealed_AADRefusesMismatch(t *testing.T) {
 // away; it is never read.
 var aesCipherSink cipher.Block
 
-// TestSealed_KeyScheduleReachesTheHeapAsDocumented pins the exposure
-// documented in docs/sealing/engineering.md, "Key-schedule heap exposure":
-// aes.NewCipher allocates on the heap, and its schedule holds the key either
-// byte-exact (hardware path, including fips140=only) or as big-endian uint32
-// words (generic path). Offset and layout are not asserted. A failure means
-// the documentation needs re-measuring, not that the package is broken.
+// TestSealed_KeyScheduleReachesTheHeapAsDocumented pins the key-schedule heap exposure documented in docs/sealing/engineering.md.
 func TestSealed_KeyScheduleReachesTheHeapAsDocumented(t *testing.T) {
 	key := make([]byte, dekBytes)
 	for i := range key {
@@ -125,9 +120,7 @@ func TestSealed_KeyScheduleReachesTheHeapAsDocumented(t *testing.T) {
 	}
 }
 
-// TestSealed_KeysAreDrawnFromTheCSPRNG pins that newKeyEnclave fills
-// keys from the CSPRNG. A constant-key mutant survives every envelope test,
-// because the random nonce keeps sealed bytes non-deterministic.
+// TestSealed_KeysAreDrawnFromTheCSPRNG pins that newKeyEnclave fills keys from the CSPRNG.
 func TestSealed_KeysAreDrawnFromTheCSPRNG(t *testing.T) {
 	a, err := newKeyEnclave(dekBytes)
 	if err != nil {

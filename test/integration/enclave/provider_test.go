@@ -39,17 +39,7 @@ func providerOption(p any, m enclave.Mode) enclave.SealerOption {
 	return enclave.WithRootUnsealer(ru)
 }
 
-// device is a provider a consumer injects through WithKeyProtector or
-// WithRootUnsealer: the shipped SoftwareProvider doing all of the
-// cryptography, behind the seam as a hardware provider would sit. It adds two
-// things a real device has:
-//
-//   - it can stall. A context carrying a stall request makes the call block
-//     until that context ends and then return ctx.Err(), which shows through
-//     the public API that a caller's deadline reaches the provider and that no
-//     Sealer lock is held across the call. Only the endpoint is stood in for;
-//     the cryptography is never faked.
-//   - it counts, so a test can assert how often the Sealer reached it.
+// device is the SoftwareProvider behind the seam, able to stall on request and counting its calls.
 type device struct {
 	soft enclave.SoftwareProvider
 
@@ -69,12 +59,7 @@ func stallingContext(parent context.Context) (context.Context, <-chan struct{}) 
 	return context.WithValue(parent, stallKey{}, entered), entered
 }
 
-// waitObservingContext wraps parent so that the first call to Done() closes
-// the returned channel. On the Seal path the library checks an ended context at
-// entry with Err() and first selects on Done() when it queues for the
-// initialization slot, so receiving from the channel proves the caller is
-// QUEUED — not merely started. Canceling before that would let a caller fail
-// at entry and pass a test about cancellation while queued.
+// waitObservingContext closes the returned channel on the first Done call, proving the caller is queued.
 func waitObservingContext(parent context.Context) (context.Context, <-chan struct{}) {
 	c := &observedDone{Context: parent, observed: make(chan struct{})}
 	return c, c.observed
@@ -141,13 +126,7 @@ func (r rootOnly) UnsealRoot(ctx context.Context, dst []byte) error {
 	return r.soft.UnsealRoot(ctx, dst)
 }
 
-// TestProviderConformance_SoftwareProviderConformance runs providertest.TestProvider against the
-// shipped SoftwareProvider for both modes it serves, and requires the residue
-// sweep (which needs Linux and /proc/self/mem) to have run rather than been
-// skipped.
-//
-// Control: told the provider serves ModeRootKey only, the suite must fail,
-// because the provider also satisfies ModePerOperation.
+// TestProviderConformance_SoftwareProviderConformance runs providertest.TestProvider against SoftwareProvider in both modes.
 func TestProviderConformance_SoftwareProviderConformance(t *testing.T) {
 	isolated(t, childOpts{}, func(t *testing.T) {
 		ctx := context.Background()

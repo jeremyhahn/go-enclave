@@ -135,11 +135,7 @@ type Allocator interface {
 	TransferTo(dst Allocator, n int64) error
 }
 
-// budgetAllocator is this package's [Allocator]. A nil *budgetAllocator
-// returns [ErrNilAllocator], and a zero one [ErrAllocatorNotConstructed], from
-// every method that can fail, and both report zero from InUse, Limit and
-// Available. It holds only a pointer to its budget, so every copy of one
-// shares the budget.
+// budgetAllocator is this package's [Allocator]; copies share one budget.
 type budgetAllocator struct {
 	_ noCopy
 	*allocatorState
@@ -367,10 +363,7 @@ func (a *budgetAllocator) Import(ctx context.Context, material []byte, opts ...I
 	return e, nil
 }
 
-// admit charges n against the budget, builds the mapping and publishes it with
-// the refund as its release. A failed build is refunded at once, unless it
-// left pages locked: then the orphan carries the refund until a sweep
-// releases them.
+// admit charges n against the budget, builds the mapping and publishes it with the refund as its release.
 func (a *budgetAllocator) admit(n int64, build func(locked int64) (*mapping, error)) (*lockedRegion, error) {
 	charge, err := a.reserve(n)
 	if err != nil {
@@ -386,10 +379,7 @@ func (a *budgetAllocator) admit(n int64, build func(locked int64) (*mapping, err
 	return publish(m, err, refund, a)
 }
 
-// reserve is the sole admission gate. It returns the page-rounded charge, which
-// the release must return exactly, or [ErrInvalidSize] for an n lockedSize
-// refuses. `charge > free` has no addition, so a huge n cannot overflow into
-// admission.
+// reserve is the sole admission gate and returns the page-rounded charge the release must return.
 func (a *budgetAllocator) reserve(n int64) (int64, error) {
 	charge, ok := lockedSize(n)
 	if !ok {
@@ -616,10 +606,7 @@ func (a *budgetAllocator) raiseLocked(old, newLimit int64) {
 	a.free.Add(newLimit - old)
 }
 
-// withdrawLocked takes d > 0 bytes of headroom out of circulation, all or
-// nothing, and reports whether it could; the caller holds a.mu exclusively. It
-// is the same compare-and-swap as reserve, so a lowering racing an admission
-// cannot double-spend the last page.
+// withdrawLocked removes d bytes of headroom, all or nothing; the caller holds a.mu exclusively.
 func (a *budgetAllocator) withdrawLocked(d int64) bool {
 	for {
 		free := a.free.Load()

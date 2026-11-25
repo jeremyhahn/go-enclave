@@ -1,7 +1,8 @@
 # Confidential VM support — architecture (proposal)
 
-> **Status: REFERENCE** · Scope: go-enclave · Last verified: 2026-11-12
-> Proposal — not implemented. A design for the future feature in [SPEC](../SPEC.md#features) row `confidential-vm`. No code exists, and every identifier here is a proposal, not an API you can call. The [open questions](#open-questions) mark a recommended answer; none is decided.
+> **Status: REFERENCE** · Scope: go-enclave · Last verified: 2026-11-21
+> Superseded for AMD SEV-SNP by [amd-sev-snp.md](amd-sev-snp.md), the design of SPEC row `confiner-sev-snp`; this page stays the record of the earlier proposal. Its Attester and KeyProtector sections are superseded by the go-xkms scope: attestation and hardware key protectors belong to go-xkms ([SPEC scope](../SPEC.md#scope)).
+> Proposal — not implemented. The [SPEC](../SPEC.md#features) has no `confidential-vm` row: SEV-SNP is row `confiner-sev-snp` (design [amd-sev-snp.md](amd-sev-snp.md), code `backends/amdsev`), and the other platforms are row `confiner`. No code implements this page, and every identifier here is a proposal, not an API you can call. The [open questions](#open-questions) mark a recommended answer; none is decided.
 
 ## Problem
 
@@ -72,16 +73,15 @@ encrypted boundary in whatever form the program wrote it.
 
 ```mermaid
 flowchart LR
-  main -->|"NewAttester()"| att[confidentialvm.Attester]
-  main -->|"NewKeyProtector(), SEV-SNP only"| kp[confidentialvm.KeyProtector]
+  main -->|"NewAttester()"| att[Attester]
+  main -->|"NewKeyProtector(), SEV-SNP only"| kp[KeyProtector]
   att -->|"Attest: configfs-tsm inblob, outblob"| ev[Evidence: sev-snp-report or tdx-quote]
   kp -->|"SNP_GET_DERIVED_KEY on /dev/sev-guest"| asp[AMD Secure Processor]
   kp -->|"WithKeyProtector(kp)"| sealer[enclave.Sealer]
   main -->|"Detect, as today"| be[memory enclave or linux-secretmem]
 ```
 
-- **A nested module, `backends/confidentialvm`** (package `confidentialvm`),
-  requiring the root module and `golang.org/x/sys`, never the reverse
+- **A nested module under `backends/`**, requiring the root module and `golang.org/x/sys`, never the reverse
   ([Q1](#q1-where-the-module-lives)). It sits beside `backends/tpm`, which
   likewise ships a `KeyProtector` and no backend.
 - **Linux on amd64 only.** On any other target a stub compiles whose
@@ -89,6 +89,8 @@ flowchart LR
   that links the module builds everywhere.
 
 ### Attestation: a standalone `Attester`
+
+> **Superseded** by the go-xkms scope: attestation belongs to go-xkms. For SEV-SNP see [amd-sev-snp.md](amd-sev-snp.md).
 
 `NewAttester() (*Attester, error)` returns a value that implements
 `enclave.Attester` and nothing else of the seam. It succeeds only inside an
@@ -118,6 +120,8 @@ handle. This adds a third, a standalone value; the comment gains one sentence
 with the code. No signature changes.
 
 ### Sealing: an SEV-SNP `KeyProtector`
+
+> **Superseded** by the go-xkms scope: hardware key protectors belong to go-xkms. For SEV-SNP see [amd-sev-snp.md](amd-sev-snp.md).
 
 `NewKeyProtector(opts ...Option) (*KeyProtector, error)` returns an
 `enclave.KeyProtector` for `ModePerOperation`, given to a sealer with
@@ -223,6 +227,8 @@ boots an unmeasured kernel attests the firmware, not the code that runs the
 program. The user doc will say so.
 
 ## SEV-SNP derived-key `KeyProtector`
+
+> **Superseded** by the go-xkms scope: hardware key protectors belong to go-xkms. For SEV-SNP see [amd-sev-snp.md](amd-sev-snp.md).
 
 `SNP_GET_DERIVED_KEY` asks the ASP for a 32-byte key derived from a root key
 the guest never sees, mixed with fields of the guest's own launch state the
@@ -339,7 +345,7 @@ the nonce checks, and error texts and unwrapping.
 
 ### Q1: where the module lives
 
-- **A nested module, `backends/confidentialvm`** (recommended), beside
+- **A nested module under `backends/`** (recommended), beside
   `backends/tpm` and `backends/armtrustzone`, released with the repository.
 - **A repository of its own:** released on its own, but split from the
   conformance suites it is tested against.

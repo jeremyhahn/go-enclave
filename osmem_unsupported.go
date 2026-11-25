@@ -10,11 +10,7 @@
 
 package enclave
 
-// This GOOS has no memory locking that x/sys exposes (js, wasip1, plan9), so
-// the package refuses to compile: the undefined identifier on the last line is
-// the error message. The variables declare osmem's names only so that this
-// error is the one the compiler reports; the other concerns (madvise, memlock,
-// harden) define their own names on every GOOS in their _unsupported files.
+// This GOOS has no memory locking x/sys exposes, so the undefined identifier on the last line fails the build.
 var (
 	sysMap                       func(n int) ([]byte, error)
 	sysLock, sysUnlock, sysUnmap func(b []byte) error

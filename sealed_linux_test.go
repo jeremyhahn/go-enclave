@@ -38,12 +38,7 @@ const (
 	sealSurvivedRefusal = "the sealed value survived the refusals and opened once the ceiling lifted"
 )
 
-// TestSealed_LockedMemoryExhausted pins that a sealed round trip under
-// a low RLIMIT_MEMLOCK reports ErrLockedMemoryUnavailable rather than aborting,
-// wherever locked memory is needed (root, KEK, transient DEK, destination),
-// and that the sealed value survives a failed Open intact.
-//
-// It runs in a subprocess because the fault is injected process-wide.
+// TestSealed_LockedMemoryExhausted pins ErrLockedMemoryUnavailable under a low RLIMIT_MEMLOCK, in a subprocess.
 func TestSealed_LockedMemoryExhausted(t *testing.T) {
 	if os.Getenv(sealLimitMarker) == "1" {
 		sealLimitChild(t)
@@ -181,14 +176,7 @@ func TestSealed_OpenedPlaintextIsLocked(t *testing.T) {
 	}
 }
 
-// TestSealed_NoPlaintextInProcessMemory pins that no copy of the
-// material survives anywhere in process memory once nothing is open.
-//
-// Every anonymous mapping is swept, named or not (the Go runtime names its heap
-// "[anon: Go: heap]"); file-backed mappings are excluded. The needle is
-// generated into locked memory and compared inside a borrow, so the test never
-// matches a copy of its own making. The control must find a match outside the
-// needle's own mapping, proving the sweep can see where a leak would be.
+// TestSealed_NoPlaintextInProcessMemory pins that no copy of the material survives in anonymous memory once nothing is open.
 func TestSealed_NoPlaintextInProcessMemory(t *testing.T) {
 	freshProcessSealer(t)
 	// The needle is generated straight into locked memory. A []byte literal
@@ -303,8 +291,7 @@ func TestSealed_FailedOpenLeaksNoLockedMemory(t *testing.T) {
 			"that reports VmLck in /proc/self/status (see vmLckBytes)")
 	}
 
-	// Now make Open fail AFTER it has allocated: tamper with the sealed
-	// bytes so the destination exists and the authentication does not.
+	// Tamper with the sealed bytes so Open fails after allocating.
 	s.sealed[len(s.sealed)-1] ^= 0xFF
 
 	before, err := vmLckBytes()

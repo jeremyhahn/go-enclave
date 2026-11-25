@@ -10,10 +10,7 @@ import (
 	"time"
 )
 
-// fakeDocker answers the reaper's read calls from fixture files in
-// $FAKE_FIX and logs every call to $FAKE_LOG. Any call that is not a read
-// is logged as "WRITE ..." and fails, so a dry run that tried to change
-// the daemon shows in the log.
+// fakeDocker answers reads from $FAKE_FIX and fails every write.
 const fakeDocker = `#!/usr/bin/env bash
 f=$FAKE_FIX
 printf '%s\n' "$*" >>"$FAKE_LOG"

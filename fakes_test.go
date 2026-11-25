@@ -66,8 +66,7 @@ func (m *mapKeyProtector) Unprotect(ctx context.Context, blob, key []byte) error
 	return nil
 }
 
-// protectCount reports how many Protects ran, so a test can prove WHICH
-// provider a seal went through rather than inferring it.
+// protectCount reports how many Protects ran.
 func (m *mapKeyProtector) protectCount() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -158,13 +157,7 @@ func (emptyBlobProtector) Unprotect(context.Context, []byte, []byte) error {
 	return ErrSealedAuthentication
 }
 
-// manualContext is a context the test ends by hand, with the error of its
-// choosing, and that REPORTS when somebody first waits on it.
-//
-// The second property is what makes the waiter tests exact: the only place a
-// Sealer selects on ctx.Done() is the init slot, so a closed waiting channel
-// means the caller has reached the slot and is queued on it — not merely that
-// its goroutine was started.
+// manualContext is a context the test ends by hand, which reports when somebody first waits on it.
 type manualContext struct {
 	context.Context
 
@@ -204,13 +197,7 @@ func (c *manualContext) end(err error) {
 	close(c.done)
 }
 
-// blockingProvider is a provider whose every operation can be held open by the
-// test. It implements both seam interfaces so one type serves both modes.
-//
-// entered receives once per call that reaches the provider, before it blocks;
-// the call then waits for release (or, when honor is set, for its own
-// context to end, returning ctx.Err() — the conforming behavior). A nil
-// release channel means "do not block".
+// blockingProvider is a provider whose every operation the test can hold open; entered fires once per call.
 type blockingProvider struct {
 	inner *softwareProvider
 
@@ -382,8 +369,7 @@ func (f *flakyRootUnsealer) UnsealRoot(ctx context.Context, dst []byte) error {
 	return f.inner.UnsealRoot(ctx, dst)
 }
 
-// countingRootUnsealer counts UnsealRoot calls and runs an optional hook after
-// a successful one, so a test can arrange for the step AFTER the unseal to fail.
+// countingRootUnsealer counts UnsealRoot calls and runs an optional hook after a successful one.
 type countingRootUnsealer struct {
 	calls int
 	after func()

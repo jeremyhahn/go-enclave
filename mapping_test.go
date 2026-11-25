@@ -25,12 +25,7 @@ import (
 	"time"
 )
 
-// TestMemory_AllocateInsideBorrow pins that allocating, borrowing and
-// destroying a second enclave inside a live borrow of the first does not block:
-// allocation and borrows share no lock.
-//
-// The wait is bounded around the call so a deadlock fails with a named reason
-// instead of the suite timeout.
+// TestMemory_AllocateInsideBorrow pins that allocating inside a live borrow does not block.
 func TestMemory_AllocateInsideBorrow(t *testing.T) {
 	const outerMaterial = "outer-private-key-material"
 

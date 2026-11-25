@@ -279,6 +279,32 @@ func TestIntegrationImage_SuiteRefusesAnImageThatWasNotScanned(t *testing.T) {
 
 // A scan that fails stops the run: no suite starts. The image stays under its
 // content tag, as every image does, for the reap step to remove.
+// TestCIIntegrationAndSoakRunWithoutTheLiveScan holds every ci.yml make call
+// that runs the integration suite or a soak target to IT_SCAN=0: scans.yml
+// scans the integration image, and a live advisory scan on every Integration
+// run or Soak iteration would make CI depend on the advisory feed.
+func TestCIIntegrationAndSoakRunWithoutTheLiveScan(t *testing.T) {
+	src := readFile(t, filepath.Join(repoRoot(t), ciWorkflowFile))
+	call := regexp.MustCompile(`(^|[\s;&|(])make\s+("\$SOAK_TARGET"|ci-integration)\s`)
+	found := map[string]bool{}
+	for i, line := range strings.Split(src, "\n") {
+		m := call.FindStringSubmatchIndex(line)
+		if m == nil || strings.HasPrefix(strings.TrimSpace(line), "- name:") {
+			continue
+		}
+		target := line[m[4]:m[5]]
+		found[target] = true
+		if !strings.HasSuffix(strings.TrimSpace(line[:m[3]]), "IT_SCAN=0") {
+			t.Errorf("%s:%d: make %s runs without IT_SCAN=0 before it: %s", ciWorkflowFile, i+1, target, strings.TrimSpace(line))
+		}
+	}
+	for _, want := range []string{"ci-integration", `"$SOAK_TARGET"`} {
+		if !found[want] {
+			t.Errorf("%s: no make %s call found", ciWorkflowFile, want)
+		}
+	}
+}
+
 func TestIntegrationImage_AFailedScanRunsNoSuite(t *testing.T) {
 	env, log, _ := fakeImageWorld(t)
 	trivy := filepath.Join(strings.SplitN(env["PATH"], ":", 2)[0], "trivy")

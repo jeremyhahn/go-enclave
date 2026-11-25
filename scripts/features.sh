@@ -1,23 +1,5 @@
 #!/bin/sh
-# features.sh — the features a change touches, one per line; and the feature
-# mapping, for the Makefile.
-#
-# Usage: scripts/features.sh <base> <tip>              (from the repository root)
-#        scripts/features.sh list
-#        scripts/features.sh field <feature> <unit-package|suite|test-prefix>
-#
-# The <base> <tip> form lets a test runner run only the features a change
-# needs. A feature is a
-# directory docs/<feature>/, with a line in scripts/features.map (override with
-# FEATURES_MAP) that gives its unit package, its integration suite, the name
-# prefix of its integration tests and the globs of its source files. A change
-# touches a feature when it changes a file under docs/<feature>/, a source file
-# the map gives the feature, or a test file whose source file that is (the name
-# without _test.go, then without each trailing _<goos> or _<goarch>, and nothing
-# else: provider_software_test.go is provider_software.go's). A change to the integration
-# suite or to the map itself touches every feature. Prints nothing when no
-# feature is touched. The Makefile maps each feature to `test-<pkg>` and
-# `integration-test-<feature>`, which runs only the feature's tests.
+# features.sh <base> <tip> | list | field <feature> <field>: the features a change touches, from scripts/features.map.
 set -eu
 # shellcheck source=lib.sh
 . "${0%/*}/lib.sh"

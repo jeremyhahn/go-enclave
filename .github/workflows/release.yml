@@ -1,63 +1,6 @@
-# Release for go-enclave, on every pushed `v*` tag (#89, release-versioning §5).
-#
-# A release reaches this workflow in two steps (docs/build-and-release.md):
-#   a. `make release-alpha`, `make release-candidate` or `make release`
-#      assembles the CHANGELOG, writes VERSION, commits on release/<version>
-#      and pushes that branch alone, for a pull request into main.
-#   b. After that pull request merges, `make release-tag` tags the merged
-#      release commit and pushes only the tag (vX.Y.Z, vX.Y.Z-alpha or
-#      vX.Y.Z-rc.N), which triggers this workflow.
-# Everything after the tag push is here, and nothing is created by hand on
-# the forge:
-#
-#   1. Verify   — the tag agrees with its own tree (VERSION, the CHANGELOG
-#                 section, no unassembled fragment), names a commit on main,
-#                 and is greater than every other v* tag on the forge.
-#   2. Gate     — the full gate on the TAGGED commit, in the toolchain image,
-#                 through the make aggregates (ci-lint, ci-build, ci-security,
-#                 ci-test, and ci-integration with both FIPS configurations),
-#                 plus `make trivy` as a blocking gate and the unit tests under
-#                 FIPS 140-3 strict mode.
+# Release gate for a pushed v* tag: Verify, Gate (full gate on the tagged commit in the toolchain image, plus trivy and FIPS strict tests), Consumer.
 #                 Trivy is nightly-only for merges in the alpha phase (devops
-#                 §8a), but a release is a publication, and §8a allows keeping
-#                 it blocking where it is green.
-#   3. Consumer — a throwaway module OUTSIDE the repository, with GOWORK=off,
-#                 `go get`s the module at this tag, then builds and runs a
-#                 program that allocates and destroys an enclave
-#                 (release-versioning §2: in-repo builds resolve through the
-#                 working tree and never exercise what a consumer gets).
-#
-# Nothing is published here: the pushed tag is what a Go consumer resolves,
-# and a GitHub release object, when one is wanted, is made by hand (it needs
-# the owner's explicit, per-instance approval: release-versioning §5, devops
-# §3). A red run says the tag must not be announced.
-#
-# Every check is a make target (release-verify, the gate aggregates,
-# consumer-check), so each stage reproduces from a shell with the same `make`
-# line. What stays here is orchestration: reading the tag from the event
-# (build/ci/release-tag.sh) and asserting the runner injected forge resolution
-# (build/ci/forge-resolution.sh).
-#
-# The gate runs in the devcontainer's toolchain image, built from the tagged
-# commit as ci.yml's image job builds it (`make docker-build`, then each stage
-# through scripts/in-toolchain-image.sh), so a release is gated with its own
-# tree's Go toolchain and tool pins, never the runner's: a Go bump needs no
-# runner rebuild (#244). Integration runs the hardened integration image
-# through compose, as ci.yml's Integration job does. Only Consumer runs on the
-# bare runner, with actions/setup-go at the version go.mod declares: it builds
-# what a consumer gets.
-#
-# Verify resolves the tag to a commit once; every other job needs Verify and
-# checks out that SHA (needs.verify.outputs.sha), never the tag ref again, so
-# a tag moved after Verify cannot change what the gates run on.
-#
-# NEVER add `GOPROXY: direct` or `GOSUMDB: off` here either (see ci.yml). The
-# consumer resolves exactly as dependency-resolution §1/§6 says. Every job runs
-# on a GitHub-hosted runner, which carries no GOPROXY (#293): the root module
-# is public, the consumer resolves it through the public proxy, and the image
-# jobs pass the empty GOPROXY as GO_BUILD_PROXY, so the image build uses the
-# Dockerfile's default public proxy. This file sets none of the module
-# variables.
+# Consumer builds a throwaway module outside the repository against the tag; nothing is published, and every job checks out the SHA Verify resolved.
 
 name: Release
 
@@ -68,16 +11,7 @@ on:
 permissions:
   contents: read
 
-# One group per tag: GitHub keeps a single pending run per concurrency group
-# and drops an older pending run when a newer one queues, so a group shared by
-# every tag could lose a tag's run. Keyed by the tag ref, no tag's run waits
-# behind or displaces another's, and none is canceled in progress. The order
-# of releases is not this workflow's to enforce: release-tag.sh pushes each
-# tag atomically with dev's release lock, leased on the lock it read before
-# its precedence check. Verify still orders the tag against every v* tag on
-# the forge that is merged into its commit (scripts/release-version-check.sh
-# --merged), so a tag below a release it descends from runs red, and a later
-# tag on a descendant commit never fails an earlier tag's run.
+# One concurrency group per tag, so no tag's run waits behind or displaces another's.
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
@@ -104,16 +38,7 @@ jobs:
         id: tag
         run: sh build/ci/release-tag.sh
 
-      # VERSION equals the tag unprefixed, CHANGELOG.md has exactly one
-      # non-empty section for it, no fragment is waiting in changelog.d/,
-      # [Unreleased] is empty — the check the release targets run before they
-      # commit — and the tagged commit is on main: every release kind is a
-      # tag on main (release-versioning §1a), and a tag on a branch commit
-      # would release code main never received.
-      #
-      # Values reach make ONLY through the environment, never as make
-      # command-line assignments: make expands a command-line value when it
-      # exports it, and the Makefile reads these as data (see EXTERNAL_VARS).
+      # VERSION, CHANGELOG and changelog.d agree with the tag, and the tagged commit is on main; values reach make only through the environment.
       - name: Tag agrees with VERSION and CHANGELOG.md, and is on main
         env:
           TAG: ${{ steps.tag.outputs.tag }}
@@ -123,18 +48,7 @@ jobs:
           git fetch --no-tags --quiet origin main
           make release-verify
 
-      # Precedence again, as defense in depth (release-versioning §3).
-      # release-tag.sh's leased push of dev's release lock is what orders
-      # releases; this step checks the tag against the release state it was
-      # cut from: the v* tags merged into the tagged commit (on it or its
-      # ancestors), fetched afresh from the forge (forced: the forge's tags
-      # are the truth here), with the pushed tag itself set aside. A later
-      # tag on a descendant commit is not in that state, so it never fails an
-      # earlier tag's run or a rerun of it; a tag below a tag it descends
-      # from fails here, and every other job needs this one.
-      # release-version-check.sh, the order release-tag.sh uses, requires the
-      # tag to be greater than its commit's first parent's VERSION and every
-      # one of those tags.
+      # The tag must be greater than its first parent's VERSION and every v* tag merged into the tagged commit.
       - name: Tag is greater than every release tag it descends from
         env:
           TAG: ${{ steps.tag.outputs.tag }}
@@ -146,14 +60,7 @@ jobs:
           parent=$(git show "$SHA^:VERSION") || { echo "::error::the tagged commit's first parent has no VERSION to order $TAG against"; exit 1; }
           sh scripts/release-version-check.sh --merged "$SHA" "$TAG" "$parent"
 
-  # The gate in the toolchain image built from the tagged commit, as ci.yml's
-  # image job runs its stages (that job's steps, one stage after another):
-  # ci-lint, ci-build, ci-security plus `trivy fs` (CRITICAL/HIGH) as a
-  # blocking gate, and ci-test plus the unit tests under FIPS 140-3 strict
-  # mode. The stages run with no network on the image's module cache, but
-  # security, which fetches the vulnerability databases (IN_IMAGE_NETWORK=
-  # bridge). Each stage runs even when an earlier one failed, so one run
-  # reports every red stage; any red stage fails the job.
+  # The gate stages in the toolchain image built from the tagged commit; each stage runs even after a failure, and any red stage fails the job.
   gate:
     name: Gate [toolchain image] [lint, build, security, test]
     needs: [verify]
@@ -218,14 +125,7 @@ jobs:
         if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' }}
         run: scripts/in-toolchain-image.sh "$TOOLCHAIN_IMAGE" make ci-test test-fips
 
-  # The integration suite (#91), both FIPS configurations, in the hardened
-  # integration image on the TAGGED commit, as ci.yml's Integration job runs
-  # it, so a tag is held to at least the main gate: the user-namespace test,
-  # the default run and the FIPS 140-3 strict run, on the content-addressed
-  # image this job names and leases, which scripts/integration-image.sh builds
-  # when the runner lacks it and trivy-scans once. Docker is a hard
-  # requirement: the targets fail, never skip, without docker, Compose v2 or a
-  # reachable daemon. No event value reaches these targets; they take none.
+  # Integration suite, both FIPS configurations, in the hardened integration image on the tagged commit; Docker is required.
   # trivy is not on the runner host, so it is copied out of the toolchain
   # image, which carries it at the pin in scripts/tool-pins.sh; nothing is
   # downloaded. go-enclave needs no module credential, so no credential file
@@ -269,10 +169,7 @@ jobs:
       - name: Name the integration image
         run: echo "IT_IMAGE=$(make -s it-image)" >> "$GITHUB_ENV"
 
-      # A lease on the integration image, so another run's reap step cannot
-      # remove it while this job needs it (ci.yml's Integration job documents
-      # the lease: bounded, building the image once if it is missing, and
-      # exporting the leased id as IT_LEASE_ID).
+      # Lease the integration image so another run's reap step cannot remove it.
       - name: Lease the integration image
         run: |
           lease="${CI_STACK_PREFIX}lease-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"

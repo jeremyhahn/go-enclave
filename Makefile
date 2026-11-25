@@ -127,6 +127,11 @@ endif
 CI_VARS := MODULE_ENV_FILE GO_BUILD_PROXY IT_IMAGE IT_PROJECT GO_BUILD_TAGS
 $(call raw_bind,$(CI_VARS))
 
+# AMDSEV_GUESTS (integration-test-amd-sev) is caller data too, bound here
+# before the first $(shell ...) below can expand it on export.
+AMDSEV_GUESTS ?= sev sev-es
+$(call raw_bind,AMDSEV_GUESTS)
+
 # Every GOOS/GOARCH a consumer may build for; 32-bit targets catch uintptr
 # comparisons that do not compile there.
 CROSS_TARGETS := linux/amd64 linux/arm64 linux/386 linux/arm \
@@ -148,7 +153,7 @@ PKGDIR_memscan      := ./internal/memscan
 # build/ci/buildgates. coverage runs their unit tests too, with -race, after
 # the root packages; the floor measures the root packages only (their device
 # paths need the device).
-BACKEND_MODULES := backends/armtrustzone backends/tpm
+BACKEND_MODULES := backends/amdsev backends/armtrustzone backends/tpm
 
 # FEATURE MAPPING. A feature is a directory
 # docs/<feature>/, mapped in scripts/features.map to its package, its
@@ -232,17 +237,21 @@ lint-actions:
 	@sc=$(call tool,shellcheck,SHELLCHECK) && \
 	bin=$(call tool,actionlint,ACTIONLINT) && "$$bin" -shellcheck "$$sc"
 
-## lint-scripts: shellcheck (pinned) over scripts/*.sh, build/docker/devcontainer/*.sh, build/fuzz/*.sh and build/ci/*.sh
+## lint-scripts: shellcheck (pinned) over scripts/*.sh, scripts/amd-sev-snp/*.sh, build/docker/devcontainer/*.sh, build/fuzz/*.sh and build/ci/*.sh
 # The scripts are POSIX sh, and release.yml runs them with a write token. -x
 # follows the `. lib.sh` every script sources. build/ci/*.sh are the workflows'
 # scripts, and CI_BASH_SCRIPTS the ci-template's bash ones, taken unchanged
 # from it; each names its own shell on its first line.
-CI_BASH_SCRIPTS := scripts/apk-index-sum.sh scripts/ci-image-cache.sh scripts/ci-image-history.sh scripts/ci-mask-lan.sh scripts/in-toolchain-image.sh scripts/in-toolchain-image_test.sh scripts/reap-stale-ci-stacks.sh scripts/trim-ci-caches.sh
+CI_BASH_SCRIPTS := scripts/apk-index-sum.sh scripts/apk-mirror.sh scripts/ci-image-cache.sh scripts/ci-image-history.sh scripts/ci-mask-lan.sh scripts/in-toolchain-image.sh scripts/in-toolchain-image_test.sh scripts/install-trivy.sh scripts/reap-stale-ci-stacks.sh scripts/trim-ci-caches.sh
 .PHONY: lint-scripts
+# The amd-sev kit, scripts/amd-sev-snp/*.sh, is POSIX sh like scripts/*.sh;
+# $(wildcard scripts/*.sh) does not reach the subdirectory, so it is named here.
+AMDSEV_KIT_SCRIPTS := $(sort $(wildcard scripts/amd-sev-snp/*.sh))
+
 lint-scripts:
 	@sc=$(call tool,shellcheck,SHELLCHECK) && \
-	echo "shellcheck $(SHELLCHECK_VERSION) -x --shell=sh scripts/*.sh build/docker/devcontainer/*.sh build/fuzz/*.sh; $(CI_BASH_SCRIPTS) build/ci/*.sh" && \
-	"$$sc" -x --source-path=SCRIPTDIR --shell=sh $(filter-out $(CI_BASH_SCRIPTS),$(sort $(wildcard scripts/*.sh))) build/docker/devcontainer/*.sh build/fuzz/*.sh && \
+	echo "shellcheck $(SHELLCHECK_VERSION) -x --shell=sh scripts/amd-sev-snp/*.sh scripts/*.sh build/docker/devcontainer/*.sh build/fuzz/*.sh; $(CI_BASH_SCRIPTS) build/ci/*.sh" && \
+	"$$sc" -x --source-path=SCRIPTDIR --shell=sh $(AMDSEV_KIT_SCRIPTS) $(filter-out $(CI_BASH_SCRIPTS),$(sort $(wildcard scripts/*.sh))) build/docker/devcontainer/*.sh build/fuzz/*.sh && \
 	"$$sc" -x --source-path=SCRIPTDIR $(CI_BASH_SCRIPTS) build/ci/*.sh
 
 ## staticcheck: staticcheck (golangci-lint's, the one implementation, lint-go)
@@ -520,6 +529,16 @@ integration-test-arm-trustzone: docker-build
 	  docker start -a "$$name"; \
 	fi
 
+## integration-test-amd-sev: the AMD SEV hardware run on the host: records the host, builds the guest kit from pinned inputs, boots a fresh guest for each mode AMDSEV_GUESTS lists and a plain KVM control, runs the TestAmdSev_ tests of backends/amdsev/integration in and around them; fails naming what is missing where a listed mode is absent
+## AMDSEV_GUESTS='<modes>': integration-test-amd-sev: the encrypted guests to boot, from sev, sev-es and snp (default "sev sev-es"); the SEV-SNP tests run only when snp is listed
+# scripts/amd-sev-snp/run.sh drives it. The suite is backends/amdsev/integration,
+# in the backends/amdsev module behind the amdsev build tag, so neither the
+# root module nor make test-backends builds a test that needs the hardware.
+# AMDSEV_CACHE and AMDSEV_RESULTS place the kit and the consoles.
+.PHONY: integration-test-amd-sev
+integration-test-amd-sev:
+	@AMDSEV_GUESTS="$$AMDSEV_GUESTS" sh scripts/amd-sev-snp/run.sh
+
 ## SWTPM_PORT=<port>: integration-test-tpm: the swtpm command port on 127.0.0.1 (default 2321)
 ## SWTPM_CTRL_PORT=<port>: integration-test-tpm: the swtpm control port on 127.0.0.1 (default 2322)
 SWTPM_PORT      ?= 2321
@@ -687,7 +706,7 @@ fuzz:
 check-fuzz-runner:
 	@sh build/fuzz/fuzz_test.sh
 
-## check-ci-python-suites: the CI template's carried Python suites: the LAN mask and the job-output handoff, with the mask step's placement
+## check-ci-python-suites: the CI template's carried Python suites: the LAN mask and the job-output handoff, with the mask step's placement, the runner selection and code-review.yml's v5.12.13 and v5.12.14 suites
 # Go does not discover Python under testdata/, so this target runs each suite,
 # isolated (python3 -I), against the tree's ci.yml and scripts; no network.
 .PHONY: check-ci-python-suites
@@ -695,6 +714,9 @@ check-ci-python-suites:
 	@python3 -I testdata/ci-mask-lan-tests.py
 	@python3 -I testdata/job-output-handoff-tests.py
 	@python3 -I testdata/runner-select-tests.py
+	@python3 -I testdata/code-review-v51213-tests.py .github/workflows/code-review.yml
+	@python3 -I testdata/code-review-v51214-tests.py .github/workflows/code-review.yml
+	@python3 -I testdata/code-review-v51215-tests.py .github/workflows/code-review.yml
 
 ## lint-gates: the repository's own gates beside lint: check-buildgates, check-releasability, check-changelog-assembly, check-scripts, check-in-toolchain-image, check-project-scripts, check-it-runner, check-fuzz-runner, check-ci-python-suites (CI's lint-gates job)
 # ci.yml runs this as its own job, in parallel with `make lint`, so make lint
