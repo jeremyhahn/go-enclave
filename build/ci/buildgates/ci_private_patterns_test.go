@@ -14,7 +14,7 @@ import (
 
 // ci.yml's private-pattern gate searches the tracked tree with RELEASABILITY_PATTERNS and prints only path and line.
 const (
-	ciTemplateHeader     = "# ci-template: v1.54 — canonical CI for all first-party Go repos."
+	ciTemplateHeader     = "# ci-template: v1.61 — canonical CI for all first-party Go repos."
 	privatePatternStep   = "Releasability (private patterns)"
 	privatePatternSecret = "${{ secrets.RELEASABILITY_PATTERNS }}"
 	privatePatternSearch = `git grep -n -I -i -E -f "$pf" -- .`

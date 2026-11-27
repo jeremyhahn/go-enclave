@@ -1,4 +1,13 @@
-# ci-template: v1.54 — canonical CI for all first-party Go repos.
+# ci-template: v1.61 — canonical CI for all first-party Go repos.
+# v1.61 (2026-11-27): each push to main runs in its own concurrency group,
+# `main-push-{sha}`, so a later push to main no longer cancels the run of an
+# earlier commit, and every commit on main gets a finished CI result. The
+# clause is tested after the schedule clause and before `main-{event}`, so a
+# workflow_dispatch run on main keeps `main-workflow_dispatch`, a schedule
+# run keeps `schedule-{repository}` and a pull request keeps its ref's
+# group, where a newer push still cancels the older run. cancel-in-progress
+# stays a literal `true`. Adopt as a ci.yml-only bump that keeps the
+# CUSTOMIZE blocks.
 # v1.54 (2026-11-22, Tenant Agent ruling 1137, owner order: the Dells and
 # the AMD SEV host are always used for CI, and nothing sits idle): the
 # preflight step `Balanced runner pool (ruling 1137)` replaces the hosted
@@ -986,6 +995,10 @@ on:
   schedule:
     - cron: '0 4 * * 3'   # CUSTOMIZE: weekly, Wednesday 04:00 UTC, not daily
 
+# v1.61: a push to main is in its own group, `main-push-{sha}`, so no later
+# push cancels it and every commit on main gets a finished run. Any other
+# event on main (workflow_dispatch) keeps `main-{event}`, so a newer
+# dispatch run cancels the older one.
 # v1.53 (ruling 1087): on main the group is the workflow and the event,
 # `main-{event}`, so a newer main run cancels the older one. Before v1.53:
 # v1.26.2: on main the group is the workflow, the event and the commit sha,
@@ -1002,7 +1015,7 @@ on:
 # at a time. It is tested first, so a schedule run never takes a main group.
 # The push, pull_request and workflow_dispatch groups do not change.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name == 'schedule' && format('schedule-{0}', github.repository) || github.ref == 'refs/heads/main' && format('main-{0}', github.event_name) || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'schedule' && format('schedule-{0}', github.repository) || github.ref == 'refs/heads/main' && github.event_name == 'push' && format('main-push-{0}', github.sha) || github.ref == 'refs/heads/main' && format('main-{0}', github.event_name) || github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -3535,6 +3548,8 @@ jobs:
     # skipped required check counts as passed, so a cancelled PR run must post
     # a failing gate, never a skip; only an older head of the PR is cancelled
     # by its group, and the head that merges has its own run.
+    # v1.61: a push to main has its own group, so no later push cancels it;
+    # !cancelled() still keeps a main run cancelled by hand off the red list.
     if: ${{ (startsWith(github.event_name, 'pull_request') && always() || !cancelled()) && (github.event_name != 'schedule' || needs.preflight.outputs.verdict != 'busy') }}
     timeout-minutes: 5        # v1.30
     # CUSTOMIZE: the repo's job list. Add every CUSTOMIZE job here AND as a

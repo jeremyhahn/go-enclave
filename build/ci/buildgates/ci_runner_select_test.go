@@ -13,9 +13,9 @@ import (
 
 // Runner selection picks hosted or self-hosted once per run; a fork's PR always runs hosted.
 const (
-	runnerSelectStep  = "Balanced runner pool (ruling 1137)"
-	runnerSelectOld   = "Hosted or overflow runner (ruling 1024)"
-	ciHistoryV154Line = "# v1.54 (2026-11-22, Tenant Agent ruling 1137, owner order: the Dells and"
+	runnerSelectStep = "Balanced runner pool (ruling 1137)"
+	runnerSelectOld  = "Hosted or overflow runner (ruling 1024)"
+	ciHistoryLine    = "# v1.61 (2026-11-27): each push to main runs in its own concurrency group,"
 
 	// preflightRunsOn: hosted off github.com and for a fork's pull request;
 	// the pool CI_PREFLIGHT_RUNS_ON names otherwise.
@@ -84,8 +84,8 @@ func runnerSelectViolations(src []byte) (script string, bad []string, err error)
 		return "", nil, err
 	}
 	lines := strings.SplitN(string(src), "\n", 3)
-	if len(lines) < 3 || lines[0] != ciTemplateHeader || lines[1] != ciHistoryV154Line {
-		bad = append(bad, "ci.yml does not open with the v1.54 header and its history block")
+	if len(lines) < 3 || lines[0] != ciTemplateHeader || lines[1] != ciHistoryLine {
+		bad = append(bad, "ci.yml does not open with the v1.61 header and its history block")
 	}
 	for _, k := range []string{"HOSTED_JOBS_PER_REPO", "HOSTED_QUEUE_GRACE_SECONDS"} {
 		if _, ok := wf.Env[k]; ok {
