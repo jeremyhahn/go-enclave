@@ -94,11 +94,14 @@ const (
 	fullTierEnv = "${{ env.CI_FULL_TIER }}"
 	// nightlyTierIf is the gate's NIGHTLY value.
 	nightlyTierIf = "${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}"
-	// refConcurrencyGroup is the group of every pull_request workflow: keyed
-	// by ref, on main by event (v1.53), so a newer main run cancels the
-	// older one as a PR's newer run cancels the older, and by repository on
-	// a schedule (v1.30).
-	refConcurrencyGroup = "${{ github.workflow }}-${{ github.event_name == 'schedule' && format('schedule-{0}', github.repository) || github.ref == 'refs/heads/main' && format('main-{0}', github.event_name) || github.ref }}"
+	// refConcurrencyGroup is ci.yml's group (v1.61): keyed by ref, so a PR's
+	// newer run cancels the older; by commit for a push to main, so no later
+	// push cancels an earlier commit's run; by event for any other run on
+	// main; and by repository on a schedule (v1.30).
+	refConcurrencyGroup = "${{ github.workflow }}-${{ github.event_name == 'schedule' && format('schedule-{0}', github.repository) || github.ref == 'refs/heads/main' && github.event_name == 'push' && format('main-push-{0}', github.sha) || github.ref == 'refs/heads/main' && format('main-{0}', github.event_name) || github.ref }}"
+	// mainEventConcurrencyGroup is the v1.53 group, one per event on main.
+	// A pull_request workflow other than ci.yml may still carry it.
+	mainEventConcurrencyGroup = "${{ github.workflow }}-${{ github.event_name == 'schedule' && format('schedule-{0}', github.repository) || github.ref == 'refs/heads/main' && format('main-{0}', github.event_name) || github.ref }}"
 	// ciSchedule is the one CI schedule, ci.yml's weekly cron: Tuesday night,
 	// 04:00 UTC Wednesday.
 	ciSchedule = "0 4 * * 3"
@@ -645,7 +648,9 @@ func workflowTriggerViolations(file string, src []byte) ([]string, error) {
 	var bad []string
 	if _, ok := events["pull_request"]; ok {
 		c, _ := wf.Concurrency.(map[string]any)
-		if c == nil || c["group"] != refConcurrencyGroup || c["cancel-in-progress"] != true {
+		group, _ := c["group"].(string)
+		okGroup := group == refConcurrencyGroup || (filepath.Base(file) != "ci.yml" && group == mainEventConcurrencyGroup)
+		if c == nil || !okGroup || c["cancel-in-progress"] != true {
 			bad = append(bad, fmt.Sprintf("runs on pull_request but its workflow-level concurrency is %v, want group: %s, cancel-in-progress: true", wf.Concurrency, refConcurrencyGroup))
 		}
 	}
@@ -924,6 +929,9 @@ func TestCIGateTiers_RefusesWhatItMustRefuse(t *testing.T) {
 		{"pull_request, cancel by expression", "x.yml", "on:\n  pull_request:\nconcurrency:\n  group: " + refConcurrencyGroup + "\n  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}\njobs: {}\n", true},
 		{"pull_request, main pushes share a group", "x.yml", "on:\n  pull_request:\nconcurrency:\n  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && format('main-{0}', github.event_name) || github.ref }}\n  cancel-in-progress: true\njobs: {}\n", true},
 		{"pull_request, per-commit main group", "x.yml", "on:\n  pull_request:\n" + wantConc + "jobs: {}\n", false},
+		{"pull_request, v1.53 main-event group", "x.yml", "on:\n  pull_request:\nconcurrency:\n  group: " + mainEventConcurrencyGroup + "\n  cancel-in-progress: true\njobs: {}\n", false},
+		{"ci.yml, v1.53 main-event group", "ci.yml", "on:\n  pull_request:\n  schedule:\n    - cron: '" + ciSchedule + "'\nconcurrency:\n  group: " + mainEventConcurrencyGroup + "\n  cancel-in-progress: true\njobs: {}\n", true},
+		{"ci.yml, v1.61 group", "ci.yml", "on:\n  pull_request:\n  schedule:\n    - cron: '" + ciSchedule + "'\n" + wantConc + "jobs: {}\n", false},
 		{"push only, no concurrency", "x.yml", "on:\n  push:\njobs: {}\n", false},
 		{"scheduled", "x.yml", "on:\n  schedule:\n    - cron: '0 3 * * *'\n  workflow_dispatch:\njobs: {}\n", true},
 		{"nightly.yml on its slot", "nightly.yml", "on:\n  schedule:\n    - cron: '" + nightlySchedule + "'\n  workflow_dispatch:\njobs: {}\n", false},
